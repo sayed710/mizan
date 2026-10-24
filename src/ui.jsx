@@ -224,6 +224,7 @@ const ICONS = {
   fieldservice: <path d="M24 4c8 0 14 6 14 14 0 10-14 26-14 26S10 28 10 18c0-8 6-14 14-14zm0 8a6 6 0 100 12 6 6 0 000-12z" fillRule="evenodd" />,
   frontdesk: <path d="M6 30h36v6H6zm4-4a14 14 0 0128 0zm12-16h4v6h-4z" />,
   elearning: <path d="M24 8l22 10-22 10L2 18zM10 24v10c4 4 10 6 14 6s10-2 14-6V24l-14 7z" />,
+  studio: <path d="M34 4l10 10-22 22-12 2 2-12zM6 40h36v4H6z" />,
   apps: <><rect x="6" y="6" width="16" height="16" rx="4" /><rect x="26" y="6" width="16" height="16" rx="8" /><rect x="6" y="26" width="16" height="16" rx="8" /><rect x="26" y="26" width="16" height="16" rx="4" /></>,
   discuss: <path d="M6 8h36v24H20l-9 8v-8H6z" />,
   manufacturing: <path d="M5 42V20l10 6v-6l10 6v-6l10 6V8h8v34z" />,

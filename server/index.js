@@ -9,6 +9,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
+import { installCustomFields } from '../src/models/studio.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -23,10 +24,15 @@ sql.exec(`
   CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY, login TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
-    salt TEXT NOT NULL, hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0
+    salt TEXT NOT NULL, hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, apps TEXT
   );
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
 `);
+
+try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
+
+/** Comma-separated app ids a user may open; null/empty = all apps. */
+const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x)) : null);
 
 // ---- database snapshot (ponytail: whole db as one JSON row; split into per-model tables when data grows) ----
 const loadDb = () => {
@@ -36,16 +42,19 @@ const loadDb = () => {
 const saveDb = (db) => sql.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('db', JSON.stringify(db));
 let db = loadDb();
 if (!db) { db = seed(); saveDb(db); }
+installCustomFields(db.settings?.customFields);
 
 // ---- users & sessions ----
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-function createUser({ login, name, password, isAdmin = false }) {
+function createUser({ login, name, password, isAdmin = false, apps = '' }) {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
-  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin) VALUES (?, ?, ?, ?, ?)').run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0);
+  const allowed = parseApps(apps);
+  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
@@ -64,9 +73,9 @@ function checkPassword(login, password) {
 function sessionUser(req) {
   const token = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
   if (!token) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
+  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
   if (!row || row.expires < Date.now()) return null;
-  return { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin };
+  return { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) };
 }
 
 const cookie = (value, maxAge) =>
@@ -139,7 +148,7 @@ async function api(req, res, path) {
     if (!user) { recordFailure(ip); return send(res, 401, { error: 'Wrong login or password' }); }
     const token = randomBytes(32).toString('base64url');
     sql.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').run(sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
-    return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
+    return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin, apps: parseApps(user.apps) }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
   }
 
   const user = sessionUser(req);
@@ -155,7 +164,7 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      db = applyDiff(db, diff, { author: user.name });
+      db = applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin });
     } catch (e) {
       return send(res, 400, { error: e.message, db });
     }
@@ -170,7 +179,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/users') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
-    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin FROM users ORDER BY id').all());
+    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps FROM users ORDER BY id').all());
     if (req.method === 'POST') {
       try {
         createUser(await readJson(req));

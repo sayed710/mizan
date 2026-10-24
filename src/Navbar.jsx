@@ -51,6 +51,7 @@ export function Navbar({ app, active }) {
           : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}
       </nav>
       <span className="spacer" />
+      <a className="systray" href="#/studio/fields" aria-label={t('Toggle Studio')} title={t('Studio')}><Icon name="studio" size={18} /></a>
       <ActivityCounter db={db} />
       <a className="company" href="#/settings/general">{db.settings?.company}</a>
       <Avatar name="Admin" />

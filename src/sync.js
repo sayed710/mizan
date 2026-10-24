@@ -2,6 +2,7 @@
 // to different records don't overwrite each other.
 import { models } from './models/index.js';
 import { validate } from './orm.js';
+import { cleanCustomField, installCustomFields } from './models/studio.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 
@@ -41,8 +42,9 @@ function clean(model, rec) {
 }
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author } = {}) {
+export function applyDiff(db, d, { author, isAdmin = true } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  installCustomFields(db.settings?.customFields);
   let records = { ...db.records };
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     if (!models[model] || !Array.isArray(recs)) throw new Error(`Unknown model ${model}`);
@@ -70,9 +72,17 @@ export function applyDiff(db, d, { author } = {}) {
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .filter((m) => m && typeof m.id === 'string' && models[m.model] && !known.has(m.id))
     .map((m) => ({ id: m.id, model: m.model, res_id: m.res_id, body: String(m.body).slice(0, 10000), kind: m.kind === 'note' ? 'note' : 'tracking', author: author ?? m.author, date: m.date }));
-  const settings = d.settings && typeof d.settings === 'object'
-    ? { ...db.settings, company: String(d.settings.company ?? db.settings.company).slice(0, 200), favorites: d.settings.favorites ?? db.settings.favorites,
-      uninstalled: Array.isArray(d.settings.uninstalled) ? d.settings.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled }
-    : db.settings;
+  // Company, installed apps and Studio fields are admin-only; any user may save favorites.
+  const s = d.settings && typeof d.settings === 'object' ? d.settings : null;
+  const settings = !s ? db.settings : {
+    ...db.settings,
+    favorites: s.favorites ?? db.settings.favorites,
+    ...(isAdmin ? {
+      company: String(s.company ?? db.settings.company).slice(0, 200),
+      uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
+      customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,
+    } : {}),
+  };
+  installCustomFields(settings.customFields);
   return { ...db, records, seq, settings, messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
 }

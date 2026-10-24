@@ -136,6 +136,12 @@ const ar = {
   'Your name': 'اسمك', 'Your answers were recorded.': 'تم تسجيل إجاباتك.', 'Answer again': 'إجابة مرة أخرى', 'No open survey.': 'لا يوجد استبيان مفتوح.',
   'Welcome {name}! Checked in at {time}.': 'أهلاً {name}! تم تسجيل حضورك الساعة {time}.', 'Goodbye {name}! Worked {h} h today.': 'مع السلامة {name}! عملت {h} ساعة اليوم.',
   'Human Resources': 'الموارد البشرية', 'Supply Chain': 'سلسلة الإمداد', Productivity: 'الإنتاجية', Marketing: 'التسويق', Accounting: 'المحاسبة',
+  Studio: 'الاستوديو', 'Toggle Studio': 'فتح الاستوديو', 'Custom Fields': 'الحقول المخصصة', 'Customize your apps without code': 'خصّص تطبيقاتك بدون برمجة',
+  'Add a field': 'إضافة حقل', Model: 'النموذج', 'Field Label': 'اسم الحقل', 'Field Type': 'نوع الحقل', 'Options (comma separated)': 'الخيارات (مفصولة بفواصل)',
+  'Show in list view': 'إظهار في القائمة', 'Technical name': 'الاسم التقني', 'Add Field': 'إضافة الحقل', 'No custom field yet.': 'لا توجد حقول مخصصة بعد.',
+  'Check the label, type and options': 'راجع الاسم والنوع والخيارات', 'A field with this name already exists': 'يوجد حقل بهذا الاسم بالفعل',
+  Text: 'نص', 'Multiline Text': 'نص متعدد الأسطر', Decimal: 'رقم عشري', Monetary: 'مبلغ', Checkbox: 'مربع اختيار', Selection: 'قائمة اختيار',
+  Customizations: 'التخصيصات', 'All apps': 'كل التطبيقات', 'Allowed apps': 'التطبيقات المسموحة', 'Allowed apps (e.g. crm,sales) — empty = all': 'التطبيقات المسموحة (مثل crm,sales) — فارغ = الكل',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

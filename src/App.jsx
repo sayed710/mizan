@@ -12,6 +12,7 @@ import { Reports } from './views/Reports.jsx';
 import { Barcode, Overview, ShopFloor } from './views/Pages.jsx';
 import { Website } from './views/Website.jsx';
 import { AppStore, Kiosk, SurveyTake } from './views/AppStore.jsx';
+import { Studio } from './views/Studio.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -22,7 +23,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, studio: Studio };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);

@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
 import { setAuthor } from './orm.js';
+import { installCustomFields } from './models/studio.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v6';
@@ -12,7 +13,10 @@ let user = null;
 let db = null;
 let inflight = Promise.resolve();
 
-const notify = () => listeners.forEach((l) => l());
+const notify = () => {
+  installCustomFields(db?.settings?.customFields);
+  listeners.forEach((l) => l());
+};
 
 function loadLocal() {
   try {
@@ -57,6 +61,7 @@ export async function initStore() {
     // no backend reachable: local mode
   }
   db = loadLocal();
+  installCustomFields(db.settings?.customFields);
   return { mode, user };
 }
 

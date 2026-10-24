@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { apps } from './models/index.js';
-import { useDb } from './store.js';
+import { getUser, useDb } from './store.js';
 import { t } from './i18n.js';
 import { Avatar, Icon } from './ui.jsx';
 
@@ -9,7 +9,8 @@ export function Home() {
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
   const hidden = new Set(db.settings?.uninstalled ?? []);
-  const shown = apps.filter((a) => !hidden.has(a.id) && (!q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q)));
+  const allowed = getUser()?.apps;
+  const shown = apps.filter((a) => !hidden.has(a.id) && (!allowed || allowed.includes(a.id) || a.id === 'settings') && (!q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q)));
   return (
     <main className="home">
       <header className="home-top">
