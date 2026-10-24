@@ -3,6 +3,7 @@ import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
 import { setAuthor } from './orm.js';
 import { installCustomFields } from './models/studio.js';
+import { setCurrency } from './ui.jsx';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v7';
@@ -15,6 +16,7 @@ let inflight = Promise.resolve();
 
 const notify = () => {
   installCustomFields(db?.settings?.customFields);
+  setCurrency(db?.settings?.currency);
   listeners.forEach((l) => l());
 };
 
@@ -62,6 +64,7 @@ export async function initStore() {
   }
   db = loadLocal();
   installCustomFields(db.settings?.customFields);
+  setCurrency(db.settings?.currency);
   return { mode, user };
 }
 

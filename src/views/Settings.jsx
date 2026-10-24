@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
 import { addUser, commit, getDb, getUser, isServer, listUsers, logout, resetDemo, useDb } from '../store.js';
 import { lang, setLang, t } from '../i18n.js';
+import { CURRENCIES } from '../ui.jsx';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -77,6 +78,14 @@ export function Settings() {
           <label htmlFor="company">{t('Company Name')}</label>
           <div className="field-value">
             <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="currency">{t('Currency')}</label>
+          <div className="field-value">
+            <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
+              {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
         </div>
         <div className="field">

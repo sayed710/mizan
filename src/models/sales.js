@@ -99,6 +99,7 @@ export const salesModels = {
       statusbarHide: ['cancel'],
       buttons: [
         { label: 'Send by Email', vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
+        { label: 'Print', run: (db, r) => ({ db, go: `#/print/sale.order/${r.id}` }) },
         {
           label: 'Confirm',
           primary: true,
@@ -147,6 +148,7 @@ export const salesModels = {
       statusbarHide: ['cancel'],
       buttons: [
         { label: 'Send RFQ', vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
+        { label: 'Print', run: (db, r) => ({ db, go: `#/print/purchase.order/${r.id}` }) },
         { label: 'Confirm Order', primary: true, vals: { state: 'purchase' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         {
           label: 'Receive Products',

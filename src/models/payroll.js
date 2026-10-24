@@ -111,6 +111,7 @@ export const payrollModels = {
         { label: 'Compute Sheet', when: (r) => r.state === 'draft', run: (db, r) => ({ db: compute(db, r) }) },
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirm(db, r) }) },
         { label: 'Mark as Paid', primary: true, when: (r) => r.state === 'done', run: (db, r) => ({ db: pay(db, r) }) },
+        { label: 'Print', when: (r) => r.line_ids?.length, run: (db, r) => ({ db, go: `#/print/hr.payslip/${r.id}` }) },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => r.state === 'draft' },
       ],
       title: 'name',

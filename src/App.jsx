@@ -14,6 +14,7 @@ import { Website } from './views/Website.jsx';
 import { AppStore, Kiosk, SurveyTake } from './views/AppStore.jsx';
 import { Studio } from './views/Studio.jsx';
 import { Kitchen } from './views/Kitchen.jsx';
+import { PrintDoc } from './views/PrintDoc.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -34,6 +35,7 @@ export function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  if (route.app === 'print') return <PrintDoc model={route.menu} id={route.id} />;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
     location.replace(`${targetOf(route.menu)}/${route.id}`);

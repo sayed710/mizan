@@ -5,7 +5,13 @@ import { read, search } from './orm.js';
 import { lang, t } from './i18n.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
-const moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
+let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+/** Switch the company currency used by every amount on screen. */
+export function setCurrency(code) {
+  const c = CURRENCIES.includes(code) ? code : 'USD';
+  if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
+}
 export const money = (n) => moneyFmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
