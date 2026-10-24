@@ -23,6 +23,8 @@ export function PublicSite() {
   const [step, setStep] = useState('browse');
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [applying, setApplying] = useState(null);
+  const [applied, setApplied] = useState(false);
 
   useEffect(() => {
     fetch('/api/public/site').then((r) => r.json()).then((s) => {
@@ -57,12 +59,39 @@ export function PublicSite() {
         <nav>
           {site.pages.map((p) => <button key={p.slug} type="button" aria-current={slug === p.slug ? 'page' : undefined} onClick={() => { setSlug(p.slug); setStep('browse'); }}>{p.name}</button>)}
           <button type="button" aria-current={slug === 'shop' ? 'page' : undefined} onClick={() => { setSlug('shop'); setStep('browse'); }}>{t('Shop')}</button>
+          {site.jobs?.length > 0 && <button type="button" aria-current={slug === 'jobs' ? 'page' : undefined} onClick={() => { setSlug('jobs'); setStep('browse'); setApplied(false); }}>{t('Jobs')}</button>}
         </nav>
         <a className="btn sm" href="#/">{t('Log in')}</a>
       </header>
       <div className="site-body">
         {step === 'done' && <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your order {name} has been received.', { name: result })}</p></div>}
-        {step !== 'done' && slug !== 'shop' && page && <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article>}
+        {slug === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
+          <>
+            <h2>{t('Jobs')}</h2>
+            {site.jobs.map((j) => (
+              <article key={j.id} className="shop-item job">
+                <h3>{j.name}</h3>
+                <p>{j.description}</p>
+                {applying === j.id ? (
+                  <form className="checkout" onSubmit={async (e) => {
+                    e.preventDefault();
+                    const f = new FormData(e.currentTarget);
+                    const r = await post('/api/public/apply', { job_id: j.id, name: f.get('name'), email: f.get('email'), phone: f.get('phone'), motivation: f.get('motivation') });
+                    if (r.ok) setApplied(true); else setError(r.data.error);
+                  }}>
+                    <label>{t('Name')}<input name="name" required maxLength={120} /></label>
+                    <label>{t('Email')}<input name="email" type="email" required /></label>
+                    <label>{t('Phone')}<input name="phone" type="tel" /></label>
+                    <label>{t('Why you?')}<textarea name="motivation" maxLength={5000} /></label>
+                    {error && <div className="alert" role="alert">{error}</div>}
+                    <button type="submit" className="btn primary">{t('Apply')}</button>
+                  </form>
+                ) : <button type="button" className="btn primary" onClick={() => setApplying(j.id)}>{t('Apply')}</button>}
+              </article>
+            ))}
+          </>
+        ))}
+        {step !== 'done' && slug !== 'shop' && slug !== 'jobs' && page && <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article>}
         {step === 'browse' && slug === 'shop' && (
           <>
             <h2>{t('Shop')}</h2>

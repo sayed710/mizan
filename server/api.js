@@ -14,7 +14,20 @@ export const publicSite = (db) => ({
   pages: search(db, 'website.page').filter((p) => p.is_published).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
     .map((p) => ({ name: p.name, slug: p.slug, content: p.content })),
   products: sellable(db).map((p) => ({ id: p.id, name: p.name, price: p.list_price })),
+  jobs: search(db, 'hr.job').filter((j) => j.is_published).map((j) => ({ id: j.id, name: j.name, description: j.description ?? '' })),
 });
+
+/** Anonymous job application to a published position. */
+export function publicApply(db, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const job = search(db, 'hr.job').find((j) => j.is_published && j.id === b.job_id);
+  const name = String(b.name ?? '').trim().slice(0, 120);
+  const email = String(b.email ?? '').trim().slice(0, 254);
+  if (!job) return { status: 400, body: { error: 'This position is not open' } };
+  if (!name || !EMAIL.test(email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
+  const res = create(db, 'hr.applicant', { name, email, phone: String(b.phone ?? '').slice(0, 40), job_id: job.id, description: String(b.motivation ?? '').slice(0, 5000), tag_ids: ['Website'] });
+  return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, res.db), { author: 'Website', isAdmin: false }) };
+}
 
 const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
 

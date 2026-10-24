@@ -286,6 +286,11 @@ export function seed() {
   add('esg.emission', { name: 'Delivery van diesel', scope: '1', source: 'diesel', quantity: 380, factor: 2.68, date: addDays(today(), -8) });
   add('esg.emission', { name: 'Business flights', scope: '3', source: 'flight', quantity: 4200, factor: 0.15, date: addDays(today(), -20) });
 
+  [['Founders shares', 'issuance', null, 1, 60000], ['Seed round', 'issuance', null, 4, 25000], ['Employee pool', 'issuance', null, 6, 15000], ['Secondary sale', 'transfer', 4, 6, 5000]]
+    .forEach(([name, kind, from_id, to_id, shares], i) => add('equity.transaction', { name, kind, from_id, to_id, shares, price_per_share: [0.01, 2, 0.01, 2.5][i], state: 'posted', date: addDays(today(), -400 + i * 90) }));
+  add('data.recycle', { name: 'Archive solved tickets older than a year', res_model: 'helpdesk.ticket', date_field: 'create_date', days: 365 });
+  set('hr.job', 1, { is_published: true, description: 'Grow our B2B furniture sales across Egypt and the Gulf.' });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

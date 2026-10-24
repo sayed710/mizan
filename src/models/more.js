@@ -184,6 +184,7 @@ export const moreModels = {
       name: { type: 'char', label: 'Job Position', required: true },
       department_id: { type: 'many2one', relation: 'hr.department', label: 'Department' },
       no_of_recruitment: { type: 'float', label: 'Target' },
+      is_published: { type: 'boolean', label: 'Published on Website' },
       description: { type: 'text', label: 'Job Summary' },
     },
     defaults: () => ({ no_of_recruitment: 1 }),
@@ -192,7 +193,7 @@ export const moreModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Applications', model: 'hr.applicant', field: 'job_id', target: 'recruitment/applications' }],
-      groups: [['department_id', 'no_of_recruitment'], []],
+      groups: [['department_id', 'no_of_recruitment'], ['is_published']],
       tabs: [{ label: 'Job Summary', fields: ['description'] }],
       chatter: true,
     },

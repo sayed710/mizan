@@ -21,7 +21,7 @@ test('ESG emissions convert quantity × factor into tonnes CO2e', () => {
 });
 
 test('every app menu points to a registered model or a known page type', () => {
-  const pages = new Set(['dashboard', 'settings', 'pos', 'discuss', 'report', 'barcode', 'shopfloor', 'overview', 'website', 'appstore', 'kiosk', 'surveytake', 'studio', 'kitchen']);
+  const pages = new Set(['dashboard', 'settings', 'pos', 'discuss', 'report', 'barcode', 'shopfloor', 'overview', 'website', 'appstore', 'kiosk', 'surveytake', 'studio', 'kitchen', 'captable']);
   for (const app of apps) {
     for (const leaf of app.menus.flatMap((m) => m.children ?? [m])) {
       assert.ok(leaf.model ? models[leaf.model] : pages.has(leaf.type), `${app.id}/${leaf.key}`);
@@ -33,4 +33,14 @@ test('every app menu points to a registered model or a known page type', () => {
 test('kitchen state flows on POS orders', () => {
   const { db, id } = create(seed(), 'pos.order', { lines: [{ product_id: 10, qty: 1, price_unit: 2.5, tax: 14 }] });
   assert.equal(read(write(db, 'pos.order', id, { kitchen_state: 'ready' }), 'pos.order', id).kitchen_state, 'ready');
+});
+
+test('cap table nets transfers and recycle rules find stale records', async () => {
+  const { capTable, staleRecords } = await import('./models/apps4.js');
+  const db = seed();
+  const table = Object.fromEntries(capTable(db).map((r) => [r.partner_id, r.shares]));
+  assert.deepEqual(table, { 1: 60000, 4: 20000, 6: 20000 });
+  assert.equal(capTable(db).reduce((s, r) => s + r.pct, 0), 100);
+  assert.equal(staleRecords(db, { res_model: 'crm.lead', date_field: 'create_date', days: 30 }).length > 0, true);
+  assert.deepEqual(staleRecords(db, { res_model: 'nope', date_field: 'x', days: 1 }), []);
 });

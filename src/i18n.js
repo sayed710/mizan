@@ -414,6 +414,12 @@ const ar = {
   Companies: 'الشركات', 'Add Company': 'إضافة شركة',
   Theme: 'المظهر', Light: 'فاتح', Dark: 'داكن', Auto: 'تلقائي', 'Unit of Measure': 'وحدة القياس', Units: 'وحدات', Hours: 'ساعات',
   'Variant of': 'متغير من', 'Variant Values': 'قيم المتغير', 'Generate Variants': 'إنشاء المتغيرات', Variants: 'المتغيرات', 'Attributes': 'الخصائص',
+  Equity: 'حقوق الملكية', 'Data Recycle': 'تدوير البيانات', 'Cap Table': 'جدول الملكية', Transactions: 'المعاملات', 'Recycle Rules': 'قواعد التدوير',
+  Shareholder: 'المساهم', Shares: 'الأسهم', Ownership: 'نسبة الملكية', Issuance: 'إصدار', Transfer: 'نقل', 'Buy-back': 'إعادة شراء', Post: 'ترحيل',
+  Seller: 'البائع', 'Buyer / Holder': 'المشتري / المالك', 'Share Class': 'فئة الأسهم', 'Price per Share': 'سعر السهم', Ordinary: 'عادية', Preferred: 'ممتازة',
+  Preview: 'معاينة', 'Archive Matching': 'أرشفة المطابق', 'Model (technical name)': 'النموذج (الاسم التقني)', 'Date Field': 'حقل التاريخ',
+  'Older than (days)': 'أقدم من (أيام)', 'Last Run': 'آخر تشغيل', 'Archived Last Run': 'المؤرشف في آخر تشغيل', Jobs: 'الوظائف', Apply: 'تقدّم',
+  'Why you?': 'لماذا أنت؟', 'Your application was received.': 'تم استلام طلبك.', 'Published on Website': 'منشور على الموقع', Administration: 'الإدارة',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

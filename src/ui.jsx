@@ -256,6 +256,10 @@ const ICONS = {
 // Apps without a dedicated glyph reuse the closest one.
 const ALIAS = { livechat: 'discuss', sms: 'marketing', social: 'events', automation: 'subscriptions', plm: 'manufacturing', rooms: 'calendar', referral: 'recruitment', skills: 'appraisals', esg: 'quality' };
 
+// equity / recycle glyphs
+ICONS.equity = <path d="M24 4a20 20 0 1020 20H24z" />;
+ICONS.recycle = <path d="M24 6l8 12h-5v6h-6v-6h-5zM10 30l6-10 4 6-3 5h12v6H10zm28 0l-6 6h-6v-6h7l-3-5 5-3z" />;
+
 export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );

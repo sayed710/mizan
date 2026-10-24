@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { apps, APP_INFO } from '../models/index.js';
 import { create, read, search, updateSettings, write } from '../orm.js';
 import { workedHours } from '../models/apps2.js';
+import { capTable } from '../models/apps4.js';
 import { today } from '../models/common.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
@@ -102,6 +103,28 @@ export function Kiosk() {
 }
 
 /** Answer a published survey; submitting stores a survey.answer and bumps the response counter. */
+/** Shareholders with their share count and ownership percentage. */
+export function CapTable() {
+  const db = useDb();
+  const rows = capTable(db).sort((a, b) => b.shares - a.shares);
+  return (
+    <main className="action">
+      <div className="control-panel"><h1 className="cp-title">{t('Cap Table')}</h1><a className="btn sm" href="#/equity/transactions/new">{t('New')}</a></div>
+      <div className="list-wrap">
+        <table className="list">
+          <thead><tr><th>{t('Shareholder')}</th><th className="num">{t('Shares')}</th><th className="num">{t('Ownership')}</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.partner_id}><td>{read(db, 'res.partner', r.partner_id)?.name}</td><td className="num">{r.shares.toLocaleString('en-US')}</td><td className="num">{r.pct}%</td></tr>
+            ))}
+            {!rows.length && <tr><td colSpan={3} className="empty">{t('No record found. Create one with “New”.')}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </main>
+  );
+}
+
 export function SurveyTake() {
   const db = useDb();
   const id = Number(new URLSearchParams(location.hash.split('?')[1] ?? '').get('survey'));

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
-import { handleApi, publicOrder, publicSite } from './api.js';
+import { handleApi, publicApply, publicOrder, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
 
@@ -170,6 +170,14 @@ async function serveStatic(req, res) {
 async function api(req, res, path) {
   const ip = clientIp(req);
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, publicSite(db));
+  if (path === '/api/public/apply' && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (tooMany(`apply:${ip}`)) return send(res, 429, { error: 'Too many applications, try again later' });
+    recordFailure(`apply:${ip}`);
+    const out = publicApply(db, await readJson(req));
+    if (out.db) { db = out.db; saveDb(db); }
+    return send(res, out.status, out.body);
+  }
   if (path === '/api/public/order' && req.method === 'POST') {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`order:${ip}`)) return send(res, 429, { error: 'Too many orders, try again later' });

@@ -11,10 +11,11 @@ import { apps2Models } from './apps2.js';
 import { apps3Models } from './apps3.js';
 import { bankModels } from './bank.js';
 import { pricelistModels } from './pricelist.js';
+import { apps4Models } from './apps4.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -315,6 +316,11 @@ const allApps = [
   { id: 'referral', name: 'Referrals', color: ['#facc15', '#9333ea'], menus: [{ key: 'referrals', label: 'Referrals', model: 'hr.referral' }] },
   { id: 'skills', name: 'Skills', color: ['#14b8a6', '#9333ea'], menus: [{ key: 'skills', label: 'Skills', model: 'hr.skill' }] },
   { id: 'esg', name: 'ESG', color: ['#22c55e', '#15803d'], menus: [{ key: 'emissions', label: 'Emissions', model: 'esg.emission' }, { key: 'report', label: 'Carbon Footprint', model: 'esg.emission', view: 'pivot' }] },
+  {
+    id: 'equity', name: 'Equity', color: ['#0f766e', '#a16207'],
+    menus: [{ key: 'captable', label: 'Cap Table', type: 'captable' }, { key: 'transactions', label: 'Transactions', model: 'equity.transaction' }],
+  },
+  { id: 'recycle', name: 'Data Recycle', color: ['#65a30d', '#334155'], menus: [{ key: 'rules', label: 'Recycle Rules', model: 'data.recycle' }] },
   { id: 'studio', name: 'Studio', color: ['#0ea5e9', '#9333ea'], menus: [{ key: 'fields', label: 'Custom Fields', type: 'studio' }] },
   { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
@@ -326,7 +332,7 @@ const allApps = [
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
   'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
-  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'studio', 'apps', 'settings'];
+  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'studio', 'apps', 'settings'];
 
 /** App-store category and one-line summary. */
 export const APP_INFO = {
@@ -345,6 +351,7 @@ export const APP_INFO = {
   appraisals: ['Human Resources', 'Assess your employees'], payroll: ['Human Resources', 'Payslips and salary entries'], expenses: ['Human Resources', 'Employee expenses'],
   fleet: ['Human Resources', 'Vehicles and their costs'], lunch: ['Human Resources', 'Lunch orders'], approvals: ['Human Resources', 'Approval requests'],
   frontdesk: ['Productivity', 'Visitor management'], studio: ['Customizations', 'Add fields to any app without code'],
+  equity: ['Accounting', 'Shareholders and cap table'], recycle: ['Administration', 'Archive old records automatically'],
   livechat: ['Website', 'Chat with your website visitors'], sms: ['Marketing', 'Design, send and track SMS'], social: ['Marketing', 'Manage your social media posts'],
   automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],
   referral: ['Human Resources', 'Employees refer candidates'], skills: ['Human Resources', 'Employee skills and levels'], esg: ['ESG', 'Measure your carbon footprint'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
