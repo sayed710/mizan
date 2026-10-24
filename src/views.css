@@ -34,6 +34,32 @@
 .discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 @media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
 
+/* App store, kiosk, surveys */
+.appstore-body { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; padding: 0 16px 24px; }
+.appstore-side { display: flex; flex-direction: column; gap: 2px; }
+.appstore-side h3 { margin: 4px 8px 8px; font-size: 13px; text-transform: uppercase; color: var(--muted); }
+.appstore-side button { display: flex; justify-content: space-between; border: 0; background: none; padding: 7px 10px; border-radius: 6px; cursor: pointer; text-align: start; }
+.appstore-side button[aria-current] { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.appstore-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; align-content: start; }
+.app-card { position: relative; display: flex; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.app-card h2 { margin: 0; font-size: 16px; } .app-card p { margin: 4px 0 10px; font-size: 13px; }
+.app-icon.small { width: 48px; height: 48px; border-radius: 12px; flex: none; }
+.badge.installed { position: absolute; top: 10px; inset-inline-end: 10px; background: #dcfce7; color: var(--success); }
+.kiosk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 14px; padding: 0 16px 24px; }
+.kiosk-card { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 10px; background: var(--surface); border: 2px solid var(--border); border-radius: 14px; cursor: pointer; }
+.kiosk-card span { color: var(--brand); font-weight: 600; }
+.kiosk-card.in { border-color: var(--success); background: #f0fdf4; }
+.kiosk-card.in span { color: var(--danger); }
+.kiosk-flash { color: var(--success); font-weight: 600; }
+.survey-form { max-width: 720px; margin: 0 16px; display: flex; flex-direction: column; gap: 14px; }
+.survey-form label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
+.survey-form input:not([type='radio']), .survey-form textarea { padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-weight: 400; }
+.survey-form fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+.survey-form legend { font-weight: 600; padding: 0 4px; }
+.survey-form .choice { flex-direction: row; align-items: center; font-weight: 400; }
+.survey-done { max-width: 480px; margin: 24px auto; text-align: center; }
+@media (max-width: 760px) { .appstore-body { grid-template-columns: 1fr; } }
+
 /* Barcode, shop floor, website */
 .barcode { display: grid; place-items: start center; padding-top: 24px; }
 .barcode-card { width: min(520px, calc(100% - 32px)); text-align: center; display: flex; flex-direction: column; gap: 10px; }

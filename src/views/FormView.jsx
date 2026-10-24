@@ -288,7 +288,7 @@ export function FormView({ leaf, id, base, params }) {
             {!isNew && def.form.smart && <SmartButtons db={db} rec={current} smart={def.form.smart} />}
             {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
             <div className="title-field">
-              {titleField.readonly
+              {titleField.readonly || titleField.compute
                 ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
                 : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
                     value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}

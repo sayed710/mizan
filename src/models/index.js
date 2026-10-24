@@ -7,10 +7,11 @@ import { moreModels } from './more.js';
 import { mailModels } from './mail.js';
 import { payrollModels } from './payroll.js';
 import { extraModels } from './extra.js';
+import { apps2Models } from './apps2.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -63,6 +64,7 @@ const allApps = [
       { key: 'dashboard', label: 'Dashboard', type: 'dashboard' },
       { label: 'Customers', children: [
         { key: 'invoices', label: 'Invoices', model: 'account.move', domain: (r) => r.move_type === 'out_invoice', defaults: { move_type: 'out_invoice' } },
+        { key: 'credit-notes', label: 'Credit Notes', model: 'account.move', domain: (r) => r.move_type === 'out_refund', defaults: { move_type: 'out_refund' } },
         customers,
       ] },
       { label: 'Vendors', children: [
@@ -242,6 +244,56 @@ const allApps = [
   { id: 'barcode', name: 'Barcode', color: ['#334155', '#0f172a'], menus: [{ key: 'scan', label: 'Inventory Count', type: 'barcode' }] },
   { id: 'shopfloor', name: 'Shop Floor', color: ['#0891b2', '#065f46'], menus: [{ key: 'operations', label: 'Operations', type: 'shopfloor' }] },
   { id: 'dashboards', name: 'Dashboards', color: ['#6366f1', '#db2777'], menus: [{ key: 'overview', label: 'Overview', type: 'overview' }] },
+  {
+    id: 'maintenance', name: 'Maintenance', color: ['#f59e0b', '#475569'],
+    menus: [
+      { key: 'requests', label: 'Maintenance Requests', model: 'maintenance.request' },
+      { key: 'equipment', label: 'Equipment', model: 'maintenance.equipment' },
+    ],
+  },
+  {
+    id: 'quality', name: 'Quality', color: ['#22c55e', '#1e40af'],
+    menus: [
+      { key: 'checks', label: 'Quality Checks', model: 'quality.check' },
+      { key: 'alerts', label: 'Quality Alerts', model: 'quality.alert' },
+    ],
+  },
+  {
+    id: 'fleet', name: 'Fleet', color: ['#64748b', '#0ea5e9'],
+    menus: [
+      { key: 'vehicles', label: 'Vehicles', model: 'fleet.vehicle' },
+      { key: 'services', label: 'Services', model: 'fleet.service' },
+    ],
+  },
+  {
+    id: 'attendances', name: 'Attendances', color: ['#10b981', '#f97316'],
+    menus: [
+      { key: 'kiosk', label: 'Kiosk Mode', type: 'kiosk' },
+      { key: 'attendances', label: 'Attendances', model: 'hr.attendance' },
+    ],
+  },
+  { id: 'appraisals', name: 'Appraisals', color: ['#e879f9', '#4f46e5'], menus: [{ key: 'appraisals', label: 'Appraisals', model: 'hr.appraisal' }] },
+  {
+    id: 'surveys', name: 'Surveys', color: ['#06b6d4', '#ea580c'],
+    menus: [
+      { key: 'surveys', label: 'Surveys', model: 'survey.survey' },
+      { key: 'take', label: 'Take a Survey', type: 'surveytake' },
+      { key: 'answers', label: 'Answers', model: 'survey.answer' },
+    ],
+  },
+  {
+    id: 'lunch', name: 'Lunch', color: ['#fb923c', '#16a34a'],
+    menus: [
+      { key: 'orders', label: 'My Orders', model: 'lunch.order' },
+      { key: 'products', label: 'Products', model: 'lunch.product' },
+    ],
+  },
+  { id: 'approvals', name: 'Approvals', color: ['#84cc16', '#0f766e'], menus: [{ key: 'requests', label: 'Approvals', model: 'approval.request' }] },
+  { id: 'repairs', name: 'Repairs', color: ['#78716c', '#dc2626'], menus: [{ key: 'orders', label: 'Repair Orders', model: 'repair.order' }] },
+  { id: 'fieldservice', name: 'Field Service', color: ['#0d9488', '#ca8a04'], menus: [{ key: 'tasks', label: 'Field Service Tasks', model: 'fsm.task' }] },
+  { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }] },
+  { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }] },
+  { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
@@ -250,7 +302,27 @@ const allApps = [
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
   'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
-  'manufacturing', 'shopfloor', 'barcode', 'sign', 'employees', 'recruitment', 'timeoff', 'payroll', 'expenses', 'settings'];
+  'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
+  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'apps', 'settings'];
+
+/** App-store category and one-line summary. */
+export const APP_INFO = {
+  discuss: ['Productivity', 'Chat, channels and activities'], calendar: ['Productivity', 'Schedule meetings'], appointments: ['Productivity', 'Let people book time with you'],
+  todo: ['Productivity', 'Organize your work'], knowledge: ['Productivity', 'Centralize your knowledge'], contacts: ['Sales', 'Centralize your address book'],
+  crm: ['Sales', 'Track leads and close opportunities'], sales: ['Sales', 'From quotations to invoices'], dashboards: ['Productivity', 'Key figures across apps'],
+  subscriptions: ['Sales', 'Recurring revenue and renewals'], rental: ['Sales', 'Rental contracts, pickups and returns'], pos: ['Sales', 'Shop checkout and payments'],
+  accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'],
+  project: ['Services', 'Tasks and projects'], timesheets: ['Services', 'Track time on tasks'], planning: ['Services', 'Employee schedules'],
+  helpdesk: ['Services', 'Solve customer tickets'], website: ['Website', 'Website builder and online shop'], marketing: ['Marketing', 'Design, send and track emails'],
+  events: ['Marketing', 'Organize events and registrations'], purchase: ['Supply Chain', 'Purchase orders and vendor bills'], inventory: ['Supply Chain', 'Stock and logistics'],
+  manufacturing: ['Supply Chain', 'Manufacturing orders and BoMs'], shopfloor: ['Supply Chain', 'Operator workstation'], barcode: ['Supply Chain', 'Scan and count stock'],
+  quality: ['Supply Chain', 'Control the quality of your products'], maintenance: ['Supply Chain', 'Equipment and maintenance requests'], repairs: ['Supply Chain', 'Repair damaged products'],
+  fieldservice: ['Services', 'Plan on-site interventions'], sign: ['Productivity', 'Electronic signatures'], employees: ['Human Resources', 'Employee directory'],
+  attendances: ['Human Resources', 'Track employee attendance'], recruitment: ['Human Resources', 'Recruitment pipeline'], timeoff: ['Human Resources', 'Leave requests'],
+  appraisals: ['Human Resources', 'Assess your employees'], payroll: ['Human Resources', 'Payslips and salary entries'], expenses: ['Human Resources', 'Employee expenses'],
+  fleet: ['Human Resources', 'Vehicles and their costs'], lunch: ['Human Resources', 'Lunch orders'], approvals: ['Human Resources', 'Approval requests'],
+  frontdesk: ['Productivity', 'Visitor management'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
+};
 export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);

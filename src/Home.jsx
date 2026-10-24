@@ -8,7 +8,8 @@ export function Home() {
   const db = useDb();
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
-  const shown = apps.filter((a) => !q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q));
+  const hidden = new Set(db.settings?.uninstalled ?? []);
+  const shown = apps.filter((a) => !hidden.has(a.id) && (!q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q)));
   return (
     <main className="home">
       <header className="home-top">

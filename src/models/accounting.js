@@ -1,8 +1,9 @@
-import { postNote, read, write } from '../orm.js';
+import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
+const isRefund = (r) => r.move_type === 'out_refund';
 const total = (r) => (isInvoice(r) ? amounts(r.invoice_line_ids).total : (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0));
 const residual = (r) => (isInvoice(r) ? Math.max(0, Math.round((total(r) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
 const paymentState = (r) => {
@@ -11,7 +12,7 @@ const paymentState = (r) => {
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-const PREFIX = { out_invoice: 'INV', in_invoice: 'BILL', entry: 'MISC' };
+const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', entry: 'MISC' };
 
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
@@ -24,7 +25,7 @@ export function postMove(db, id) {
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  const journal = journalId(db, r.move_type === 'out_invoice' ? 'INV' : 'BILL');
+  const journal = journalId(db, r.move_type === 'in_invoice' ? 'BILL' : 'INV');
   return write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) });
 }
 
@@ -42,6 +43,15 @@ export function payMove(db, id, amount, date = today()) {
   });
   const next = write(withEntry, 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
+}
+
+/** Draft credit note reversing a posted customer invoice. */
+function creditNote(db, r) {
+  const { db: next, id } = create(db, 'account.move', {
+    move_type: 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
+    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`,
+  });
+  return { db: next, go: `#/accounting/credit-notes/${id}` };
 }
 
 function registerPayment(db, r) {
@@ -106,7 +116,7 @@ export const accountingModels = {
     label: 'Invoices',
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
-      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['in_invoice', 'Vendor Bill'], ['entry', 'Journal Entry']] },
+      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['entry', 'Journal Entry']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       ref: { type: 'char', label: 'Reference' },
@@ -156,12 +166,13 @@ export const accountingModels = {
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
+        { label: 'Credit Note', when: (r) => r.state === 'posted' && r.move_type === 'out_invoice', run: creditNote },
         { label: 'Print', when: (r) => r.state === 'posted', run: (db) => { window.print(); return { db }; } },
         { label: 'Reset to Draft', when: (r) => r.state !== 'draft' && !(Number(r.amount_paid) > 0), vals: { state: 'draft' } },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
-      subtitle: (r) => ({ in_invoice: 'Vendor Bill', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
+      subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_date_due', 'journal_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)

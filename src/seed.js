@@ -229,6 +229,40 @@ export function seed() {
   add('website.page', { name: 'About Us', slug: 'about', sequence: 2, is_published: true, content: '# Our story\n\nFounded in Cairo, we have equipped more than 200 offices.' });
   add('website.page', { name: 'Contact', slug: 'contact', sequence: 3, is_published: true, content: '# Contact us\n\nsales@mycompany.example · +20 2 1234 5678' });
 
+  const press = add('maintenance.equipment', { name: 'CNC Router', category: 'machine', serial_no: 'CNC-2291', technician_id: 4, location: 'Workshop', next_maintenance: addDays(today(), 20) });
+  add('maintenance.equipment', { name: 'Delivery laptop', category: 'computer', serial_no: 'LT-7781', technician_id: 5 });
+  add('maintenance.request', { name: 'Spindle vibration', equipment_id: press, technician_id: 4, priority: 2, stage_id: 'progress' });
+  add('maintenance.request', { name: 'Quarterly lubrication', equipment_id: press, maintenance_type: 'preventive', schedule_date: addDays(today(), 20) });
+  add('quality.check', { product_id: 2, test_type: 'measure', measure: 75, norm_min: 72, norm_max: 76, user_id: 4 });
+  add('quality.check', { product_id: 1, test_type: 'pass_fail', result: 'pass', user_id: 4 });
+  add('quality.alert', { name: 'Scratched desk tops from supplier', product_id: 7, user_id: 4, priority: 2 });
+  const van = add('fleet.vehicle', { name: 'Toyota Hiace', license_plate: 'ق ط ر 1234', driver_id: 4, fuel_type: 'diesel', odometer: 48200, stage_id: 'registered' });
+  add('fleet.vehicle', { name: 'Hyundai Elantra', license_plate: 'س ص ع 5678', driver_id: 2, fuel_type: 'gasoline', odometer: 21000, stage_id: 'registered' });
+  add('fleet.service', { name: 'Oil change', vehicle_id: van, service_type: 'maintenance', amount: 85, date: addDays(today(), -15), vendor_id: 2, stage_id: 'done' });
+  add('fleet.service', { name: 'Fuel', vehicle_id: van, service_type: 'fuel', amount: 60, date: addDays(today(), -2), stage_id: 'done' });
+  [[2, -1, '08:55', '17:05'], [3, -1, '09:10', '16:40'], [4, 0, '08:30', null]]
+    .forEach(([employee_id, d, check_in, check_out]) => add('hr.attendance', { employee_id, date: addDays(today(), d), check_in, check_out }));
+  add('hr.appraisal', { employee_id: 3, manager_id: 2, stage_id: 'pending' });
+  add('hr.appraisal', { employee_id: 5, manager_id: 4 });
+  add('survey.survey', { name: 'Customer Satisfaction', user_id: 2, stage_id: 'open', questions: [
+    { question: 'How satisfied are you with our products?', kind: 'rating', choices: '' },
+    { question: 'Which product did you buy?', kind: 'choice', choices: 'Chair, Desk, Table, Other' },
+    { question: 'Any suggestions?', kind: 'text', choices: '' },
+  ] });
+  ['Chicken Shawarma', 'Margherita Pizza', 'Greek Salad', 'Fresh Lemon Mint'].forEach((name, i) =>
+    add('lunch.product', { name, vendor: i === 1 ? 'Pizza Corner' : 'Cairo Kitchen', price: [6, 9, 5, 2][i], category: ['sandwich', 'pizza', 'salad', 'drink'][i] }));
+  add('lunch.order', { product_id: 1, employee_id: 2, stage_id: 'ordered' });
+  add('lunch.order', { product_id: 3, employee_id: 4 });
+  add('approval.request', { name: 'New laptop for support', category: 'purchase', request_owner_id: 5, approver_id: 4, amount: 1200, request_status: 'pending' });
+  add('approval.request', { name: 'Trip to Dubai expo', category: 'travel', request_owner_id: 2, approver_id: 1, amount: 900, request_status: 'approved' });
+  add('repair.order', { product_id: 1, partner_id: 3, user_id: 5, state: 'confirmed', parts: [{ product_id: 9, qty: 1, price_unit: 10, tax: 14 }] });
+  add('fsm.task', { name: 'Install 12 workstations', partner_id: 6, address: 'Atlas Workspace, Casablanca', technician_id: 4, date: addDays(today(), 2), stage_id: 'planned' });
+  add('fsm.task', { name: 'Fix desk motor', partner_id: 3, address: 'Giza', technician_id: 5, date: today(), stage_id: 'progress', hours: 1.5 });
+  add('frontdesk.visitor', { name: 'Ali Mansour', company: 'Delta Office Supplies', host_id: 2, stage_id: 'planned' });
+  add('slide.channel', { name: 'Ergonomics 101', user_id: 3, members: 14, stage_id: 'published', tag_ids: ['Health'], lessons: [
+    { title: 'Why posture matters', kind: 'video', duration: 8 }, { title: 'Setting up your desk', kind: 'doc', duration: 12 }, { title: 'Check your knowledge', kind: 'quiz', duration: 5 },
+  ] });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

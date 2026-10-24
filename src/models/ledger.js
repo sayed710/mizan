@@ -34,12 +34,14 @@ export const isBalanced = (lines = []) =>
 
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
 export function invoiceLines(db, move) {
-  const sale = move.move_type === 'out_invoice';
+  // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
+  const sale = move.move_type !== 'in_invoice';
+  const refund = move.move_type === 'out_refund';
   const { untaxed, tax, total } = amounts(move.invoice_line_ids);
   const counterpart = accountId(db, sale ? '121000' : '211000');
   const base = accountId(db, sale ? '400000' : '600000');
   const taxAcc = accountId(db, sale ? '251000' : '131000');
-  const side = (amount, debit) => (debit ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
+  const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     { account_id: base, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(untaxed, !sale) },

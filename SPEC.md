@@ -88,5 +88,13 @@ Customer, Status, Pick up Date, Return Date, Total, Invoice Status).
   Planning uses calendar/kanban instead of a Gantt chart. Rental pickup/return move stock and invoice days × qty × daily price.
   Website renders published pages from a small text format (no raw HTML) plus a shop whose checkout creates a customer and quotation.
 
+## Phase 7: app store and more apps
+
+Evidence: `ev_4a99eeaa…` (Apps: kanban of app cards with name, summary and Activate / Learn More / Module Info; side panel of
+categories Sales, Website, Services, Accounting, Supply Chain, Productivity, Marketing, Human Resources …; 80 apps listed).
+- D: Apps page toggles installation (hidden from home, kept in settings). New apps: Maintenance, Quality (pass/fail + measure tolerance),
+  Repairs (parts consume stock, invoice), Field Service, Fleet (services cost smart button), Attendances (kiosk check-in/out),
+  Appraisals, Surveys (take page + stored answers), Lunch, Approvals, Frontdesk, eLearning. Credit notes reverse invoices in the ledger.
+
 ## Persistence
 - D: Browser `localStorage` (`mizan-db-v1`). Swap `src/store.js` for an HTTP API when a backend is needed.

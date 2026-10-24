@@ -71,7 +71,8 @@ export function applyDiff(db, d, { author } = {}) {
     .filter((m) => m && typeof m.id === 'string' && models[m.model] && !known.has(m.id))
     .map((m) => ({ id: m.id, model: m.model, res_id: m.res_id, body: String(m.body).slice(0, 10000), kind: m.kind === 'note' ? 'note' : 'tracking', author: author ?? m.author, date: m.date }));
   const settings = d.settings && typeof d.settings === 'object'
-    ? { ...db.settings, company: String(d.settings.company ?? db.settings.company).slice(0, 200), favorites: d.settings.favorites ?? db.settings.favorites }
+    ? { ...db.settings, company: String(d.settings.company ?? db.settings.company).slice(0, 200), favorites: d.settings.favorites ?? db.settings.favorites,
+      uninstalled: Array.isArray(d.settings.uninstalled) ? d.settings.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled }
     : db.settings;
   return { ...db, records, seq, settings, messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
 }
