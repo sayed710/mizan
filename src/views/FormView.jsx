@@ -206,11 +206,13 @@ export function FormView({ leaf, id, base, params }) {
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
   const runButton = (b) => {
-    if (b.email && isServer() && getUser()?.smtp) {
+    const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
+    const need = b.requires ?? (b.email ? 'smtp' : 'server');
+    if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
       const savedId = save();
       if (savedId == null) return;
-      serverAction(b.email === 'mailing' ? '/api/mail/mailing' : '/api/mail/document', { model, id: savedId })
-        .then(() => setError(null), (e) => fail(e));
+      serverAction(endpoint, { model, id: savedId })
+        .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
       return;
     }
     if (!b.run) {

@@ -12,10 +12,11 @@ import { apps3Models } from './apps3.js';
 import { bankModels } from './bank.js';
 import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
+import { logisticsModels } from './logistics.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -114,6 +115,8 @@ const allApps = [
       ] },
       { key: 'products', label: 'Products', model: 'product' },
       { key: 'stock', label: 'Stock', model: 'product', view: 'list', domain: (r) => r.type === 'goods' },
+      { key: 'lots', label: 'Lots/Serial Numbers', model: 'stock.lot' },
+      { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }] },
       { key: 'report', label: 'Reporting', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
     ],
   },
@@ -323,6 +326,8 @@ const allApps = [
     menus: [{ key: 'captable', label: 'Cap Table', type: 'captable' }, { key: 'transactions', label: 'Transactions', model: 'equity.transaction' }],
   },
   { id: 'recycle', name: 'Data Recycle', color: ['#65a30d', '#334155'], menus: [{ key: 'rules', label: 'Recycle Rules', model: 'data.recycle' }] },
+  { id: 'phone', name: 'Phone', color: ['#22c55e', '#0369a1'], menus: [{ key: 'calls', label: 'Calls', model: 'phone.call' }] },
+  { id: 'iot', name: 'IoT', color: ['#475569', '#0ea5e9'], menus: [{ key: 'devices', label: 'IoT Devices', model: 'iot.device' }] },
   { id: 'studio', name: 'Studio', color: ['#0ea5e9', '#9333ea'], menus: [{ key: 'fields', label: 'Custom Fields', type: 'studio' }] },
   { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
@@ -334,7 +339,7 @@ const allApps = [
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
   'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
-  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'studio', 'apps', 'settings'];
+  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
 
 /** App-store category and one-line summary. */
 export const APP_INFO = {
@@ -353,6 +358,7 @@ export const APP_INFO = {
   appraisals: ['Human Resources', 'Assess your employees'], payroll: ['Human Resources', 'Payslips and salary entries'], expenses: ['Human Resources', 'Employee expenses'],
   fleet: ['Human Resources', 'Vehicles and their costs'], lunch: ['Human Resources', 'Lunch orders'], approvals: ['Human Resources', 'Approval requests'],
   frontdesk: ['Productivity', 'Visitor management'], studio: ['Customizations', 'Add fields to any app without code'],
+  phone: ['Productivity', 'Click-to-call and call log'], iot: ['Administration', 'Connect scales, sensors and devices'],
   equity: ['Accounting', 'Shareholders and cap table'], recycle: ['Administration', 'Archive old records automatically'],
   livechat: ['Website', 'Chat with your website visitors'], sms: ['Marketing', 'Design, send and track SMS'], social: ['Marketing', 'Manage your social media posts'],
   automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],

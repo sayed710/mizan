@@ -38,6 +38,8 @@ const products = [
   { name: 'Espresso', default_code: 'CAFE-001', categ: 'Cafeteria', type: 'goods', list_price: 2.5, cost: 0.6, qty_available: 500, reorder_min: 0 },
   { name: 'Croissant', default_code: 'CAFE-002', categ: 'Cafeteria', type: 'goods', list_price: 3, cost: 1, qty_available: 60, reorder_min: 20 },
   { name: 'Software Support Plan', default_code: 'SUB-001', categ: 'Services', type: 'service', list_price: 99, cost: 0, qty_available: 0, reorder_min: 0 },
+  { name: 'Shipping', default_code: 'SHIP', categ: 'Services', type: 'service', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, website_published: false },
+  { name: 'Smart Desk Controller', default_code: 'ELEC-001', categ: 'Electronics', type: 'goods', list_price: 89, cost: 40, qty_available: 0, reorder_min: 0, tracking: 'serial', weight: 0.4 },
 ];
 
 const departments = ['Management', 'Sales', 'Operations', 'Support'];
@@ -97,7 +99,11 @@ export function seed() {
       create_date: addDays(today(), -40 + i * 5),
     });
   });
-  products.forEach((p) => add('product', p));
+  const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
+  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...p }));
+  add('delivery.carrier', { name: 'Standard Delivery', delivery_type: 'fixed', fixed_price: 25, free_over: 2000 });
+  add('delivery.carrier', { name: 'Freight by weight', delivery_type: 'rules', rules: [{ max_weight: 50, price: 40 }, { max_weight: 300, price: 120 }, { max_weight: 2000, price: 450 }] });
+  add('delivery.carrier', { name: 'Aramex Express', delivery_type: 'api', api_url: '', tracking_url: 'https://www.aramex.com/track/results?ShipmentNumber={ref}' });
 
   departments.forEach((name) => add('hr.department', { name }));
   employees.forEach(([name, job_title, department_id, parent_id, work_location], i) =>
@@ -298,6 +304,10 @@ export function seed() {
     .forEach(([name, kind, from_id, to_id, shares], i) => add('equity.transaction', { name, kind, from_id, to_id, shares, price_per_share: [0.01, 2, 0.01, 2.5][i], state: 'posted', date: addDays(today(), -400 + i * 90) }));
   add('data.recycle', { name: 'Archive solved tickets older than a year', res_model: 'helpdesk.ticket', date_field: 'create_date', days: 365 });
   set('hr.job', 1, { is_published: true, description: 'Grow our B2B furniture sales across Egypt and the Gulf.' });
+
+  add('stock.lot', { name: 'SDC-0001', product_id: read(db, 'product', 14) ? 14 : null, qty: 1 });
+  add('phone.call', { name: 'Follow-up on HQ chairs', partner_id: 1, phone: '+20 2 2345 6789', direction: 'out', duration: 6 });
+  add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });
 
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');

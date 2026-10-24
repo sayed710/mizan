@@ -6,7 +6,7 @@ import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
-const KEY = 'mizan-db-v13';
+const KEY = 'mizan-db-v14';
 const POLL_MS = 15000;
 const listeners = new Set();
 let mode = 'local';

@@ -254,7 +254,7 @@ const ICONS = {
 };
 
 // Apps without a dedicated glyph reuse the closest one.
-const ALIAS = { livechat: 'discuss', sms: 'marketing', social: 'events', automation: 'subscriptions', plm: 'manufacturing', rooms: 'calendar', referral: 'recruitment', skills: 'appraisals', esg: 'quality' };
+const ALIAS = { phone: 'helpdesk', iot: 'shopfloor', livechat: 'discuss', sms: 'marketing', social: 'events', automation: 'subscriptions', plm: 'manufacturing', rooms: 'calendar', referral: 'recruitment', skills: 'appraisals', esg: 'quality' };
 
 // equity / recycle glyphs
 ICONS.equity = <path d="M24 4a20 20 0 1020 20H24z" />;

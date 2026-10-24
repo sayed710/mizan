@@ -422,6 +422,13 @@ const ar = {
   'Why you?': 'لماذا أنت؟', 'Your application was received.': 'تم استلام طلبك.', 'Published on Website': 'منشور على الموقع', Administration: 'الإدارة',
   Contracts: 'العقود', 'Salary Structures': 'هياكل الرواتب', 'Salary Rules': 'قواعد الراتب', 'Structure Name': 'اسم الهيكل', Structure: 'الهيكل', 'Simulate 10,000': 'محاكاة 10,000', 'Contract Reference': 'مرجع العقد', 'Salary Structure': 'هيكل الراتب', Wage: 'الراتب', 'Contract Start Date': 'بداية العقد', 'Contract End Date': 'نهاية العقد', 'Contract Type': 'نوع العقد', Permanent: 'دائم', 'Fixed Term': 'محدد المدة', Internship: 'تدريب', Running: 'سارٍ', Expired: 'منتهي', 'Expiring Soon': 'ينتهي قريباً', 'Amount Type': 'نوع المبلغ', 'Based on (code)': 'محسوب من (الكود)', Value: 'القيمة', 'Contract Wage': 'راتب العقد', 'Fixed Amount': 'مبلغ ثابت', Percentage: 'نسبة', Basic: 'أساسي', Allowance: 'بدل', Gross: 'الإجمالي', Deduction: 'استقطاع', Net: 'الصافي',
   'Open Shifts': 'ورديات متاحة', 'To schedule': 'للجدولة', 'to schedule': 'للجدولة', Week: 'أسبوع',
+  Phone: 'الهاتف', IoT: 'إنترنت الأشياء', Calls: 'المكالمات', Call: 'اتصال', 'IoT Devices': 'أجهزة إنترنت الأشياء', 'Delivery Methods': 'طرق الشحن',
+  'Delivery Method': 'طريقة الشحن', 'Lots/Serial Numbers': 'الدفعات/الأرقام التسلسلية', 'Lot/Serial Number': 'رقم الدفعة/التسلسل', 'Add Shipping': 'إضافة الشحن',
+  'Weight (kg)': 'الوزن (كجم)', Tracking: 'التتبع', 'No Tracking': 'بدون تتبع', 'By Lots': 'بالدفعات', 'By Unique Serial Number': 'برقم تسلسلي فريد',
+  Carrier: 'شركة الشحن', 'Tracking Reference': 'رقم التتبع', Provider: 'المزوّد', 'Fixed Price ': 'سعر ثابت', 'Based on Rules': 'حسب القواعد',
+  'Free if order amount is above': 'مجاني إذا تجاوز الطلب', 'Pricing Rules': 'قواعد التسعير', 'Up to (kg)': 'حتى (كجم)', 'Rate API URL': 'رابط واجهة الأسعار',
+  'Generate Token': 'إنشاء رمز', 'Device Name': 'اسم الجهاز', 'Last Value': 'آخر قيمة', 'Last Seen': 'آخر ظهور', Unit: 'الوحدة', Direction: 'الاتجاه',
+  Outgoing: 'صادر', Missed: 'فائتة', 'Phone Number': 'رقم الهاتف', 'Duration (min)': 'المدة (دقائق)', Expired: 'منتهي الصلاحية', 'In Stock': 'متوفر',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

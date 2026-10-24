@@ -1,4 +1,5 @@
-import { create, read, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
+import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { addDays, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
@@ -11,10 +12,10 @@ export function moveStock(db, lines = [], sign) {
 }
 
 /** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
-export function createPicking(db, { type, partner_id, origin, lines, link }) {
+export function createPicking(db, { type, partner_id, origin, lines, link, carrier_id = null }) {
   const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: Number(l.qty) || 0 }));
   if (!moves.length) return db;
-  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', ...link }).db;
+  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', carrier_id, ...link }).db;
 }
 
 /** Create a draft invoice/bill from order lines and return where to go. */
@@ -62,12 +63,14 @@ export const salesModels = {
       date_done: { type: 'date', label: 'Effective Date', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
+      carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Carrier' },
+      carrier_tracking_ref: { type: 'char', label: 'Tracking Reference' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['ready', 'Ready'], ['done', 'Done'], ['cancel', 'Cancelled']] },
       move_ids: {
         type: 'one2many',
         label: 'Operations',
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Quantity' } },
-        newLine: () => ({ product_id: null, qty: 1 }),
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' } },
+        newLine: () => ({ product_id: null, qty: 1, lot_name: '' }),
       },
     },
     defaults: (id) => ({ name: `WH/${pad(id)}`, picking_type: 'outgoing', scheduled_date: today(), state: 'draft', move_ids: [] }),
@@ -90,7 +93,7 @@ export const salesModels = {
           label: 'Validate', primary: true, when: (r) => r.state === 'ready',
           run: (db, r) => {
             const sign = r.picking_type === 'incoming' ? 1 : r.picking_type === 'outgoing' ? -1 : 0;
-            let next = write(moveStock(db, r.move_ids, sign), 'stock.picking', r.id, { state: 'done', date_done: today() });
+            let next = write(moveStock(applyLots(db, r, sign || 0), r.move_ids, sign), 'stock.picking', r.id, { state: 'done', date_done: today() });
             if (r.purchase_id) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
             return { db: next };
           },
@@ -98,7 +101,7 @@ export const salesModels = {
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'ready'].includes(r.state) },
       ],
       title: 'name',
-      groups: [['partner_id', 'picking_type', 'origin'], ['scheduled_date', 'date_done']],
+      groups: [['partner_id', 'picking_type', 'origin'], ['scheduled_date', 'date_done', 'carrier_id', 'carrier_tracking_ref']],
       tabs: [{ label: 'Operations', fields: ['move_ids'] }],
       chatter: true,
     },
@@ -111,6 +114,8 @@ export const salesModels = {
       default_code: { type: 'char', label: 'Internal Reference' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
+      weight: { type: 'float', label: 'Weight (kg)' },
+      tracking: { type: 'selection', label: 'Tracking', options: [['none', 'No Tracking'], ['lot', 'By Lots'], ['serial', 'By Unique Serial Number']] },
       uom: { type: 'selection', label: 'Unit of Measure', options: [['unit', 'Units'], ['kg', 'kg'], ['m', 'm'], ['l', 'L'], ['hour', 'Hours'], ['box', 'Box']] },
       attributes: { type: 'char', label: 'Attributes' },
       variant_of: { type: 'many2one', relation: 'product', label: 'Variant of', readonly: true },
@@ -146,7 +151,7 @@ export const salesModels = {
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
-      groups: [['default_code', 'type', 'categ', 'uom'], ['list_price', 'cost', 'qty_available', 'reorder_min'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['default_code', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'cost', 'qty_available', 'reorder_min'], ['attributes', 'variant_of', 'variant_values']],
       chatter: true,
     },
   },
@@ -157,6 +162,7 @@ export const salesModels = {
       name: { type: 'char', label: 'Number', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer', required: true },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
+      carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Delivery Method' },
       date_order: { type: 'date', label: 'Order Date' },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
@@ -190,10 +196,19 @@ export const salesModels = {
         { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/sale.order/${r.id}` }) },
         {
+          label: 'Add Shipping', when: (r) => r.carrier_id && ['draft', 'sent'].includes(r.state),
+          // API carriers are quoted by the server; fixed/rule carriers are computed here.
+          server: '/api/integrations/shipping-rate', requires: 'shipping_api',
+          run: (db, r) => {
+            const carrier = read(db, 'delivery.carrier', r.carrier_id);
+            return { db: addShipping(db, r, shippingPrice(db, carrier, r)) };
+          },
+        },
+        {
           label: 'Confirm',
           primary: true,
           when: (r) => ['draft', 'sent'].includes(r.state),
-          run: (db, r) => ({ db: createPicking(write(db, 'sale.order', r.id, { state: 'sale' }), { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { sale_id: r.id } }) }),
+          run: (db, r) => ({ db: createPicking(write(db, 'sale.order', r.id, { state: 'sale' }), { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null }) }),
         },
         { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
@@ -203,7 +218,7 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
-      groups: [['partner_id', 'pricelist_id'], ['date_order', 'validity_date', 'user']],
+      groups: [['partner_id', 'pricelist_id', 'carrier_id'], ['date_order', 'validity_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,
