@@ -8,10 +8,11 @@ import { mailModels } from './mail.js';
 import { payrollModels } from './payroll.js';
 import { extraModels } from './extra.js';
 import { apps2Models } from './apps2.js';
+import { apps3Models } from './apps3.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -144,6 +145,7 @@ const allApps = [
     menus: [
       { key: 'register', label: 'Register', type: 'pos' },
       { key: 'orders', label: 'Orders', model: 'pos.order' },
+      { key: 'kitchen', label: 'Kitchen Display', type: 'kitchen' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
     ],
   },
@@ -293,6 +295,18 @@ const allApps = [
   { id: 'fieldservice', name: 'Field Service', color: ['#0d9488', '#ca8a04'], menus: [{ key: 'tasks', label: 'Field Service Tasks', model: 'fsm.task' }] },
   { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }] },
   { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }] },
+  { id: 'livechat', name: 'Live Chat', color: ['#38bdf8', '#7c3aed'], menus: [{ key: 'sessions', label: 'Sessions', model: 'livechat.session' }] },
+  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }] },
+  { id: 'social', name: 'Social Marketing', color: ['#3b82f6', '#ec4899'], menus: [{ key: 'posts', label: 'Posts', model: 'social.post' }] },
+  { id: 'automation', name: 'Marketing Automation', color: ['#f97316', '#4f46e5'], menus: [{ key: 'campaigns', label: 'Campaigns', model: 'marketing.campaign' }] },
+  { id: 'plm', name: 'PLM', color: ['#16a34a', '#334155'], menus: [{ key: 'changes', label: 'Engineering Changes', model: 'mrp.eco' }, { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' }] },
+  {
+    id: 'rooms', name: 'Meeting Rooms', color: ['#0891b2', '#a21caf'],
+    menus: [{ key: 'bookings', label: 'Room Bookings', model: 'room.booking' }, { key: 'rooms', label: 'Meeting Rooms', model: 'room.room' }],
+  },
+  { id: 'referral', name: 'Referrals', color: ['#facc15', '#9333ea'], menus: [{ key: 'referrals', label: 'Referrals', model: 'hr.referral' }] },
+  { id: 'skills', name: 'Skills', color: ['#14b8a6', '#9333ea'], menus: [{ key: 'skills', label: 'Skills', model: 'hr.skill' }] },
+  { id: 'esg', name: 'ESG', color: ['#22c55e', '#15803d'], menus: [{ key: 'emissions', label: 'Emissions', model: 'esg.emission' }, { key: 'report', label: 'Carbon Footprint', model: 'esg.emission', view: 'pivot' }] },
   { id: 'studio', name: 'Studio', color: ['#0ea5e9', '#9333ea'], menus: [{ key: 'fields', label: 'Custom Fields', type: 'studio' }] },
   { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
@@ -304,7 +318,7 @@ const allApps = [
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
   'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
-  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'studio', 'apps', 'settings'];
+  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'studio', 'apps', 'settings'];
 
 /** App-store category and one-line summary. */
 export const APP_INFO = {
@@ -322,7 +336,10 @@ export const APP_INFO = {
   attendances: ['Human Resources', 'Track employee attendance'], recruitment: ['Human Resources', 'Recruitment pipeline'], timeoff: ['Human Resources', 'Leave requests'],
   appraisals: ['Human Resources', 'Assess your employees'], payroll: ['Human Resources', 'Payslips and salary entries'], expenses: ['Human Resources', 'Employee expenses'],
   fleet: ['Human Resources', 'Vehicles and their costs'], lunch: ['Human Resources', 'Lunch orders'], approvals: ['Human Resources', 'Approval requests'],
-  frontdesk: ['Productivity', 'Visitor management'], studio: ['Customizations', 'Add fields to any app without code'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
+  frontdesk: ['Productivity', 'Visitor management'], studio: ['Customizations', 'Add fields to any app without code'],
+  livechat: ['Website', 'Chat with your website visitors'], sms: ['Marketing', 'Design, send and track SMS'], social: ['Marketing', 'Manage your social media posts'],
+  automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],
+  referral: ['Human Resources', 'Employees refer candidates'], skills: ['Human Resources', 'Employee skills and levels'], esg: ['ESG', 'Measure your carbon footprint'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
 };
 export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 

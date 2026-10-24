@@ -380,6 +380,7 @@ export const moreModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       date_order: { type: 'date', label: 'Date', readonly: true },
       payment_method: { type: 'selection', label: 'Payment Method', options: [['cash', 'Cash'], ['card', 'Card']] },
+      kitchen_state: { type: 'selection', label: 'Kitchen', options: [['new', 'To Cook'], ['cooking', 'Cooking'], ['ready', 'Ready'], ['served', 'Served']] },
       lines: productLines('Products', 'list_price'),
       ...amountFields('lines'),
     },

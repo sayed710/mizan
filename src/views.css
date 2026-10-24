@@ -34,6 +34,13 @@
 .discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 @media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
 
+/* Kitchen display */
+.card.kds { text-align: start; font: inherit; color: inherit; }
+.card.kds ul { margin: 6px 0; padding-inline-start: 18px; font-size: 15px; }
+.card.kds-new { border-inline-start: 4px solid var(--danger); }
+.card.kds-cooking { border-inline-start: 4px solid var(--warn); }
+.card.kds-ready { border-inline-start: 4px solid var(--success); }
+
 /* Studio */
 .studio-body { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 16px; padding: 0 16px 24px; align-items: start; }
 .studio-form { display: flex; flex-direction: column; gap: 10px; }

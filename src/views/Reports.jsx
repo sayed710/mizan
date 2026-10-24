@@ -146,7 +146,7 @@ export function Reports({ leaf }) {
       </div>
       <div className="list-wrap">
         <table className="list report">
-          <thead><tr><th /> {cols.map((c) => <th key={c} className="num">{t(c)}</th>)}</tr></thead>
+          <thead><tr><th />{cols.map((c) => <th key={c} className="num">{t(c)}</th>)}</tr></thead>
           <Body db={db} period={period} />
         </table>
       </div>

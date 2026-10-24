@@ -263,6 +263,23 @@ export function seed() {
     { title: 'Why posture matters', kind: 'video', duration: 8 }, { title: 'Setting up your desk', kind: 'doc', duration: 12 }, { title: 'Check your knowledge', kind: 'quiz', duration: 5 },
   ] });
 
+  add('livechat.session', { name: 'Visitor #1042', operator_id: 5, country: 'Egypt', stage_id: 'closed', rating: 3, transcript: 'Asked about delivery times to Giza.' });
+  add('livechat.session', { name: 'Visitor #1043', operator_id: 6, country: 'UAE', stage_id: 'open' });
+  add('sms.campaign', { name: 'Weekend promo', list_id: 1, body: 'Mizan: 15% off ergonomic chairs this weekend only!' });
+  add('social.post', { name: 'Expo announcement', message: 'Meet us at the Office Design Expo!', stage_id: 'scheduled', accounts: ['LinkedIn'] });
+  add('social.post', { name: 'New desk launch', message: 'Our new standing desk is here.', stage_id: 'posted', likes: 128, shares: 14, scheduled_date: addDays(today(), -4) });
+  add('marketing.campaign', { name: 'Welcome series', list_id: 1, steps: [{ action: 'email', detail: 'Welcome email', delay_days: 0 }, { action: 'wait', detail: '', delay_days: 3 }, { action: 'email', detail: 'Product tips', delay_days: 0 }] });
+  add('mrp.eco', { name: 'Thicker oak top for standing desk', bom_id: 1, user_id: 4, stage_id: 'progress', priority: 1 });
+  const room = add('room.room', { name: 'Nile Room', capacity: 8, location: '1st floor', equipment: ['Screen', 'Whiteboard'] });
+  add('room.room', { name: 'Focus Booth', capacity: 2, location: '2nd floor', equipment: [] });
+  add('room.booking', { name: 'Sales weekly', room_id: room, organizer_id: 2, date: addDays(today(), 1), start: '09:30', end: '10:30' });
+  add('hr.referral', { name: 'Omar Sherif', job_id: 1, referrer_id: 3, stage_id: 'interview', email: 'omar.s@mail.example' });
+  [[3, 'English', 'language', 'advanced'], [3, 'Negotiation', 'soft', 'intermediate'], [5, 'Electronics', 'tech', 'expert']]
+    .forEach(([employee_id, name, skill_type, level]) => add('hr.skill', { employee_id, name, skill_type, level }));
+  add('esg.emission', { name: 'Office electricity', scope: '2', source: 'electricity', quantity: 5200, factor: 0.45, date: addDays(today(), -10) });
+  add('esg.emission', { name: 'Delivery van diesel', scope: '1', source: 'diesel', quantity: 380, factor: 2.68, date: addDays(today(), -8) });
+  add('esg.emission', { name: 'Business flights', scope: '3', source: 'flight', quantity: 4200, factor: 0.15, date: addDays(today(), -20) });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

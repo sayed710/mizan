@@ -5,7 +5,7 @@ import { setAuthor } from './orm.js';
 import { installCustomFields } from './models/studio.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
-const KEY = 'mizan-db-v6';
+const KEY = 'mizan-db-v7';
 const POLL_MS = 15000;
 const listeners = new Set();
 let mode = 'local';
@@ -117,3 +117,6 @@ const subscribe = (l) => {
 };
 
 export const useDb = () => useSyncExternalStore(subscribe, getDb);
+
+// The store holds the loaded database; hot-swapping this module would drop it, so reload the page instead.
+if (import.meta.hot) import.meta.hot.decline();

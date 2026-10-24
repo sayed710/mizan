@@ -16,7 +16,7 @@ export const workedHours = (r) => {
 };
 
 /** A stage-driven model with kanban/list/form defaults; `extra` overrides any part. */
-function simple({ label, fields, stages, title = 'name', lines, list, extra = {} }) {
+export function simple({ label, fields, stages, title = 'name', lines, list, extra = {} }) {
   const { defaults, groupBys = [], groups, form, ...rest } = extra;
   return {
     label,

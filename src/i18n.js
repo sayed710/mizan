@@ -142,6 +142,11 @@ const ar = {
   'Check the label, type and options': 'راجع الاسم والنوع والخيارات', 'A field with this name already exists': 'يوجد حقل بهذا الاسم بالفعل',
   Text: 'نص', 'Multiline Text': 'نص متعدد الأسطر', Decimal: 'رقم عشري', Monetary: 'مبلغ', Checkbox: 'مربع اختيار', Selection: 'قائمة اختيار',
   Customizations: 'التخصيصات', 'All apps': 'كل التطبيقات', 'Allowed apps': 'التطبيقات المسموحة', 'Allowed apps (e.g. crm,sales) — empty = all': 'التطبيقات المسموحة (مثل crm,sales) — فارغ = الكل',
+  'Live Chat': 'الدردشة المباشرة', 'SMS Marketing': 'التسويق بالرسائل', 'Social Marketing': 'التسويق الاجتماعي', 'Marketing Automation': 'أتمتة التسويق',
+  PLM: 'إدارة دورة المنتج', 'Meeting Rooms': 'قاعات الاجتماعات', Referrals: 'الترشيحات', Skills: 'المهارات', ESG: 'الاستدامة',
+  'Kitchen Display': 'شاشة المطبخ', 'To Cook': 'للطهي', Cooking: 'قيد الطهي', Ready: 'جاهز', 'Tap to advance': 'اضغط للتقدم', 'Tap when served': 'اضغط عند التقديم',
+  Sessions: 'الجلسات', 'SMS Campaigns': 'حملات الرسائل', Posts: 'المنشورات', Campaigns: 'الحملات', 'Engineering Changes': 'التغييرات الهندسية',
+  'Room Bookings': 'حجوزات القاعات', Emissions: 'الانبعاثات', 'Carbon Footprint': 'البصمة الكربونية', 'Use Default Factor': 'استخدام المعامل الافتراضي',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

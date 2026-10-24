@@ -246,6 +246,9 @@ const ICONS = {
   chevron: <path d="M14 18l10 10 10-10" stroke="currentColor" strokeWidth="5" fill="none" strokeLinecap="round" />,
 };
 
+// Apps without a dedicated glyph reuse the closest one.
+const ALIAS = { livechat: 'discuss', sms: 'marketing', social: 'events', automation: 'subscriptions', plm: 'manufacturing', rooms: 'calendar', referral: 'recruitment', skills: 'appraisals', esg: 'quality' };
+
 export const Icon = ({ name, size = 18 }) => (
-  <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS.grid}</svg>
+  <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );

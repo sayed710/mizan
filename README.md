@@ -13,7 +13,10 @@ Discuss · Calendar · Appointments · To-do · Knowledge · Contacts · CRM · 
 Point of Sale · Invoicing/Accounting · Documents · Project · Timesheets · Planning · Helpdesk · Website (pages + online shop) ·
 Email Marketing · Events · Purchase · Inventory · Manufacturing · Shop Floor · Barcode · Sign · Employees · Recruitment ·
 Time Off · Payroll · Expenses · Maintenance · Quality · Repairs · Field Service · Fleet · Attendances (kiosk) · Appraisals ·
-Surveys · Lunch · Approvals · Frontdesk · eLearning · Apps (install/uninstall) · Settings (46 apps)
+Surveys · Lunch · Approvals · Frontdesk · eLearning · Live Chat · SMS Marketing · Social Marketing · Marketing Automation ·
+PLM · Meeting Rooms · Referrals · Skills · ESG · Studio (custom fields) · Apps (install/uninstall) · Settings (56 apps)
+
+POS includes a Kitchen Display; users can be restricted to specific apps; company, apps and Studio changes are admin-only.
 
 Core features on every model: kanban/list/graph/pivot/calendar views, search panel (filters, group by, favorites,
 archived), activities with a due-today counter, chatter with tracked changes, smart buttons, CSV export/import,
