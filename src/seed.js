@@ -144,6 +144,7 @@ export function seed() {
   });
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
+  add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });
   add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: ['Consulting'], date: addDays(today(), 60) });

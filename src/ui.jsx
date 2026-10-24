@@ -108,7 +108,7 @@ function FileInput({ id, value, onChange }) {
   );
 }
 
-const lineSubtotal = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0);
+import { subtotal as lineSubtotal } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly }) {

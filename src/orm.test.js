@@ -65,15 +65,28 @@ test('filters OR within a group and AND across groups', () => {
   assert.equal(applyFilters('crm.lead', leads, ['unassigned', 'won']).length, 0);
 });
 
-test('confirming a sale removes stock; receiving a PO adds it', () => {
+test('confirming a sale creates a delivery; stock leaves only when it is validated (same for PO receipts)', () => {
   let db = seed();
   const before = read(db, 'product', 1).qty_available;
   db = runButton(db, 'sale.order', 1, 'Confirm').db;
+  assert.equal(read(db, 'product', 1).qty_available, before);
+  const delivery = search(db, 'stock.picking').find((p) => p.sale_id === 1);
+  assert.deepEqual(delivery.move_ids, [{ product_id: 1, qty: 40 }]); // service line (installation) is not shipped
+  db = runButton(db, 'stock.picking', delivery.id, 'Validate').db;
   assert.equal(read(db, 'product', 1).qty_available, before - 40);
   const { db: db2, id } = create(db, 'purchase.order', { partner_id: 7, order_line: [{ product_id: 1, qty: 10, price_unit: 120, tax: 14 }] });
-  let db3 = write(db2, 'purchase.order', id, { state: 'purchase' });
-  db3 = runButton(db3, 'purchase.order', id, 'Receive Products').db;
+  let db3 = runButton(db2, 'purchase.order', id, 'Confirm Order').db;
+  const receipt = search(db3, 'stock.picking').find((p) => p.purchase_id === id);
+  db3 = runButton(db3, 'stock.picking', receipt.id, 'Validate').db;
   assert.equal(read(db3, 'product', 1).qty_available, before - 30);
+  assert.equal(read(db3, 'purchase.order', id).receipt_done, true);
+});
+
+test('line discounts reduce the untaxed amount', () => {
+  const { db, id } = create(seed(), 'sale.order', { partner_id: 1, order_line: [{ product_id: 1, qty: 10, price_unit: 100, discount: 10, tax: 14 }] });
+  const so = read(db, 'sale.order', id);
+  assert.equal(so.amount_untaxed, 900);
+  assert.equal(Math.round(so.amount_total * 100), 102600);
 });
 
 test('invoice from sale order, posting numbers it, payment state follows amount paid', () => {

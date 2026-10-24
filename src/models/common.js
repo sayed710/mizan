@@ -10,7 +10,8 @@ export const addDays = (date, n) => {
 };
 export const pad = (n, size = 5) => String(n).padStart(size, '0');
 
-const subtotal = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0);
+/** Line subtotal before tax, after the line discount (%). */
+export const subtotal = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 
 /** @returns {{untaxed:number, tax:number, total:number}} */
 export function amounts(lines = []) {
@@ -27,9 +28,10 @@ export const productLines = (label, priceField) => ({
     product_id: { type: 'many2one', relation: 'product', label: 'Product' },
     qty: { type: 'float', label: 'Quantity' },
     price_unit: { type: 'monetary', label: 'Unit Price' },
+    discount: { type: 'float', label: 'Disc.%' },
     tax: { type: 'float', label: 'Tax %' },
   },
-  newLine: () => ({ product_id: null, qty: 1, price_unit: 0, tax: 14 }),
+  newLine: () => ({ product_id: null, qty: 1, price_unit: 0, discount: 0, tax: 14 }),
   onchange: (line, key, db) => {
     if (key !== 'product_id') return line;
     const product = (db.records.product ?? []).find((p) => p.id === line.product_id);

@@ -103,6 +103,11 @@ const allApps = [
   {
     id: 'inventory', name: 'Inventory', color: ['#a855f7', '#be185d'],
     menus: [
+      { label: 'Operations', children: [
+        { key: 'transfers', label: 'Transfers', model: 'stock.picking' },
+        { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
+        { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },
+      ] },
       { key: 'products', label: 'Products', model: 'product' },
       { key: 'stock', label: 'Stock', model: 'product', view: 'list', domain: (r) => r.type === 'goods' },
       { key: 'report', label: 'Reporting', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },

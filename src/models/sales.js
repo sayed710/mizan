@@ -10,6 +10,13 @@ export function moveStock(db, lines = [], sign) {
   }, db);
 }
 
+/** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
+export function createPicking(db, { type, partner_id, origin, lines, link }) {
+  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: Number(l.qty) || 0 }));
+  if (!moves.length) return db;
+  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', ...link }).db;
+}
+
 /** Create a draft invoice/bill from order lines and return where to go. */
 function invoiceFrom(db, order, moveType, originField) {
   const { db: next, id } = create(db, 'account.move', {
@@ -27,6 +34,59 @@ function invoiceFrom(db, order, moveType, originField) {
 const orderState = (labels) => ({ type: 'selection', label: 'Status', tracking: true, options: labels });
 
 export const salesModels = {
+  'stock.picking': {
+    label: 'Transfers',
+    fields: {
+      name: { type: 'char', label: 'Reference', readonly: true },
+      picking_type: { type: 'selection', label: 'Operation Type', options: [['incoming', 'Receipt'], ['outgoing', 'Delivery'], ['internal', 'Internal Transfer']] },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
+      origin: { type: 'char', label: 'Source Document' },
+      scheduled_date: { type: 'date', label: 'Scheduled Date' },
+      date_done: { type: 'date', label: 'Effective Date', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
+      purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
+      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['ready', 'Ready'], ['done', 'Done'], ['cancel', 'Cancelled']] },
+      move_ids: {
+        type: 'one2many',
+        label: 'Operations',
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Quantity' } },
+        newLine: () => ({ product_id: null, qty: 1 }),
+      },
+    },
+    defaults: (id) => ({ name: `WH/${pad(id)}`, picking_type: 'outgoing', scheduled_date: today(), state: 'draft', move_ids: [] }),
+    filters: [
+      [{ id: 'receipts', label: 'Receipts', fn: (r) => r.picking_type === 'incoming' }, { id: 'deliveries', label: 'Deliveries', fn: (r) => r.picking_type === 'outgoing' }],
+      [{ id: 'ready', label: 'Ready', fn: (r) => r.state === 'ready' }, { id: 'late', label: 'Late', fn: (r) => r.state === 'ready' && r.scheduled_date < today() }],
+    ],
+    groupBys: ['picking_type', 'state', 'partner_id', 'scheduled_date'],
+    kanban: { groupBy: 'state', title: 'name', lines: ['partner_id', 'origin', 'scheduled_date'], badge: 'picking_type' },
+    list: ['name', 'partner_id', 'origin', 'scheduled_date', 'picking_type', 'state'],
+    views: ['list', 'kanban', 'calendar'],
+    calendar: { date: 'scheduled_date' },
+    form: {
+      statusbar: 'state',
+      statusbarHide: ['cancel'],
+      lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
+      buttons: [
+        { label: 'Mark as Todo', primary: true, vals: { state: 'ready' }, when: (r) => r.state === 'draft' },
+        {
+          label: 'Validate', primary: true, when: (r) => r.state === 'ready',
+          run: (db, r) => {
+            const sign = r.picking_type === 'incoming' ? 1 : r.picking_type === 'outgoing' ? -1 : 0;
+            let next = write(moveStock(db, r.move_ids, sign), 'stock.picking', r.id, { state: 'done', date_done: today() });
+            if (r.purchase_id) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
+            return { db: next };
+          },
+        },
+        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'ready'].includes(r.state) },
+      ],
+      title: 'name',
+      groups: [['partner_id', 'picking_type', 'origin'], ['scheduled_date', 'date_done']],
+      tabs: [{ label: 'Operations', fields: ['move_ids'] }],
+      chatter: true,
+    },
+  },
+
   product: {
     label: 'Products',
     fields: {
@@ -104,12 +164,15 @@ export const salesModels = {
           label: 'Confirm',
           primary: true,
           when: (r) => ['draft', 'sent'].includes(r.state),
-          run: (db, r) => ({ db: moveStock(write(db, 'sale.order', r.id, { state: 'sale' }), r.order_line, -1) }),
+          run: (db, r) => ({ db: createPicking(write(db, 'sale.order', r.id, { state: 'sale' }), { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { sale_id: r.id } }) }),
         },
         { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
       ],
-      smart: [{ label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' }],
+      smart: [
+        { label: 'Delivery', model: 'stock.picking', field: 'sale_id', target: 'inventory/transfers' },
+        { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
+      ],
       title: 'name',
       groups: [['partner_id'], ['date_order', 'validity_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }],
@@ -149,17 +212,17 @@ export const salesModels = {
       buttons: [
         { label: 'Send RFQ', vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/purchase.order/${r.id}` }) },
-        { label: 'Confirm Order', primary: true, vals: { state: 'purchase' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         {
-          label: 'Receive Products',
-          primary: true,
-          when: (r) => r.state === 'purchase' && !r.receipt_done,
-          run: (db, r) => ({ db: moveStock(write(db, 'purchase.order', r.id, { receipt_done: true }), r.order_line, 1) }),
+          label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
+          run: (db, r) => ({ db: createPicking(write(db, 'purchase.order', r.id, { state: 'purchase' }), { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) }),
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'purchase'].includes(r.state) },
       ],
-      smart: [{ label: 'Bills', model: 'account.move', field: 'purchase_id', target: 'accounting/bills' }],
+      smart: [
+        { label: 'Receipt', model: 'stock.picking', field: 'purchase_id', target: 'inventory/transfers' },
+        { label: 'Bills', model: 'account.move', field: 'purchase_id', target: 'accounting/bills' },
+      ],
       ribbon: (r) => (r.receipt_done ? 'Received' : null),
       title: 'name',
       groups: [['partner_id'], ['date_order', 'date_planned']],

@@ -38,7 +38,7 @@ export function cleanValue(field, value, where) {
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
       return value.map((line, i) => Object.fromEntries(
-        Object.entries(field.fields).map(([k, sub]) => [k, cleanValue(sub, line[k], `${where}[${i}].${k}`)]),
+        Object.entries(field.fields).filter(([k]) => k in line).map(([k, sub]) => [k, cleanValue(sub, line[k], `${where}[${i}].${k}`)]),
       ));
     default:
       fail(where);

@@ -395,6 +395,8 @@ const ar = {
   Revoke: 'إلغاء',
   'Visit our website': 'زر موقعنا', 'The website is not available right now.': 'الموقع غير متاح حالياً.', 'Could not place the order': 'تعذّر إتمام الطلب',
   'Your cart is empty': 'سلتك فارغة', 'Name is required': 'الاسم مطلوب',
+  Transfers: 'التحويلات', Receipts: 'الاستلامات', Deliveries: 'التسليمات', Delivery: 'التسليم', Receipt: 'الاستلام', 'Internal Transfer': 'تحويل داخلي',
+  'Operation Type': 'نوع العملية', 'Effective Date': 'تاريخ التنفيذ', Validate: 'اعتماد', 'Mark as Todo': 'تحديد للتنفيذ', 'Disc.%': 'خصم %',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',
