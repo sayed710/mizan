@@ -3,7 +3,7 @@ import { models } from '../models/index.js';
 import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
@@ -206,6 +206,13 @@ export function FormView({ leaf, id, base, params }) {
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
   const runButton = (b) => {
+    if (b.email && isServer() && getUser()?.smtp) {
+      const savedId = save();
+      if (savedId == null) return;
+      serverAction(b.email === 'mailing' ? '/api/mail/mailing' : '/api/mail/document', { model, id: savedId })
+        .then(() => setError(null), (e) => fail(e));
+      return;
+    }
     if (!b.run) {
       if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
       return;

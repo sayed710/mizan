@@ -91,6 +91,14 @@ export function commit(next) {
   });
 }
 
+/** Run a server-side action (e.g. send email) and refresh the shared database. */
+export async function serverAction(path, body) {
+  const r = await api(path, body);
+  if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
+  await pull();
+  return r.data;
+}
+
 export async function resetDemo() {
   if (mode === 'local') return commit(seed());
   const r = await api('/api/reset', {});

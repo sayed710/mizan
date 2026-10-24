@@ -164,7 +164,7 @@ export const salesModels = {
       lockedWhen: (r) => !['draft', 'sent'].includes(r.state),
       statusbarHide: ['cancel'],
       buttons: [
-        { label: 'Send by Email', vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
+        { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/sale.order/${r.id}` }) },
         {
           label: 'Confirm',
@@ -216,7 +216,7 @@ export const salesModels = {
       lockedWhen: (r) => !['draft', 'sent'].includes(r.state),
       statusbarHide: ['cancel'],
       buttons: [
-        { label: 'Send RFQ', vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
+        { label: 'Send RFQ', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/purchase.order/${r.id}` }) },
         {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),

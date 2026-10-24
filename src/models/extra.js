@@ -106,7 +106,7 @@ export const extraModels = {
       statusbar: 'state',
       lockedWhen: (r) => r.state === 'sent',
       buttons: [
-        { label: 'Send', primary: true, when: (r) => r.state !== 'sent', run: sendMailing },
+        { label: 'Send', email: 'mailing', primary: true, when: (r) => r.state !== 'sent', run: sendMailing },
         { label: 'Schedule', when: (r) => r.state === 'draft', vals: { state: 'scheduled', schedule_date: addDays(today(), 1) } },
       ],
       title: 'subject',

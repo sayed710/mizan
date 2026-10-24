@@ -11,6 +11,10 @@ import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { handleApi, publicOrder, publicSite } from './api.js';
+import { smtpConfig } from './smtp.js';
+import { sendDocument, sendMailing } from './mail.js';
+
+const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -202,7 +206,21 @@ async function api(req, res, path) {
   const user = sessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
 
-  if (path === '/api/session' && req.method === 'GET') return send(res, 200, user);
+  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP });
+  if ((path === '/api/mail/document' || path === '/api/mail/mailing') && req.method === 'POST') {
+    if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
+    const body = await readJson(req);
+    const model = path.endsWith('mailing') ? 'mailing.mailing' : String(body.model ?? '');
+    const allowed = allowedFor(user);
+    if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
+    try {
+      const out = await (path.endsWith('mailing') ? sendMailing : sendDocument)(SMTP, db, user, body);
+      if (out.db) { db = out.db; saveDb(db); }
+      return send(res, out.status, out.body);
+    } catch (e) {
+      return send(res, 502, { error: `Email could not be sent: ${e.message}` });
+    }
+  }
   if (path === '/api/logout' && req.method === 'POST') {
     const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
     if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));

@@ -49,6 +49,12 @@ Without a server the frontend runs as a browser-only demo (data in `localStorage
 npm test           # ORM, business-flow and sync tests
 ```
 
+### Email
+
+Set `MIZAN_SMTP_HOST`, `MIZAN_SMTP_PORT` (587), `MIZAN_SMTP_USER`, `MIZAN_SMTP_PASS`, `MIZAN_SMTP_FROM`
+(`MIZAN_SMTP_SECURE=1` for port 465). Then **Send by Email** on quotations, RFQs and invoices and **Send** on
+email campaigns deliver real messages (STARTTLS when offered). Without SMTP these actions are simulated.
+
 ### Docker
 
 ```bash
