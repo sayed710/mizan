@@ -207,6 +207,8 @@ const allApps = [
     menus: [
       { key: 'batches', label: 'Payslip Batches', model: 'hr.payslip.run' },
       { key: 'payslips', label: 'Payslips', model: 'hr.payslip' },
+      { key: 'contracts', label: 'Contracts', model: 'hr.contract' },
+      { label: 'Configuration', children: [{ key: 'structures', label: 'Salary Structures', model: 'hr.payroll.structure' }] },
       { key: 'report', label: 'Reporting', model: 'hr.payslip', view: 'pivot' },
     ],
   },

@@ -107,6 +107,14 @@ export function seed() {
       join_date: addDays(today(), -900 + i * 120),
     }));
   [[1, 1], [2, 2], [3, 4], [4, 5]].forEach(([dep, mgr]) => set('hr.department', dep, { manager_id: mgr }));
+  const egypt = add('hr.payroll.structure', { name: 'Egypt — Employees' });
+  add('hr.payroll.structure', { name: 'Interns', rules: [
+    { sequence: 1, code: 'BASIC', name: 'Stipend', category: 'basic', amount_type: 'wage', base: '', value: 0, account: '' },
+    { sequence: 2, code: 'TRANS', name: 'Transport', category: 'allowance', amount_type: 'fixed', base: '', value: 300, account: '' },
+    { sequence: 3, code: 'GROSS', name: 'Gross', category: 'gross', amount_type: 'wage', base: '', value: 0, account: '' },
+    { sequence: 4, code: 'NET', name: 'Net', category: 'net', amount_type: 'wage', base: '', value: 0, account: '' },
+  ] });
+  [[2, 6000], [3, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
 
   // Sales: one quotation, one confirmed + invoiced + paid, one confirmed not invoiced.
   add('sale.order', { partner_id: 1, order_line: lines([[1, 40], [6, 8]]) });

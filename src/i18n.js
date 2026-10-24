@@ -420,6 +420,7 @@ const ar = {
   Preview: 'معاينة', 'Archive Matching': 'أرشفة المطابق', 'Model (technical name)': 'النموذج (الاسم التقني)', 'Date Field': 'حقل التاريخ',
   'Older than (days)': 'أقدم من (أيام)', 'Last Run': 'آخر تشغيل', 'Archived Last Run': 'المؤرشف في آخر تشغيل', Jobs: 'الوظائف', Apply: 'تقدّم',
   'Why you?': 'لماذا أنت؟', 'Your application was received.': 'تم استلام طلبك.', 'Published on Website': 'منشور على الموقع', Administration: 'الإدارة',
+  Contracts: 'العقود', 'Salary Structures': 'هياكل الرواتب', 'Salary Rules': 'قواعد الراتب', 'Structure Name': 'اسم الهيكل', Structure: 'الهيكل', 'Simulate 10,000': 'محاكاة 10,000', 'Contract Reference': 'مرجع العقد', 'Salary Structure': 'هيكل الراتب', Wage: 'الراتب', 'Contract Start Date': 'بداية العقد', 'Contract End Date': 'نهاية العقد', 'Contract Type': 'نوع العقد', Permanent: 'دائم', 'Fixed Term': 'محدد المدة', Internship: 'تدريب', Running: 'سارٍ', Expired: 'منتهي', 'Expiring Soon': 'ينتهي قريباً', 'Amount Type': 'نوع المبلغ', 'Based on (code)': 'محسوب من (الكود)', Value: 'القيمة', 'Contract Wage': 'راتب العقد', 'Fixed Amount': 'مبلغ ثابت', Percentage: 'نسبة', Basic: 'أساسي', Allowance: 'بدل', Gross: 'الإجمالي', Deduction: 'استقطاع', Net: 'الصافي',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',
