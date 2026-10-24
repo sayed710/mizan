@@ -4,7 +4,7 @@ import { diffDb, isEmptyDiff } from './sync.js';
 import { setAuthor } from './orm.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
-const KEY = 'mizan-db-v2';
+const KEY = 'mizan-db-v3';
 const POLL_MS = 15000;
 const listeners = new Set();
 let mode = 'local';

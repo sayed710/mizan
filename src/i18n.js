@@ -91,6 +91,11 @@ const ar = {
   'Contract Proposal': 'عرض عقد', 'Contract Signed': 'تم توقيع العقد', Travel: 'سفر', Meals: 'وجبات', 'Office Supplies': 'أدوات مكتبية',
   'Paid Time Off': 'إجازة مدفوعة', 'Sick Time Off': 'إجازة مرضية', Unpaid: 'غير مدفوعة', 'Compensatory Days': 'أيام تعويضية',
   Workspace: 'مساحة العمل', Shared: 'مشتركة', Private: 'خاصة', 'Monthly Recurring Revenue': 'الإيراد الشهري المتكرر',
+  Discuss: 'المحادثات', Channels: 'القنوات', Activities: 'الأنشطة', 'Channel Name': 'اسم القناة', Message: 'رسالة', Send: 'إرسال',
+  'Schedule Activity': 'جدولة نشاط', Schedule: 'جدولة', 'Mark Done': 'تم الإنجاز', 'Open Document': 'فتح المستند', Summary: 'الملخص',
+  'Activity Type': 'نوع النشاط', 'To-Do': 'مهمة', Call: 'مكالمة', Meeting: 'اجتماع', 'Upload Document': 'رفع مستند', Planned: 'مخطط',
+  Actions: 'إجراءات', Duplicate: 'تكرار', Archive: 'أرشفة', Unarchive: 'إلغاء الأرشفة', Import: 'استيراد',
+  '{n} record(s) imported.': 'تم استيراد {n} سجل.', 'Import failed': 'فشل الاستيراد', Document: 'المستند',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

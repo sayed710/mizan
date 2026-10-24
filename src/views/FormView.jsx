@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, messagesOf, nextId, postNote, read, search, write } from '../orm.js';
+import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
+import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
+import { today } from '../models/common.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
@@ -48,7 +50,77 @@ function SmartButtons({ db, rec, smart }) {
   );
 }
 
-function Chatter({ db, model, id }) {
+function Activities({ db, model, id, name }) {
+  const [form, setForm] = useState(null);
+  const acts = search(db, 'mail.activity').filter((a) => a.res_model === model && a.res_id === id && !a.done);
+  const save = () => {
+    if (!form.date_deadline) return;
+    commit(create(getDb(), 'mail.activity', { ...form, res_model: model, res_id: id, res_name: name }).db);
+    setForm(null);
+  };
+  return (
+    <div className="activities">
+      {acts.map((a) => (
+        <div key={a.id} className={`activity ${activityState(a)}`}>
+          <span className="activity-dot" aria-hidden="true" />
+          <div className="grow">
+            <b>{t(ACTIVITY_TYPES.find((x) => x[0] === a.activity_type)?.[1])}</b> {a.summary}
+            <div className="muted">{t(activityState(a) === 'overdue' ? 'Overdue' : activityState(a) === 'today' ? 'Today' : 'Planned')} · {a.date_deadline}</div>
+          </div>
+          <button type="button" className="btn sm" onClick={() => commit(markDone(getDb(), a))}>{t('Mark Done')}</button>
+        </div>
+      ))}
+      {form ? (
+        <div className="activity-form">
+          <select aria-label={t('Activity Type')} value={form.activity_type} onChange={(e) => setForm({ ...form, activity_type: e.target.value })}>
+            {ACTIVITY_TYPES.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
+          </select>
+          <input aria-label={t('Summary')} placeholder={t('Summary')} value={form.summary} onChange={(e) => setForm({ ...form, summary: e.target.value })} />
+          <input aria-label={t('Due Date')} type="date" value={form.date_deadline} onChange={(e) => setForm({ ...form, date_deadline: e.target.value })} />
+          <div className="row">
+            <button type="button" className="btn primary sm" onClick={save}>{t('Schedule')}</button>
+            <button type="button" className="btn sm" onClick={() => setForm(null)}>{t('Discard')}</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="btn sm" onClick={() => setForm({ activity_type: 'todo', summary: '', date_deadline: today(), user_id: 1 })}>
+          🕓 {t('Schedule Activity')}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ActionsMenu({ model, rec, backHash, base, query }) {
+  const [open, setOpen] = useState(false);
+  const run = (fn) => { setOpen(false); fn(); };
+  const duplicate = () => {
+    const { id: _id, name, ...vals } = rec;
+    const copy = { ...vals, ...(models[model].fields.name?.readonly ? {} : { name: `${name ?? ''} (copy)` }) };
+    const res = create(getDb(), model, models[model].fields.name?.readonly ? { ...copy, ...models[model].defaults?.(nextId(getDb(), model)) } : copy);
+    commit(res.db);
+    location.hash = `${base}/${res.id}${query}`;
+  };
+  const archived = rec.active === false;
+  return (
+    <div className="nav-group actions-menu">
+      <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
+      {open && (
+        <div className="nav-dropdown" role="menu">
+          <button type="button" role="menuitem" onClick={() => run(duplicate)}>{t('Duplicate')}</button>
+          <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
+          <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
+            if (!confirm(t('Delete {n} record(s)?', { n: 1 }))) return;
+            commit(unlink(getDb(), model, [rec.id]));
+            location.hash = backHash;
+          })}>{t('Delete')}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Chatter({ db, model, id, name }) {
   const [note, setNote] = useState('');
   const messages = messagesOf(db, model, id);
   const send = () => {
@@ -58,6 +130,7 @@ function Chatter({ db, model, id }) {
   };
   return (
     <aside className="chatter" aria-label="Chatter">
+      <Activities db={db} model={model} id={id} name={name} />
       <div className="chatter-compose">
         <textarea value={note} placeholder={t('Log an internal note…')} onChange={(e) => setNote(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send(); }} />
@@ -162,6 +235,7 @@ export function FormView({ leaf, id, base, params }) {
             <a href={backHash} onClick={(e) => { e.preventDefault(); leave(backHash); }}>{t(leaf.label)}</a>
             <span>{isNew ? t('New') : current[def.form.title]}</span>
           </nav>
+          {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} />}
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>
@@ -251,7 +325,7 @@ export function FormView({ leaf, id, base, params }) {
             )}
           </section>
         </div>
-        {def.form.chatter && !isNew && <Chatter db={db} model={model} id={rec.id} />}
+        {def.form.chatter && !isNew && <Chatter db={db} model={model} id={rec.id} name={rec[def.form.title]} />}
       </div>
     </main>
   );

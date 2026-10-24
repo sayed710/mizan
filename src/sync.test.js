@@ -17,7 +17,7 @@ test('concurrent edits to different records both survive', () => {
   server = applyDiff(server, diffDb(base, bob));
   assert.equal(read(server, 'crm.lead', 1).stage_id, 'won');
   assert.equal(read(server, 'crm.lead', 2).priority, 3);
-  assert.equal(server.messages.length, 1);
+  assert.equal(server.messages.length, base.messages.length + 1);
 });
 
 test('creates, deletes and sequences are applied', () => {

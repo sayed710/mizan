@@ -9,9 +9,15 @@ in [SPEC.md](SPEC.md).
 
 ## Apps
 
-CRM · Sales · Invoicing · Purchase · Inventory · Contacts · Calendar · Project · Helpdesk · Employees · Settings
+Discuss · Calendar · To-do · Knowledge · Contacts · CRM · Sales · Subscriptions · Point of Sale · Invoicing · Project ·
+Timesheets · Helpdesk · Events · Purchase · Inventory · Manufacturing · Employees · Recruitment · Time Off · Expenses · Settings
 
-Cross-app flows: quotation → sales order (stock out) → invoice → payment; RFQ → purchase order → receipt (stock in) → vendor bill.
+Core features on every model: kanban/list/graph/pivot/calendar views, search panel (filters, group by, favorites,
+archived), activities with a due-today counter, chatter with tracked changes, smart buttons, CSV export/import,
+duplicate/archive/delete actions, multi-level grouped lists.
+
+Cross-app flows: manufacturing order consumes components → finished stock; subscription → recurring invoices; POS sale → stock out;
+quotation → sales order (stock out) → invoice → payment; RFQ → purchase order → receipt (stock in) → vendor bill.
 
 ## Run
 

@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
-import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
+import { applyFilters, create, matches, read, search as searchRecords, unlink } from '../orm.js';
+import { display } from '../ui.jsx';
+import { fromCsv, toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
@@ -20,8 +22,44 @@ export function parseRel(db, model, raw) {
 }
 
 /** Records visible in an action before search-panel filtering. */
-export const actionRecords = (db, leaf, rel) =>
-  searchRecords(db, leaf.model).filter((r) => (!leaf.domain || leaf.domain(r)) && (!rel || r[rel.field] === rel.id));
+export const actionRecords = (db, leaf, rel, archived = false) =>
+  searchRecords(db, leaf.model, { includeArchived: archived })
+    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r)) && (!rel || r[rel.field] === rel.id));
+
+const download = (name, text) => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' }));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+/** Import rows whose headers match field labels (or technical names); many2one by record name. */
+function importRows(db, model, defaults, rows) {
+  const fields = models[model].fields;
+  const keyOf = (h) => Object.keys(fields).find((k) => k === h || fields[k].label.toLowerCase() === h.trim().toLowerCase());
+  const [header, ...body] = rows;
+  const keys = header.map(keyOf);
+  let next = db;
+  let count = 0;
+  for (const row of body.filter((r) => r.some((c) => c.trim()))) {
+    const vals = { ...defaults };
+    keys.forEach((k, i) => {
+      if (!k || fields[k].readonly || fields[k].compute) return;
+      const raw = (row[i] ?? '').trim();
+      const f = fields[k];
+      if (f.type === 'many2one') vals[k] = searchRecords(next, f.relation).find((r) => r.name?.toLowerCase() === raw.toLowerCase())?.id ?? null;
+      else if (['monetary', 'float', 'integer', 'priority'].includes(f.type)) vals[k] = raw === '' ? null : Number(raw);
+      else if (f.type === 'boolean') vals[k] = /^(1|true|yes|نعم)$/i.test(raw);
+      else if (f.type === 'tags') vals[k] = raw ? raw.split(/[;,]/).map((x) => x.trim()).filter(Boolean) : [];
+      else if (f.type === 'selection') vals[k] = f.options.find((o) => o[0] === raw || o[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
+      else vals[k] = raw;
+    });
+    next = create(next, model, vals).db;
+    count += 1;
+  }
+  return { db: next, count };
+}
 
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
@@ -34,7 +72,7 @@ export function ActionView({ leaf, base, params }) {
   const [selected, setSelected] = useState(() => new Set());
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const records = applyFilters(model, actionRecords(db, leaf, search.rel), search.filters)
+  const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
     .filter((r) => matches(db, model, r, search.terms));
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
@@ -44,8 +82,23 @@ export function ActionView({ leaf, base, params }) {
     commit(unlink(getDb(), model, [...selected]));
     setSelected(new Set());
   };
+  const exportCsv = () => {
+    const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
+    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => display(db, def.fields[f], r[f])))]));
+  };
+  const importCsv = async (file) => {
+    try {
+      const res = importRows(getDb(), model, defaults, fromCsv(await file.text()));
+      commit(res.db);
+      alert(t('{n} record(s) imported.', { n: res.count }));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : t('Import failed'));
+    }
+  };
   const extra = view === 'list' && (
     <>
+      <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
+      <label className="btn sm">⬆ {t('Import')}<input type="file" accept=".csv,text/csv" hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       <span className="pager">{records.length ? `1-${records.length}` : '0'} / {records.length}</span>
     </>

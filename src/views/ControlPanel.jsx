@@ -6,7 +6,7 @@ import { t } from '../i18n.js';
 import { Icon } from '../ui.jsx';
 
 /** Search state: { terms: string[], filters: string[], groupBy: string[], rel: {field,id,label}|null } */
-export const emptySearch = (model, rel = null) => ({ terms: [], filters: models[model].defaultFilters ?? [], groupBy: [], rel });
+export const emptySearch = (model, rel = null) => ({ terms: [], filters: models[model].defaultFilters ?? [], groupBy: [], rel, archived: false });
 
 const filterLabel = (model, id) => t((models[model].filters ?? []).flat().find((f) => f.id === id)?.label ?? id);
 
@@ -15,6 +15,7 @@ function Facets({ model, search, setSearch }) {
   const facets = [
     ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
     ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
+    ...(search.archived ? [{ key: 'a', icon: <Icon name="filter" size={11} />, label: t('Archived'), clear: { archived: false } }] : []),
     ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => t(fields[g].label)).join(' › '), clear: { groupBy: [] } }] : []),
     ...search.terms.map((term, i) => ({ key: `s${i}`, icon: t('Search'), label: term, clear: { terms: search.terms.filter((_, j) => j !== i) } })),
   ];
@@ -55,7 +56,11 @@ function SearchPanel({ model, search, setSearch, onClose }) {
             ))}
           </ul>
         ))}
-        {!def.filters?.length && <p className="muted">—</p>}
+        <ul>
+          <li>
+            <button type="button" aria-pressed={!!search.archived} onClick={() => setSearch({ ...search, archived: !search.archived })}>{t('Archived')}</button>
+          </li>
+        </ul>
       </section>
       <section>
         <h3>≡ {t('Group By')}</h3>

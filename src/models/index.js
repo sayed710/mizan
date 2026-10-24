@@ -4,10 +4,11 @@ import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
+import { mailModels } from './mail.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -20,6 +21,13 @@ const products = { key: 'products', label: 'Products', model: 'product' };
  * Top-level menus may group leaves under `children`.
  */
 const allApps = [
+  {
+    id: 'discuss', name: 'Discuss', color: ['#f97316', '#db2777'],
+    menus: [
+      { key: 'channels', label: 'Channels', type: 'discuss' },
+      { key: 'activities', label: 'Activities', model: 'mail.activity' },
+    ],
+  },
   {
     id: 'crm', name: 'CRM', color: ['#14b8a6', '#0e7490'],
     menus: [
@@ -174,9 +182,18 @@ const allApps = [
 ];
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
-const ORDER = ['calendar', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'subscriptions', 'pos', 'accounting', 'project',
+const ORDER = ['discuss', 'calendar', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'subscriptions', 'pos', 'accounting', 'project',
   'timesheets', 'helpdesk', 'events', 'purchase', 'inventory', 'manufacturing', 'employees', 'recruitment', 'timeoff', 'expenses', 'settings'];
 export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
+
+/** "#/app/menu" of the first unfiltered menu showing `model` (used to open any record from anywhere). */
+export function targetOf(model) {
+  for (const app of apps) {
+    const leaf = leavesOf(app).find((l) => l.model === model && !l.domain);
+    if (leaf) return `#/${app.id}/${leaf.key}`;
+  }
+  return '#/';
+}
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];

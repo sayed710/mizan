@@ -1,4 +1,4 @@
-import { create, emptyDb, read, write } from './orm.js';
+import { create, emptyDb, postNote, read, write } from './orm.js';
 import { addDays, today } from './models/common.js';
 import { moveStock } from './models/sales.js';
 
@@ -184,5 +184,12 @@ export function seed() {
 
   add('pos.order', { partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
-  return { ...db, messages: [] };
+  const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
+  add('discuss.channel', { name: 'sales', description: 'Deals and quotations' });
+  [['crm.lead', 1, 'call', 'Discuss chair models', 0], ['crm.lead', 3, 'email', 'Send room layout', -2], ['sale.order', 1, 'todo', 'Follow up on quotation', 3], ['helpdesk.ticket', 1, 'call', 'Confirm replacement part', 1]]
+    .forEach(([res_model, res_id, activity_type, summary, d]) =>
+      add('mail.activity', { res_model, res_id, res_name: read(db, res_model, res_id).name, activity_type, summary, date_deadline: addDays(today(), d), user_id: 2 }));
+
+  const seeded = { ...db, messages: [] };
+  return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

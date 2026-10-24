@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useDb } from './store.js';
+import { search } from './orm.js';
+import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
 import { Avatar, Icon } from './ui.jsx';
 
@@ -27,6 +29,16 @@ function MenuGroup({ app, menu, active }) {
   );
 }
 
+function ActivityCounter({ db }) {
+  const due = search(db, 'mail.activity').filter((a) => ['overdue', 'today'].includes(activityState(a))).length;
+  return (
+    <a className="systray" href="#/discuss/activities" aria-label={`${t('Activities')}: ${due}`} title={t('Activities')}>
+      <Icon name="timesheets" size={18} />
+      {due > 0 && <span className="systray-badge">{due}</span>}
+    </a>
+  );
+}
+
 export function Navbar({ app, active }) {
   const db = useDb();
   return (
@@ -39,6 +51,7 @@ export function Navbar({ app, active }) {
           : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}
       </nav>
       <span className="spacer" />
+      <ActivityCounter db={db} />
       <a className="company" href="#/settings/general">{db.settings?.company}</a>
       <Avatar name="Admin" />
     </header>

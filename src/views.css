@@ -1,3 +1,39 @@
+/* Systray, actions menu, activities, discuss */
+.systray { position: relative; color: var(--muted); display: grid; place-items: center; padding: 6px; border-radius: 6px; }
+.systray:hover { background: var(--bg); color: var(--brand); }
+.systray-badge {
+  position: absolute; top: 0; inset-inline-end: -2px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px;
+  background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center;
+}
+.actions-menu .nav-dropdown button { background: none; border: 0; text-align: start; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.actions-menu .nav-dropdown button:hover { background: var(--brand-soft); }
+.actions-menu .nav-dropdown .danger { color: var(--danger); }
+.activities { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.activity { display: flex; align-items: center; gap: 10px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.activity .grow { flex: 1; min-width: 0; }
+.activity .muted { font-size: 12px; }
+.activity-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--success); flex: none; }
+.activity.overdue .activity-dot { background: var(--danger); }
+.activity.today .activity-dot { background: var(--warn); }
+.activity-form { display: flex; flex-direction: column; gap: 6px; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.activity-form input, .activity-form select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
+.discuss { display: grid; grid-template-columns: 240px minmax(0, 1fr); height: calc(100vh - 47px); }
+.discuss-side { border-inline-end: 1px solid var(--border); background: var(--surface); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.discuss-side-head { display: flex; align-items: center; justify-content: space-between; }
+.discuss-side h2 { margin: 0; font-size: 14px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
+.discuss-side ul { list-style: none; margin: 0; padding: 0; flex: 1; }
+.discuss-side li button { width: 100%; text-align: start; border: 0; background: none; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.discuss-side li button:hover { background: var(--bg); }
+.discuss-side li button[aria-current] { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.discuss-thread { display: flex; flex-direction: column; min-height: 0; }
+.discuss-thread header { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; background: var(--surface); }
+.discuss-thread h1 { margin: 0; font-size: 18px; }
+.discuss-thread .messages { flex: 1; overflow-y: auto; padding: 16px 18px; }
+.discuss-thread .messages li.note .msg-body { background: none; padding: 0; }
+.discuss-compose { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface); }
+.discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+@media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
+
 /* Point of Sale */
 .pos { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 0; height: calc(100vh - 47px); }
 .pos-products { padding: 14px 16px; overflow-y: auto; }

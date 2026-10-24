@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { apps, findLeaf } from './models/index.js';
+import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
 import { Navbar } from './Navbar.jsx';
 import { ActionView } from './views/ActionView.jsx';
@@ -7,6 +7,7 @@ import { FormView } from './views/FormView.jsx';
 import { Dashboard } from './views/Dashboard.jsx';
 import { Settings } from './views/Settings.jsx';
 import { Pos } from './views/Pos.jsx';
+import { Discuss } from './views/Discuss.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -17,7 +18,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);
@@ -27,6 +28,11 @@ export function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  if (route.app === 'open') {
+    // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
+    location.replace(`${targetOf(route.menu)}/${route.id}`);
+    return null;
+  }
   const app = apps.find((a) => a.id === route.app);
   if (!app) return <Home />;
   const leaf = findLeaf(app, route.menu);
