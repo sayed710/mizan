@@ -82,6 +82,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     ...(isAdmin ? {
       company: String(s.company ?? db.settings.company).slice(0, 200),
       currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : db.settings.currency,
+      companies: Array.isArray(s.companies)
+        ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
+          .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
+        : db.settings.companies,
       uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
       customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,
     } : {}),

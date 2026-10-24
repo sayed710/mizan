@@ -59,6 +59,8 @@
   .paper { box-shadow: none; padding: 0; max-width: none; min-height: 0; }
 }
 
+.company-switch { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; background: var(--surface); }
+
 /* Gantt */
 .gantt-view { padding-bottom: 24px; }
 .gantt { margin: 0 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; }

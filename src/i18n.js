@@ -402,6 +402,7 @@ const ar = {
   Pricelists: 'قوائم الأسعار', Pricelist: 'قائمة الأسعار', 'Pricelist Name': 'اسم قائمة الأسعار', 'Price Rules': 'قواعد التسعير',
   'Product (empty = all)': 'المنتج (فارغ = الكل)', 'Fixed Price': 'سعر ثابت', 'Discount %': 'الخصم %',
   gantt: 'مخطط جانت',
+  Companies: 'الشركات', 'Add Company': 'إضافة شركة',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

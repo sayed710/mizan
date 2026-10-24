@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
-import { setAuthor } from './orm.js';
+import { setActiveCompany, setAuthor } from './orm.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 
@@ -14,9 +14,26 @@ let user = null;
 let db = null;
 let inflight = Promise.resolve();
 
-const notify = () => {
+const COMPANY_KEY = 'mizan-company';
+const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
+
+/** Companies defined in settings (the first one mirrors the company name/currency fields). */
+export const companiesOf = (d) => (d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: d?.settings?.currency ?? 'USD' }]);
+export const currentCompany = (d = db) => companiesOf(d).find((c) => c.id === savedCompany()) ?? companiesOf(d)[0];
+export function switchCompany(id) {
+  try { localStorage.setItem(COMPANY_KEY, String(id)); } catch { /* storage blocked: switch lasts for this page only */ }
+  location.reload();
+}
+
+const applyContext = () => {
   installCustomFields(db?.settings?.customFields);
-  setCurrency(db?.settings?.currency);
+  const company = currentCompany();
+  setActiveCompany(companiesOf(db).length > 1 ? company.id : null);
+  setCurrency(company.currency ?? db?.settings?.currency);
+};
+
+const notify = () => {
+  applyContext();
   listeners.forEach((l) => l());
 };
 
@@ -63,8 +80,7 @@ export async function initStore() {
     // no backend reachable: local mode
   }
   db = loadLocal();
-  installCustomFields(db.settings?.customFields);
-  setCurrency(db.settings?.currency);
+  applyContext();
   return { mode, user };
 }
 

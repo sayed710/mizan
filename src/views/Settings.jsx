@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
+import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
 import { lang, setLang, t } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 
@@ -43,6 +43,37 @@ function Users() {
         <button type="submit" className="btn primary">{t('Add user')}</button>
       </form>
       {error && <div className="alert" role="alert">{error}</div>}
+    </>
+  );
+}
+
+function Companies({ db }) {
+  const list = companiesOf(db);
+  const add = () => {
+    const name = prompt(t('Company Name'));
+    if (!name?.trim()) return;
+    const next = [...list, { id: Math.max(...list.map((c) => c.id)) + 1, name: name.trim(), currency: db.settings?.currency ?? 'USD' }];
+    commit(updateSettings(getDb(), { companies: next }));
+  };
+  const setCurrencyOf = (id, currency) => commit(updateSettings(getDb(), { companies: list.map((c) => (c.id === id ? { ...c, currency } : c)) }));
+  return (
+    <>
+      <h3>{t('Companies')}</h3>
+      <table className="list">
+        <tbody>
+          {list.map((c) => (
+            <tr key={c.id}>
+              <td>{c.name}</td>
+              <td>
+                <select aria-label={t('Currency')} value={c.currency} onChange={(e) => setCurrencyOf(c.id, e.target.value)}>
+                  {CURRENCIES.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button type="button" className="btn" onClick={add}>{t('Add Company')}</button>
     </>
   );
 }
@@ -133,6 +164,7 @@ export function Settings() {
         </div>
         {status && <p role="status">{status}</p>}
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
+        {(!isServer() || getUser()?.isAdmin) && <Companies db={db} />}
         {isServer() && getUser()?.isAdmin && <Users />}
         {isServer() && <ApiKeys />}
         {isServer() && <p><button type="button" className="btn" onClick={logout}>{t('Log out')}</button></p>}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useDb } from './store.js';
+import { companiesOf, currentCompany, switchCompany, useDb } from './store.js';
 import { search } from './orm.js';
 import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
@@ -53,7 +53,13 @@ export function Navbar({ app, active }) {
       <span className="spacer" />
       <a className="systray" href="#/studio/fields" aria-label={t('Toggle Studio')} title={t('Studio')}><Icon name="studio" size={18} /></a>
       <ActivityCounter db={db} />
-      <a className="company" href="#/settings/general">{db.settings?.company}</a>
+      {companiesOf(db).length > 1
+        ? (
+          <select className="company-switch" aria-label={t('Company')} value={currentCompany(db).id} onChange={(e) => switchCompany(e.target.value)}>
+            {companiesOf(db).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        )
+        : <a className="company" href="#/settings/general">{db.settings?.company}</a>}
       <Avatar name="Admin" />
     </header>
   );

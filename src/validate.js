@@ -54,6 +54,10 @@ export function cleanRecord(model, rec) {
     if (typeof rec.active !== 'boolean') fail(`${model}.active`);
     out.active = rec.active;
   }
+  if (rec.company_id != null) {
+    if (!Number.isInteger(rec.company_id) || rec.company_id < 1) fail(`${model}.company_id`);
+    out.company_id = rec.company_id;
+  }
   for (const [k, v] of Object.entries(rec)) {
     const f = fields[k];
     if (f && !f.compute) out[k] = cleanValue(f, v, `${model}.${k}`);

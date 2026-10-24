@@ -6,16 +6,32 @@ export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { 
 
 export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 
-/** Records of a model with computed fields applied. Archived (active === false) hidden by default. */
+// ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
+/** Master data shared by all companies (Odoo shares these by default). */
+export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'product.pricelist', 'discuss.channel',
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+let activeCompany = null; // null = no filtering (server, tests)
+export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
+const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
+
+const withComputed = (fields, r) => {
+  const computed = Object.entries(fields).filter(([, f]) => f.compute);
+  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r)])) } : r;
+};
+
+/** Records of a model in the active company, with computed fields. Archived (active === false) hidden by default. */
 export function search(db, model, { includeArchived = false } = {}) {
   const fields = models[model].fields;
-  const computed = Object.entries(fields).filter(([, f]) => f.compute);
   return (db.records[model] ?? [])
-    .filter((r) => includeArchived || r.active !== false)
-    .map((r) => (computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r)])) } : r));
+    .filter((r) => (includeArchived || r.active !== false) && inCompany(model, r))
+    .map((r) => withComputed(fields, r));
 }
 
-export const read = (db, model, id) => search(db, model, { includeArchived: true }).find((r) => r.id === id);
+/** One record by id regardless of company (cross-company links still display). */
+export function read(db, model, id) {
+  const r = (db.records[model] ?? []).find((x) => x.id === id);
+  return r && withComputed(models[model].fields, r);
+}
 
 /** @returns {string|null} error message when a required field is empty */
 export function validate(model, vals) {
@@ -46,7 +62,12 @@ const message = (model, resId, body, kind) => ({
 
 export function create(db, model, vals) {
   const id = nextId(db, model);
-  const rec = { ...(models[model].defaults?.(id) ?? {}), ...stripComputed(model, vals), id };
+  const rec = {
+    ...(models[model].defaults?.(id) ?? {}),
+    ...(SHARED_MODELS.has(model) ? {} : { company_id: activeCompany ?? 1 }),
+    ...stripComputed(model, vals),
+    id,
+  };
   const err = validate(model, rec);
   if (err) throw new Error(err);
   return {
