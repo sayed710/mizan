@@ -6,6 +6,7 @@ import { ActionView } from './views/ActionView.jsx';
 import { FormView } from './views/FormView.jsx';
 import { Dashboard } from './views/Dashboard.jsx';
 import { Settings } from './views/Settings.jsx';
+import { Pos } from './views/Pos.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -16,7 +17,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);

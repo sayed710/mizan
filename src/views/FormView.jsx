@@ -39,7 +39,7 @@ function SmartButtons({ db, rec, smart }) {
         const recs = search(db, s.model).filter((r) => r[s.field] === rec.id);
         return (
           <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${rec.id}`}>
-            <b>{s.sum ? money(aggregate(recs, s.sum)) : recs.length}</b>
+            <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>
         );

@@ -1,3 +1,36 @@
+/* Point of Sale */
+.pos { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 0; height: calc(100vh - 47px); }
+.pos-products { padding: 14px 16px; overflow-y: auto; }
+.pos-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.pos-filters input { flex: 1 1 220px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.chip { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.chip.on { background: var(--brand); border-color: var(--brand); color: #fff; }
+.pos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.pos-tile {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px; min-height: 120px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; text-align: start; box-shadow: var(--shadow);
+}
+.pos-tile:hover { border-color: var(--brand); }
+.pos-tile:active { transform: scale(.98); }
+.pos-initial { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--brand-soft); color: var(--brand); font-weight: 800; font-size: 18px; }
+.pos-name { font-weight: 600; }
+.pos-price { color: var(--muted); }
+.pos-stock { position: absolute; top: 8px; inset-inline-end: 8px; font-size: 11px; background: #eef0f4; border-radius: 999px; padding: 1px 7px; }
+.pos-stock.out { background: #fdecea; color: var(--danger); }
+.pos-cart { display: flex; flex-direction: column; gap: 10px; padding: 14px; background: var(--surface); border-inline-start: 1px solid var(--border); }
+.pos-cart select { padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.pos-lines { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.pos-lines li { display: flex; align-items: center; gap: 8px; }
+.pos-lines .grow { flex: 1; }
+.pos-line-total { min-width: 80px; text-align: end; }
+.pos-pay { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pos-pay .btn { justify-content: center; padding: 14px; font-size: 16px; }
+.pos-done { display: grid; place-items: center; grid-template-columns: 1fr; }
+.receipt { text-align: center; min-width: 320px; }
+.receipt .big { font-size: 34px; font-weight: 700; margin: 8px 0; }
+.receipt .row { justify-content: center; }
+@media (max-width: 860px) { .pos { grid-template-columns: 1fr; height: auto; } }
+
 /* Search panel, navbar dropdowns, graph/pivot/calendar views, dashboard, RTL. */
 html[dir='rtl'] body { font-family: 'Segoe UI', Tahoma, 'Noto Sans Arabic', system-ui, sans-serif; }
 

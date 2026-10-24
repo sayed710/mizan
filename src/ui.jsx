@@ -85,6 +85,7 @@ const lineSubtotal = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0);
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly }) {
   const cols = Object.entries(field.fields);
+  const priced = 'price_unit' in field.fields;
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
     onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db) : l)));
@@ -95,7 +96,7 @@ function Lines({ db, field, value = [], onChange, readonly }) {
         <thead>
           <tr>
             {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{t(f.label)}</th>)}
-            <th className="num">{t('Subtotal')}</th>
+            {priced && <th className="num">{t('Subtotal')}</th>}
             {!readonly && <th aria-label={t('Delete')} />}
           </tr>
         </thead>
@@ -109,7 +110,7 @@ function Lines({ db, field, value = [], onChange, readonly }) {
                     : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
-              <td className="num">{money(lineSubtotal(l))}</td>
+              {priced && <td className="num">{money(lineSubtotal(l))}</td>}
               {!readonly && (
                 <td>
                   <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
@@ -176,6 +177,16 @@ const ICONS = {
   helpdesk: <><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" strokeWidth="7" /><path d="M12 12l7 7m10 10l7 7m0-24l-7 7M19 29l-7 7" stroke="currentColor" strokeWidth="4" /></>,
   employees: <><circle cx="17" cy="16" r="6" /><circle cx="33" cy="18" r="5" /><path d="M5 38c1-8 6-12 12-12s11 4 12 12zm25 0c0-5-1-8-3-10 6-1 13 2 15 10z" /></>,
   settings: <path d="M21 4h6l1 6 4 2 5-4 4 4-4 5 2 4 6 1v6l-6 1-2 4 4 5-4 4-5-4-4 2-1 6h-6l-1-6-4-2-5 4-4-4 4-5-2-4-6-1v-6l6-1 2-4-4-5 4-4 5 4 4-2zm3 13a7 7 0 100 14 7 7 0 000-14z" fillRule="evenodd" />,
+  manufacturing: <path d="M5 42V20l10 6v-6l10 6v-6l10 6V8h8v34z" />,
+  pos: <path d="M8 6h32v14H8zm4 4v6h24v-6zM6 24h36l-3 18H9zm8 5v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3zm-16 6v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3z" fillRule="evenodd" />,
+  expenses: <path d="M10 6h28v36l-5-3-5 3-4-3-4 3-5-3-5 3zm6 9v3h16v-3zm0 7v3h16v-3zm0 7v3h10v-3z" fillRule="evenodd" />,
+  timeoff: <><circle cx="24" cy="18" r="12" /><path d="M24 30v12M14 42h20" stroke="currentColor" strokeWidth="4" /></>,
+  recruitment: <><circle cx="20" cy="20" r="11" fill="none" stroke="currentColor" strokeWidth="5" /><path d="M28 28l12 12" stroke="currentColor" strokeWidth="6" strokeLinecap="round" /></>,
+  timesheets: <><circle cx="24" cy="24" r="17" fill="none" stroke="currentColor" strokeWidth="5" /><path d="M24 13v12l8 5" stroke="currentColor" strokeWidth="5" fill="none" strokeLinecap="round" /></>,
+  events: <path d="M24 4l5 12 13 1-10 8 3 13-11-7-11 7 3-13-10-8 13-1z" />,
+  subscriptions: <path d="M38 18A15 15 0 0011 15l-3-4v12h12l-4-4a10 10 0 0117 1zM10 30a15 15 0 0027 3l3 4V25H28l4 4a10 10 0 01-17-1z" />,
+  todo: <><rect x="6" y="8" width="10" height="10" rx="2" /><rect x="20" y="10" width="22" height="6" rx="3" /><rect x="6" y="30" width="10" height="10" rx="2" /><rect x="20" y="32" width="22" height="6" rx="3" /></>,
+  knowledge: <path d="M8 8h13c2 0 3 1 3 3v30c0-2-1-3-3-3H8zm32 0H27c-2 0-3 1-3 3v30c0-2 1-3 3-3h13z" />,
   kanban: <><rect x="6" y="8" width="10" height="32" rx="2" /><rect x="19" y="8" width="10" height="22" rx="2" /><rect x="32" y="8" width="10" height="14" rx="2" /></>,
   list: <><rect x="6" y="9" width="36" height="5" rx="2" /><rect x="6" y="21" width="36" height="5" rx="2" /><rect x="6" y="33" width="36" height="5" rx="2" /></>,
   graph: <><rect x="7" y="24" width="8" height="17" rx="2" /><rect x="20" y="12" width="8" height="29" rx="2" /><rect x="33" y="18" width="8" height="23" rx="2" /></>,

@@ -30,6 +30,12 @@ const products = [
   { name: 'LED Desk Lamp', default_code: 'LIGHT-001', categ: 'Lighting', type: 'goods', list_price: 35, cost: 14, qty_available: 140, reorder_min: 30 },
   { name: 'Office Design Consultation', default_code: 'SRV-001', categ: 'Services', type: 'service', list_price: 150, cost: 0, qty_available: 0, reorder_min: 0 },
   { name: 'Installation (per hour)', default_code: 'SRV-002', categ: 'Services', type: 'service', list_price: 45, cost: 20, qty_available: 0, reorder_min: 0 },
+  { name: 'Oak Desk Top', default_code: 'COMP-001', categ: 'Components', type: 'goods', list_price: 0, cost: 90, qty_available: 40, reorder_min: 10 },
+  { name: 'Steel Desk Frame', default_code: 'COMP-002', categ: 'Components', type: 'goods', list_price: 0, cost: 120, qty_available: 25, reorder_min: 10 },
+  { name: 'Screw Kit', default_code: 'COMP-003', categ: 'Components', type: 'goods', list_price: 0, cost: 4, qty_available: 300, reorder_min: 50 },
+  { name: 'Espresso', default_code: 'CAFE-001', categ: 'Cafeteria', type: 'goods', list_price: 2.5, cost: 0.6, qty_available: 500, reorder_min: 0 },
+  { name: 'Croissant', default_code: 'CAFE-002', categ: 'Cafeteria', type: 'goods', list_price: 3, cost: 1, qty_available: 60, reorder_min: 20 },
+  { name: 'Software Support Plan', default_code: 'SUB-001', categ: 'Services', type: 'service', list_price: 99, cost: 0, qty_available: 0, reorder_min: 0 },
 ];
 
 const departments = ['Management', 'Sales', 'Operations', 'Support'];
@@ -140,6 +146,43 @@ export function seed() {
   add('calendar.event', { name: 'Demo with Nile Furniture', start: addDays(today(), 1), start_time: '11:00', duration: 1, partner_id: 1, location: 'Cairo office' });
   add('calendar.event', { name: 'Weekly sales review', start: addDays(today(), 3), start_time: '09:30', duration: 0.5, location: 'Meeting room' });
   add('calendar.event', { name: 'Supplier visit — Pharos Wood', start: addDays(today(), -2), start_time: '14:00', duration: 2, partner_id: 7, location: 'Damietta' });
+
+  // Manufacturing: standing desk BoM + one confirmed and one done order.
+  const bom = add('mrp.bom', { name: 'Standing Desk BoM', product_id: 2, product_qty: 1, components: [{ product_id: 7, qty: 1 }, { product_id: 8, qty: 1 }, { product_id: 9, qty: 1 }] });
+  add('mrp.production', { product_id: 2, bom_id: bom, product_qty: 5, state: 'confirmed', user_id: 4 });
+  add('mrp.production', { product_id: 2, bom_id: bom, product_qty: 3, state: 'done', user_id: 4, date_deadline: addDays(today(), -3), date_finished: addDays(today(), -3) });
+
+  [['Taxi to client site', 3, 'travel', 18, 'submitted', -2], ['Team lunch', 2, 'meals', 64, 'approved', -6], ['Printer paper', 4, 'office', 22, 'draft', 0], ['Flight to Dubai', 2, 'travel', 420, 'paid', -20]]
+    .forEach(([name, employee_id, category, total_amount, state, d]) => add('hr.expense', { name, employee_id, category, total_amount, state, date: addDays(today(), d) }));
+
+  [['Family visit', 3, 'paid', 5, 8, 'confirm'], ['Flu', 5, 'sick', -4, -3, 'validate'], ['Summer holiday', 2, 'paid', 20, 29, 'validate']]
+    .forEach(([name, employee_id, leave_type, a, b, state]) => add('hr.leave', { name, employee_id, leave_type, date_from: addDays(today(), a), date_to: addDays(today(), b), state }));
+
+  const job1 = add('hr.job', { name: 'Sales Representative', department_id: 2, no_of_recruitment: 2 });
+  const job2 = add('hr.job', { name: 'Support Engineer', department_id: 4, no_of_recruitment: 1 });
+  [['Ahmed Tarek', job1, 'interview', 2], ['Nour Ali', job1, 'new', 1], ['Mariam Fouad', job2, 'contract', 3], ['Hassan Reda', job2, 'screening', 0]]
+    .forEach(([name, job_id, stage_id, priority]) => add('hr.applicant', { name, job_id, stage_id, priority, email: `${name.split(' ')[0].toLowerCase()}@mail.example`, expected_salary: 1500 + priority * 300 }));
+
+  [[0, 4, 1, 1, 'Survey report', 3], [-1, 4, 1, 2, 'Draft floor plan', 5], [-2, 4, 2, 5, 'Lighting model', 4], [0, 5, 2, 6, 'Workstation prep', 2]]
+    .forEach(([d, employee_id, project_id, task_id, name, unit_amount]) => add('account.analytic.line', { date: addDays(today(), d), employee_id, project_id, task_id, name, unit_amount }));
+
+  const ev = add('event.event', { name: 'Office Design Expo', date_begin: addDays(today(), 12), date_end: addDays(today(), 13), location: 'Cairo International Convention Center', seats_max: 200, stage_id: 'announced', user_id: 2, tag_ids: ['Expo'] });
+  add('event.event', { name: 'Ergonomics Workshop', date_begin: addDays(today(), 30), location: 'Mizan HQ', seats_max: 25, stage_id: 'new', user_id: 3, tag_ids: ['Workshop'] });
+  [['Rania Saleh', 'open'], ['Tamer Hosny', 'open'], ['Dina Magdy', 'cancel']]
+    .forEach(([name, st]) => add('event.registration', { name, event_id: ev, state: st, email: `${name.split(' ')[0].toLowerCase()}@mail.example` }));
+
+  add('sale.subscription', { partner_id: 1, product_id: 12, plan: 'monthly', recurring_amount: 99, stage: 'progress', start_date: addDays(today(), -60), next_invoice_date: addDays(today(), -1) });
+  add('sale.subscription', { partner_id: 4, product_id: 12, plan: 'yearly', recurring_amount: 990, stage: 'progress', start_date: addDays(today(), -100), next_invoice_date: addDays(today(), 265) });
+  add('sale.subscription', { partner_id: 6, product_id: 12, plan: 'monthly', recurring_amount: 99, stage: 'draft' });
+
+  [['Call Gulf Interiors about delivery', 'today', 2], ['Prepare Q4 sales review', 'week', 1], ['Renew office insurance', 'later', 0], ['Send expo invitations', 'inbox', 0]]
+    .forEach(([name, stage, priority]) => add('todo.task', { name, stage, priority }));
+
+  const kb = add('knowledge.article', { name: 'Company Handbook', category: 'workspace', is_favorite: true, body: 'Welcome to the team! This handbook covers our values, working hours and tools.' });
+  add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
+  add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
+
+  add('pos.order', { partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   return { ...db, messages: [] };
 }

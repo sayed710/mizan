@@ -3,10 +3,11 @@ import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
 import { workModels } from './work.js';
+import { moreModels } from './more.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -18,7 +19,7 @@ const products = { key: 'products', label: 'Products', model: 'product' };
  * A menu leaf is { key, label, model, view?, domain?, defaults? } or { key, label, type } for custom pages.
  * Top-level menus may group leaves under `children`.
  */
-export const apps = [
+const allApps = [
   {
     id: 'crm', name: 'CRM', color: ['#14b8a6', '#0e7490'],
     menus: [
@@ -107,8 +108,75 @@ export const apps = [
       { key: 'departments', label: 'Departments', model: 'hr.department' },
     ],
   },
+  {
+    id: 'manufacturing', name: 'Manufacturing', color: ['#10b981', '#0e7490'],
+    menus: [
+      { key: 'orders', label: 'Manufacturing Orders', model: 'mrp.production' },
+      { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' },
+      { key: 'products', label: 'Products', model: 'product' },
+    ],
+  },
+  {
+    id: 'pos', name: 'Point of Sale', color: ['#fbbf24', '#ea580c'],
+    menus: [
+      { key: 'register', label: 'Register', type: 'pos' },
+      { key: 'orders', label: 'Orders', model: 'pos.order' },
+      { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
+    ],
+  },
+  {
+    id: 'expenses', name: 'Expenses', color: ['#38bdf8', '#7c3aed'],
+    menus: [
+      { key: 'mine', label: 'My Expenses', model: 'hr.expense' },
+      { key: 'to-approve', label: 'To Approve', model: 'hr.expense', domain: (r) => r.state === 'submitted' },
+      { key: 'report', label: 'Reporting', model: 'hr.expense', view: 'pivot' },
+    ],
+  },
+  {
+    id: 'timeoff', name: 'Time Off', color: ['#f472b6', '#0284c7'],
+    menus: [
+      { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
+      { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
+      { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
+    ],
+  },
+  {
+    id: 'recruitment', name: 'Recruitment', color: ['#2dd4bf', '#4338ca'],
+    menus: [
+      { key: 'jobs', label: 'Job Positions', model: 'hr.job' },
+      { key: 'applications', label: 'Applications', model: 'hr.applicant' },
+    ],
+  },
+  {
+    id: 'timesheets', name: 'Timesheets', color: ['#0f766e', '#1e3a8a'],
+    menus: [
+      { key: 'timesheets', label: 'My Timesheets', model: 'account.analytic.line' },
+      { key: 'report', label: 'Reporting', model: 'account.analytic.line', view: 'pivot' },
+    ],
+  },
+  {
+    id: 'events', name: 'Events', color: ['#fb7185', '#f59e0b'],
+    menus: [
+      { key: 'events', label: 'Events', model: 'event.event' },
+      { key: 'attendees', label: 'Attendees', model: 'event.registration' },
+    ],
+  },
+  {
+    id: 'subscriptions', name: 'Subscriptions', color: ['#f97316', '#16a34a'],
+    menus: [
+      { key: 'subscriptions', label: 'Subscriptions', model: 'sale.subscription' },
+      { key: 'report', label: 'Reporting', model: 'sale.subscription', view: 'pivot' },
+    ],
+  },
+  { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
+  { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
 ];
+
+// Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
+const ORDER = ['calendar', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'subscriptions', 'pos', 'accounting', 'project',
+  'timesheets', 'helpdesk', 'events', 'purchase', 'inventory', 'manufacturing', 'employees', 'recruitment', 'timeoff', 'expenses', 'settings'];
+export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];

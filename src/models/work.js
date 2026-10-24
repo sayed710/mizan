@@ -110,6 +110,7 @@ export const workModels = {
       statusbar: 'stage_id',
       statusbarClickable: true,
       title: 'name',
+      smart: [{ label: 'Hours Spent', model: 'account.analytic.line', field: 'task_id', target: 'timesheets/timesheets', sum: 'unit_amount', format: 'number' }],
       groups: [['project_id', 'user_id', 'tag_ids'], ['date_deadline', 'planned_hours', 'priority']],
       tabs: [{ label: 'Description', fields: ['description'] }],
       chatter: true,
