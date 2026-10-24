@@ -1,9 +1,49 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { commit, getDb, resetDemo, useDb } from '../store.js';
+import { addUser, commit, getDb, getUser, isServer, listUsers, logout, resetDemo, useDb } from '../store.js';
 import { lang, setLang, t } from '../i18n.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
+
+function Users() {
+  const [users, setUsers] = useState([]);
+  const [form, setForm] = useState({ login: '', name: '', password: '' });
+  const [error, setError] = useState(null);
+  const refresh = () => listUsers().then(setUsers);
+  useEffect(() => { refresh(); }, []);
+  const submit = async (e) => {
+    e.preventDefault();
+    try {
+      await addUser(form);
+      setForm({ login: '', name: '', password: '' });
+      setError(null);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  };
+  const input = (key, extra = {}) => (
+    <input aria-label={t(extra.label)} placeholder={t(extra.label)} required value={form[key]} type={extra.type ?? 'text'}
+      autoComplete="off" onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
+  );
+  return (
+    <>
+      <h3>{t('Users')}</h3>
+      <table className="list">
+        <tbody>
+          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td></tr>)}
+        </tbody>
+      </table>
+      <form className="row user-form" onSubmit={submit}>
+        {input('name', { label: 'Name' })}
+        {input('login', { label: 'Login' })}
+        {input('password', { label: 'Password', type: 'password' })}
+        <button type="submit" className="btn primary">{t('Add user')}</button>
+      </form>
+      {error && <div className="alert" role="alert">{error}</div>}
+    </>
+  );
+}
 
 export function Settings() {
   const db = useDb();
@@ -60,6 +100,9 @@ export function Settings() {
           </button>
         </div>
         {status && <p role="status">{status}</p>}
+        {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
+        {isServer() && getUser()?.isAdmin && <Users />}
+        {isServer() && <p><button type="button" className="btn" onClick={logout}>{t('Log out')}</button></p>}
       </section>
     </main>
   );

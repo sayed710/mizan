@@ -74,6 +74,9 @@ const ar = {
   Assignee: 'المكلّف', Deadline: 'الموعد النهائي', 'Allocated Hours': 'الساعات المخصصة', Subject: 'الموضوع', 'Assigned to': 'مسندة إلى',
   'Meeting Subject': 'موضوع الاجتماع', Date: 'التاريخ', Time: 'الوقت', 'Duration (hours)': 'المدة (ساعات)', Attendee: 'الحضور', Location: 'المكان',
   Opportunities: 'الفرص', Invoiced: 'المفوتر', 'Sales Order ': 'أمر البيع',
+  Login: 'اسم الدخول', Password: 'كلمة المرور', 'Log in': 'تسجيل الدخول', 'Log out': 'تسجيل الخروج', Users: 'المستخدمون',
+  'Add user': 'إضافة مستخدم', Administrator: 'مدير', 'Wrong login or password': 'اسم الدخول أو كلمة المرور غير صحيحة',
+  'Browser-only demo mode: data is stored in this browser.': 'وضع تجريبي: البيانات محفوظة في هذا المتصفح فقط.',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

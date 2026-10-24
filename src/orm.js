@@ -30,13 +30,17 @@ function stripComputed(model, vals) {
   return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute));
 }
 
+let author = 'Admin';
+/** Name stamped on chatter messages created by this client/process. */
+export const setAuthor = (name) => { author = name; };
+
 const message = (model, resId, body, kind) => ({
   id: crypto.randomUUID(),
   model,
   res_id: resId,
   body,
   kind,
-  author: 'Admin',
+  author,
   date: new Date().toISOString(),
 });
 
