@@ -57,6 +57,26 @@ export function applyLots(db, picking, sign) {
 }
 
 export const logisticsModels = {
+  'marketplace.connector': {
+    label: 'Marketplace Connectors',
+    fields: {
+      name: { type: 'char', label: 'Connector', required: true },
+      platform: { type: 'selection', label: 'Platform', options: [['amazon', 'Amazon'], ['noon', 'Noon'], ['shopee', 'Shopee'], ['lazada', 'Lazada'], ['tiktok', 'TikTok Shop'], ['jumia', 'Jumia'], ['custom', 'Custom feed']] },
+      feed_url: { type: 'char', label: 'Orders Feed URL (https)' },
+      last_sync: { type: 'char', label: 'Last Sync', readonly: true },
+      last_count: { type: 'integer', label: 'Orders Imported Last Sync', readonly: true },
+    },
+    defaults: () => ({ platform: 'amazon' }),
+    kanban: { title: 'name', lines: ['platform', 'last_sync', 'last_count'] },
+    list: ['name', 'platform', 'last_sync', 'last_count'],
+    form: {
+      buttons: [{ label: 'Sync Orders', primary: true, server: '/api/integrations/marketplace-sync', requires: 'marketplace', run: () => { throw new Error('Order sync runs on the Mizan server (npm start)'); } }],
+      title: 'name',
+      smart: [{ label: 'Orders', model: 'sale.order', field: 'connector_id', target: 'sales/quotations' }],
+      groups: [['platform', 'feed_url'], ['last_sync', 'last_count']],
+      chatter: true,
+    },
+  },
   'delivery.carrier': {
     label: 'Delivery Methods',
     fields: {

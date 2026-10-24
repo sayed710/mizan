@@ -49,6 +49,16 @@ export function generateVariants(db, template) {
   }).db, db);
 }
 
+/** Fallback without the WhatsApp API: open a wa.me chat with the order summary prefilled. */
+export function openWhatsApp(db, r) {
+  const partner = r.email !== undefined && r.phone !== undefined && !r.partner_id ? r : read(db, 'res.partner', r.partner_id);
+  const phone = String(partner?.phone ?? '').replace(/[^\d]/g, '');
+  if (!phone) throw new Error('The contact has no phone number');
+  const text = r.name && r.amount_total != null ? `${r.name}: ${Number(r.amount_total).toFixed(2)}` : '';
+  window.open(`https://wa.me/${phone}?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+  return { db };
+}
+
 const orderState = (labels) => ({ type: 'selection', label: 'Status', tracking: true, options: labels });
 
 export const salesModels = {
@@ -166,7 +176,9 @@ export const salesModels = {
       date_order: { type: 'date', label: 'Order Date' },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
-      source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website']] },
+      source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website'], ['marketplace', 'Marketplace']] },
+      client_order_ref: { type: 'char', label: 'Customer Reference', readonly: true },
+      connector_id: { type: 'many2one', relation: 'marketplace.connector', label: 'Marketplace', readonly: true },
       state: orderState([['draft', 'Quotation'], ['sent', 'Quotation Sent'], ['sale', 'Sales Order'], ['cancel', 'Cancelled']]),
       order_line: productLines('Order Lines', 'list_price'),
       ...amountFields('order_line'),
@@ -195,6 +207,7 @@ export const salesModels = {
       buttons: [
         { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/sale.order/${r.id}` }) },
+        { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', run: (db, r) => openWhatsApp(db, r) },
         {
           label: 'Add Shipping', when: (r) => r.carrier_id && ['draft', 'sent'].includes(r.state),
           // API carriers are quoted by the server; fixed/rule carriers are computed here.

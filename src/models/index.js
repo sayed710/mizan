@@ -60,6 +60,7 @@ const allApps = [
       ] },
       { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }] },
+      { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },

@@ -9,7 +9,8 @@ RUN npm run build && npm test
 FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production PORT=8069 MIZAN_DB=/data/mizan.sqlite
-COPY --from=build /app/package.json ./
+COPY --from=build /app/package.json /app/package-lock.json ./
+RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server ./server
 COPY --from=build /app/src ./src

@@ -8,12 +8,24 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
-import { applyDiff } from '../src/sync.js';
+import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicOrder, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
+import { aiDraft, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+
+const ENV = process.env;
+/** Server actions: endpoint → integration it needs, model it touches, admin-only flag, implementation. */
+const ACTIONS = {
+  '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
+  '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, run: (b, u) => sendWhatsApp(ENV, db, u, b) },
+  '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b) => sendSmsCampaign(ENV, db, b) },
+  '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
+  '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
+  '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
+};
 
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
@@ -169,6 +181,14 @@ async function serveStatic(req, res) {
 async function api(req, res, path) {
   const ip = clientIp(req);
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, publicSite(db));
+  if (path === '/api/iot/ingest' && req.method === 'POST') {
+    if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
+    const token = /^Bearer (iot_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
+    const next = token && ingestIot(db, token, await readJson(req));
+    if (!next) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
+    commitDb(applyDiff(db, diffDb(db, next), { author: 'IoT', isAdmin: false }));
+    return send(res, 200, { ok: true });
+  }
   if (path === '/api/public/apply' && req.method === 'POST') {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`apply:${ip}`)) return send(res, 429, { error: 'Too many applications, try again later' });
@@ -213,7 +233,24 @@ async function api(req, res, path) {
   const user = sessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
 
-  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP });
+  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
+  const action = ACTIONS[path];
+  if (action && req.method === 'POST') {
+    if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
+    if (action.admin && !user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    const body = await readJson(req);
+    const model = action.model(body);
+    const allowed = allowedFor(user);
+    if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
+    try {
+      const out = await action.run(body, user);
+      // Changes made by integrations go through the same validation as client edits.
+      if (out.db) commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      return send(res, 200, { ok: true, message: out.message, text: out.text });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
   if ((path === '/api/mail/document' || path === '/api/mail/mailing') && req.method === 'POST') {
     if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
     const body = await readJson(req);

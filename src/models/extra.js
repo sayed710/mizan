@@ -68,6 +68,7 @@ export const extraModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       email: { type: 'char', label: 'Email', required: true },
+      phone: { type: 'char', label: 'Mobile' },
       list_id: { type: 'many2one', relation: 'mailing.list', label: 'Mailing List' },
       opt_out: { type: 'boolean', label: 'Opted Out' },
     },

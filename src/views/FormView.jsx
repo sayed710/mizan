@@ -122,6 +122,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
 
 function Chatter({ db, model, id, name }) {
   const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
   const messages = messagesOf(db, model, id);
   const send = () => {
     if (!note.trim()) return;
@@ -134,7 +135,24 @@ function Chatter({ db, model, id, name }) {
       <div className="chatter-compose">
         <textarea value={note} placeholder={t('Log an internal note…')} onChange={(e) => setNote(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send(); }} />
-        <button type="button" className="btn primary" onClick={send} disabled={!note.trim()}>{t('Log note')}</button>
+        <div className="row">
+          {isServer() && getUser()?.integrations?.ai && (
+            <button type="button" className="btn" disabled={busy} onClick={async () => {
+              const instruction = prompt(t('What should the AI write?'), t('Summarize this record and suggest the next step.'));
+              if (instruction == null) return;
+              setBusy(true);
+              try {
+                const res = await serverAction('/api/ai/draft', { model, id, instruction });
+                setNote(res.text ?? '');
+              } catch (e) {
+                alert(e instanceof Error ? e.message : String(e));
+              } finally {
+                setBusy(false);
+              }
+            }}>✨ {t(busy ? 'Thinking…' : 'AI Draft')}</button>
+          )}
+          <button type="button" className="btn primary" onClick={send} disabled={!note.trim()}>{t('Log note')}</button>
+        </div>
       </div>
       <ol className="messages">
         {messages.map((m) => (

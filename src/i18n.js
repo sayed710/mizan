@@ -429,6 +429,10 @@ const ar = {
   'Free if order amount is above': 'مجاني إذا تجاوز الطلب', 'Pricing Rules': 'قواعد التسعير', 'Up to (kg)': 'حتى (كجم)', 'Rate API URL': 'رابط واجهة الأسعار',
   'Generate Token': 'إنشاء رمز', 'Device Name': 'اسم الجهاز', 'Last Value': 'آخر قيمة', 'Last Seen': 'آخر ظهور', Unit: 'الوحدة', Direction: 'الاتجاه',
   Outgoing: 'صادر', Missed: 'فائتة', 'Phone Number': 'رقم الهاتف', 'Duration (min)': 'المدة (دقائق)', Expired: 'منتهي الصلاحية', 'In Stock': 'متوفر',
+  WhatsApp: 'واتساب', 'AI Draft': 'صياغة بالذكاء الاصطناعي', 'Thinking…': 'جارٍ التفكير…', 'What should the AI write?': 'ماذا تريد أن يكتب الذكاء الاصطناعي؟',
+  'Summarize this record and suggest the next step.': 'لخّص هذا السجل واقترح الخطوة التالية.', Marketplaces: 'المتاجر الإلكترونية', 'Marketplace Connectors': 'ربط المتاجر الإلكترونية',
+  'Sync Orders': 'مزامنة الطلبات', Platform: 'المنصة', 'Orders Feed URL (https)': 'رابط الطلبات (https)', 'Last Sync': 'آخر مزامنة', Mobile: 'الجوال',
+  'Customer Reference': 'مرجع العميل', Marketplace: 'متجر إلكتروني', 'Orders Imported Last Sync': 'الطلبات المستوردة',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

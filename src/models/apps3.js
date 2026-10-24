@@ -49,7 +49,7 @@ export const apps3Models = {
       form: {
         statusbarClickable: false,
         buttons: [{
-          label: 'Send', primary: true, when: (r) => r.stage_id !== 'sent',
+          label: 'Send', primary: true, when: (r) => r.stage_id !== 'sent', server: '/api/integrations/sms-campaign', requires: 'sms',
           run: (db, r) => {
             if (!(r.body ?? '').trim()) throw new Error('Write the SMS content first');
             if ((r.body ?? '').length > SMS_LIMIT) throw new Error(`SMS content is longer than ${SMS_LIMIT} characters`);

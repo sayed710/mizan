@@ -29,6 +29,7 @@ export const crmModels = {
         { label: 'Sales', model: 'sale.order', field: 'partner_id', target: 'sales/quotations' },
         { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
       ],
+      buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'country', 'pricelist_id', 'tag_ids']],
       chatter: true,
     },

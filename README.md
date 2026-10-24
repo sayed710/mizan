@@ -55,6 +55,22 @@ Set `MIZAN_SMTP_HOST`, `MIZAN_SMTP_PORT` (587), `MIZAN_SMTP_USER`, `MIZAN_SMTP_P
 (`MIZAN_SMTP_SECURE=1` for port 465). Then **Send by Email** on quotations, RFQs and invoices and **Send** on
 email campaigns deliver real messages (STARTTLS when offered). Without SMTP these actions are simulated.
 
+### Integrations
+
+Each integration turns on when its environment variables are set; without them the buttons fall back to a local action
+(simulated send, or a `wa.me` / `tel:` link).
+
+| Integration | Environment | Used by |
+|---|---|---|
+| AI (Claude, `claude-opus-5-5`) | `ANTHROPIC_API_KEY` (or another Anthropic credential) | **AI Draft** in every chatter |
+| WhatsApp Cloud API | `MIZAN_WHATSAPP_TOKEN`, `MIZAN_WHATSAPP_PHONE_ID` | WhatsApp button on contacts and quotations |
+| SMS (Twilio) | `MIZAN_TWILIO_SID`, `MIZAN_TWILIO_TOKEN`, `MIZAN_TWILIO_FROM` | SMS Marketing campaigns |
+| Carrier rate APIs (DHL, FedEx, Aramex, …) | `MIZAN_SHIPPING_TOKEN` + Rate API URL on the delivery method | **Add Shipping** on quotations |
+| Marketplaces (Amazon, Noon, Shopee, TikTok, Jumia, …) | Orders feed URL on the connector, `MIZAN_MARKETPLACE_TOKEN` | **Sync Orders** (idempotent, SKU matching) |
+| IoT devices | per-device token from **Generate Token** | `POST /api/iot/ingest` with `Authorization: Bearer iot_…` |
+
+Outbound URLs configured in records must be public `https` endpoints (private network addresses are refused).
+
 ### Docker
 
 ```bash
