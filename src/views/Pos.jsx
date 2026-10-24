@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { create, read, search } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { moveStock } from '../models/sales.js';
+import { postEntry } from '../models/ledger.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -30,7 +31,15 @@ export function Pos() {
 
   const pay = (method) => {
     const { db: next, id } = create(getDb(), 'pos.order', { partner_id: Number(partner) || null, payment_method: method, lines });
-    commit(moveStock(next, lines, -1));
+    const { db: booked } = postEntry(moveStock(next, lines, -1), {
+      journal: 'POSS', ref: read(next, 'pos.order', id).name,
+      lines: [
+        { account: method === 'cash' ? '101501' : '101401', debit: total.total },
+        { account: '400000', credit: total.untaxed },
+        ...(total.tax ? [{ account: '251000', credit: total.tax }] : []),
+      ],
+    });
+    commit(booked);
     setReceipt({ id, name: read(next, 'pos.order', id).name, total: total.total, method });
     setCart([]);
     setPartner('');

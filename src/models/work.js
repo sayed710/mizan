@@ -31,6 +31,7 @@ export const workModels = {
       work_phone: { type: 'char', label: 'Work Phone' },
       work_location: { type: 'selection', label: 'Work Location', options: [['office', 'Office'], ['home', 'Home'], ['other', 'Other']] },
       join_date: { type: 'date', label: 'Joined on' },
+      wage: { type: 'monetary', label: 'Monthly Wage' },
       tag_ids: { type: 'tags', label: 'Tags' },
     },
     defaults: () => ({ work_location: 'office', tag_ids: [], join_date: today() }),
@@ -47,8 +48,9 @@ export const workModels = {
       smart: [
         { label: 'Tasks', model: 'project.task', field: 'user_id', target: 'project/tasks' },
         { label: 'Tickets', model: 'helpdesk.ticket', field: 'user_id', target: 'helpdesk/tickets' },
+        { label: 'Payslips', model: 'hr.payslip', field: 'employee_id', target: 'payroll/payslips' },
       ],
-      groups: [['job_title', 'department_id', 'parent_id', 'work_location'], ['work_email', 'work_phone', 'join_date', 'tag_ids']],
+      groups: [['job_title', 'department_id', 'parent_id', 'work_location'], ['work_email', 'work_phone', 'join_date', 'wage', 'tag_ids']],
       chatter: true,
     },
   },

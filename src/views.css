@@ -34,6 +34,15 @@
 .discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 @media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
 
+/* Financial reports */
+.report-page .control-panel { gap: 14px; }
+.list.report tr.rep-section { cursor: pointer; font-weight: 600; }
+.list.report tr.rep-section:hover { background: #f7f8fc; }
+.list.report tr.rep-detail td { color: var(--muted); padding-inline-start: 34px; font-size: 13px; }
+.list.report tr.rep-total td { font-weight: 700; border-top: 2px solid var(--border); }
+.list.report tr.rep-total.strong td { font-size: 16px; background: var(--brand-soft); }
+.list.report { max-width: 980px; }
+
 /* Point of Sale */
 .pos { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 0; height: calc(100vh - 47px); }
 .pos-products { padding: 14px 16px; overflow-y: auto; }

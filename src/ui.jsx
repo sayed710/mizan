@@ -6,7 +6,7 @@ import { lang, t } from './i18n.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 const moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-export const money = (n) => moneyFmt.format(Number(n) || 0);
+export const money = (n) => moneyFmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
@@ -178,6 +178,7 @@ const ICONS = {
   helpdesk: <><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" strokeWidth="7" /><path d="M12 12l7 7m10 10l7 7m0-24l-7 7M19 29l-7 7" stroke="currentColor" strokeWidth="4" /></>,
   employees: <><circle cx="17" cy="16" r="6" /><circle cx="33" cy="18" r="5" /><path d="M5 38c1-8 6-12 12-12s11 4 12 12zm25 0c0-5-1-8-3-10 6-1 13 2 15 10z" /></>,
   settings: <path d="M21 4h6l1 6 4 2 5-4 4 4-4 5 2 4 6 1v6l-6 1-2 4 4 5-4 4-5-4-4 2-1 6h-6l-1-6-4-2-5 4-4-4 4-5-2-4-6-1v-6l6-1 2-4-4-5 4-4 5 4 4-2zm3 13a7 7 0 100 14 7 7 0 000-14z" fillRule="evenodd" />,
+  payroll: <path d="M6 12h36v24H6zm18 5a7 7 0 100 14 7 7 0 000-14zM10 16v4h4v-4zm24 12v4h4v-4z" fillRule="evenodd" />,
   discuss: <path d="M6 8h36v24H20l-9 8v-8H6z" />,
   manufacturing: <path d="M5 42V20l10 6v-6l10 6v-6l10 6V8h8v34z" />,
   pos: <path d="M8 6h32v14H8zm4 4v6h24v-6zM6 24h36l-3 18H9zm8 5v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3zm-16 6v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3z" fillRule="evenodd" />,

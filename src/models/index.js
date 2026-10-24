@@ -5,10 +5,11 @@ import { accountingModels } from './accounting.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
 import { mailModels } from './mail.js';
+import { payrollModels } from './payroll.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -67,8 +68,19 @@ const allApps = [
         { key: 'bills', label: 'Bills', model: 'account.move', domain: (r) => r.move_type === 'in_invoice', defaults: { move_type: 'in_invoice' } },
         vendors,
       ] },
+      { label: 'Accounting', children: [
+        { key: 'entries', label: 'Journal Entries', model: 'account.move' },
+        { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+      ] },
       { label: 'Reporting', children: [
-        { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot' },
+        { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
+        { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
+        { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
+        { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
+      ] },
+      { label: 'Configuration', children: [
+        { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
+        { key: 'journals', label: 'Journals', model: 'account.journal' },
       ] },
     ],
   },
@@ -176,6 +188,14 @@ const allApps = [
       { key: 'report', label: 'Reporting', model: 'sale.subscription', view: 'pivot' },
     ],
   },
+  {
+    id: 'payroll', name: 'Payroll', color: ['#a3e635', '#0f766e'],
+    menus: [
+      { key: 'batches', label: 'Payslip Batches', model: 'hr.payslip.run' },
+      { key: 'payslips', label: 'Payslips', model: 'hr.payslip' },
+      { key: 'report', label: 'Reporting', model: 'hr.payslip', view: 'pivot' },
+    ],
+  },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
@@ -183,7 +203,7 @@ const allApps = [
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
 const ORDER = ['discuss', 'calendar', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'subscriptions', 'pos', 'accounting', 'project',
-  'timesheets', 'helpdesk', 'events', 'purchase', 'inventory', 'manufacturing', 'employees', 'recruitment', 'timeoff', 'expenses', 'settings'];
+  'timesheets', 'helpdesk', 'events', 'purchase', 'inventory', 'manufacturing', 'employees', 'recruitment', 'timeoff', 'expenses', 'payroll', 'settings'];
 export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);

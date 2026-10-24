@@ -1,6 +1,8 @@
 import { create, emptyDb, postNote, read, write } from './orm.js';
 import { addDays, today } from './models/common.js';
 import { moveStock } from './models/sales.js';
+import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
+import { payMove, postMove } from './models/accounting.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -77,6 +79,12 @@ export function seed() {
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
 
+  CHART.forEach(([code, name, account_type]) => add('account.account', { code, name, account_type, reconcile: ['asset_receivable', 'liability_payable'].includes(account_type) }));
+  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  db = postEntry(db, {
+    journal: 'MISC', date: today().slice(0, 4) + '-01-01', ref: 'Opening balance',
+    lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
+  }).db;
   partners.forEach((p) => add('res.partner', p));
   leads.forEach(([name, partner_id, expected_revenue, stage_id, priority, tag_ids], i) => {
     const partner = partners[partner_id - 1];
@@ -93,7 +101,7 @@ export function seed() {
   departments.forEach((name) => add('hr.department', { name }));
   employees.forEach(([name, job_title, department_id, parent_id, work_location], i) =>
     add('hr.employee', {
-      name, job_title, department_id, parent_id, work_location,
+      name, job_title, department_id, parent_id, work_location, wage: [9000, 6000, 4200, 5500, 3800, 3600][i],
       work_email: `${name.split(' ')[0].toLowerCase()}@mycompany.example`,
       join_date: addDays(today(), -900 + i * 120),
     }));
@@ -115,12 +123,14 @@ export function seed() {
     move_type: 'out_invoice', partner_id: 4, sale_id: so2, invoice_origin: so2rec.name,
     invoice_date: addDays(today(), -18), invoice_date_due: addDays(today(), 12), invoice_line_ids: so2rec.order_line,
   });
-  set('account.move', inv1, { state: 'posted', name: `INV/${today().slice(0, 4)}/00001`, amount_paid: read(db, 'account.move', inv1).amount_total, payment_date: addDays(today(), -5) });
+  db = postMove(db, inv1);
+  db = payMove(db, inv1, read(db, 'account.move', inv1).amount_total, addDays(today(), -5));
   const inv2 = add('account.move', {
     move_type: 'out_invoice', partner_id: 3, invoice_date: addDays(today(), -45), invoice_date_due: addDays(today(), -15),
     invoice_line_ids: lines([[5, 10]]),
   });
-  set('account.move', inv2, { state: 'posted', name: `INV/${today().slice(0, 4)}/00002`, amount_paid: 500 });
+  db = postMove(db, inv2);
+  db = payMove(db, inv2, 500, addDays(today(), -10));
   add('account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: today(), invoice_date_due: addDays(today(), 30), invoice_line_ids: lines([[1, 4]]) });
 
   // Purchases: received PO + its posted bill, open RFQ.
@@ -132,7 +142,7 @@ export function seed() {
     move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,
     invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20), invoice_line_ids: po1rec.order_line,
   });
-  set('account.move', bill, { state: 'posted', name: `BILL/${today().slice(0, 4)}/00001` });
+  db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
 
   add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });

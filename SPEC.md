@@ -66,5 +66,17 @@ Evidence: `ev_68388708…` (CRM search panel, graph, pivot, calendar), `ev_c36d3
 - RFQ → Confirm Order → Receive Products (stock in) → Create Bill.
 - Smart buttons jump to filtered lists (`?rel=field:id`).
 
+## Phase 5: accounting & payroll
+
+Evidence: `ev_a9a164f5…` (menu paths: Accounting › Journal Entries, Reporting › Profit and Loss, Configuration › Chart of Accounts),
+`ev_ba3dd3d2…` (P&L report structure), `ev_3db04dba…` (invoice form with Journal Items tab, Journal field).
+
+- O: Journal Entries list holds every move (invoices included); an invoice has an Invoice Lines tab and a Journal Items tab and a Journal.
+- O: P&L rows: Revenue, Cost of Sales, Gross Profit, Expense, Net Operating Income, Other Income, Other Expense, Net Other Income, Net Income; sections expand to accounts; period/comparison/print controls.
+- D: Own 6-digit chart of accounts and journals (INV, BILL, BNK1, CSH1, MISC, SAL, POSS). Posting an invoice generates receivable/payable,
+  income/expense and VAT lines; payments, paid expenses, POS sales and payroll create balanced entries. Reports (P&L, balance sheet with
+  current-year earnings, general ledger with running balance) are computed from posted journal items.
+- D: Payroll uses one salary structure (basic, 10% allowance, 11% social insurance, 10% income tax on gross − SI); batches generate, confirm and pay all payslips.
+
 ## Persistence
 - D: Browser `localStorage` (`mizan-db-v1`). Swap `src/store.js` for an HTTP API when a backend is needed.

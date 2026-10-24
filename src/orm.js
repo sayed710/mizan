@@ -45,10 +45,10 @@ const message = (model, resId, body, kind) => ({
 });
 
 export function create(db, model, vals) {
-  const err = validate(model, vals);
-  if (err) throw new Error(err);
   const id = nextId(db, model);
   const rec = { ...(models[model].defaults?.(id) ?? {}), ...stripComputed(model, vals), id };
+  const err = validate(model, rec);
+  if (err) throw new Error(err);
   return {
     db: {
       ...db,

@@ -2,6 +2,7 @@
 import { create, read, write } from '../orm.js';
 import { addDays, amountFields, pad, productLines, today } from './common.js';
 import { moveStock } from './sales.js';
+import { postEntry } from './ledger.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -124,7 +125,18 @@ export const moreModels = {
         { label: 'Submit', primary: true, vals: { state: 'submitted' }, when: (r) => r.state === 'draft' },
         { label: 'Approve', primary: true, vals: { state: 'approved' }, when: (r) => r.state === 'submitted' },
         { label: 'Refuse', vals: { state: 'refused' }, when: (r) => r.state === 'submitted' },
-        { label: 'Mark as Paid', primary: true, vals: { state: 'paid' }, when: (r) => r.state === 'approved' },
+        {
+          label: 'Mark as Paid',
+          primary: true,
+          when: (r) => r.state === 'approved',
+          run: (db, r) => {
+            const { db: withEntry } = postEntry(db, {
+              journal: 'BNK1', date: today(), ref: `Expense: ${r.name}`,
+              lines: [{ account: ['travel', 'meals'].includes(r.category) ? '610000' : '600000', debit: r.total_amount }, { account: '101401', credit: r.total_amount }],
+            });
+            return { db: write(withEntry, 'hr.expense', r.id, { state: 'paid' }) };
+          },
+        },
         { label: 'Reset to Draft', vals: { state: 'draft' }, when: (r) => r.state === 'refused' },
       ],
       title: 'name',

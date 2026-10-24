@@ -8,6 +8,7 @@ import { Dashboard } from './views/Dashboard.jsx';
 import { Settings } from './views/Settings.jsx';
 import { Pos } from './views/Pos.jsx';
 import { Discuss } from './views/Discuss.jsx';
+import { Reports } from './views/Reports.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -18,7 +19,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);
@@ -40,7 +41,7 @@ export function App() {
   const Page = PAGES[leaf.type];
 
   let content;
-  if (Page) content = <Page />;
+  if (Page) content = <Page key={leaf.key} leaf={leaf} />;
   else if (route.id) content = <FormView key={`${leaf.model}:${route.id}`} leaf={leaf} id={route.id} base={base} params={route.params} />;
   else content = <ActionView key={`${base}?${route.params.get('rel') ?? ''}`} leaf={leaf} base={base} params={route.params} />;
 

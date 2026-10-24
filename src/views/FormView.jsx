@@ -223,7 +223,9 @@ export function FormView({ leaf, id, base, params }) {
   const buttons = (def.form.buttons ?? []).filter((b) => !b.when || b.when(current));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
-  const footer = [].concat(def.form.footer ?? []);
+  const resolve = (v) => (typeof v === 'function' ? v(current) : v);
+  const tabs = resolve(def.form.tabs);
+  const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current);
 
   return (
@@ -298,17 +300,17 @@ export function FormView({ leaf, id, base, params }) {
                 </div>
               ))}
             </div>
-            {def.form.tabs && (
+            {tabs && (
               <>
                 <div className="tabs" role="tablist">
-                  {def.form.tabs.map((tb, i) => (
+                  {tabs.map((tb, i) => (
                     <button key={tb.label} type="button" role="tab" aria-selected={tab === i} onClick={() => setTab(i)}>{t(tb.label)}</button>
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {def.form.tabs[tab].fields.map((f) => (
+                  {(tabs[tab] ?? tabs[0]).fields.map((f) => (
                     <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`}
-                      readonly={locked && def.fields[f].type === 'one2many'} />
+                      readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
                   ))}
                   {footer.length > 0 && tab === 0 && (
                     <dl className="totals">
