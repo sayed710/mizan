@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
+import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicOrder, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
@@ -41,14 +42,12 @@ try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column al
 /** Comma-separated app ids a user may open; null/empty = all apps. */
 const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x)) : null);
 
-// ---- database snapshot (ponytail: whole db as one JSON row; split into per-model tables when data grows) ----
-const loadDb = () => {
-  const row = sql.prepare('SELECT value FROM kv WHERE key = ?').get('db');
-  return row ? JSON.parse(row.value) : null;
-};
-const saveDb = (db) => sql.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('db', JSON.stringify(db));
-let db = loadDb();
-if (!db) { db = seed(); saveDb(db); }
+// ---- database: one row per record, incremental saves (see storage.js) ----
+const storage = openStorage(sql);
+let db = storage.load();
+/** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
+const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+if (!db) commitDb(seed(), { full: true });
 installCustomFields(db.settings?.customFields);
 
 // ---- users & sessions ----
@@ -175,7 +174,7 @@ async function api(req, res, path) {
     if (tooMany(`apply:${ip}`)) return send(res, 429, { error: 'Too many applications, try again later' });
     recordFailure(`apply:${ip}`);
     const out = publicApply(db, await readJson(req));
-    if (out.db) { db = out.db; saveDb(db); }
+    if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/order' && req.method === 'POST') {
@@ -183,7 +182,7 @@ async function api(req, res, path) {
     if (tooMany(`order:${ip}`)) return send(res, 429, { error: 'Too many orders, try again later' });
     recordFailure(`order:${ip}`); // counts every order: max 10 per client per 15 minutes
     const out = publicOrder(db, await readJson(req));
-    if (out.db) { db = out.db; saveDb(db); }
+    if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
   if (path.startsWith('/api/v1/')) {
@@ -193,7 +192,7 @@ async function api(req, res, path) {
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
-    if (out.db) { db = out.db; saveDb(db); }
+    if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
@@ -223,7 +222,7 @@ async function api(req, res, path) {
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
       const out = await (path.endsWith('mailing') ? sendMailing : sendDocument)(SMTP, db, user, body);
-      if (out.db) { db = out.db; saveDb(db); }
+      if (out.db) commitDb(out.db);
       return send(res, out.status, out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -238,17 +237,15 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      db = applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) });
+      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
-    saveDb(db);
     return send(res, 200, visibleDb(user));
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
-    db = seed();
-    saveDb(db);
+    commitDb(seed(), { full: true });
     return send(res, 200, db);
   }
   if (path === '/api/keys') {
