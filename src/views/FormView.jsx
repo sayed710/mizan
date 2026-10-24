@@ -174,7 +174,14 @@ export function FormView({ leaf, id, base, params }) {
 
   const current = withComputed(model, { ...(isNew ? initial : rec), ...changes });
   const dirty = Object.keys(changes).length > 0;
-  const set = (k) => (v) => { setChanges((c) => ({ ...c, [k]: v })); setError(null); };
+  const set = (k) => (v) => {
+    setChanges((c) => {
+      const next = { ...c, [k]: v };
+      const extra = def.onchange?.({ ...(isNew ? initial : rec), ...next }, k, getDb()) ?? {};
+      return { ...next, ...extra };
+    });
+    setError(null);
+  };
   const fail = (e) => setError(e instanceof Error ? e.message : t('Could not save'));
 
   /** Persist pending changes (+ extra vals). Returns the record id, or null on validation error. */

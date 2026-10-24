@@ -56,6 +56,12 @@ export const crmModels = {
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Notes' },
     },
+    onchange: (r, key, db) => {
+      if (key === 'stage_id') return { probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[r.stage_id] ?? r.probability };
+      if (key !== 'partner_id' || !r.partner_id) return {};
+      const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
+      return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
+    },
     defaults: () => ({ stage_id: 'new', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today() }),
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],

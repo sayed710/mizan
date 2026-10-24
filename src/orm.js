@@ -73,7 +73,9 @@ function trackingMessages(db, model, before, vals) {
 export function write(db, model, id, vals) {
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
-  const clean = stripComputed(model, vals);
+  const base = stripComputed(model, vals);
+  // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
+  const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
   const after = { ...before, ...clean };
   const err = validate(model, after);
   if (err) throw new Error(err);

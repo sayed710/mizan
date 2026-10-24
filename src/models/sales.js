@@ -142,6 +142,11 @@ export const salesModels = {
       order_line: productLines('Order Lines', 'list_price'),
       ...amountFields('order_line'),
     },
+    onchange: (r, key, db) => {
+      if (key !== 'partner_id' || !r.partner_id) return {};
+      const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
+      return p ? { pricelist_id: p.pricelist_id ?? null } : {};
+    },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
       [{ id: 'quotations', label: 'Quotations', fn: (r) => ['draft', 'sent'].includes(r.state) }, { id: 'orders', label: 'Sales Orders', fn: (r) => r.state === 'sale' }],
