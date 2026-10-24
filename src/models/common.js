@@ -1,3 +1,5 @@
+import { priceFor } from './pricelist.js';
+
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
 /** Local calendar date as YYYY-MM-DD (not UTC, so "today" matches the user's wall clock). */
@@ -32,10 +34,12 @@ export const productLines = (label, priceField) => ({
     tax: { type: 'float', label: 'Tax %' },
   },
   newLine: () => ({ product_id: null, qty: 1, price_unit: 0, discount: 0, tax: 14 }),
-  onchange: (line, key, db) => {
-    if (key !== 'product_id') return line;
+  // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
+  onchange: (line, key, db, record) => {
+    if (key !== 'product_id' && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = (db.records.product ?? []).find((p) => p.id === line.product_id);
-    return { ...line, price_unit: product?.[priceField] ?? 0 };
+    const base = product?.[priceField] ?? 0;
+    return { ...line, price_unit: record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, line.qty, base) : base };
   },
 });
 

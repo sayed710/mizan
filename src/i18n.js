@@ -399,6 +399,8 @@ const ar = {
   'Operation Type': 'نوع العملية', 'Effective Date': 'تاريخ التنفيذ', Validate: 'اعتماد', 'Mark as Todo': 'تحديد للتنفيذ', 'Disc.%': 'خصم %',
   'Bank Transactions': 'الحركات البنكية', 'To Reconcile': 'للتسوية', Reconciled: 'تمت التسوية', 'Matched with': 'مطابقة مع',
   'Book to Account': 'ترحيل لحساب', Reconcile: 'تسوية', Match: 'مطابقة', 'To reconcile': 'للتسوية', Incoming: 'وارد', Outgoing: 'صادر',
+  Pricelists: 'قوائم الأسعار', Pricelist: 'قائمة الأسعار', 'Pricelist Name': 'اسم قائمة الأسعار', 'Price Rules': 'قواعد التسعير',
+  'Product (empty = all)': 'المنتج (فارغ = الكل)', 'Fixed Price': 'سعر ثابت', 'Discount %': 'الخصم %',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

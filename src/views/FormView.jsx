@@ -309,7 +309,7 @@ export function FormView({ leaf, id, base, params }) {
                 </div>
                 <div className="tab-panel" role="tabpanel">
                   {(tabs[tab] ?? tabs[0]).fields.map((f) => (
-                    <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`}
+                    <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current}
                       readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
                   ))}
                   {footer.length > 0 && tab === 0 && (

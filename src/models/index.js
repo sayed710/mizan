@@ -10,10 +10,11 @@ import { extraModels } from './extra.js';
 import { apps2Models } from './apps2.js';
 import { apps3Models } from './apps3.js';
 import { bankModels } from './bank.js';
+import { pricelistModels } from './pricelist.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -56,7 +57,7 @@ const allApps = [
         customers,
       ] },
       { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' },
-      { label: 'Products', children: [products] },
+      { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }] },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },

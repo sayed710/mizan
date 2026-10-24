@@ -111,12 +111,12 @@ function FileInput({ id, value, onChange }) {
 import { subtotal as lineSubtotal } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
-function Lines({ db, field, value = [], onChange, readonly }) {
+function Lines({ db, field, value = [], onChange, readonly, record }) {
   const cols = Object.entries(field.fields);
   const priced = 'price_unit' in field.fields;
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
-    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db) : l)));
+    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db, record) : l)));
   };
   return (
     <div className="lines-wrap">
@@ -159,8 +159,8 @@ function Lines({ db, field, value = [], onChange, readonly }) {
   );
 }
 
-export function FieldInput({ db, field, value, onChange, id, readonly, placeholder }) {
-  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} />;
+export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
+  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
   const text = (type = 'text', extra = {}) => (
     <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />

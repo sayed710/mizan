@@ -133,6 +133,7 @@ export const salesModels = {
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer', required: true },
+      pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
       date_order: { type: 'date', label: 'Order Date' },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
@@ -174,7 +175,7 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
-      groups: [['partner_id'], ['date_order', 'validity_date', 'user']],
+      groups: [['partner_id', 'pricelist_id'], ['date_order', 'validity_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,

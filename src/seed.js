@@ -85,7 +85,8 @@ export function seed() {
     journal: 'MISC', date: today().slice(0, 4) + '-01-01', ref: 'Opening balance',
     lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
   }).db;
-  partners.forEach((p) => add('res.partner', p));
+  const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
+  partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   leads.forEach(([name, partner_id, expected_revenue, stage_id, priority, tag_ids], i) => {
     const partner = partners[partner_id - 1];
     add('crm.lead', {
