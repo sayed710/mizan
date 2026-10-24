@@ -154,7 +154,7 @@ export function seed() {
   add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });
   add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: ['Consulting'], date: addDays(today(), 60) });
   tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) =>
-    add('project.task', { name, project_id, user_id, stage_id, planned_hours, priority, date_deadline: addDays(today(), d) }));
+    add('project.task', { name, project_id, user_id, stage_id, planned_hours, priority, date_start: addDays(today(), d - Math.ceil(planned_hours / 4)), date_deadline: addDays(today(), d) }));
 
   tickets.forEach(([name, partner_id, user_id, ticket_type, stage_id, priority], i) =>
     add('helpdesk.ticket', { name, partner_id, user_id, ticket_type, stage_id, priority, create_date: addDays(today(), -i * 3) }));
@@ -220,7 +220,7 @@ export function seed() {
     .forEach(([name, folder, tag_ids]) => add('documents.document', { name, folder, tag_ids }));
 
   [[2, 'sales', 0, 8], [3, 'sales', 1, 8], [5, 'support', 0, 6], [6, 'support', 2, 8], [null, 'install', 3, 4]]
-    .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), allocated_hours, state: employee_id ? 'published' : 'draft' }));
+    .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), end: addDays(today(), d + (role === 'install' ? 2 : 4)), allocated_hours, state: employee_id ? 'published' : 'draft' }));
 
   add('sale.rental', { partner_id: 6, product_id: 3, qty: 1, price_per_day: 60, state: 'picked', pickup_date: addDays(today(), -5), return_date: addDays(today(), -1) });
   add('sale.rental', { partner_id: 1, product_id: 2, qty: 4, price_per_day: 15, state: 'reserved', pickup_date: today(), return_date: addDays(today(), 7) });

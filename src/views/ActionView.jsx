@@ -11,6 +11,7 @@ import { List } from './List.jsx';
 import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
+import { Gantt } from './Gantt.jsx';
 
 /** `rel=field:id` narrows an action to records linked to one parent (smart buttons). */
 export function parseRel(db, model, raw) {
@@ -115,6 +116,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView model={model} records={records} open={open} newHref={newHref} />}
+      {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
     </main>
   );
 }

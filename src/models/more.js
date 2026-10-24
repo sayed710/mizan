@@ -162,7 +162,8 @@ export const moreModels = {
     groupBys: ['employee_id', 'leave_type', 'state', 'date_from'],
     kanban: { title: 'name', lines: ['employee_id', 'date_from', 'number_of_days'], badge: 'state' },
     list: ['employee_id', 'leave_type', 'name', 'date_from', 'date_to', 'number_of_days', 'state'],
-    views: ['calendar', 'list', 'kanban', 'pivot'],
+    views: ['gantt', 'calendar', 'list', 'kanban', 'pivot'],
+    gantt: { start: 'date_from', stop: 'date_to', row: 'employee_id', color: 'state' },
     calendar: { date: 'date_from' },
     pivot: { row: 'employee_id', col: 'leave_type', measure: 'number_of_days' },
     form: {

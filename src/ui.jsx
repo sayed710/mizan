@@ -246,6 +246,7 @@ const ICONS = {
   kanban: <><rect x="6" y="8" width="10" height="32" rx="2" /><rect x="19" y="8" width="10" height="22" rx="2" /><rect x="32" y="8" width="10" height="14" rx="2" /></>,
   list: <><rect x="6" y="9" width="36" height="5" rx="2" /><rect x="6" y="21" width="36" height="5" rx="2" /><rect x="6" y="33" width="36" height="5" rx="2" /></>,
   graph: <><rect x="7" y="24" width="8" height="17" rx="2" /><rect x="20" y="12" width="8" height="29" rx="2" /><rect x="33" y="18" width="8" height="23" rx="2" /></>,
+  gantt: <><rect x="6" y="9" width="18" height="6" rx="2" /><rect x="14" y="21" width="24" height="6" rx="2" /><rect x="22" y="33" width="20" height="6" rx="2" /></>,
   pivot: <path d="M6 6h36v36H6zm0 10h36M18 6v36M6 26h36M6 34h36M30 16v26" stroke="currentColor" strokeWidth="3.5" fill="none" />,
   grid: <><rect x="6" y="6" width="10" height="10" rx="2" /><rect x="19" y="6" width="10" height="10" rx="2" /><rect x="32" y="6" width="10" height="10" rx="2" /><rect x="6" y="19" width="10" height="10" rx="2" /><rect x="19" y="19" width="10" height="10" rx="2" /><rect x="32" y="19" width="10" height="10" rx="2" /><rect x="6" y="32" width="10" height="10" rx="2" /><rect x="19" y="32" width="10" height="10" rx="2" /><rect x="32" y="32" width="10" height="10" rx="2" /></>,
   filter: <path d="M6 9h36L28 25v12l-8 4V25z" />,

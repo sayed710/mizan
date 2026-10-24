@@ -232,7 +232,7 @@ const allApps = [
     id: 'rental', name: 'Rental', color: ['#ef4444', '#7c2d12'],
     menus: [
       { key: 'orders', label: 'Rental Orders', model: 'sale.rental' },
-      { key: 'schedule', label: 'Schedule', model: 'sale.rental', view: 'calendar' },
+      { key: 'schedule', label: 'Schedule', model: 'sale.rental', view: 'gantt' },
       { key: 'report', label: 'Reporting', model: 'sale.rental', view: 'pivot' },
     ],
   },
