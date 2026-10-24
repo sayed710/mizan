@@ -101,7 +101,7 @@ function FileInput({ id, value, onChange }) {
   };
   return (
     <div className="file-input">
-      {value?.data && <a href={value.data} download={value.name}>⬇ {value.name}</a>}
+      {/^data:/.test(value?.data ?? '') && <a href={value.data} download={value.name}>⬇ {value.name}</a>}
       <input id={id} type="file" onChange={(e) => pick(e.target.files[0])} />
       {error && <span className="req">{error}</span>}
     </div>

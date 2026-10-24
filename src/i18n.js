@@ -392,6 +392,9 @@ const ar = {
   "Warehouse": "المستودع",
   "Worked Hours": "ساعات العمل",
   "Workflow": "مسار العمل",
+  Revoke: 'إلغاء',
+  'Visit our website': 'زر موقعنا', 'The website is not available right now.': 'الموقع غير متاح حالياً.', 'Could not place the order': 'تعذّر إتمام الطلب',
+  'Your cart is empty': 'سلتك فارغة', 'Name is required': 'الاسم مطلوب',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

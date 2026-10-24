@@ -345,6 +345,24 @@ export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.inde
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 
+const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
+
+/** Models a user restricted to `appIds` may read/write: their menus' models, related models, shared basics. */
+export function modelsForApps(appIds) {
+  const base = new Set(SHARED);
+  for (const app of apps.filter((a) => appIds.includes(a.id))) {
+    for (const leaf of leavesOf(app)) if (leaf.model) base.add(leaf.model);
+  }
+  const out = new Set(base);
+  for (const m of base) {
+    for (const f of Object.values(models[m].fields)) {
+      if (f.relation) out.add(f.relation);
+      for (const sub of Object.values(f.fields ?? {})) if (sub.relation) out.add(sub.relation);
+    }
+  }
+  return out;
+}
+
 /** "#/app/menu" of the first unfiltered menu showing `model` (used to open any record from anywhere). */
 export function targetOf(model) {
   for (const app of apps) {

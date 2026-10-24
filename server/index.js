@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
-import { handleApi } from './api.js';
+import { handleApi, publicOrder, publicSite } from './api.js';
+import { modelsForApps } from '../src/models/index.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -84,18 +85,35 @@ function sessionUser(req) {
 function apiKeyUser(req) {
   const key = /^Bearer (mzn_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
   if (!key) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
-  return row ? { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin } : null;
+  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
+  return row ? { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) } : null;
 }
 
-const cookie = (value, maxAge) =>
-  `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${process.env.MIZAN_SECURE_COOKIE === '1' ? '; Secure' : ''}`;
+// Secure cookies by default in production; MIZAN_SECURE_COOKIE=0 to serve plain HTTP (e.g. LAN), =1 to force.
+const SECURE = process.env.MIZAN_SECURE_COOKIE ? process.env.MIZAN_SECURE_COOKIE === '1' : process.env.NODE_ENV === 'production';
+const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${SECURE ? '; Secure' : ''}`;
 
-// ---- login rate limit: 10 failures per IP per 15 minutes ----
+/** Models a session/API user may touch (null = everything). */
+const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
+const visibleDb = (u) => {
+  const allowed = allowedFor(u);
+  if (!allowed) return db;
+  return {
+    ...db,
+    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => allowed.has(m))),
+    messages: db.messages.filter((m) => allowed.has(m.model)),
+  };
+};
+
+// ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
 const failures = new Map();
 const WINDOW = 15 * 60 * 1000;
-const tooMany = (ip) => (failures.get(ip) ?? []).filter((t) => Date.now() - t < WINDOW).length >= 10;
-const recordFailure = (ip) => failures.set(ip, [...(failures.get(ip) ?? []).filter((t) => Date.now() - t < WINDOW), Date.now()]);
+const recent = (k) => (failures.get(k) ?? []).filter((t) => Date.now() - t < WINDOW);
+const tooMany = (k) => recent(k).length >= 10;
+const recordFailure = (k) => failures.set(k, [...recent(k), Date.now()]);
+setInterval(() => { for (const k of failures.keys()) if (!recent(k).length) failures.delete(k); }, WINDOW).unref();
+// Behind a reverse proxy set MIZAN_TRUST_PROXY=1 so limits apply per client, not per proxy.
+const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
 // ---- http helpers ----
 const send = (res, status, body, headers = {}) => {
@@ -146,14 +164,23 @@ async function serveStatic(req, res) {
 
 // ---- routes ----
 async function api(req, res, path) {
-  const ip = req.socket.remoteAddress ?? '?';
+  const ip = clientIp(req);
+  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, publicSite(db));
+  if (path === '/api/public/order' && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (tooMany(`order:${ip}`)) return send(res, 429, { error: 'Too many orders, try again later' });
+    recordFailure(`order:${ip}`); // counts every order: max 10 per client per 15 minutes
+    const out = publicOrder(db, await readJson(req));
+    if (out.db) { db = out.db; saveDb(db); }
+    return send(res, out.status, out.body);
+  }
   if (path.startsWith('/api/v1/')) {
     // Bearer-token API: no cookies involved, so no CSRF exposure; rate-limit failed keys like logins.
-    if (tooMany(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    if (tooMany(`key:${ip}`)) return send(res, 429, { error: 'Too many attempts, try again later' });
     const keyUser = apiKeyUser(req);
-    if (!keyUser) { recordFailure(ip); return send(res, 401, { error: 'Invalid or missing API key' }); }
+    if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
     if (out.db) { db = out.db; saveDb(db); }
     return send(res, out.status, out.body);
   }
@@ -162,10 +189,11 @@ async function api(req, res, path) {
     return send(res, 403, { error: 'Missing CSRF header' });
   }
   if (path === '/api/login' && req.method === 'POST') {
-    if (tooMany(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
     const { login, password } = await readJson(req);
+    const limitKey = `login:${ip}:${String(login ?? '').toLowerCase().slice(0, 64)}`;
+    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many attempts, try again later' });
     const user = checkPassword(login, password);
-    if (!user) { recordFailure(ip); return send(res, 401, { error: 'Wrong login or password' }); }
+    if (!user) { recordFailure(limitKey); return send(res, 401, { error: 'Wrong login or password' }); }
     const token = randomBytes(32).toString('base64url');
     sql.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').run(sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
     return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin, apps: parseApps(user.apps) }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
@@ -180,16 +208,16 @@ async function api(req, res, path) {
     if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
-  if (path === '/api/db' && req.method === 'GET') return send(res, 200, db);
+  if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      db = applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin });
+      db = applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) });
     } catch (e) {
-      return send(res, 400, { error: e.message, db });
+      return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
     saveDb(db);
-    return send(res, 200, db);
+    return send(res, 200, visibleDb(user));
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
@@ -204,6 +232,11 @@ async function api(req, res, path) {
       const key = `mzn_${randomBytes(24).toString('base64url')}`;
       sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
       return send(res, 201, { key }); // shown once; only the hash is stored
+    }
+    if (req.method === 'DELETE') {
+      const created = Number(new URL(req.url, 'http://x').searchParams.get('created'));
+      sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created);
+      return send(res, 200, { ok: true });
     }
   }
   if (path === '/api/users') {

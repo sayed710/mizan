@@ -110,6 +110,7 @@ export async function logout() {
 
 export const listUsers = async () => (await api('/api/users')).data ?? [];
 export const listKeys = async () => (await api('/api/keys')).data ?? [];
+export const revokeKey = (created) => fetch(`/api/keys?created=${Number(created)}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' } });
 export async function createKey(name) {
   const r = await api('/api/keys', { name });
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create key');

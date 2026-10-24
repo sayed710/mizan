@@ -5,6 +5,43 @@ import { applyDiff, diffDb } from '../src/sync.js';
 
 const MAX_LIMIT = 500;
 
+const sellable = (db) => search(db, 'product').filter((p) => p.list_price > 0 && p.website_published !== false);
+
+/** Public website content: only published pages and sellable products (no internal fields). */
+export const publicSite = (db) => ({
+  company: db.settings?.company,
+  currency: db.settings?.currency ?? 'USD',
+  pages: search(db, 'website.page').filter((p) => p.is_published).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map((p) => ({ name: p.name, slug: p.slug, content: p.content })),
+  products: sellable(db).map((p) => ({ id: p.id, name: p.name, price: p.list_price })),
+});
+
+const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
+
+/** Anonymous checkout: validated customer + quotation from sellable products only. */
+export function publicOrder(db, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const name = String(b.name ?? '').trim().slice(0, 120);
+  const email = String(b.email ?? '').trim().slice(0, 254);
+  if (!name) return { status: 400, body: { error: 'Name is required' } };
+  if (!EMAIL.test(email)) return { status: 400, body: { error: 'Enter a valid email address' } };
+  const products = new Map(sellable(db).map((p) => [p.id, p]));
+  const lines = (Array.isArray(b.lines) ? b.lines : []).slice(0, 50)
+    .filter((l) => products.has(l?.product_id) && Number.isInteger(l.qty) && l.qty > 0 && l.qty <= 1000)
+    .map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: products.get(l.product_id).list_price, tax: 14 }));
+  if (!lines.length) return { status: 400, body: { error: 'Your cart is empty' } };
+  let next = db;
+  let partnerId = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase())?.id;
+  if (!partnerId) {
+    const res = create(next, 'res.partner', { name, email, phone: String(b.phone ?? '').slice(0, 40), city: String(b.city ?? '').slice(0, 80), tag_ids: ['Website'] });
+    next = res.db;
+    partnerId = res.id;
+  }
+  const order = create(next, 'sale.order', { partner_id: partnerId, order_line: lines, state: 'sent', source: 'website' });
+  const saved = applyDiff(db, diffDb(db, order.db), { author: 'Website', isAdmin: false });
+  return { status: 201, body: { order: read(saved, 'sale.order', order.id).name }, db: saved };
+}
+
 /** Public shape of a model for API discovery. */
 const describe = (name) => ({
   model: name,
@@ -18,15 +55,16 @@ const describe = (name) => ({
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req
  * @returns {{ status: number, body: unknown, db?: object }} db is set when the request changed data.
  */
-export function handleApi({ method, path, query, body, db, user }) {
+export function handleApi({ method, path, query, body, db, user, allowed = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
-  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).map(describe) };
+  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
+  if (allowed && !allowed.has(model)) return { status: 403, body: { error: `No access to ${model}` } };
   const id = rawId === undefined ? null : Number(rawId);
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed }) });
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {

@@ -28,6 +28,7 @@ export function Login() {
         <input id="password" type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
         {error && <div className="alert" role="alert">{t(error)}</div>}
         <button type="submit" className="btn primary" disabled={busy}>{t('Log in')}</button>
+        <a className="link" href="#/shop">{t('Visit our website')}</a>
       </form>
     </main>
   );

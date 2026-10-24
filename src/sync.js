@@ -3,6 +3,7 @@
 import { models } from './models/index.js';
 import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
+import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 
@@ -33,25 +34,24 @@ export function diffDb(prev, next) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
-const ALWAYS = new Set(['id', 'active']);
-
-/** Keep only declared fields (drops junk and prototype-polluting keys from untrusted input). */
-function clean(model, rec) {
-  const fields = models[model].fields;
-  return Object.fromEntries(Object.entries(rec).filter(([k]) => ALWAYS.has(k) || (fields[k] && !fields[k].compute)));
-}
+const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true } = {}) {
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  const check = (model) => {
+    if (!models[model]) throw new Error(`Unknown model ${model}`);
+    if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
+  };
   installCustomFields(db.settings?.customFields);
   let records = { ...db.records };
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
-    if (!models[model] || !Array.isArray(recs)) throw new Error(`Unknown model ${model}`);
+    check(model);
+    if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
-      const rec = clean(model, raw);
+      const rec = cleanRecord(model, raw);
       const err = validate(model, rec);
       if (err) throw new Error(err);
       current.set(rec.id, rec);
@@ -59,7 +59,8 @@ export function applyDiff(db, d, { author, isAdmin = true } = {}) {
     records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
   }
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
-    if (!models[model] || !Array.isArray(ids)) throw new Error(`Unknown model ${model}`);
+    check(model);
+    if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
@@ -70,13 +71,14 @@ export function applyDiff(db, d, { author, isAdmin = true } = {}) {
   const known = new Set(db.messages.map((m) => m.id));
   const removed = new Set(Array.isArray(d.removedMessages) ? d.removedMessages : []);
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
-    .filter((m) => m && typeof m.id === 'string' && models[m.model] && !known.has(m.id))
-    .map((m) => ({ id: m.id, model: m.model, res_id: m.res_id, body: String(m.body).slice(0, 10000), kind: m.kind === 'note' ? 'note' : 'tracking', author: author ?? m.author, date: m.date }));
+    .map(cleanMessage)
+    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
+    .map((m) => ({ ...m, author: author ?? m.author }));
   // Company, installed apps and Studio fields are admin-only; any user may save favorites.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;
   const settings = !s ? db.settings : {
     ...db.settings,
-    favorites: s.favorites ?? db.settings.favorites,
+    favorites: s.favorites === undefined ? db.settings.favorites : cleanFavorites(s.favorites, db.settings.favorites),
     ...(isAdmin ? {
       company: String(s.company ?? db.settings.company).slice(0, 200),
       currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : db.settings.currency,
@@ -85,5 +87,7 @@ export function applyDiff(db, d, { author, isAdmin = true } = {}) {
     } : {}),
   };
   installCustomFields(settings.customFields);
-  return { ...db, records, seq, settings, messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
+  const next = { ...db, records, seq, settings, messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
+  if (JSON.stringify(next).length > MAX_DB_CHARS) throw new Error('Database size limit reached');
+  return next;
 }
