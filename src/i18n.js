@@ -433,6 +433,10 @@ const ar = {
   'Summarize this record and suggest the next step.': 'لخّص هذا السجل واقترح الخطوة التالية.', Marketplaces: 'المتاجر الإلكترونية', 'Marketplace Connectors': 'ربط المتاجر الإلكترونية',
   'Sync Orders': 'مزامنة الطلبات', Platform: 'المنصة', 'Orders Feed URL (https)': 'رابط الطلبات (https)', 'Last Sync': 'آخر مزامنة', Mobile: 'الجوال',
   'Customer Reference': 'مرجع العميل', Marketplace: 'متجر إلكتروني', 'Orders Imported Last Sync': 'الطلبات المستوردة',
+  Route: 'المسار', 'From Stock': 'من المخزون', 'Buy on Order': 'شراء عند الطلب', 'Manufacture on Order': 'تصنيع عند الطلب', Dropship: 'شحن مباشر',
+  'Landed Costs': 'التكاليف الإضافية', Locations: 'المواقع', 'Location Name': 'اسم الموقع', 'Parent Location': 'الموقع الأب', 'Location Type': 'نوع الموقع',
+  'Source Location': 'موقع المصدر', 'Destination Location': 'موقع الوجهة', 'Additional Costs': 'تكاليف إضافية', 'Dropship Address': 'عنوان الشحن المباشر',
+  Internal: 'داخلي', View: 'عرض', Transit: 'عبور', Receipt: 'الاستلام', Source: 'المصدر',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

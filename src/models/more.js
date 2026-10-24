@@ -73,6 +73,7 @@ export const moreModels = {
       date_deadline: { type: 'date', label: 'Deadline' },
       date_finished: { type: 'date', label: 'Finished on', readonly: true },
       user_id: employee('Responsible'),
+      origin: { type: 'char', label: 'Source', readonly: true },
       state: state([['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done'], ['cancel', 'Cancelled']]),
     },
     defaults: (id) => ({ name: 'MO/' + pad(id), product_qty: 1, state: 'draft', date_deadline: addDays(today(), 7) }),

@@ -1,5 +1,6 @@
 import { create, read, search, write } from '../orm.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
+import { procure } from './routes.js';
 import { addDays, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
@@ -74,6 +75,8 @@ export const salesModels = {
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Carrier' },
+      location_id: { type: 'many2one', relation: 'stock.location', label: 'Source Location' },
+      location_dest_id: { type: 'many2one', relation: 'stock.location', label: 'Destination Location' },
       carrier_tracking_ref: { type: 'char', label: 'Tracking Reference' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['ready', 'Ready'], ['done', 'Done'], ['cancel', 'Cancelled']] },
       move_ids: {
@@ -111,7 +114,7 @@ export const salesModels = {
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'ready'].includes(r.state) },
       ],
       title: 'name',
-      groups: [['partner_id', 'picking_type', 'origin'], ['scheduled_date', 'date_done', 'carrier_id', 'carrier_tracking_ref']],
+      groups: [['partner_id', 'picking_type', 'origin', 'location_id', 'location_dest_id'], ['scheduled_date', 'date_done', 'carrier_id', 'carrier_tracking_ref']],
       tabs: [{ label: 'Operations', fields: ['move_ids'] }],
       chatter: true,
     },
@@ -125,6 +128,8 @@ export const salesModels = {
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
       weight: { type: 'float', label: 'Weight (kg)' },
+      route: { type: 'selection', label: 'Route', options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] },
+      vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       tracking: { type: 'selection', label: 'Tracking', options: [['none', 'No Tracking'], ['lot', 'By Lots'], ['serial', 'By Unique Serial Number']] },
       uom: { type: 'selection', label: 'Unit of Measure', options: [['unit', 'Units'], ['kg', 'kg'], ['m', 'm'], ['l', 'L'], ['hour', 'Hours'], ['box', 'Box']] },
       attributes: { type: 'char', label: 'Attributes' },
@@ -161,7 +166,7 @@ export const salesModels = {
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
-      groups: [['default_code', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'cost', 'qty_available', 'reorder_min'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['default_code', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'cost', 'qty_available', 'reorder_min', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       chatter: true,
     },
   },
@@ -221,7 +226,11 @@ export const salesModels = {
           label: 'Confirm',
           primary: true,
           when: (r) => ['draft', 'sent'].includes(r.state),
-          run: (db, r) => ({ db: createPicking(write(db, 'sale.order', r.id, { state: 'sale' }), { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null }) }),
+          // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
+          run: (db, r) => {
+            const { db: procured, stockLines } = procure(write(db, 'sale.order', r.id, { state: 'sale' }), r);
+            return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null }) };
+          },
         },
         { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
@@ -247,6 +256,8 @@ export const salesModels = {
       date_planned: { type: 'date', label: 'Expected Arrival' },
       state: orderState([['draft', 'RFQ'], ['sent', 'RFQ Sent'], ['purchase', 'Purchase Order'], ['cancel', 'Cancelled']]),
       receipt_done: { type: 'boolean', label: 'Received', readonly: true },
+      origin: { type: 'char', label: 'Source Document', readonly: true },
+      dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
       order_line: productLines('Products', 'cost'),
       ...amountFields('order_line'),
     },
@@ -271,7 +282,11 @@ export const salesModels = {
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/purchase.order/${r.id}` }) },
         {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
-          run: (db, r) => ({ db: createPicking(write(db, 'purchase.order', r.id, { state: 'purchase' }), { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) }),
+          // Dropship orders go vendor → customer directly: no receipt into our stock.
+          run: (db, r) => {
+            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase', ...(r.dropship_partner_id ? { receipt_done: true } : {}) });
+            return { db: r.dropship_partner_id ? confirmed : createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
+          },
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'purchase'].includes(r.state) },
@@ -282,7 +297,7 @@ export const salesModels = {
       ],
       ribbon: (r) => (r.receipt_done ? 'Received' : null),
       title: 'name',
-      groups: [['partner_id'], ['date_order', 'date_planned']],
+      groups: [['partner_id', 'origin', 'dropship_partner_id'], ['date_order', 'date_planned']],
       tabs: [{ label: 'Products', fields: ['order_line'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,

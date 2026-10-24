@@ -307,6 +307,10 @@ export function seed() {
 
   add('stock.lot', { name: 'SDC-0001', product_id: read(db, 'product', 14) ? 14 : null, qty: 1 });
   add('phone.call', { name: 'Follow-up on HQ chairs', partner_id: 1, phone: '+20 2 2345 6789', direction: 'out', duration: 6 });
+  const wh = add('stock.location', { name: 'WH', usage: 'view' });
+  ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));
+  set('product', 4, { route: 'mto_buy', vendor_id: 2 });
+  set('product', 2, { route: 'mto_make' });
   add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
 
