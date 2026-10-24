@@ -1,50 +1,57 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { useState } from 'react';
-import { models } from './models.js';
+import { models } from './models/index.js';
 import { read, search } from './orm.js';
+import { lang, t } from './i18n.js';
 
-const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
+const moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+export const money = (n) => moneyFmt.format(Number(n) || 0);
+export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
+  new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
+export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
 export function display(db, field, value) {
   if (value == null || value === '') return '';
   switch (field.type) {
-    case 'monetary': return money.format(Number(value));
+    case 'monetary': return money(value);
     case 'float': return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    case 'selection': return field.options.find((o) => o[0] === value)?.[1] ?? value;
+    case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
-    case 'boolean': return value ? 'Yes' : '';
+    case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
-    case 'date': return new Date(value + 'T00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    case 'date': return formatDate(value);
     default: return String(value);
   }
 }
 
 const TAG_COLORS = ['#fee2e2', '#dbeafe', '#dcfce7', '#fef3c7', '#ede9fe', '#cffafe', '#fce7f3'];
-const hash = (s) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
+const hash = (s) => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
 
 export const Tag = ({ name, onRemove }) => (
   <span className="tag" style={{ background: TAG_COLORS[hash(name) % TAG_COLORS.length] }}>
     {name}
-    {onRemove && <button type="button" aria-label={`Remove ${name}`} onClick={onRemove}>×</button>}
+    {onRemove && <button type="button" aria-label={`${t('Remove filter')} ${name}`} onClick={onRemove}>×</button>}
   </span>
 );
 
 export const Avatar = ({ name = '?', size = 28 }) => (
-  <span className="avatar" style={{ width: size, height: size, fontSize: size * 0.42, background: `hsl(${hash(name) % 360} 45% 45%)` }}>
-    {name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
+  <span className="avatar" title={name} style={{ width: size, height: size, fontSize: size * 0.42, background: `hsl(${hash(name) % 360} 45% 42%)` }}>
+    {String(name).split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
   </span>
 );
 
 export function Stars({ value = 0, onChange }) {
   return (
-    <span className="stars" role={onChange ? 'radiogroup' : undefined} aria-label="Priority">
+    <span className="stars" aria-label={t('Priority')}>
       {[1, 2, 3].map((n) => (
         <button
           key={n}
           type="button"
           className={n <= value ? 'on' : ''}
           disabled={!onChange}
-          aria-label={`${n} star${n > 1 ? 's' : ''}`}
+          aria-label={`${n} ★`}
+          aria-pressed={n <= value}
           onClick={(e) => { e.stopPropagation(); onChange?.(value === n ? 0 : n); }}
         >★</button>
       ))}
@@ -55,16 +62,16 @@ export function Stars({ value = 0, onChange }) {
 function TagsInput({ value = [], onChange }) {
   const [text, setText] = useState('');
   const add = () => {
-    const t = text.trim();
-    if (t && !value.includes(t)) onChange([...value, t]);
+    const tag = text.trim();
+    if (tag && !value.includes(tag)) onChange([...value, tag]);
     setText('');
   };
   return (
     <div className="tags-input">
-      {value.map((t) => <Tag key={t} name={t} onRemove={() => onChange(value.filter((x) => x !== t))} />)}
+      {value.map((tag) => <Tag key={tag} name={tag} onRemove={() => onChange(value.filter((x) => x !== tag))} />)}
       <input
         value={text}
-        placeholder={value.length ? '' : 'Add a tag…'}
+        placeholder={value.length ? '' : t('Add a tag…')}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
         onBlur={add}
@@ -73,54 +80,64 @@ function TagsInput({ value = [], onChange }) {
   );
 }
 
-function Lines({ db, field, value = [], onChange }) {
-  const set = (i, k, v) => {
-    const next = value.map((l, j) => (j === i ? { ...l, [k]: v } : l));
-    if (k === 'product_id') next[i] = { ...next[i], price_unit: read(db, 'product', Number(v))?.list_price ?? 0 };
-    onChange(next);
+const lineSubtotal = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0);
+
+/** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
+function Lines({ db, field, value = [], onChange, readonly }) {
+  const cols = Object.entries(field.fields);
+  const set = (i, key, v) => {
+    const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
+    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db) : l)));
   };
-  const products = search(db, 'product');
   return (
-    <table className="lines">
-      <thead>
-        <tr>
-          {Object.values(field.fields).map((f) => <th key={f.label}>{f.label}</th>)}
-          <th className="num">Subtotal</th>
-          <th aria-label="Actions" />
-        </tr>
-      </thead>
-      <tbody>
-        {value.map((l, i) => (
-          <tr key={i}>
-            <td>
-              <select value={l.product_id ?? ''} onChange={(e) => set(i, 'product_id', Number(e.target.value) || null)}>
-                <option value="">Select a product…</option>
-                {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </td>
-            <td><input type="number" min="0" value={l.qty ?? ''} onChange={(e) => set(i, 'qty', e.target.value)} /></td>
-            <td><input type="number" min="0" step="0.01" value={l.price_unit ?? ''} onChange={(e) => set(i, 'price_unit', e.target.value)} /></td>
-            <td className="num">{money.format((Number(l.qty) || 0) * (Number(l.price_unit) || 0))}</td>
-            <td><button type="button" className="link danger" aria-label="Delete line" onClick={() => onChange(value.filter((_, j) => j !== i))}>🗑</button></td>
+    <div className="lines-wrap">
+      <table className="lines">
+        <thead>
+          <tr>
+            {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{t(f.label)}</th>)}
+            <th className="num">{t('Subtotal')}</th>
+            {!readonly && <th aria-label={t('Delete')} />}
           </tr>
-        ))}
-        <tr>
-          <td colSpan={5}>
-            <button type="button" className="link" onClick={() => onChange([...value, { product_id: null, qty: 1, price_unit: 0 }])}>Add a line</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {value.map((l, i) => (
+            <tr key={i}>
+              {cols.map(([k, f]) => (
+                <td key={k} className={isNumeric(f) ? 'num' : ''}>
+                  {readonly
+                    ? display(db, f, l[k])
+                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                </td>
+              ))}
+              <td className="num">{money(lineSubtotal(l))}</td>
+              {!readonly && (
+                <td>
+                  <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
+                </td>
+              )}
+            </tr>
+          ))}
+          {!readonly && (
+            <tr>
+              <td colSpan={cols.length + 2}>
+                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.() ?? {}])}>{t('Add a line')}</button>
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
-export function FieldInput({ db, field, value, onChange, id }) {
-  if (field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
+export function FieldInput({ db, field, value, onChange, id, readonly, placeholder }) {
+  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} />;
+  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
   const text = (type = 'text', extra = {}) => (
     <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
-    case 'text': return <textarea id={id} value={value ?? ''} placeholder="Add a description…" onChange={(e) => onChange(e.target.value)} />;
+    case 'text': return <textarea id={id} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
@@ -128,36 +145,46 @@ export function FieldInput({ db, field, value, onChange, id }) {
     case 'selection':
       return (
         <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
-          {field.options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
     case 'many2one':
       return (
         <select id={id} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
-          <option value="" />
+          <option value="">{placeholder ?? ''}</option>
           {search(db, field.relation).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'tags': return <TagsInput value={value} onChange={onChange} />;
-    case 'one2many': return <Lines db={db} field={field} value={value} onChange={onChange} />;
     default: return text();
   }
 }
 
 export const fieldOf = (model, name) => models[model].fields[name];
 
-// Own icon set (simple geometric glyphs) — no third-party artwork.
+// Own icon set (simple geometric glyphs on a 48×48 grid).
 const ICONS = {
   crm: <path d="M6 10h36l-13 15v11l-10 5V25z" />,
   sales: <><rect x="8" y="26" width="8" height="14" rx="2" /><rect x="20" y="16" width="8" height="24" rx="2" /><rect x="32" y="8" width="8" height="32" rx="2" /></>,
   contacts: <><circle cx="24" cy="17" r="8" /><path d="M9 41c1-9 7-14 15-14s14 5 15 14z" /></>,
   inventory: <path d="M24 5l17 9v20l-17 9-17-9V14zm0 4L11 16l13 7 13-7z" />,
+  accounting: <path d="M12 5h18l8 8v30H12zm17 2v8h8M17 24h14v3H17zm0 7h14v3H17zm0 7h9v3h-9z" fillRule="evenodd" />,
+  purchase: <><path d="M4 8h7l5 21h22l4-15H14l-1-3" stroke="currentColor" strokeWidth="4" fill="none" strokeLinejoin="round" /><circle cx="19" cy="38" r="4" /><circle cx="35" cy="38" r="4" /></>,
+  calendar: <path d="M8 10h32v30H8zm0 8h32M16 5v9m16-9v9M14 24h6v5h-6zm10 0h6v5h-6zm-10 8h6v5h-6z" stroke="currentColor" strokeWidth="3.5" fill="none" />,
+  project: <><rect x="6" y="6" width="36" height="36" rx="6" fill="none" stroke="currentColor" strokeWidth="4" /><path d="M14 24l7 7 13-14" stroke="currentColor" strokeWidth="5" fill="none" strokeLinecap="round" strokeLinejoin="round" /></>,
+  helpdesk: <><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" strokeWidth="7" /><path d="M12 12l7 7m10 10l7 7m0-24l-7 7M19 29l-7 7" stroke="currentColor" strokeWidth="4" /></>,
+  employees: <><circle cx="17" cy="16" r="6" /><circle cx="33" cy="18" r="5" /><path d="M5 38c1-8 6-12 12-12s11 4 12 12zm25 0c0-5-1-8-3-10 6-1 13 2 15 10z" /></>,
+  settings: <path d="M21 4h6l1 6 4 2 5-4 4 4-4 5 2 4 6 1v6l-6 1-2 4 4 5-4 4-5-4-4 2-1 6h-6l-1-6-4-2-5 4-4-4 4-5-2-4-6-1v-6l6-1 2-4-4-5 4-4 5 4 4-2zm3 13a7 7 0 100 14 7 7 0 000-14z" fillRule="evenodd" />,
   kanban: <><rect x="6" y="8" width="10" height="32" rx="2" /><rect x="19" y="8" width="10" height="22" rx="2" /><rect x="32" y="8" width="10" height="14" rx="2" /></>,
   list: <><rect x="6" y="9" width="36" height="5" rx="2" /><rect x="6" y="21" width="36" height="5" rx="2" /><rect x="6" y="33" width="36" height="5" rx="2" /></>,
+  graph: <><rect x="7" y="24" width="8" height="17" rx="2" /><rect x="20" y="12" width="8" height="29" rx="2" /><rect x="33" y="18" width="8" height="23" rx="2" /></>,
+  pivot: <path d="M6 6h36v36H6zm0 10h36M18 6v36M6 26h36M6 34h36M30 16v26" stroke="currentColor" strokeWidth="3.5" fill="none" />,
   grid: <><rect x="6" y="6" width="10" height="10" rx="2" /><rect x="19" y="6" width="10" height="10" rx="2" /><rect x="32" y="6" width="10" height="10" rx="2" /><rect x="6" y="19" width="10" height="10" rx="2" /><rect x="19" y="19" width="10" height="10" rx="2" /><rect x="32" y="19" width="10" height="10" rx="2" /><rect x="6" y="32" width="10" height="10" rx="2" /><rect x="19" y="32" width="10" height="10" rx="2" /><rect x="32" y="32" width="10" height="10" rx="2" /></>,
+  filter: <path d="M6 9h36L28 25v12l-8 4V25z" />,
+  chevron: <path d="M14 18l10 10 10-10" stroke="currentColor" strokeWidth="5" fill="none" strokeLinecap="round" />,
 };
 
 export const Icon = ({ name, size = 18 }) => (
-  <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name]}</svg>
+  <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS.grid}</svg>
 );

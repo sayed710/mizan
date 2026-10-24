@@ -38,5 +38,33 @@ Evidence: `ev_67ecdb63…` (home), `ev_5a9caa98…` (CRM kanban), `ev_f1748908�
 - O: Always-editable form; changes saved when leaving the record (URL `/odoo/crm/31`).
 - D: Explicit save/discard shown when dirty; stage changes log a tracking message in chatter.
 
+## Phase 2 observations
+
+Evidence: `ev_68388708…` (CRM search panel, graph, pivot, calendar), `ev_c36d3c71…` (Accounting dashboard, invoice list, invoice form).
+
+### Search panel
+- O: Dropdown with three columns: Filters (grouped, separated by rules), Group By (fields + date granularity), Favorites ("Save search").
+- O: Active filters show a ✓; facets in the search box show filter / group-by chips.
+- D: Filters in one group are OR-ed, groups AND-ed. Group-by is multi-level (list nests, kanban uses first level). Favorites stored in db settings.
+
+### Graph / Pivot / Calendar
+- O: Graph: measure dropdown (Count default), bar/line/pie, stacked toggle, ascending/descending sort.
+- O: Pivot: "Measures" dropdown, row headers (e.g. month), column headers (stage), totals row+column, download.
+- O: Calendar: month grid with week numbers, prev/next/today, mini-month + attendee filters on the side.
+- D: Graph is own SVG (one value axis, hover tooltip, data-table toggle, fixed categorical palette). Pivot uses row/column selects + CSV export instead of expandable headers. Calendar has no side panel yet; "+" on a day creates a record with that date.
+
+### Accounting
+- O: Dashboard: KPI strip (Invoices, Expenses, Cash, Receivable, Payable) + journal cards.
+- O: Invoice list: Number, Customer, Invoice Date, Due Date (relative, red when late), Tax Excluded, Total, Amount Due, Status badge; totals footer.
+- O: Invoice form: buttons Send / Print / Credit Note / Reset to Draft, status bar Draft → Posted, "PAID" diagonal ribbon,
+  smart buttons (Payments, Journal Items), lines (Product, Account, Quantity, Price, Taxes, Amount), totals block
+  (Untaxed, Total, Paid on…, Amount Due), chatter with tracked changes.
+- D: Single `account.move` model for customer invoices and vendor bills; posting assigns `INV/YYYY/NNNNN` or `BILL/…`; payments are a paid amount (partial supported) rather than journal entries; no chart of accounts yet.
+
+### Cross-app flows (D)
+- Quotation → Confirm (stock out) → Create Invoice → Confirm → Register Payment.
+- RFQ → Confirm Order → Receive Products (stock in) → Create Bill.
+- Smart buttons jump to filtered lists (`?rel=field:id`).
+
 ## Persistence
 - D: Browser `localStorage` (`mizan-db-v1`). Swap `src/store.js` for an HTTP API when a backend is needed.

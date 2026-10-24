@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 
 // ponytail: whole db in localStorage, fine for a demo; replace with an HTTP API + Postgres for multi-user.
-const KEY = 'mizan-db-v1';
+const KEY = 'mizan-db-v2';
 const listeners = new Set();
 
 function load() {

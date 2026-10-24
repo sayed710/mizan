@@ -1,17 +1,45 @@
+import { useEffect, useRef, useState } from 'react';
+import { useDb } from './store.js';
+import { t } from './i18n.js';
 import { Avatar, Icon } from './ui.jsx';
 
-export function Navbar({ app, menuIndex }) {
+function MenuGroup({ app, menu, active }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const isActive = menu.children.some((c) => c.key === active);
+  return (
+    <div className="nav-group" ref={ref}>
+      <button type="button" className={isActive ? 'active' : ''} aria-expanded={open} onClick={() => setOpen(!open)}>{t(menu.label)}</button>
+      {open && (
+        <div className="nav-dropdown" role="menu">
+          {menu.children.map((c) => (
+            <a key={c.key} role="menuitem" href={`#/${app.id}/${c.key}`} className={c.key === active ? 'active' : ''} onClick={() => setOpen(false)}>{t(c.label)}</a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function Navbar({ app, active }) {
+  const db = useDb();
   return (
     <header className="navbar">
-      <a href="#/" className="nav-home" aria-label="Home menu"><Icon name="grid" size={18} /></a>
-      <a href={`#/${app.id}/0`} className="nav-app">{app.name}</a>
-      <nav className="nav-menus" aria-label={`${app.name} menus`}>
-        {app.menus.map((m, i) => (
-          <a key={m.label} href={`#/${app.id}/${i}`} className={i === menuIndex ? 'active' : ''}>{m.label}</a>
-        ))}
+      <a href="#/" className="nav-home" aria-label={t('Home menu')}><Icon name="grid" size={18} /></a>
+      <a href={`#/${app.id}`} className="nav-app">{t(app.name)}</a>
+      <nav className="nav-menus" aria-label={t(app.name)}>
+        {app.menus.map((m) => (m.children
+          ? <MenuGroup key={m.label} app={app} menu={m} active={active} />
+          : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}
       </nav>
       <span className="spacer" />
-      <span className="company">My Company</span>
+      <a className="company" href="#/settings/general">{db.settings?.company}</a>
       <Avatar name="Admin" />
     </header>
   );

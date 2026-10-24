@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, write, unlink, search, read, matches, messagesOf } from './orm.js';
+import { aggregate, applyFilters, create, groupRecords, matches, messagesOf, read, search, unlink, write } from './orm.js';
+import { models } from './models/index.js';
 import { seed } from './seed.js';
 
+const runButton = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
+
 test('create assigns sequence and defaults', () => {
-  const { db, id } = create(seed(), 'sale.order', { partner_id: 1 });
+  const db0 = seed();
+  const { db, id } = create(db0, 'sale.order', { partner_id: 1 });
   const so = read(db, 'sale.order', id);
-  assert.equal(so.name, 'S00003');
+  assert.equal(so.name, 'S00004');
   assert.equal(so.state, 'draft');
   assert.equal(so.amount_total, 0);
 });
@@ -15,9 +19,11 @@ test('required fields are enforced', () => {
   assert.throws(() => create(seed(), 'crm.lead', { name: '' }), /Opportunity is required/);
 });
 
-test('computed total from order lines', () => {
+test('order totals include tax', () => {
   const so = read(seed(), 'sale.order', 1);
-  assert.equal(so.amount_total, 40 * 210 + 8 * 45);
+  const untaxed = 40 * 210 + 8 * 45;
+  assert.equal(so.amount_untaxed, untaxed);
+  assert.equal(Math.round(so.amount_total * 100), Math.round(untaxed * 1.14 * 100));
 });
 
 test('stage change writes a tracking message and does not mutate input', () => {
@@ -41,4 +47,47 @@ test('text search matches related partner names and tags', () => {
   assert.ok(matches(db, 'crm.lead', lead, ['nile']));
   assert.ok(matches(db, 'crm.lead', lead, ['product']));
   assert.ok(!matches(db, 'crm.lead', lead, ['zzz']));
+});
+
+test('groupRecords keeps selection order and empty stages', () => {
+  const db = seed();
+  const groups = groupRecords(db, 'crm.lead', search(db, 'crm.lead'), 'stage_id');
+  assert.deepEqual(groups.map((g) => g.key), ['new', 'qualified', 'proposition', 'won']);
+  assert.equal(aggregate(groups[0].records, '__count'), 2);
+  assert.equal(aggregate(groups[0].records, 'expected_revenue'), 50500);
+});
+
+test('filters OR within a group and AND across groups', () => {
+  const db = seed();
+  const leads = search(db, 'crm.lead');
+  assert.equal(applyFilters('crm.lead', leads, ['won']).length, 1);
+  assert.equal(applyFilters('crm.lead', leads, ['won', 'ongoing']).length, leads.length);
+  assert.equal(applyFilters('crm.lead', leads, ['unassigned', 'won']).length, 0);
+});
+
+test('confirming a sale removes stock; receiving a PO adds it', () => {
+  let db = seed();
+  const before = read(db, 'product', 1).qty_available;
+  db = runButton(db, 'sale.order', 1, 'Confirm').db;
+  assert.equal(read(db, 'product', 1).qty_available, before - 40);
+  const { db: db2, id } = create(db, 'purchase.order', { partner_id: 7, order_line: [{ product_id: 1, qty: 10, price_unit: 120, tax: 14 }] });
+  let db3 = write(db2, 'purchase.order', id, { state: 'purchase' });
+  db3 = runButton(db3, 'purchase.order', id, 'Receive Products').db;
+  assert.equal(read(db3, 'product', 1).qty_available, before - 30);
+});
+
+test('invoice from sale order, posting numbers it, payment state follows amount paid', () => {
+  let db = seed();
+  const res = runButton(db, 'sale.order', 3, 'Create Invoice');
+  db = res.db;
+  const inv = search(db, 'account.move').find((m) => m.sale_id === 3);
+  assert.match(res.go, new RegExp(`/invoices/${inv.id}$`));
+  assert.equal(inv.state, 'draft');
+  db = runButton(db, 'account.move', inv.id, 'Confirm').db;
+  const posted = read(db, 'account.move', inv.id);
+  assert.match(posted.name, /^INV\/\d{4}\/00003$/);
+  assert.equal(posted.payment_state, 'not_paid');
+  db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total });
+  assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');
+  assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
 });

@@ -1,12 +1,15 @@
-import { create, emptyDb } from './orm.js';
+import { create, emptyDb, read, write } from './orm.js';
+import { addDays, today } from './models/common.js';
+import { moveStock } from './models/sales.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
-  { name: 'Delta Office Supplies', is_company: true, email: 'info@deltaoffice.example', phone: '+20 3 456 7890', city: 'Alexandria', country: 'Egypt', tag_ids: [] },
+  { name: 'Delta Office Supplies', is_company: true, email: 'info@deltaoffice.example', phone: '+20 3 456 7890', city: 'Alexandria', country: 'Egypt', tag_ids: ['Vendor'] },
   { name: 'Sara Hassan', email: 'sara.h@mail.example', phone: '+20 100 123 4567', city: 'Giza', country: 'Egypt', tag_ids: ['Retail'] },
   { name: 'Gulf Interiors', is_company: true, email: 'contact@gulfinteriors.example', phone: '+971 4 555 0101', city: 'Dubai', country: 'UAE', tag_ids: ['Wholesale'] },
   { name: 'Omar Khaled', email: 'omar.k@mail.example', phone: '+966 55 123 4567', city: 'Riyadh', country: 'Saudi Arabia', tag_ids: [] },
   { name: 'Atlas Workspace', is_company: true, email: 'hello@atlasws.example', phone: '+212 522 000 111', city: 'Casablanca', country: 'Morocco', tag_ids: ['Wholesale'] },
+  { name: 'Pharos Wood Industries', is_company: true, email: 'orders@pharoswood.example', phone: '+20 2 3333 4444', city: 'Damietta', country: 'Egypt', tag_ids: ['Vendor'] },
 ];
 
 const leads = [
@@ -21,14 +24,40 @@ const leads = [
 ];
 
 const products = [
-  { name: 'Ergonomic Chair', type: 'goods', list_price: 210, cost: 120, qty_available: 85 },
-  { name: 'Standing Desk', type: 'goods', list_price: 540, cost: 310, qty_available: 32 },
-  { name: 'Meeting Table (8 seats)', type: 'goods', list_price: 1250, cost: 700, qty_available: 6 },
-  { name: 'Office Design Consultation', type: 'service', list_price: 150, cost: 0, qty_available: 0 },
-  { name: 'Installation (per hour)', type: 'service', list_price: 45, cost: 20, qty_available: 0 },
+  { name: 'Ergonomic Chair', default_code: 'FURN-001', categ: 'Furniture', type: 'goods', list_price: 210, cost: 120, qty_available: 85, reorder_min: 20 },
+  { name: 'Standing Desk', default_code: 'FURN-002', categ: 'Furniture', type: 'goods', list_price: 540, cost: 310, qty_available: 32, reorder_min: 10 },
+  { name: 'Meeting Table (8 seats)', default_code: 'FURN-003', categ: 'Furniture', type: 'goods', list_price: 1250, cost: 700, qty_available: 4, reorder_min: 5 },
+  { name: 'LED Desk Lamp', default_code: 'LIGHT-001', categ: 'Lighting', type: 'goods', list_price: 35, cost: 14, qty_available: 140, reorder_min: 30 },
+  { name: 'Office Design Consultation', default_code: 'SRV-001', categ: 'Services', type: 'service', list_price: 150, cost: 0, qty_available: 0, reorder_min: 0 },
+  { name: 'Installation (per hour)', default_code: 'SRV-002', categ: 'Services', type: 'service', list_price: 45, cost: 20, qty_available: 0, reorder_min: 0 },
 ];
 
-const addDays = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+const departments = ['Management', 'Sales', 'Operations', 'Support'];
+const employees = [
+  ['Admin', 'Chief Executive Officer', 1, null, 'office'],
+  ['Mona Adel', 'Sales Manager', 2, 1, 'office'],
+  ['Youssef Nabil', 'Account Executive', 2, 2, 'home'],
+  ['Hana Mostafa', 'Operations Lead', 3, 1, 'office'],
+  ['Karim Fathy', 'Support Engineer', 4, 4, 'home'],
+  ['Laila Samir', 'Support Engineer', 4, 4, 'office'],
+];
+
+const tasks = [
+  ['Site survey', 1, 4, 'done', -6, 4, 1],
+  ['Floor plan draft', 1, 4, 'progress', 3, 8, 2],
+  ['Order furniture', 1, 2, 'todo', 10, 2, 0],
+  ['Kick-off meeting', 2, 1, 'done', -2, 1, 0],
+  ['Lighting simulation', 2, 4, 'review', 1, 6, 3],
+  ['Install workstations', 2, 5, 'todo', 14, 16, 1],
+];
+
+const tickets = [
+  ['Chair armrest broken', 3, 5, 'issue', 'new', 2],
+  ['Invoice copy request', 1, 6, 'request', 'progress', 0],
+  ['How to adjust desk height?', 5, null, 'question', 'new', 0],
+  ['Late delivery to Dubai', 4, 5, 'issue', 'hold', 3],
+  ['Warranty extension', 6, 6, 'request', 'solved', 1],
+];
 
 /** Builds a fresh demo database through the ORM so seed data obeys the same rules as user data. */
 export function seed() {
@@ -38,6 +67,10 @@ export function seed() {
     db = res.db;
     return res.id;
   };
+  const set = (model, id, vals) => { db = write(db, model, id, vals); };
+  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
+  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
+
   partners.forEach((p) => add('res.partner', p));
   leads.forEach(([name, partner_id, expected_revenue, stage_id, priority, tag_ids], i) => {
     const partner = partners[partner_id - 1];
@@ -45,11 +78,68 @@ export function seed() {
       name, partner_id, expected_revenue, stage_id, priority, tag_ids,
       email: partner.email, phone: partner.phone,
       probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[stage_id],
-      date_deadline: addDays(7 + i * 4),
+      date_deadline: addDays(today(), i * 4 - 6),
+      create_date: addDays(today(), -40 + i * 5),
     });
   });
   products.forEach((p) => add('product', p));
-  add('sale.order', { partner_id: 1, order_line: [{ product_id: 1, qty: 40, price_unit: 210 }, { product_id: 5, qty: 8, price_unit: 45 }] });
-  add('sale.order', { partner_id: 4, state: 'sale', order_line: [{ product_id: 2, qty: 12, price_unit: 540 }] });
+
+  departments.forEach((name) => add('hr.department', { name }));
+  employees.forEach(([name, job_title, department_id, parent_id, work_location], i) =>
+    add('hr.employee', {
+      name, job_title, department_id, parent_id, work_location,
+      work_email: `${name.split(' ')[0].toLowerCase()}@mycompany.example`,
+      join_date: addDays(today(), -900 + i * 120),
+    }));
+  [[1, 1], [2, 2], [3, 4], [4, 5]].forEach(([dep, mgr]) => set('hr.department', dep, { manager_id: mgr }));
+
+  // Sales: one quotation, one confirmed + invoiced + paid, one confirmed not invoiced.
+  add('sale.order', { partner_id: 1, order_line: lines([[1, 40], [6, 8]]) });
+  const so2 = add('sale.order', { partner_id: 4, date_order: addDays(today(), -20), order_line: lines([[2, 12], [4, 12]]) });
+  const so3 = add('sale.order', { partner_id: 6, date_order: addDays(today(), -8), order_line: lines([[3, 2], [5, 6]]) });
+  for (const id of [so2, so3]) {
+    const so = read(db, 'sale.order', id);
+    db = moveStock(db, so.order_line, -1);
+    set('sale.order', id, { state: 'sale' });
+  }
+
+  // Invoices: posted+paid from so2, posted overdue, draft.
+  const so2rec = read(db, 'sale.order', so2);
+  const inv1 = add('account.move', {
+    move_type: 'out_invoice', partner_id: 4, sale_id: so2, invoice_origin: so2rec.name,
+    invoice_date: addDays(today(), -18), invoice_date_due: addDays(today(), 12), invoice_line_ids: so2rec.order_line,
+  });
+  set('account.move', inv1, { state: 'posted', name: `INV/${today().slice(0, 4)}/00001`, amount_paid: read(db, 'account.move', inv1).amount_total, payment_date: addDays(today(), -5) });
+  const inv2 = add('account.move', {
+    move_type: 'out_invoice', partner_id: 3, invoice_date: addDays(today(), -45), invoice_date_due: addDays(today(), -15),
+    invoice_line_ids: lines([[5, 10]]),
+  });
+  set('account.move', inv2, { state: 'posted', name: `INV/${today().slice(0, 4)}/00002`, amount_paid: 500 });
+  add('account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: today(), invoice_date_due: addDays(today(), 30), invoice_line_ids: lines([[1, 4]]) });
+
+  // Purchases: received PO + its posted bill, open RFQ.
+  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]) });
+  const po1rec = read(db, 'purchase.order', po1);
+  db = moveStock(db, po1rec.order_line, 1);
+  set('purchase.order', po1, { state: 'purchase', receipt_done: true });
+  const bill = add('account.move', {
+    move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,
+    invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20), invoice_line_ids: po1rec.order_line,
+  });
+  set('account.move', bill, { state: 'posted', name: `BILL/${today().slice(0, 4)}/00001` });
+  add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
+
+  add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });
+  add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: ['Consulting'], date: addDays(today(), 60) });
+  tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) =>
+    add('project.task', { name, project_id, user_id, stage_id, planned_hours, priority, date_deadline: addDays(today(), d) }));
+
+  tickets.forEach(([name, partner_id, user_id, ticket_type, stage_id, priority], i) =>
+    add('helpdesk.ticket', { name, partner_id, user_id, ticket_type, stage_id, priority, create_date: addDays(today(), -i * 3) }));
+
+  add('calendar.event', { name: 'Demo with Nile Furniture', start: addDays(today(), 1), start_time: '11:00', duration: 1, partner_id: 1, location: 'Cairo office' });
+  add('calendar.event', { name: 'Weekly sales review', start: addDays(today(), 3), start_time: '09:30', duration: 0.5, location: 'Meeting room' });
+  add('calendar.event', { name: 'Supplier visit — Pharos Wood', start: addDays(today(), -2), start_time: '14:00', duration: 2, partner_id: 7, location: 'Damietta' });
+
   return { ...db, messages: [] };
 }

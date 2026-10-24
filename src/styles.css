@@ -81,7 +81,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* Control panel */
 .control-panel { display: flex; align-items: center; gap: 12px; padding: 10px 16px; flex-wrap: wrap; }
 .cp-left, .cp-right { display: flex; align-items: center; gap: 10px; }
-.cp-right { margin-left: auto; }
+.cp-right { margin-inline-start: auto; }
 .cp-title { margin: 0; font-size: 18px; font-weight: 600; }
 .search {
   flex: 1 1 320px; max-width: 520px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -137,12 +137,12 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* List */
 .list-wrap { padding: 0 16px 24px; overflow-x: auto; }
 .list { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.list th, .list td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.list th, .list td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: start; white-space: nowrap; }
 .list th button { background: none; border: 0; font-weight: 600; cursor: pointer; padding: 0; }
 .list tbody tr { cursor: pointer; }
 .list tbody tr:hover { background: #f7f8fc; }
 .list tr.selected { background: var(--brand-soft); }
-.list .num { text-align: right; }
+.list .num { text-align: end; }
 .list .check { width: 36px; }
 .list tfoot td { font-weight: 700; border-bottom: 0; }
 .empty { text-align: center; color: var(--muted); padding: 32px !important; }
@@ -163,7 +163,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 40px; }
 .field { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 10px; min-height: 36px; }
 .field label { font-weight: 600; }
-.req { color: var(--danger); margin-left: 2px; }
+.req { color: var(--danger); margin-inline-start: 2px; }
 .field-value input:not([type='checkbox']), .field-value select, .tab-panel textarea, .lines input, .lines select {
   width: 100%; border: 0; border-bottom: 1px solid var(--border); padding: 4px 2px; background: none; outline: 0;
 }
@@ -177,8 +177,8 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .tab-panel { padding: 14px 0; }
 .tab-panel textarea { min-height: 140px; resize: vertical; }
 .lines { width: 100%; border-collapse: collapse; }
-.lines th, .lines td { padding: 6px; border-bottom: 1px solid var(--border); text-align: left; }
-.lines .num { text-align: right; white-space: nowrap; }
+.lines th, .lines td { padding: 6px; border-bottom: 1px solid var(--border); text-align: start; }
+.lines .num { text-align: end; white-space: nowrap; }
 .total { display: flex; justify-content: flex-end; gap: 12px; font-size: 16px; margin-top: 14px; }
 .alert { background: #fdecea; color: var(--danger); border: 1px solid #f5c2bd; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
 .ribbon { display: inline-block; background: var(--danger); color: #fff; padding: 2px 10px; border-radius: 4px; margin-bottom: 8px; font-weight: 600; }

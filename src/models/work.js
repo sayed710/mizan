@@ -1,0 +1,182 @@
+// Project, Helpdesk, Employees and Calendar.
+import { today } from './common.js';
+
+const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
+
+export const workModels = {
+  'hr.department': {
+    label: 'Departments',
+    fields: {
+      name: { type: 'char', label: 'Department Name', required: true },
+      manager_id: employee('Manager'),
+    },
+    kanban: { title: 'name', lines: ['manager_id'], avatar: true },
+    list: ['name', 'manager_id'],
+    form: {
+      title: 'name',
+      smart: [{ label: 'Employees', model: 'hr.employee', field: 'department_id', target: 'employees/employees' }],
+      groups: [['manager_id'], []],
+      chatter: true,
+    },
+  },
+
+  'hr.employee': {
+    label: 'Employees',
+    fields: {
+      name: { type: 'char', label: 'Employee Name', required: true },
+      job_title: { type: 'char', label: 'Job Title' },
+      department_id: { type: 'many2one', relation: 'hr.department', label: 'Department' },
+      parent_id: employee('Manager'),
+      work_email: { type: 'char', label: 'Work Email' },
+      work_phone: { type: 'char', label: 'Work Phone' },
+      work_location: { type: 'selection', label: 'Work Location', options: [['office', 'Office'], ['home', 'Home'], ['other', 'Other']] },
+      join_date: { type: 'date', label: 'Joined on' },
+      tag_ids: { type: 'tags', label: 'Tags' },
+    },
+    defaults: () => ({ work_location: 'office', tag_ids: [], join_date: today() }),
+    filters: [[{ id: 'remote', label: 'Remote', fn: (r) => r.work_location === 'home' }]],
+    groupBys: ['department_id', 'parent_id', 'work_location', 'join_date'],
+    kanban: { title: 'name', lines: ['job_title', 'work_email'], tags: 'tag_ids', avatar: true },
+    list: ['name', 'job_title', 'department_id', 'parent_id', 'work_email', 'work_phone'],
+    graph: { groupBy: 'department_id', measure: '__count' },
+    pivot: { row: 'department_id', col: 'work_location', measure: '__count' },
+    views: ['kanban', 'list', 'graph', 'pivot'],
+    form: {
+      title: 'name',
+      subtitleField: 'job_title',
+      smart: [
+        { label: 'Tasks', model: 'project.task', field: 'user_id', target: 'project/tasks' },
+        { label: 'Tickets', model: 'helpdesk.ticket', field: 'user_id', target: 'helpdesk/tickets' },
+      ],
+      groups: [['job_title', 'department_id', 'parent_id', 'work_location'], ['work_email', 'work_phone', 'join_date', 'tag_ids']],
+      chatter: true,
+    },
+  },
+
+  'project.project': {
+    label: 'Projects',
+    fields: {
+      name: { type: 'char', label: 'Project Name', required: true },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
+      user_id: employee('Project Manager'),
+      date_start: { type: 'date', label: 'Start Date' },
+      date: { type: 'date', label: 'End Date' },
+      tag_ids: { type: 'tags', label: 'Tags' },
+      description: { type: 'text', label: 'Description' },
+    },
+    defaults: () => ({ tag_ids: [], date_start: today() }),
+    kanban: { title: 'name', lines: ['partner_id', 'user_id'], tags: 'tag_ids', counter: { label: 'Tasks', model: 'project.task', field: 'project_id' } },
+    list: ['name', 'partner_id', 'user_id', 'date_start', 'date'],
+    form: {
+      title: 'name',
+      smart: [{ label: 'Tasks', model: 'project.task', field: 'project_id', target: 'project/tasks' }],
+      groups: [['partner_id', 'user_id', 'tag_ids'], ['date_start', 'date']],
+      tabs: [{ label: 'Description', fields: ['description'] }],
+      chatter: true,
+    },
+  },
+
+  'project.task': {
+    label: 'Tasks',
+    fields: {
+      name: { type: 'char', label: 'Task Title', required: true },
+      project_id: { type: 'many2one', relation: 'project.project', label: 'Project' },
+      user_id: employee('Assignee'),
+      stage_id: {
+        type: 'selection',
+        label: 'Stage',
+        tracking: true,
+        options: [['todo', 'To Do'], ['progress', 'In Progress'], ['review', 'Review'], ['done', 'Done']],
+      },
+      date_deadline: { type: 'date', label: 'Deadline' },
+      planned_hours: { type: 'float', label: 'Allocated Hours' },
+      priority: { type: 'priority', label: 'Priority' },
+      tag_ids: { type: 'tags', label: 'Tags' },
+      description: { type: 'text', label: 'Description' },
+    },
+    defaults: () => ({ stage_id: 'todo', priority: 0, tag_ids: [], planned_hours: 0 }),
+    filters: [
+      [{ id: 'open', label: 'Open Tasks', fn: (r) => r.stage_id !== 'done' }, { id: 'done', label: 'Done', fn: (r) => r.stage_id === 'done' }],
+      [{ id: 'late', label: 'Late', fn: (r) => r.stage_id !== 'done' && r.date_deadline && r.date_deadline < today() }],
+    ],
+    groupBys: ['stage_id', 'project_id', 'user_id', 'date_deadline'],
+    kanban: { groupBy: 'stage_id', title: 'name', lines: ['project_id', 'date_deadline'], tags: 'tag_ids', priority: 'priority', badge: 'user_id', quickCreate: true },
+    list: ['name', 'project_id', 'user_id', 'date_deadline', 'planned_hours', 'stage_id'],
+    graph: { groupBy: 'project_id', measure: '__count' },
+    pivot: { row: 'project_id', col: 'stage_id', measure: 'planned_hours' },
+    calendar: { date: 'date_deadline' },
+    views: ['kanban', 'list', 'calendar', 'graph', 'pivot'],
+    form: {
+      statusbar: 'stage_id',
+      statusbarClickable: true,
+      title: 'name',
+      groups: [['project_id', 'user_id', 'tag_ids'], ['date_deadline', 'planned_hours', 'priority']],
+      tabs: [{ label: 'Description', fields: ['description'] }],
+      chatter: true,
+    },
+  },
+
+  'helpdesk.ticket': {
+    label: 'Tickets',
+    fields: {
+      name: { type: 'char', label: 'Subject', required: true },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
+      user_id: employee('Assigned to'),
+      ticket_type: { type: 'selection', label: 'Type', options: [['question', 'Question'], ['issue', 'Issue'], ['request', 'Request']] },
+      stage_id: {
+        type: 'selection',
+        label: 'Stage',
+        tracking: true,
+        options: [['new', 'New'], ['progress', 'In Progress'], ['hold', 'On Hold'], ['solved', 'Solved']],
+      },
+      create_date: { type: 'date', label: 'Created on', readonly: true },
+      priority: { type: 'priority', label: 'Priority' },
+      tag_ids: { type: 'tags', label: 'Tags' },
+      description: { type: 'text', label: 'Description' },
+    },
+    defaults: () => ({ stage_id: 'new', ticket_type: 'question', priority: 0, tag_ids: [], create_date: today() }),
+    filters: [
+      [{ id: 'mine', label: 'My Tickets', fn: (r) => r.user_id === 1 }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user_id }],
+      [{ id: 'open', label: 'Open', fn: (r) => r.stage_id !== 'solved' }, { id: 'urgent', label: 'Urgent', fn: (r) => r.priority >= 3 }],
+    ],
+    groupBys: ['stage_id', 'user_id', 'ticket_type', 'partner_id', 'create_date'],
+    kanban: { groupBy: 'stage_id', title: 'name', lines: ['partner_id', 'ticket_type'], tags: 'tag_ids', priority: 'priority', badge: 'user_id', quickCreate: true },
+    list: ['name', 'partner_id', 'ticket_type', 'user_id', 'create_date', 'stage_id'],
+    graph: { groupBy: 'ticket_type', measure: '__count' },
+    pivot: { row: 'user_id', col: 'stage_id', measure: '__count' },
+    views: ['kanban', 'list', 'graph', 'pivot'],
+    form: {
+      statusbar: 'stage_id',
+      statusbarClickable: true,
+      title: 'name',
+      groups: [['partner_id', 'ticket_type', 'tag_ids'], ['user_id', 'priority', 'create_date']],
+      tabs: [{ label: 'Description', fields: ['description'] }],
+      chatter: true,
+    },
+  },
+
+  'calendar.event': {
+    label: 'Meetings',
+    fields: {
+      name: { type: 'char', label: 'Meeting Subject', required: true },
+      start: { type: 'date', label: 'Date', required: true },
+      start_time: { type: 'char', label: 'Time' },
+      duration: { type: 'float', label: 'Duration (hours)' },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Attendee' },
+      location: { type: 'char', label: 'Location' },
+      description: { type: 'text', label: 'Description' },
+    },
+    defaults: () => ({ start: today(), start_time: '10:00', duration: 1 }),
+    groupBys: ['partner_id', 'start'],
+    kanban: { title: 'name', lines: ['start', 'start_time', 'location'] },
+    list: ['name', 'start', 'start_time', 'duration', 'partner_id', 'location'],
+    calendar: { date: 'start', time: 'start_time' },
+    views: ['calendar', 'list', 'kanban'],
+    form: {
+      title: 'name',
+      groups: [['start', 'start_time', 'duration'], ['partner_id', 'location']],
+      tabs: [{ label: 'Description', fields: ['description'] }],
+      chatter: true,
+    },
+  },
+};
