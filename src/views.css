@@ -34,6 +34,39 @@
 .discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 @media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
 
+/* Barcode, shop floor, website */
+.barcode { display: grid; place-items: start center; padding-top: 24px; }
+.barcode-card { width: min(520px, calc(100% - 32px)); text-align: center; display: flex; flex-direction: column; gap: 10px; }
+.barcode-icon { font-size: 30px; letter-spacing: 2px; color: var(--muted); }
+.barcode-card > input { padding: 12px; font-size: 18px; border: 2px solid var(--brand); border-radius: 8px; text-align: center; }
+.barcode-product { border-top: 1px solid var(--border); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.barcode-count { align-items: center; justify-content: center; }
+.barcode-count input { width: 90px; text-align: center; font-size: 22px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; }
+.shopfloor .big-qty { font-size: 18px; font-weight: 700; margin: 6px 0; }
+.shopfloor .components { margin: 0 0 10px; padding-inline-start: 18px; color: var(--muted); font-size: 13px; }
+.shopfloor .components .short { color: var(--danger); font-weight: 600; }
+.dash-grid.two { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.file-input { display: flex; flex-direction: column; gap: 4px; }
+.site { min-height: calc(100vh - 47px); display: flex; flex-direction: column; background: #fff; }
+.site-nav { display: flex; align-items: center; gap: 20px; padding: 14px 32px; border-bottom: 1px solid var(--border); }
+.site-brand { font-size: 20px; }
+.site-nav nav { display: flex; gap: 6px; flex: 1; flex-wrap: wrap; }
+.site-nav nav button { border: 0; background: none; padding: 6px 12px; border-radius: 999px; cursor: pointer; font-weight: 500; }
+.site-nav nav button[aria-current] { background: var(--brand); color: #fff; }
+.site-body { flex: 1; padding: 32px; max-width: 1100px; width: 100%; margin: 0 auto; }
+.site-page h1 { font-size: 40px; margin: 0 0 16px; letter-spacing: -.02em; }
+.site-page h2 { font-size: 28px; } .site-page p { font-size: 17px; line-height: 1.7; color: #374151; }
+.shop-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.shop-item { border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.shop-item h3 { margin: 0; font-size: 16px; } .shop-item .price { margin: 0; color: var(--brand); font-weight: 700; }
+.shop-thumb { height: 120px; border-radius: 8px; background: linear-gradient(135deg, var(--brand-soft), #fef3c7); display: grid; place-items: center; font-size: 42px; font-weight: 800; color: var(--brand); }
+.shop-cart { position: sticky; bottom: 16px; margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; box-shadow: 0 10px 30px rgb(16 24 40 / 14%); display: flex; flex-direction: column; gap: 4px; max-width: 360px; margin-inline-start: auto; }
+.checkout { max-width: 420px; display: flex; flex-direction: column; gap: 10px; }
+.checkout label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
+.checkout input { padding: 9px; border: 1px solid var(--border); border-radius: 6px; font-weight: 400; }
+.site-thanks { text-align: center; padding: 40px; }
+.site-footer { padding: 18px 32px; border-top: 1px solid var(--border); color: var(--muted); }
+
 /* Financial reports */
 .report-page .control-panel { gap: 14px; }
 .list.report tr.rep-section { cursor: pointer; font-weight: 600; }

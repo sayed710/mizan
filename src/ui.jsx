@@ -20,6 +20,7 @@ export function display(db, field, value) {
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
+    case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
     default: return String(value);
   }
@@ -76,6 +77,27 @@ function TagsInput({ value = [], onChange }) {
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
         onBlur={add}
       />
+    </div>
+  );
+}
+
+const MAX_FILE = 2 * 1024 * 1024;
+
+/** File field stored inline as { name, type, size, data(URL) }; capped so the shared database stays small. */
+function FileInput({ id, value, onChange }) {
+  const [error, setError] = useState(null);
+  const pick = (file) => {
+    if (!file) return;
+    if (file.size > MAX_FILE) { setError(t('File is larger than 2 MB')); return; }
+    const reader = new FileReader();
+    reader.onload = () => { setError(null); onChange({ name: file.name, type: file.type, size: file.size, data: reader.result }); };
+    reader.readAsDataURL(file);
+  };
+  return (
+    <div className="file-input">
+      {value?.data && <a href={value.data} download={value.name}>⬇ {value.name}</a>}
+      <input id={id} type="file" onChange={(e) => pick(e.target.files[0])} />
+      {error && <span className="req">{error}</span>}
     </div>
   );
 }
@@ -158,6 +180,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;
+    case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
     case 'tags': return <TagsInput value={value} onChange={onChange} />;
     default: return text();
   }
@@ -179,6 +202,16 @@ const ICONS = {
   employees: <><circle cx="17" cy="16" r="6" /><circle cx="33" cy="18" r="5" /><path d="M5 38c1-8 6-12 12-12s11 4 12 12zm25 0c0-5-1-8-3-10 6-1 13 2 15 10z" /></>,
   settings: <path d="M21 4h6l1 6 4 2 5-4 4 4-4 5 2 4 6 1v6l-6 1-2 4 4 5-4 4-5-4-4 2-1 6h-6l-1-6-4-2-5 4-4-4 4-5-2-4-6-1v-6l6-1 2-4-4-5 4-4 5 4 4-2zm3 13a7 7 0 100 14 7 7 0 000-14z" fillRule="evenodd" />,
   payroll: <path d="M6 12h36v24H6zm18 5a7 7 0 100 14 7 7 0 000-14zM10 16v4h4v-4zm24 12v4h4v-4z" fillRule="evenodd" />,
+  marketing: <path d="M4 10h40v28H4zm4 4v2l16 10 16-10v-2L24 24z" fillRule="evenodd" />,
+  sign: <path d="M6 36c6-12 10-18 13-18 4 0-2 14 2 14s6-10 9-10c2 0 1 6 4 6s4-3 8-3v4c-3 0-5 3-8 3s-3-4-4-4-4 8-9 8c-6 0-1-12-2-12-2 0-6 8-9 15z" />,
+  documents: <path d="M6 10h14l4 4h18v24H6z" />,
+  planning: <><rect x="6" y="8" width="16" height="8" rx="2" /><rect x="14" y="20" width="22" height="8" rx="2" /><rect x="24" y="32" width="18" height="8" rx="2" /></>,
+  rental: <path d="M17 6a11 11 0 016 20l-1 2h4v5h-4v4h-5V26a11 11 0 010-20zm0 6a5 5 0 100 10 5 5 0 000-10z" fillRule="evenodd" />,
+  appointments: <path d="M8 10h32v30H8zm0 8h32M16 5v9m16-9v9M17 30l5 5 9-10" stroke="currentColor" strokeWidth="3.5" fill="none" />,
+  website: <><circle cx="24" cy="24" r="17" fill="none" stroke="currentColor" strokeWidth="4" /><path d="M7 24h34M24 7c-9 9-9 25 0 34m0-34c9 9 9 25 0 34" stroke="currentColor" strokeWidth="3" fill="none" /></>,
+  barcode: <path d="M6 8h4v32H6zm7 0h2v32h-2zm5 0h5v32h-5zm8 0h2v32h-2zm5 0h4v32h-4zm7 0h2v32h-2z" />,
+  shopfloor: <path d="M24 4l4 7 8-2 1 8 7 4-4 7 4 7-7 4-1 8-8-2-4 7-4-7-8 2-1-8-7-4 4-7-4-7 7-4 1-8 8 2zm0 13a7 7 0 100 14 7 7 0 000-14z" fillRule="evenodd" />,
+  dashboards: <><rect x="6" y="6" width="16" height="20" rx="3" /><rect x="26" y="6" width="16" height="12" rx="3" /><rect x="6" y="30" width="16" height="12" rx="3" /><rect x="26" y="22" width="16" height="20" rx="3" /></>,
   discuss: <path d="M6 8h36v24H20l-9 8v-8H6z" />,
   manufacturing: <path d="M5 42V20l10 6v-6l10 6v-6l10 6V8h8v34z" />,
   pos: <path d="M8 6h32v14H8zm4 4v6h24v-6zM6 24h36l-3 18H9zm8 5v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3zm-16 6v3h4v-3zm8 0v3h4v-3zm8 0v3h4v-3z" fillRule="evenodd" />,

@@ -200,6 +200,35 @@ export function seed() {
     .forEach(([res_model, res_id, activity_type, summary, d]) =>
       add('mail.activity', { res_model, res_id, res_name: read(db, res_model, res_id).name, activity_type, summary, date_deadline: addDays(today(), d), user_id: 2 }));
 
+  // Email marketing
+  const list = add('mailing.list', { name: 'Newsletter' });
+  [['Rania Saleh', 'rania@mail.example'], ['Karim Adel', 'karim.a@mail.example'], ['Salma Nabil', 'salma@mail.example', true]]
+    .forEach(([name, email, opt_out]) => add('mailing.contact', { name, email, list_id: list, opt_out: !!opt_out }));
+  add('mailing.mailing', { subject: 'Autumn collection is here', list_id: list, body: 'Discover our new ergonomic chairs and desks.', state: 'sent', sent_date: addDays(today(), -6), sent: 2, delivered: 2, opened: 2, clicked: 1, replied: 0 });
+  add('mailing.mailing', { subject: 'Invitation: Office Design Expo', list_id: list, body: 'Join us at the expo next month.', state: 'draft' });
+
+  add('sign.request', { name: 'Distributor Agreement — Gulf Interiors', partner_id: 4, state: 'sent', body: 'The parties agree on exclusive distribution in the UAE for 12 months.' });
+  add('sign.request', { name: 'NDA — Atlas Workspace', partner_id: 6, state: 'signed', signature: 'Atlas Workspace', sign_date: addDays(today(), -3) });
+
+  [['Q3 VAT return.pdf', 'finance', ['Tax']], ['Employee handbook.pdf', 'hr', ['Policy']], ['Brand guidelines.pdf', 'marketing', []], ['Lease contract.pdf', 'legal', ['Contract']]]
+    .forEach(([name, folder, tag_ids]) => add('documents.document', { name, folder, tag_ids }));
+
+  [[2, 'sales', 0, 8], [3, 'sales', 1, 8], [5, 'support', 0, 6], [6, 'support', 2, 8], [null, 'install', 3, 4]]
+    .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), allocated_hours, state: employee_id ? 'published' : 'draft' }));
+
+  add('sale.rental', { partner_id: 6, product_id: 3, qty: 1, price_per_day: 60, state: 'picked', pickup_date: addDays(today(), -5), return_date: addDays(today(), -1) });
+  add('sale.rental', { partner_id: 1, product_id: 2, qty: 4, price_per_day: 15, state: 'reserved', pickup_date: today(), return_date: addDays(today(), 7) });
+  add('sale.rental', { partner_id: 5, product_id: 1, qty: 10, price_per_day: 5, state: 'quotation', pickup_date: addDays(today(), 3), return_date: addDays(today(), 10) });
+
+  const demo = add('appointment.type', { name: 'Showroom Visit', duration: 1, location: 'Mizan Showroom, Cairo', user_id: 2, description: 'Book a guided tour of our showroom.' });
+  add('appointment.type', { name: 'Online Consultation', duration: 0.5, location: 'Video call', user_id: 4 });
+  add('appointment.booking', { name: 'Hany Samir', type_id: demo, date: addDays(today(), 2), time: '11:00' });
+  add('appointment.booking', { name: 'Mai Ezzat', type_id: demo, date: addDays(today(), 4), time: '15:30' });
+
+  add('website.page', { name: 'Home', slug: 'home', sequence: 1, is_published: true, content: '# Workspaces people love\n\nWe design and furnish modern offices across the region.\n\n## Why us\n\nErgonomic products, fast installation and local support.' });
+  add('website.page', { name: 'About Us', slug: 'about', sequence: 2, is_published: true, content: '# Our story\n\nFounded in Cairo, we have equipped more than 200 offices.' });
+  add('website.page', { name: 'Contact', slug: 'contact', sequence: 3, is_published: true, content: '# Contact us\n\nsales@mycompany.example · +20 2 1234 5678' });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

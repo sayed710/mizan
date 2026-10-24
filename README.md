@@ -9,8 +9,10 @@ in [SPEC.md](SPEC.md).
 
 ## Apps
 
-Discuss · Calendar · To-do · Knowledge · Contacts · CRM · Sales · Subscriptions · Point of Sale · Invoicing · Project ·
-Timesheets · Helpdesk · Events · Purchase · Inventory · Manufacturing · Employees · Recruitment · Time Off · Expenses · Payroll · Settings
+Discuss · Calendar · Appointments · To-do · Knowledge · Contacts · CRM · Sales · Dashboards · Subscriptions · Rental ·
+Point of Sale · Invoicing/Accounting · Documents · Project · Timesheets · Planning · Helpdesk · Website (pages + online shop) ·
+Email Marketing · Events · Purchase · Inventory · Manufacturing · Shop Floor · Barcode · Sign · Employees · Recruitment ·
+Time Off · Payroll · Expenses · Settings (33 apps)
 
 Core features on every model: kanban/list/graph/pivot/calendar views, search panel (filters, group by, favorites,
 archived), activities with a due-today counter, chatter with tracked changes, smart buttons, CSV export/import,

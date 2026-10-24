@@ -38,6 +38,7 @@ export const salesModels = {
       cost: { type: 'monetary', label: 'Cost' },
       qty_available: { type: 'float', label: 'On Hand', readonly: true },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
+      website_published: { type: 'boolean', label: 'Sold Online' },
     },
     defaults: () => ({ type: 'goods', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0 }),
     filters: [
@@ -75,6 +76,7 @@ export const salesModels = {
       date_order: { type: 'date', label: 'Order Date' },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
+      source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website']] },
       state: orderState([['draft', 'Quotation'], ['sent', 'Quotation Sent'], ['sale', 'Sales Order'], ['cancel', 'Cancelled']]),
       order_line: productLines('Order Lines', 'list_price'),
       ...amountFields('order_line'),

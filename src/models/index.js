@@ -6,10 +6,11 @@ import { workModels } from './work.js';
 import { moreModels } from './more.js';
 import { mailModels } from './mail.js';
 import { payrollModels } from './payroll.js';
+import { extraModels } from './extra.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -196,14 +197,60 @@ const allApps = [
       { key: 'report', label: 'Reporting', model: 'hr.payslip', view: 'pivot' },
     ],
   },
+  {
+    id: 'marketing', name: 'Email Marketing', color: ['#8b5cf6', '#2563eb'],
+    menus: [
+      { key: 'mailings', label: 'Mailings', model: 'mailing.mailing' },
+      { label: 'Recipients', children: [
+        { key: 'lists', label: 'Mailing Lists', model: 'mailing.list' },
+        { key: 'contacts', label: 'Mailing Contacts', model: 'mailing.contact' },
+      ] },
+    ],
+  },
+  { id: 'sign', name: 'Sign', color: ['#0ea5e9', '#0f172a'], menus: [{ key: 'documents', label: 'Documents to Sign', model: 'sign.request' }] },
+  { id: 'documents', name: 'Documents', color: ['#f59e0b', '#be123c'], menus: [{ key: 'all', label: 'Documents', model: 'documents.document' }] },
+  {
+    id: 'planning', name: 'Planning', color: ['#facc15', '#0d9488'],
+    menus: [
+      { key: 'schedule', label: 'Schedule', model: 'planning.slot' },
+      { key: 'report', label: 'Reporting', model: 'planning.slot', view: 'pivot' },
+    ],
+  },
+  {
+    id: 'rental', name: 'Rental', color: ['#ef4444', '#7c2d12'],
+    menus: [
+      { key: 'orders', label: 'Rental Orders', model: 'sale.rental' },
+      { key: 'schedule', label: 'Schedule', model: 'sale.rental', view: 'calendar' },
+      { key: 'report', label: 'Reporting', model: 'sale.rental', view: 'pivot' },
+    ],
+  },
+  {
+    id: 'appointments', name: 'Appointments', color: ['#22d3ee', '#7c3aed'],
+    menus: [
+      { key: 'types', label: 'Appointment Types', model: 'appointment.type' },
+      { key: 'bookings', label: 'Bookings', model: 'appointment.booking' },
+    ],
+  },
+  {
+    id: 'website', name: 'Website', color: ['#14b8a6', '#2563eb'],
+    menus: [
+      { key: 'site', label: 'Site', type: 'website' },
+      { key: 'pages', label: 'Pages', model: 'website.page' },
+      { key: 'orders', label: 'Online Orders', model: 'sale.order', domain: (r) => r.source === 'website' },
+    ],
+  },
+  { id: 'barcode', name: 'Barcode', color: ['#334155', '#0f172a'], menus: [{ key: 'scan', label: 'Inventory Count', type: 'barcode' }] },
+  { id: 'shopfloor', name: 'Shop Floor', color: ['#0891b2', '#065f46'], menus: [{ key: 'operations', label: 'Operations', type: 'shopfloor' }] },
+  { id: 'dashboards', name: 'Dashboards', color: ['#6366f1', '#db2777'], menus: [{ key: 'overview', label: 'Overview', type: 'overview' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
 ];
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
-const ORDER = ['discuss', 'calendar', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'subscriptions', 'pos', 'accounting', 'project',
-  'timesheets', 'helpdesk', 'events', 'purchase', 'inventory', 'manufacturing', 'employees', 'recruitment', 'timeoff', 'expenses', 'payroll', 'settings'];
+const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
+  'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
+  'manufacturing', 'shopfloor', 'barcode', 'sign', 'employees', 'recruitment', 'timeoff', 'payroll', 'expenses', 'settings'];
 export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);

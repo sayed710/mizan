@@ -78,5 +78,15 @@ Evidence: `ev_a9a164f5…` (menu paths: Accounting › Journal Entries, Reportin
   current-year earnings, general ledger with running balance) are computed from posted journal items.
 - D: Payroll uses one salary structure (basic, 10% allowance, 11% social insurance, 10% income tax on gross − SI); batches generate, confirm and pay all payslips.
 
+## Phase 6: remaining apps
+
+Evidence: `ev_b8365588…` (Email Marketing: menus Mailings / Recipients / Templates / Reporting; list columns Date, Subject,
+Responsible, Sent, Delivered, Opened, Clicked, Replied, Status), `ev_37306a7b…` (Rental: Orders / Schedule / Products; quick
+counters Today, Pickups, Returns, Late, To Confirm, To Invoice; states Quotation, Reserved, Picked-up; columns Order Reference,
+Customer, Status, Pick up Date, Return Date, Total, Invoice Status).
+- D: Mailing send is simulated (recipient counts, no SMTP). Sign captures a typed-name signature. Documents store files inline (≤ 2 MB).
+  Planning uses calendar/kanban instead of a Gantt chart. Rental pickup/return move stock and invoice days × qty × daily price.
+  Website renders published pages from a small text format (no raw HTML) plus a shop whose checkout creates a customer and quotation.
+
 ## Persistence
 - D: Browser `localStorage` (`mizan-db-v1`). Swap `src/store.js` for an HTTP API when a backend is needed.
