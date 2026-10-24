@@ -4,12 +4,14 @@ import { App } from './App.jsx';
 import { Login } from './Login.jsx';
 import { PublicSite } from './views/PublicSite.jsx';
 import { initStore } from './store.js';
-import { isRtl, lang } from './i18n.js';
+import { isRtl, lang, resolvedTheme } from './i18n.js';
 import './styles.css';
 import './views.css';
+import './theme.css';
 
 document.documentElement.lang = lang;
 document.documentElement.dir = isRtl ? 'rtl' : 'ltr';
+document.documentElement.dataset.theme = resolvedTheme();
 
 const root = createRoot(document.getElementById('root'));
 initStore().then(({ mode, user }) => {

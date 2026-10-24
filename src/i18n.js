@@ -8,6 +8,15 @@ const read = () => {
 export const lang = typeof localStorage === 'undefined' ? 'en' : read();
 export const isRtl = lang === 'ar';
 
+const THEME_KEY = 'mizan-theme';
+/** 'light' | 'dark' | 'auto' (follows the OS); a per-browser preference. */
+export const theme = (() => { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch { return 'auto'; } })();
+export const resolvedTheme = () => (theme === 'auto' ? (matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : theme);
+export function setTheme(next) {
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* storage blocked */ }
+  location.reload();
+}
+
 export function setLang(next) {
   try { localStorage.setItem(KEY, next); } catch { /* storage blocked: stays in current language */ }
   location.reload();
@@ -403,6 +412,8 @@ const ar = {
   'Product (empty = all)': 'المنتج (فارغ = الكل)', 'Fixed Price': 'سعر ثابت', 'Discount %': 'الخصم %',
   gantt: 'مخطط جانت',
   Companies: 'الشركات', 'Add Company': 'إضافة شركة',
+  Theme: 'المظهر', Light: 'فاتح', Dark: 'داكن', Auto: 'تلقائي', 'Unit of Measure': 'وحدة القياس', Units: 'وحدات', Hours: 'ساعات',
+  'Variant of': 'متغير من', 'Variant Values': 'قيم المتغير', 'Generate Variants': 'إنشاء المتغيرات', Variants: 'المتغيرات', 'Attributes': 'الخصائص',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

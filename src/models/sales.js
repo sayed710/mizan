@@ -31,6 +31,23 @@ function invoiceFrom(db, order, moveType, originField) {
   return { db: next, go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
 }
 
+/** "Color: Red, Blue; Size: S, M" → [['Red','Blue'], ['S','M']] (empty groups ignored). */
+export const parseAttributes = (text = '') => String(text).split(';')
+  .map((part) => (part.includes(':') ? part.split(':')[1] : part).split(',').map((v) => v.trim()).filter(Boolean))
+  .filter((values) => values.length);
+
+/** Create one product per combination of attribute values (skips combinations that already exist). */
+export function generateVariants(db, template) {
+  const combos = parseAttributes(template.attributes).reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
+  const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => (p.variant_values ?? []).join('|')));
+  return combos.filter((c) => !existing.has(c.join('|'))).reduce((acc, values, i) => create(acc, 'product', {
+    name: `${template.name} (${values.join(', ')})`,
+    default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
+    type: template.type, categ: template.categ, uom: template.uom, list_price: template.list_price, cost: template.cost,
+    qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values,
+  }).db, db);
+}
+
 const orderState = (labels) => ({ type: 'selection', label: 'Status', tracking: true, options: labels });
 
 export const salesModels = {
@@ -94,13 +111,17 @@ export const salesModels = {
       default_code: { type: 'char', label: 'Internal Reference' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
+      uom: { type: 'selection', label: 'Unit of Measure', options: [['unit', 'Units'], ['kg', 'kg'], ['m', 'm'], ['l', 'L'], ['hour', 'Hours'], ['box', 'Box']] },
+      attributes: { type: 'char', label: 'Attributes' },
+      variant_of: { type: 'many2one', relation: 'product', label: 'Variant of', readonly: true },
+      variant_values: { type: 'tags', label: 'Variant Values', readonly: true },
       list_price: { type: 'monetary', label: 'Sales Price' },
       cost: { type: 'monetary', label: 'Cost' },
       qty_available: { type: 'float', label: 'On Hand', readonly: true },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
-    defaults: () => ({ type: 'goods', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0 }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
       [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && r.qty_available < r.reorder_min }],
@@ -122,8 +143,10 @@ export const salesModels = {
           },
           when: (r) => r.type === 'goods',
         },
+        { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
-      groups: [['default_code', 'type', 'categ'], ['list_price', 'cost', 'qty_available', 'reorder_min']],
+      smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
+      groups: [['default_code', 'type', 'categ', 'uom'], ['list_price', 'cost', 'qty_available', 'reorder_min'], ['attributes', 'variant_of', 'variant_values']],
       chatter: true,
     },
   },

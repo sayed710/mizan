@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
 import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
-import { lang, setLang, t } from '../i18n.js';
+import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
@@ -138,6 +138,16 @@ export function Settings() {
           <div className="field-value">
             <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
               {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="theme">{t('Theme')}</label>
+          <div className="field-value">
+            <select id="theme" value={theme} onChange={(e) => setTheme(e.target.value)}>
+              <option value="auto">{t('Auto')}</option>
+              <option value="light">{t('Light')}</option>
+              <option value="dark">{t('Dark')}</option>
             </select>
           </div>
         </div>
