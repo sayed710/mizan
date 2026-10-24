@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
+import { handleApi } from './api.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -27,6 +28,7 @@ sql.exec(`
     salt TEXT NOT NULL, hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, apps TEXT
   );
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
 `);
 
 try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
@@ -76,6 +78,14 @@ function sessionUser(req) {
   const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
   if (!row || row.expires < Date.now()) return null;
   return { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) };
+}
+
+/** User owning a "Bearer mzn_…" API key, or null. Keys are stored only as SHA-256 hashes. */
+function apiKeyUser(req) {
+  const key = /^Bearer (mzn_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
+  if (!key) return null;
+  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
+  return row ? { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin } : null;
 }
 
 const cookie = (value, maxAge) =>
@@ -137,6 +147,16 @@ async function serveStatic(req, res) {
 // ---- routes ----
 async function api(req, res, path) {
   const ip = req.socket.remoteAddress ?? '?';
+  if (path.startsWith('/api/v1/')) {
+    // Bearer-token API: no cookies involved, so no CSRF exposure; rate-limit failed keys like logins.
+    if (tooMany(ip)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    const keyUser = apiKeyUser(req);
+    if (!keyUser) { recordFailure(ip); return send(res, 401, { error: 'Invalid or missing API key' }); }
+    const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser });
+    if (out.db) { db = out.db; saveDb(db); }
+    return send(res, out.status, out.body);
+  }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
   if (req.method !== 'GET' && (req.headers['x-requested-with'] !== 'mizan' || !String(req.headers['content-type']).startsWith('application/json'))) {
     return send(res, 403, { error: 'Missing CSRF header' });
@@ -176,6 +196,15 @@ async function api(req, res, path) {
     db = seed();
     saveDb(db);
     return send(res, 200, db);
+  }
+  if (path === '/api/keys') {
+    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT name, created FROM api_keys WHERE user_id = ? ORDER BY created').all(user.id));
+    if (req.method === 'POST') {
+      const { name } = await readJson(req);
+      const key = `mzn_${randomBytes(24).toString('base64url')}`;
+      sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
+      return send(res, 201, { key }); // shown once; only the hash is stored
+    }
   }
   if (path === '/api/users') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });

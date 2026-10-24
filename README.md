@@ -49,6 +49,26 @@ Without a server the frontend runs as a browser-only demo (data in `localStorage
 npm test           # ORM, business-flow and sync tests
 ```
 
+### Docker
+
+```bash
+docker build -t mizan .
+docker run -p 8069:8069 -v mizan-data:/data -e MIZAN_ADMIN_PASSWORD=change-me mizan
+```
+
+### REST API
+
+Create a key in **Settings → API Keys**, then:
+
+```bash
+curl -H "Authorization: Bearer mzn_..." http://localhost:8069/api/v1/models
+curl -H "Authorization: Bearer mzn_..." "http://localhost:8069/api/v1/crm.lead?q=desk&limit=20"
+curl -H "Authorization: Bearer mzn_..." -H "Content-Type: application/json" -X POST -d '{"name":"New lead"}' http://localhost:8069/api/v1/crm.lead
+```
+
+`GET/POST /api/v1/<model>`, `GET/PATCH/DELETE /api/v1/<model>/<id>` (search with `q`, paging with `limit`/`offset`).
+Writes go through the same validation as the web client.
+
 ## Architecture
 
 - `src/models/` — model registry (fields, filters, group-bys, view definitions, buttons) and app menus.

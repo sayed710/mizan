@@ -109,6 +109,12 @@ export async function logout() {
 }
 
 export const listUsers = async () => (await api('/api/users')).data ?? [];
+export const listKeys = async () => (await api('/api/keys')).data ?? [];
+export async function createKey(name) {
+  const r = await api('/api/keys', { name });
+  if (!r.ok) throw new Error(r.data?.error ?? 'Could not create key');
+  return r.data.key;
+}
 export async function addUser(vals) {
   const r = await api('/api/users', vals);
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create user');

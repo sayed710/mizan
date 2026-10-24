@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { addUser, commit, getDb, getUser, isServer, listUsers, logout, resetDemo, useDb } from '../store.js';
+import { addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, useDb } from '../store.js';
 import { lang, setLang, t } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 
@@ -43,6 +43,28 @@ function Users() {
         <button type="submit" className="btn primary">{t('Add user')}</button>
       </form>
       {error && <div className="alert" role="alert">{error}</div>}
+    </>
+  );
+}
+
+function ApiKeys() {
+  const [keys, setKeys] = useState([]);
+  const [fresh, setFresh] = useState(null);
+  const refresh = () => listKeys().then(setKeys);
+  useEffect(() => { refresh(); }, []);
+  const add = async () => {
+    const name = prompt(t('Key name'), 'Integration');
+    if (!name) return;
+    setFresh(await createKey(name));
+    refresh();
+  };
+  return (
+    <>
+      <h3>{t('API Keys')}</h3>
+      <p className="muted">{t('Use with')} <code>Authorization: Bearer &lt;key&gt;</code> {t('on')} <code>/api/v1/&lt;model&gt;</code></p>
+      <ul>{keys.map((k) => <li key={k.created}>{k.name} · {new Date(k.created).toLocaleDateString()}</li>)}</ul>
+      {fresh && <div className="alert info-box" role="status">{t('Copy this key now, it will not be shown again')}: <code>{fresh}</code></div>}
+      <button type="button" className="btn" onClick={add}>{t('New API Key')}</button>
     </>
   );
 }
@@ -112,6 +134,7 @@ export function Settings() {
         {status && <p role="status">{status}</p>}
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
         {isServer() && getUser()?.isAdmin && <Users />}
+        {isServer() && <ApiKeys />}
         {isServer() && <p><button type="button" className="btn" onClick={logout}>{t('Log out')}</button></p>}
       </section>
     </main>

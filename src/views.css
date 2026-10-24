@@ -34,6 +34,8 @@
 .discuss-compose textarea { flex: 1; min-height: 44px; max-height: 160px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 @media (max-width: 760px) { .discuss { grid-template-columns: 1fr; height: auto; } }
 
+.info-box { background: #eff6ff; color: #1e3a8a; border-color: #bfdbfe; word-break: break-all; }
+
 /* Printable documents */
 .print-page { background: #e9ebf0; min-height: 100vh; padding: 20px 16px; }
 .print-toolbar { display: flex; gap: 8px; justify-content: center; margin-bottom: 14px; }
