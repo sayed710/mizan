@@ -185,7 +185,7 @@ export const extraModels = {
     kanban: { groupBy: 'employee_id', title: 'name', lines: ['start', 'allocated_hours', 'role'], badge: 'state' },
     list: ['start', 'employee_id', 'role', 'name', 'allocated_hours', 'state'],
     views: ['gantt', 'calendar', 'kanban', 'list', 'pivot'],
-    gantt: { start: 'start', stop: 'end', row: 'employee_id', color: 'state' },
+    gantt: { start: 'start', stop: 'end', row: 'employee_id', color: 'state', hours: 'allocated_hours' },
     calendar: { date: 'start' },
     pivot: { row: 'employee_id', col: 'role', measure: 'allocated_hours' },
     form: {

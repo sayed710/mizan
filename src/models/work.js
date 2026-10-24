@@ -109,7 +109,7 @@ export const workModels = {
     pivot: { row: 'project_id', col: 'stage_id', measure: 'planned_hours' },
     calendar: { date: 'date_deadline' },
     views: ['kanban', 'list', 'gantt', 'calendar', 'graph', 'pivot'],
-    gantt: { start: 'date_start', stop: 'date_deadline', row: 'user_id', color: 'stage_id' },
+    gantt: { start: 'date_start', stop: 'date_deadline', row: 'user_id', color: 'stage_id', hours: 'planned_hours', openLabel: 'Unassigned' },
     form: {
       statusbar: 'stage_id',
       statusbarClickable: true,
