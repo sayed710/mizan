@@ -1,4 +1,4 @@
-import { create, emptyDb, postNote, read, write } from './orm.js';
+import { create, emptyDb, postNote, read, search, write } from './orm.js';
 import { addDays, today } from './models/common.js';
 import { moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
@@ -144,6 +144,10 @@ export function seed() {
   });
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
+  const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
+  add('account.bank.statement.line', { date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
+  add('account.bank.statement.line', { date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
+  add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });

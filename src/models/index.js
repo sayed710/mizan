@@ -9,10 +9,11 @@ import { payrollModels } from './payroll.js';
 import { extraModels } from './extra.js';
 import { apps2Models } from './apps2.js';
 import { apps3Models } from './apps3.js';
+import { bankModels } from './bank.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -73,6 +74,7 @@ const allApps = [
         vendors,
       ] },
       { label: 'Accounting', children: [
+        { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
         { key: 'entries', label: 'Journal Entries', model: 'account.move' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
       ] },

@@ -24,6 +24,7 @@ export function Dashboard() {
     ['Receivable', money(sum(invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
     ['Payable', money(sum(bills, 'amount_residual')), '#/accounting/bills?view=list'],
     ['Overdue invoices', String(overdue.length), '#/accounting/invoices?view=list'],
+    ['To reconcile', String(search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length), '#/accounting/bank'],
   ];
 
   return (

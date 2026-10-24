@@ -397,6 +397,8 @@ const ar = {
   'Your cart is empty': 'سلتك فارغة', 'Name is required': 'الاسم مطلوب',
   Transfers: 'التحويلات', Receipts: 'الاستلامات', Deliveries: 'التسليمات', Delivery: 'التسليم', Receipt: 'الاستلام', 'Internal Transfer': 'تحويل داخلي',
   'Operation Type': 'نوع العملية', 'Effective Date': 'تاريخ التنفيذ', Validate: 'اعتماد', 'Mark as Todo': 'تحديد للتنفيذ', 'Disc.%': 'خصم %',
+  'Bank Transactions': 'الحركات البنكية', 'To Reconcile': 'للتسوية', Reconciled: 'تمت التسوية', 'Matched with': 'مطابقة مع',
+  'Book to Account': 'ترحيل لحساب', Reconcile: 'تسوية', Match: 'مطابقة', 'To reconcile': 'للتسوية', Incoming: 'وارد', Outgoing: 'صادر',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',
