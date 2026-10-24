@@ -96,5 +96,17 @@ categories Sales, Website, Services, Accounting, Supply Chain, Productivity, Mar
   Repairs (parts consume stock, invoice), Field Service, Fleet (services cost smart button), Attendances (kiosk check-in/out),
   Appraisals, Surveys (take page + stored answers), Lunch, Approvals, Frontdesk, eLearning. Credit notes reverse invoices in the ledger.
 
+## Phase 8+: platform features (design choices)
+
+- Studio: admin-defined custom fields (x_ prefix) merged into the registry; validated on the server.
+- Access: admin-only settings; users can be limited to apps, enforced server-side for /api/db, /api/diff and /api/v1.
+- Security review fixes: per-field type validation of every incoming value, rate limits per ip+login, Secure cookies in production.
+- REST API (/api/v1) with hashed personal API keys; public website endpoints (/api/public/site, /api/public/order).
+- Accounting: credit notes, bank reconciliation (auto-match by amount, manual match, book to account), pricelists, line discounts.
+- Inventory: delivery orders and receipts created on confirmation; stock moves on validation.
+- Record onchange rules (customer → pricelist/contact details, stage → probability), also for programmatic writes.
+- Email: dependency-free SMTP client; documents and campaigns are emailed when MIZAN_SMTP_* is set.
+- Views: Gantt (Planning, Time Off, Rental, Project), printable documents, company currency.
+
 ## Persistence
 - D: Browser `localStorage` (`mizan-db-v1`). Swap `src/store.js` for an HTTP API when a backend is needed.
