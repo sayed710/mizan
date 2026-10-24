@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { read } from '../orm.js';
+import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
+import { agedBalance, analyticActuals, followUps, taxReport } from '../models/finance.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -115,7 +116,98 @@ function Ledger({ db, period }) {
   );
 }
 
+const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
+
+function Tax({ db, period }) {
+  const r = taxReport(db, period);
+  return (
+    <tbody>
+      <Total label="Output Tax" value={r.output} />
+      <Total label="Input Tax" value={r.input} />
+      <Total label="Tax Payable" value={r.payable} strong />
+    </tbody>
+  );
+}
+
+const Aged = (kind) => function AgedBody({ db }) {
+  const { buckets, rows } = agedBalance(db, kind);
+  const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
+  return (
+    <tbody>
+      {rows.map((r) => (
+        <tr key={r.partner_id} className="rep-detail">
+          <td><a href={`#/open/res.partner/${r.partner_id}`}>{partnerName(db, r.partner_id)}</a></td>
+          {buckets.map(([k]) => <td key={k} className="num">{r[k] ? money(r[k]) : ''}</td>)}
+          <td className="num">{money(r.total)}</td>
+        </tr>
+      ))}
+      <tr className="rep-total strong"><td>{t('Total')}</td>{buckets.map(([k]) => <td key={k} className="num">{money(sum(k))}</td>)}<td className="num">{money(sum('total'))}</td></tr>
+    </tbody>
+  );
+};
+
+function FollowUps({ db }) {
+  return (
+    <tbody>
+      {followUps(db).map((f) => {
+        const email = read(db, 'res.partner', f.partner_id)?.email;
+        const body = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${Number(m.amount_residual).toFixed(2)}`).join('\n');
+        return (
+          <tr key={f.partner_id} className="rep-detail">
+            <td>
+              <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
+              <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
+              {email && <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}>{t('Send Reminder')}</a>}
+            </td>
+            <td className="num">{f.oldest}</td>
+            <td className="num">{money(f.total)}</td>
+          </tr>
+        );
+      })}
+    </tbody>
+  );
+}
+
+function Budget({ db }) {
+  return (
+    <tbody>
+      {search(db, 'account.budget').filter((b) => b.state !== 'draft').flatMap((b) => {
+        const actual = analyticActuals(db, { from: b.date_from, to: b.date_to });
+        return [
+          <tr key={b.id} className="rep-section"><td colSpan={4}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
+          ...(b.lines ?? []).map((l, i) => {
+            const a = actual.get(l.analytic_account_id) ?? 0;
+            return (
+              <tr key={`${b.id}-${i}`} className="rep-detail">
+                <td>{read(db, 'account.analytic.account', l.analytic_account_id)?.name ?? '—'}</td>
+                <td className="num">{money(l.planned)}</td>
+                <td className="num">{money(a)}</td>
+                <td className="num">{l.planned ? `${Math.round((a / l.planned) * 100)}%` : ''}</td>
+              </tr>
+            );
+          }),
+        ];
+      })}
+    </tbody>
+  );
+}
+
+function Analytic({ db, period }) {
+  const actual = analyticActuals(db, period);
+  return (
+    <tbody>
+      {search(db, 'account.analytic.account').map((a) => <Total key={a.id} label={a.name} value={actual.get(a.id) ?? 0} />)}
+    </tbody>
+  );
+}
+
 const REPORTS = {
+  tax: { title: 'Tax Return', Body: Tax, cols: ['Amount'] },
+  agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
+  agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
+  followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
+  budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Achievement'] },
+  analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', Body: Pnl, cols: ['Balance'] },
   balance: { title: 'Balance Sheet', Body: Balance, cols: ['Balance'] },
   ledger: { title: 'General Ledger', Body: Ledger, cols: ['Debit', 'Credit', 'Balance'] },

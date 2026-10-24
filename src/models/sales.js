@@ -1,7 +1,8 @@
 import { create, read, search, write } from '../orm.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
-import { addDays, amountFields, monthFilters, pad, productLines, today } from './common.js';
+import { checkCreditLimit } from './finance.js';
+import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
 export function moveStock(db, lines = [], sign) {
@@ -228,6 +229,7 @@ export const salesModels = {
           when: (r) => ['draft', 'sent'].includes(r.state),
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
+            checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
             const { db: procured, stockLines } = procure(write(db, 'sale.order', r.id, { state: 'sale' }), r);
             return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null }) };
           },

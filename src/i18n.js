@@ -437,6 +437,11 @@ const ar = {
   'Landed Costs': 'التكاليف الإضافية', Locations: 'المواقع', 'Location Name': 'اسم الموقع', 'Parent Location': 'الموقع الأب', 'Location Type': 'نوع الموقع',
   'Source Location': 'موقع المصدر', 'Destination Location': 'موقع الوجهة', 'Additional Costs': 'تكاليف إضافية', 'Dropship Address': 'عنوان الشحن المباشر',
   Internal: 'داخلي', View: 'عرض', Transit: 'عبور', Receipt: 'الاستلام', Source: 'المصدر',
+  'Credit Limit': 'حد الائتمان', 'Lock Date': 'تاريخ الإقفال', 'Tax Return': 'الإقرار الضريبي', 'Aged Receivable': 'أعمار الذمم المدينة',
+  'Aged Payable': 'أعمار الذمم الدائنة', 'Follow-up Reports': 'تقارير المتابعة', 'Budget vs Actual': 'الموازنة مقابل الفعلي', 'Analytic Report': 'التقرير التحليلي',
+  'Analytic Accounts': 'الحسابات التحليلية', Budgets: 'الموازنات', Analytic: 'تحليلي', 'Output Tax': 'ضريبة المخرجات', 'Input Tax': 'ضريبة المدخلات',
+  'Tax Payable': 'الضريبة المستحقة', 'Not due': 'غير مستحق', Older: 'أقدم', Planned: 'المخطط', Actual: 'الفعلي', Achievement: 'نسبة التحقيق', Overdue: 'متأخر',
+  'Send Reminder': 'إرسال تذكير', 'Oldest Due': 'أقدم استحقاق',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

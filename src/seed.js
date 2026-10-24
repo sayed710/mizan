@@ -313,6 +313,10 @@ export function seed() {
   set('product', 2, { route: 'mto_make' });
   add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
+  const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
+  add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
+  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
+  set('res.partner', 1, { credit_limit: 100000 });
 
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');

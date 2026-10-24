@@ -32,6 +32,7 @@ export const productLines = (label, priceField) => ({
     price_unit: { type: 'monetary', label: 'Unit Price' },
     discount: { type: 'float', label: 'Disc.%' },
     tax: { type: 'float', label: 'Tax %' },
+    analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
   },
   newLine: () => ({ product_id: null, qty: 1, price_unit: 0, discount: 0, tax: 14 }),
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.

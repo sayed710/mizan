@@ -14,10 +14,11 @@ import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
+import { financeModels } from './finance.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -87,11 +88,19 @@ const allApps = [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
         { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
         { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
+        { key: 'tax-report', label: 'Tax Return', type: 'report', report: 'tax' },
+        { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
+        { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
+        { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
+        { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
+        { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
         { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
       ] },
       { label: 'Configuration', children: [
         { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
         { key: 'journals', label: 'Journals', model: 'account.journal' },
+        { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
+        { key: 'budgets', label: 'Budgets', model: 'account.budget' },
       ] },
     ],
   },

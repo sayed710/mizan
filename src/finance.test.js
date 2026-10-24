@@ -1,0 +1,51 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { create, read, search, updateSettings, write } from './orm.js';
+import { models } from './models/index.js';
+import { agedBalance, analyticActuals, followUps, receivableOf, taxReport } from './models/finance.js';
+import { addDays, today } from './models/common.js';
+import { seed } from './seed.js';
+
+const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+const invoice = (db, vals) => {
+  const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14 }], ...vals });
+  return { db: run(next, 'account.move', id, 'Confirm'), id };
+};
+
+test('confirming a quotation over the credit limit is refused', () => {
+  const db0 = write(seed(), 'res.partner', 3, { credit_limit: receivableOf(seed(), 3) + 500 });
+  const { db, id } = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 0 }] });
+  assert.throws(() => run(db, 'sale.order', id, 'Confirm'), /credit limit/);
+  const ok = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  assert.equal(read(run(ok.db, 'sale.order', ok.id, 'Confirm'), 'sale.order', ok.id).state, 'sale');
+});
+
+test('posting into a locked period is refused', () => {
+  const db = updateSettings(seed(), { lock_date: today() });
+  assert.throws(() => invoice(db, { invoice_date: addDays(today(), -1) }), /locked/);
+  assert.equal(read(invoice(db, { invoice_date: addDays(today(), 1) }).db, 'account.move', invoice(db, { invoice_date: addDays(today(), 1) }).id).state, 'posted');
+});
+
+test('tax return nets output VAT against input VAT', () => {
+  const db0 = seed();
+  const period = { from: today(), to: today() };
+  const before = taxReport(db0, period);
+  const { db } = invoice(db0, { invoice_date: today() });
+  const after = taxReport(db, period);
+  assert.equal(Math.round((after.output - before.output) * 100) / 100, 140);
+  assert.equal(after.payable, Math.round((after.output - after.input) * 100) / 100);
+});
+
+test('aged receivable buckets by days overdue and follow-ups list overdue partners', () => {
+  const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -80), invoice_date_due: addDays(today(), -45) });
+  const row = agedBalance(db).rows.find((r) => r.partner_id === 5);
+  assert.ok(row['31_60'] >= 1140);
+  assert.ok(followUps(db).some((f) => f.partner_id === 5 && f.total >= 1140));
+});
+
+test('analytic actuals sum posted lines tagged with an analytic account', () => {
+  const db0 = seed();
+  const office = search(db0, 'account.analytic.account')[0].id;
+  const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, analytic_account_id: office }] });
+  assert.equal(analyticActuals(db).get(office), 900);
+});

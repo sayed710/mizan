@@ -160,6 +160,12 @@ export function Settings() {
             </select>
           </div>
         </div>
+        <div className="field">
+          <label htmlFor="lock_date">{t('Lock Date')}</label>
+          <div className="field-value">
+            <input id="lock_date" type="date" value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
+          </div>
+        </div>
         <h3>{t('Data')}</h3>
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">
