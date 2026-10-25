@@ -455,6 +455,7 @@ const ar = {
   'Post Due Entries': 'ترحيل القيود المستحقة', Compute: 'احسب', Running: 'جارٍ', Months: 'الأشهر', 'Prepaid Expenses': 'مصروفات مدفوعة مقدمًا',
   'Invoice Address': 'عنوان الفاتورة', 'Delivery Address': 'عنوان التسليم', 'Promised Delivery': 'موعد التسليم الموعود', 'Invoice Status': 'حالة الفوترة',
   'Nothing to Invoice': 'لا شيء للفوترة', 'Fully Invoiced': 'مفوتر بالكامل', 'Billing Status': 'حالة الفواتير', Delivered: 'تم التسليم', Invoiced: 'مفوتر',
+  'Paid on': 'دُفع في', Payments: 'المدفوعات',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

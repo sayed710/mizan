@@ -1,6 +1,6 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
-import { amounts, nextName, today } from './common.js';
+import { amounts, nextName, subtotal, today } from './common.js';
 import { rateAt } from './currency.js';
 
 export const ACCOUNT_TYPES = [
@@ -42,17 +42,20 @@ export function invoiceLines(db, move) {
   const refund = move.move_type === 'out_refund';
   // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today());
-  const { untaxed: u, tax: t } = amounts(move.invoice_line_ids);
-  const untaxed = round(u / rate);
-  const tax = round(t / rate);
-  const total = round(untaxed + tax);
   const counterpart = accountId(db, sale ? '121000' : '211000');
   const base = accountId(db, sale ? '400000' : '600000');
+  // Each line may override the income/expense account; amounts are grouped per account.
+  const byAccount = new Map();
+  for (const l of move.invoice_line_ids ?? []) byAccount.set(l.account_id || base, (byAccount.get(l.account_id || base) ?? 0) + subtotal(l));
+  const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate)]);
+  const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
+  const tax = round(amounts(move.invoice_line_ids).tax / rate);
+  const total = round(untaxed + tax);
   const taxAcc = accountId(db, sale ? '251000' : '131000');
   const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
-    { account_id: base, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(untaxed, !sale) },
+    ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
     ...(tax ? [{ account_id: taxAcc, partner_id: move.partner_id, name: 'VAT 14%', ...side(tax, !sale) }] : []),
   ].filter((l) => l.debit || l.credit);
 }

@@ -44,13 +44,14 @@ export function payMove(db, id, amount, date = today()) {
   const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
-  const { db: withEntry } = postEntry(db, {
+  const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: 'BNK1', date, ref: `Payment ${r.name}`,
     lines: sale
       ? [{ account: '101401', debit: bank, partner_id: r.partner_id }, { account: '121000', credit: open, partner_id: r.partner_id }, ...fx]
       : [{ account: '211000', debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
   });
-  const next = write(withEntry, 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date });
+  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
+  const next = write(withEntry, 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
 }
 
@@ -99,6 +100,9 @@ const termDue = (db, r) => {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
   return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : {};
 };
+
+const invoiceLineBase = productLines('Invoice Lines', 'list_price');
+const invoiceLineField = { ...invoiceLineBase, fields: { ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } } };
 
 const lineItem = {
   type: 'one2many',
@@ -177,7 +181,12 @@ export const accountingModels = {
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
-      invoice_line_ids: productLines('Invoice Lines', 'list_price'),
+      invoice_line_ids: invoiceLineField,
+      payments: {
+        type: 'one2many', label: 'Payments', readonly: true,
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' } },
+        newLine: () => ({ date: today(), amount: 0, move_id: null }),
+      },
       line_ids: lineItem,
       amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r) => amounts(r.invoice_line_ids).untaxed },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r) => amounts(r.invoice_line_ids).tax },
@@ -229,7 +238,7 @@ export const accountingModels = {
       title: 'name',
       groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
-        ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
+        ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),
       footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
       chatter: true,

@@ -42,3 +42,17 @@ test('paying later at a better rate books an exchange gain and clears the receiv
   assert.equal(recv.reduce((s, l) => s + l.debit - l.credit, 0), 0);
   assert.equal(read(paid, 'account.move', id).amount_residual, 0);
 });
+
+test('invoice lines can book to their own account and payments are listed on the invoice', () => {
+  const db0 = seed();
+  const other = accountId(db0, '450000');
+  const { db, id } = create(db0, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [
+    { product_id: 1, qty: 1, price_unit: 100, tax: 0 }, { product_id: 1, qty: 1, price_unit: 50, tax: 0, account_id: other },
+  ] });
+  const posted = post(db, id);
+  const lines = read(posted, 'account.move', id).line_ids;
+  assert.equal(lines.find((l) => l.account_id === other).credit, 50);
+  assert.equal(lines.find((l) => l.account_id === accountId(posted, '400000')).credit, 100);
+  const paid = payMove(payMove(posted, id, 60, '2026-10-01'), id, 90, '2026-10-05');
+  assert.deepEqual(read(paid, 'account.move', id).payments.map((p) => [p.date, p.amount]), [['2026-10-01', 60], ['2026-10-05', 90]]);
+});
