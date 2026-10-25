@@ -482,6 +482,11 @@ const ar = {
   'Employee Expenses Payable': 'مصروفات موظفين مستحقة', 'Expense Product': 'منتج المصروف', 'Tax % (included)': 'نسبة الضريبة (مشمولة)',
   'Paid By': 'مدفوع بواسطة', 'Employee (to reimburse)': 'الموظف (للاسترداد)', 'Post Journal Entries': 'ترحيل القيود',
   'To Post': 'للترحيل', 'To Reimburse': 'للاسترداد',
+  'First Interview': 'المقابلة الأولى', 'Second Interview': 'المقابلة الثانية', 'Proposed Salary': 'الراتب المقترح', Availability: 'تاريخ التوفر',
+  Degree: 'المؤهل', Graduate: 'خريج', 'Bachelor Degree': 'بكالوريوس', 'Master Degree': 'ماجستير', 'Doctoral Degree': 'دكتوراه', Recruiter: 'مسؤول التوظيف',
+  Interviewers: 'المقابِلون', Interviewer: 'المقابِل', Feedback: 'الملاحظات', LinkedIn: 'لينكدإن', Agency: 'وكالة', 'LinkedIn Profile': 'ملف لينكدإن',
+  'Refuse Reason': 'سبب الرفض', 'Does not fit the job requirements': 'لا يطابق متطلبات الوظيفة', 'Refused by applicant': 'رفضه المتقدم',
+  'Salary expectations too high': 'توقعات الراتب مرتفعة', 'Hired on': 'تاريخ التعيين', 'Create Employee': 'إنشاء موظف', Hired: 'تم التعيين', Contract: 'العقد',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -99,6 +99,24 @@ function reimburse(db, r) {
   return write(paid, 'hr.expense', r.id, { state: 'paid' });
 }
 
+const REFUSE_REASONS = [['skills', 'Does not fit the job requirements'], ['declined', 'Refused by applicant'], ['salary', 'Salary expectations too high'], ['duplicate', 'Duplicate'], ['other', 'Other']];
+
+/** Hire: create the employee from the applicant (job, department, proposed wage) and link it back. */
+function createEmployee(db, r) {
+  const job = read(db, 'hr.job', r.job_id);
+  const { db: next, id } = create(db, 'hr.employee', {
+    name: r.name, job_title: job?.name ?? '', department_id: job?.department_id ?? null, work_email: r.email ?? '', mobile_phone: r.phone ?? '',
+    wage: Number(r.salary_proposed) || Number(r.expected_salary) || 0, join_date: r.availability || today(),
+  });
+  return { db: write(next, 'hr.applicant', r.id, { emp_id: id, stage_id: 'hired', date_closed: today() }), go: `#/employees/employees/${id}` };
+}
+
+function refuseApplicant(db, r) {
+  const pick = prompt(`Refuse reason:\n${REFUSE_REASONS.map(([, l], i) => `${i + 1}. ${l}`).join('\n')}`, '1');
+  if (pick == null) return { db };
+  return { db: write(db, 'hr.applicant', r.id, { active: false, refuse_reason: REFUSE_REASONS[Number(pick) - 1]?.[0] ?? 'other' }) };
+}
+
 function invoiceSubscription(db, sub) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice',
@@ -323,23 +341,46 @@ export const moreModels = {
       job_id: { type: 'many2one', relation: 'hr.job', label: 'Job Position' },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
-      stage_id: state([['new', 'New'], ['screening', 'Initial Qualification'], ['interview', 'Interview'], ['contract', 'Contract Proposal'], ['hired', 'Contract Signed']], 'Stage'),
+      stage_id: state([['new', 'New'], ['screening', 'Initial Qualification'], ['interview', 'First Interview'], ['interview2', 'Second Interview'], ['contract', 'Contract Proposal'], ['hired', 'Contract Signed']], 'Stage'),
       expected_salary: { type: 'monetary', label: 'Expected Salary' },
+      salary_proposed: { type: 'monetary', label: 'Proposed Salary' },
+      availability: { type: 'date', label: 'Availability' },
+      degree: { type: 'selection', label: 'Degree', options: [['graduate', 'Graduate'], ['bachelor', 'Bachelor Degree'], ['master', 'Master Degree'], ['doctoral', 'Doctoral Degree']] },
+      user_id: employee('Recruiter'),
+      interviewers: {
+        type: 'one2many', label: 'Interviewers',
+        fields: { employee_id: employee('Interviewer'), evaluation: { type: 'priority', label: 'Evaluation' }, note: { type: 'char', label: 'Feedback' } },
+        newLine: () => ({ employee_id: null, evaluation: 0, note: '' }),
+      },
+      source: { type: 'selection', label: 'Source', options: [['website', 'Website'], ['linkedin', 'LinkedIn'], ['referral', 'Referral'], ['agency', 'Agency'], ['other', 'Other']] },
+      linkedin: { type: 'char', label: 'LinkedIn Profile' },
+      refuse_reason: { type: 'selection', label: 'Refuse Reason', options: REFUSE_REASONS },
+      emp_id: employee('Employee'),
+      date_closed: { type: 'date', label: 'Hired on', readonly: true },
       priority: { type: 'priority', label: 'Evaluation' },
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Notes' },
     },
-    defaults: () => ({ stage_id: 'new', priority: 0, tag_ids: [] }),
-    groupBys: ['stage_id', 'job_id'],
+    defaults: () => ({ stage_id: 'new', priority: 0, tag_ids: [], interviewers: [] }),
+    groupBys: ['stage_id', 'job_id', 'user_id', 'source', 'refuse_reason'],
     kanban: { groupBy: 'stage_id', title: 'name', lines: ['job_id', 'email'], tags: 'tag_ids', priority: 'priority', quickCreate: true },
     list: ['name', 'job_id', 'email', 'phone', 'expected_salary', 'stage_id'],
     form: {
       statusbar: 'stage_id',
       statusbarClickable: true,
-      buttons: [{ label: 'Refuse', vals: { active: false }, when: (r) => r.active !== false }],
+      buttons: [
+        { label: 'Create Employee', primary: true, when: (r) => !r.emp_id && ['contract', 'hired'].includes(r.stage_id) && r.active !== false, run: createEmployee },
+        { label: 'Refuse', when: (r) => r.active !== false && !r.emp_id, run: refuseApplicant },
+        { label: 'Restore', vals: { active: true, refuse_reason: null }, when: (r) => r.active === false },
+      ],
+      ribbon: (r) => (r.emp_id ? 'Hired' : r.active === false ? 'Refused' : null),
       title: 'name',
-      groups: [['job_id', 'email', 'phone'], ['expected_salary', 'priority', 'tag_ids']],
-      tabs: [{ label: 'Notes', fields: ['description'] }],
+      groups: [['job_id', 'email', 'phone', 'linkedin', 'degree'], ['user_id', 'source', 'priority', 'tag_ids', 'emp_id']],
+      tabs: [
+        { label: 'Contract', fields: ['expected_salary', 'salary_proposed', 'availability', 'date_closed'] },
+        { label: 'Interviewers', fields: ['interviewers'] },
+        { label: 'Notes', fields: ['description'] },
+      ],
       chatter: true,
     },
   },
