@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read } from './orm.js';
+import { create, read, search } from './orm.js';
+import { postMove } from './models/accounting.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, postDepreciation } from './models/assets.js';
 import { seed } from './seed.js';
@@ -110,4 +111,18 @@ test('invalid assets are refused on confirm', () => {
   assert.throws(() => running({ method_number: 0 }), /at least 1/);
   assert.throws(() => running({ method_number: 2.5 }), /at least 1/);
   assert.throws(() => running({ salvage_value: 10000 }), /lower than the original value/);
+});
+
+test('posting a bill line on a fixed-asset account creates one draft asset', () => {
+  const base = seed();
+  const { db, id } = create(base, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01',
+    invoice_line_ids: [{ name: 'Forklift', product_id: 1, qty: 1, price_unit: 30000, tax: 14, account_id: accountId(base, '151000') }, { product_id: 1, qty: 1, price_unit: 100, tax: 14 }],
+  });
+  const posted = postMove(db, id);
+  const assets = search(posted, 'account.asset').filter((a) => a.bill_id === id);
+  assert.equal(assets.length, 1);
+  assert.equal(assets[0].name, 'Forklift');
+  assert.equal(assets[0].original_value, 30000);
+  assert.equal(assets[0].state, 'draft');
 });

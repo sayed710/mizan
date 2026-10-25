@@ -1,5 +1,5 @@
 import { create, postNote, read, write } from '../orm.js';
-import { amounts, nextName, productLines, today } from './common.js';
+import { amounts, nextName, productLines, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
 import { moveDeleteGuard, moveGuard } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
@@ -34,7 +34,22 @@ export function postMove(db, id) {
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
-  return write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) });
+  const posted = write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) });
+  return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
+}
+
+/** Bill lines booked on a fixed-asset account become draft assets (once per bill line). */
+function draftAssetsFromBill(db, bill) {
+  const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
+  const already = new Set((db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id).map((a) => a.bill_line));
+  return (bill.invoice_line_ids ?? []).reduce((acc, l, i) => {
+    if (!fixed.has(l.account_id) || already.has(i)) return acc;
+    const product = read(acc, 'product', l.product_id);
+    return create(acc, 'account.asset', {
+      name: l.name || product?.name || bill.name, original_value: Math.round(subtotal(l) * 100) / 100, acquisition_date: bill.invoice_date ?? today(),
+      partner_id: bill.partner_id, bill_id: bill.id, bill_line: i,
+    }).db;
+  }, db);
 }
 
 /**

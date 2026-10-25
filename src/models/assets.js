@@ -127,6 +127,7 @@ export const assetModels = {
       prorata: { type: 'boolean', label: 'Prorata Temporis' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       bill_id: { type: 'many2one', relation: 'account.move', label: 'Bill' },
+      bill_line: { type: 'integer', label: 'Bill Line', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['open', 'Running'], ['paused', 'Paused'], ['close', 'Closed'], ['cancel', 'Cancelled']] },
       book_value: { type: 'monetary', label: 'Book Value', readonly: true, compute: (r) => (cents(r.original_value) - cents(r.already_depreciated) - postedCents(r)) / 100 },
       depreciation_ids: {
