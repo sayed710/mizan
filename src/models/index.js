@@ -489,8 +489,8 @@ const allApps = [
     id: 'rooms', name: 'Meeting Rooms', color: ['#0891b2', '#a21caf'],
     menus: [{ key: 'bookings', label: 'Room Bookings', model: 'room.booking' }, { key: 'rooms', label: 'Meeting Rooms', model: 'room.room' }],
   },
-  { id: 'referral', name: 'Referrals', color: ['#facc15', '#9333ea'], menus: [{ key: 'referrals', label: 'Referrals', model: 'hr.referral' }] },
-  { id: 'skills', name: 'Skills', color: ['#14b8a6', '#9333ea'], menus: [{ key: 'skills', label: 'Skills', model: 'hr.skill' }] },
+  { id: 'referral', name: 'Referrals', color: ['#facc15', '#9333ea'], menus: [{ key: 'referrals', label: 'Referrals', model: 'hr.referral' }, { label: 'Configuration', children: [{ key: 'rewards', label: 'Rewards', model: 'hr.referral.reward' }] }] },
+  { id: 'skills', name: 'Skills', color: ['#14b8a6', '#9333ea'], menus: [{ key: 'employee-skills', label: 'Employee Skills', model: 'hr.employee.skill' }, { key: 'resume', label: 'Resume', model: 'hr.resume.line' }, { key: 'skills', label: 'Skills', model: 'hr.skill' }, { label: 'Configuration', children: [{ key: 'skill-types', label: 'Skill Types', model: 'hr.skill.type' }] }] },
   { id: 'esg', name: 'ESG', color: ['#22c55e', '#15803d'], menus: [{ key: 'emissions', label: 'Emissions', model: 'esg.emission' }, { key: 'report', label: 'Carbon Footprint', model: 'esg.emission', view: 'pivot' }] },
   {
     id: 'equity', name: 'Equity', color: ['#0f766e', '#a16207'],

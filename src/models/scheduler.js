@@ -14,6 +14,7 @@ import { assignTicket, autoCloseStale } from './helpdesk.js';
 import { generateRecurringTasks } from './projectplus.js';
 import { appraisalJobs } from './appraisalplus.js';
 import { autoCheckout } from './attendanceplus.js';
+import { syncFromApplicant } from './skillsplus.js';
 
 /** New helpdesk tickets of teams that assign automatically get an owner; stale solved/waiting tickets close. */
 const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?? []).filter((t) => !t.user_id && t.team_id && t.stage_id === 'new')
@@ -36,5 +37,7 @@ export function runScheduledJobs(db, at = today()) {
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
   const ran = tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
-  return tolerant((d) => autoCheckout(d, `${at}T00:00`))(ran);
+  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(ran);
+  // Referral stages follow their applicants (recruitment has no after-write hook).
+  return (checkedOut.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), checkedOut);
 }
