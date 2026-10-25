@@ -67,7 +67,7 @@ export function Barcode() {
 export function ShopFloor() {
   const db = useDb();
   const [error, setError] = useState(null);
-  const orders = search(db, 'mrp.production').filter((o) => o.state === 'confirmed');
+  const orders = search(db, 'mrp.production').filter((o) => ['confirmed', 'progress'].includes(o.state));
   const produce = models['mrp.production'].form.buttons.find((b) => b.label === 'Produce');
   const run = (o) => {
     try {

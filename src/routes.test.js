@@ -48,3 +48,24 @@ test('landed costs raise product cost by quantity share and post a balanced entr
   assert.equal(read(done, 'product', 8).cost, Math.round((costs.frame + 300 / onHand(8)) * 100) / 100);
   assert.ok(search(done, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
 });
+
+test('a manufacturing order explodes its BoM into components and work orders, then produces a lot', () => {
+  const db0 = seed();
+  const bom = search(db0, 'mrp.bom')[0];
+  const { db: withWc, id: wc } = create(db0, 'mrp.workcenter', { name: 'Assembly' });
+  const withOps = write(withWc, 'mrp.bom', bom.id, { operations: [{ name: 'Assemble', workcenter_id: wc, duration: 30 }] });
+  const tracked = write(withOps, 'product', bom.product_id, { tracking: 'lot' });
+  const { db, id } = create(tracked, 'mrp.production', { product_id: bom.product_id, bom_id: bom.id, product_qty: 2 });
+  const confirmed = run(db, 'mrp.production', id, 'Confirm');
+  const mo = read(confirmed, 'mrp.production', id);
+  assert.equal(mo.move_raw.length, bom.components.length);
+  assert.equal(mo.move_raw[0].to_consume, bom.components[0].qty * 2 / (bom.product_qty || 1));
+  assert.deepEqual(mo.workorders.map((w) => [w.name, w.duration_expected]), [['Assemble', 60 / (bom.product_qty || 1)]]);
+  assert.throws(() => run(confirmed, 'mrp.production', id, 'Produce'), /lot\/serial/);
+  const lotted = write(confirmed, 'mrp.production', id, { lot_name: 'LOT-77' });
+  const before = read(lotted, 'product', bom.product_id).qty_available;
+  const done = run(lotted, 'mrp.production', id, 'Produce');
+  assert.equal(read(done, 'product', bom.product_id).qty_available, before + 2);
+  assert.ok(search(done, 'stock.lot').some((l) => l.name === 'LOT-77' && l.qty === 2));
+  assert.equal(read(done, 'mrp.production', id).workorders[0].state, 'done');
+});

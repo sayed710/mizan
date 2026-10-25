@@ -37,7 +37,7 @@ export function procure(db, order) {
     } else if (route === 'mto_make') {
       const bom = search(next, 'mrp.bom').find((b) => b.product_id === p.id);
       if (!bom) throw new Error(`${p.name}: create a bill of materials to manufacture on order`);
-      next = create(next, 'mrp.production', { product_id: p.id, bom_id: bom.id, product_qty: missing, state: 'confirmed', origin: order.name }).db;
+      next = create(next, 'mrp.production', { product_id: p.id, bom_id: bom.id, product_qty: missing, state: 'draft', origin: order.name }).db;
     }
   }
   for (const [key, lines] of rfqs) {

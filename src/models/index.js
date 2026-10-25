@@ -179,6 +179,7 @@ const allApps = [
     menus: [
       { key: 'orders', label: 'Manufacturing Orders', model: 'mrp.production' },
       { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' },
+      { key: 'workcenters', label: 'Work Centers', model: 'mrp.workcenter' },
       { key: 'products', label: 'Products', model: 'product' },
     ],
   },

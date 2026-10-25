@@ -475,6 +475,10 @@ const ar = {
   'Days to Solve': 'أيام الحل', 'SLA Deadline': 'موعد مستوى الخدمة', 'SLA Status': 'حالة مستوى الخدمة', 'On Track': 'في الموعد', Failed: 'متأخر',
   'Closed on': 'أُغلق في', Intervention: 'التدخل الميداني', 'Plan Intervention': 'جدولة تدخل ميداني', 'Customer Tickets': 'تذاكر العميل',
   'SLA Failed': 'تجاوز مستوى الخدمة', 'SLA On Track': 'ضمن مستوى الخدمة', Low: 'منخفضة',
+  'Work Centers': 'مراكز العمل', 'Work Center': 'مركز العمل', Capacity: 'السعة', 'Time Efficiency (%)': 'كفاءة الوقت (%)', 'Cost per Hour': 'التكلفة بالساعة',
+  Operation: 'العملية', 'Component Status': 'حالة المكونات', 'Not Available': 'غير متاح',
+  'To Consume': 'للاستهلاك', Consumed: 'المستهلك', 'Work Orders': 'أوامر العمل', 'Expected (min)': 'المتوقع (دقيقة)', 'Real (min)': 'الفعلي (دقيقة)',
+  Finished: 'منتهٍ', 'Check Availability': 'التحقق من التوفر', 'Waiting Components': 'بانتظار المكونات', 'Scheduled Date': 'التاريخ المجدول',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

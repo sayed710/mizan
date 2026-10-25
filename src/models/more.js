@@ -2,6 +2,7 @@
 import { create, read, write } from '../orm.js';
 import { addDays, amountFields, pad, productLines, today } from './common.js';
 import { moveStock } from './sales.js';
+import { applyLots } from './logistics.js';
 import { postEntry } from './ledger.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -19,19 +20,49 @@ const components = {
 const daysBetween = (a, b) => (a && b ? Math.max(0, Math.round((new Date(b) - new Date(a)) / 864e5) + 1) : 0);
 const monthly = (r) => (r.plan === 'yearly' ? (Number(r.recurring_amount) || 0) / 12 : Number(r.recurring_amount) || 0);
 
-function produce(db, mo) {
+/** Components and work orders of an MO, scaled from its bill of materials. */
+function explode(db, mo) {
   const bom = read(db, 'mrp.bom', mo.bom_id);
   if (!bom) throw new Error('Select a bill of materials first');
   const factor = (Number(mo.product_qty) || 0) / (Number(bom.product_qty) || 1);
-  const used = (bom.components ?? []).map((c) => ({ product_id: c.product_id, qty: c.qty * factor }));
+  return {
+    move_raw: (bom.components ?? []).map((c) => ({ product_id: c.product_id, to_consume: (Number(c.qty) || 0) * factor, consumed: 0 })),
+    workorders: (bom.operations ?? []).map((o) => ({ name: o.name, workcenter_id: o.workcenter_id, duration_expected: (Number(o.duration) || 0) * factor, duration: 0, state: 'ready' })),
+  };
+}
+
+const availability = (db, moves) => (moves.every((m) => {
+  const p = read(db, 'product', m.product_id);
+  return p?.type !== 'goods' || (Number(p.qty_available) || 0) >= m.to_consume;
+}) ? 'available' : 'waiting');
+
+/** Confirm: lay out components and work orders and report whether components are in stock. */
+function confirmMo(db, mo) {
+  const { move_raw, workorders } = explode(db, mo);
+  return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw) });
+}
+
+/** Produce: consume what was recorded (to-consume by default), stock the finished product (with its lot), close work orders. */
+function produce(db, mo) {
+  const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
+  const used = moves.map((m) => ({ product_id: m.product_id, qty: Number(m.consumed) || Number(m.to_consume) || 0 }));
   const missing = used.find((c) => {
     const p = read(db, 'product', c.product_id);
     return p?.type === 'goods' && p.qty_available < c.qty;
   });
   if (missing) throw new Error(`Not enough ${read(db, 'product', missing.product_id).name} in stock`);
-  let next = moveStock(db, used, -1);
-  next = moveStock(next, [{ product_id: mo.product_id, qty: mo.product_qty }], 1);
-  return { db: write(next, 'mrp.production', mo.id, { state: 'done', date_finished: today() }) };
+  const product = read(db, 'product', mo.product_id);
+  if (product?.tracking && product.tracking !== 'none' && !mo.lot_name) throw new Error(`Set a lot/serial number for ${product.name}`);
+  if (product?.tracking === 'serial' && Number(mo.product_qty) !== 1) throw new Error('Serial-tracked products are produced one at a time');
+  const finished = [{ product_id: mo.product_id, qty: mo.product_qty, lot_name: mo.lot_name || undefined }];
+  const stocked = moveStock(applyLots(moveStock(db, used, -1), { move_ids: finished }, 1), finished, 1);
+  return {
+    db: write(stocked, 'mrp.production', mo.id, {
+      state: 'done', date_finished: today(),
+      move_raw: moves.map((m, i) => ({ ...m, consumed: used[i].qty })),
+      workorders: (mo.workorders ?? []).map((w) => ({ ...w, state: 'done', duration: Number(w.duration) || Number(w.duration_expected) || 0 })),
+    }),
+  };
 }
 
 function invoiceSubscription(db, sub) {
@@ -55,12 +86,32 @@ export const moreModels = {
       product_id: { type: 'many2one', relation: 'product', label: 'Product', required: true },
       product_qty: { type: 'float', label: 'Quantity' },
       components,
+      operations: {
+        type: 'one2many', label: 'Operations',
+        fields: { name: { type: 'char', label: 'Operation' }, workcenter_id: { type: 'many2one', relation: 'mrp.workcenter', label: 'Work Center' }, duration: { type: 'float', label: 'Duration (min)' } },
+        newLine: () => ({ name: '', workcenter_id: null, duration: 60 }),
+      },
     },
-    defaults: () => ({ product_qty: 1, components: [] }),
+    defaults: () => ({ product_qty: 1, components: [], operations: [] }),
     kanban: { title: 'name', lines: ['product_id'] },
     list: ['name', 'product_id', 'product_qty'],
     views: ['list', 'kanban'],
-    form: { title: 'name', groups: [['product_id', 'product_qty'], []], tabs: [{ label: 'Components', fields: ['components'] }], chatter: true },
+    form: { title: 'name', groups: [['product_id', 'product_qty'], []], tabs: [{ label: 'Components', fields: ['components'] }, { label: 'Operations', fields: ['operations'] }], chatter: true },
+  },
+
+  'mrp.workcenter': {
+    label: 'Work Centers',
+    fields: {
+      name: { type: 'char', label: 'Work Center', required: true },
+      code: { type: 'char', label: 'Code' },
+      capacity: { type: 'float', label: 'Capacity' },
+      time_efficiency: { type: 'float', label: 'Time Efficiency (%)' },
+      costs_hour: { type: 'monetary', label: 'Cost per Hour' },
+    },
+    defaults: () => ({ capacity: 1, time_efficiency: 100, costs_hour: 0 }),
+    kanban: { title: 'name', lines: ['code', 'costs_hour'] },
+    list: ['code', 'name', 'capacity', 'time_efficiency', 'costs_hour'],
+    form: { title: 'name', groups: [['code', 'capacity'], ['time_efficiency', 'costs_hour']], chatter: true },
   },
 
   'mrp.production': {
@@ -74,10 +125,31 @@ export const moreModels = {
       date_finished: { type: 'date', label: 'Finished on', readonly: true },
       user_id: employee('Responsible'),
       origin: { type: 'char', label: 'Source', readonly: true },
-      state: state([['draft', 'Draft'], ['confirmed', 'Confirmed'], ['done', 'Done'], ['cancel', 'Cancelled']]),
+      priority: { type: 'priority', label: 'Priority' },
+      date_start: { type: 'date', label: 'Scheduled Date' },
+      lot_name: { type: 'char', label: 'Lot/Serial Number' },
+      components_availability: { type: 'selection', label: 'Component Status', readonly: true, options: [['available', 'Available'], ['waiting', 'Not Available']] },
+      move_raw: {
+        type: 'one2many', label: 'Components',
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, to_consume: { type: 'float', label: 'To Consume', readonly: true }, consumed: { type: 'float', label: 'Consumed' } },
+        newLine: () => ({ product_id: null, to_consume: 0, consumed: 0 }),
+      },
+      workorders: {
+        type: 'one2many', label: 'Work Orders',
+        fields: {
+          name: { type: 'char', label: 'Operation' }, workcenter_id: { type: 'many2one', relation: 'mrp.workcenter', label: 'Work Center' },
+          duration_expected: { type: 'float', label: 'Expected (min)', readonly: true }, duration: { type: 'float', label: 'Real (min)' },
+          state: { type: 'selection', label: 'Status', options: [['ready', 'Ready'], ['progress', 'In Progress'], ['done', 'Finished']] },
+        },
+        newLine: () => ({ name: '', workcenter_id: null, duration_expected: 0, duration: 0, state: 'ready' }),
+      },
+      state: state([['draft', 'Draft'], ['confirmed', 'Confirmed'], ['progress', 'In Progress'], ['done', 'Done'], ['cancel', 'Cancelled']]),
     },
-    defaults: (id) => ({ name: 'MO/' + pad(id), product_qty: 1, state: 'draft', date_deadline: addDays(today(), 7) }),
-    filters: [[{ id: 'todo', label: 'To Do', fn: (r) => ['draft', 'confirmed'].includes(r.state) }, { id: 'done', label: 'Done', fn: (r) => r.state === 'done' }]],
+    defaults: (id) => ({ name: 'MO/' + pad(id), product_qty: 1, state: 'draft', priority: 0, date_start: today(), date_deadline: addDays(today(), 7), move_raw: [], workorders: [] }),
+    filters: [
+      [{ id: 'todo', label: 'To Do', fn: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) }, { id: 'done', label: 'Done', fn: (r) => r.state === 'done' }],
+      [{ id: 'waiting', label: 'Waiting Components', fn: (r) => r.components_availability === 'waiting' && r.state !== 'done' }],
+    ],
     groupBys: ['state', 'product_id', 'date_deadline'],
     kanban: { groupBy: 'state', title: 'name', lines: ['product_id', 'product_qty', 'date_deadline'], badge: 'user_id' },
     list: ['name', 'product_id', 'product_qty', 'date_deadline', 'user_id', 'state'],
@@ -89,12 +161,15 @@ export const moreModels = {
       statusbarHide: ['cancel'],
       lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
       buttons: [
-        { label: 'Confirm', primary: true, vals: { state: 'confirmed' }, when: (r) => r.state === 'draft' },
-        { label: 'Produce', primary: true, when: (r) => r.state === 'confirmed', run: produce },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed'].includes(r.state) },
+        { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmMo(db, r) }) },
+        { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? []) }) }) },
+        { label: 'Start', when: (r) => r.state === 'confirmed', vals: { state: 'progress' } },
+        { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produce },
+        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) },
       ],
       title: 'name',
-      groups: [['product_id', 'bom_id', 'product_qty'], ['date_deadline', 'date_finished', 'user_id']],
+      groups: [['product_id', 'bom_id', 'product_qty', 'lot_name'], ['date_start', 'date_deadline', 'components_availability', 'user_id', 'priority', 'date_finished']],
+      tabs: [{ label: 'Components', fields: ['move_raw'] }, { label: 'Work Orders', fields: ['workorders'] }],
       chatter: true,
     },
   },
