@@ -456,6 +456,9 @@ const ar = {
   'Invoice Address': 'عنوان الفاتورة', 'Delivery Address': 'عنوان التسليم', 'Promised Delivery': 'موعد التسليم الموعود', 'Invoice Status': 'حالة الفوترة',
   'Nothing to Invoice': 'لا شيء للفوترة', 'Fully Invoiced': 'مفوتر بالكامل', 'Billing Status': 'حالة الفواتير', Delivered: 'تم التسليم', Invoiced: 'مفوتر',
   'Paid on': 'دُفع في', Payments: 'المدفوعات',
+  'Can be Sold': 'قابل للبيع', 'Can be Purchased': 'قابل للشراء', 'Available in POS': 'متاح في نقطة البيع', 'Can be Expensed': 'قابل للصرف كمصروف',
+  'Invoicing Policy': 'سياسة الفوترة', 'Ordered quantities': 'الكميات المطلوبة', 'Delivered quantities': 'الكميات المسلّمة', 'Sales Tax %': 'ضريبة المبيعات %',
+  'Purchase Tax %': 'ضريبة المشتريات %', 'Income Account': 'حساب الإيرادات', 'Expense Account': 'حساب المصروفات', 'Internal Notes': 'ملاحظات داخلية',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

@@ -40,7 +40,8 @@ export const productLines = (label, priceField) => ({
     if (key !== 'product_id' && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = (db.records.product ?? []).find((p) => p.id === line.product_id);
     const base = product?.[priceField] ?? 0;
-    return { ...line, price_unit: record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, line.qty, base) : base };
+    const tax = key === 'product_id' ? product?.[priceField === 'cost' ? 'purchase_tax' : 'sale_tax'] : undefined;
+    return { ...line, price_unit: record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, line.qty, base) : base, ...(tax != null ? { tax } : {}) };
   },
 });
 

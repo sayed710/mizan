@@ -39,11 +39,12 @@ function addLineQty(db, model, order, field, moves) {
 
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField) {
+  const invoiceable = (l) => (read(db, 'product', l.product_id)?.invoice_policy === 'delivery' ? Number(l.qty_delivered) || 0 : Number(l.qty) || 0);
   const lines = order.order_line
-    .map((l) => ({ ...l, qty: (Number(l.qty) || 0) - (Number(l.qty_invoiced) || 0) }))
+    .map((l) => ({ ...l, qty: invoiceable(l) - (Number(l.qty_invoiced) || 0) }))
     .filter((l) => l.qty > 0)
     .map(({ qty_invoiced, qty_delivered, ...l }) => l);
-  if (!lines.length) throw new Error('Everything on this order is already invoiced');
+  if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {
     move_type: moveType,
@@ -163,6 +164,17 @@ export const salesModels = {
     fields: {
       name: { type: 'char', label: 'Product Name', required: true },
       default_code: { type: 'char', label: 'Internal Reference' },
+      barcode: { type: 'char', label: 'Barcode' },
+      sale_ok: { type: 'boolean', label: 'Can be Sold' },
+      purchase_ok: { type: 'boolean', label: 'Can be Purchased' },
+      available_in_pos: { type: 'boolean', label: 'Available in POS' },
+      can_be_expensed: { type: 'boolean', label: 'Can be Expensed' },
+      invoice_policy: { type: 'selection', label: 'Invoicing Policy', options: [['order', 'Ordered quantities'], ['delivery', 'Delivered quantities']] },
+      sale_tax: { type: 'float', label: 'Sales Tax %' },
+      purchase_tax: { type: 'float', label: 'Purchase Tax %' },
+      property_account_income_id: { type: 'many2one', relation: 'account.account', label: 'Income Account' },
+      property_account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      description: { type: 'text', label: 'Internal Notes' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
       weight: { type: 'float', label: 'Weight (kg)' },
@@ -179,10 +191,11 @@ export const salesModels = {
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
       [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && r.qty_available < r.reorder_min }],
+      [{ id: 'sale_ok', label: 'Can be Sold', fn: (r) => r.sale_ok !== false }, { id: 'purchase_ok', label: 'Can be Purchased', fn: (r) => r.purchase_ok !== false }, { id: 'pos', label: 'Available in POS', fn: (r) => r.available_in_pos }],
     ],
     groupBys: ['type', 'categ'],
     kanban: { title: 'name', lines: ['list_price', 'qty_available'], avatar: true },
@@ -204,7 +217,8 @@ export const salesModels = {
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
-      groups: [['default_code', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'cost', 'qty_available', 'reorder_min', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },
   },

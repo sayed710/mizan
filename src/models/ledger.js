@@ -46,7 +46,11 @@ export function invoiceLines(db, move) {
   const base = accountId(db, sale ? '400000' : '600000');
   // Each line may override the income/expense account; amounts are grouped per account.
   const byAccount = new Map();
-  for (const l of move.invoice_line_ids ?? []) byAccount.set(l.account_id || base, (byAccount.get(l.account_id || base) ?? 0) + subtotal(l));
+  const productAccount = (l) => (db.records.product ?? []).find((p) => p.id === l.product_id)?.[sale ? 'property_account_income_id' : 'property_account_expense_id'];
+  for (const l of move.invoice_line_ids ?? []) {
+    const account = l.account_id || productAccount(l) || base;
+    byAccount.set(account, (byAccount.get(account) ?? 0) + subtotal(l));
+  }
   const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate)]);
   const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
   const tax = round(amounts(move.invoice_line_ids).tax / rate);
@@ -56,7 +60,7 @@ export function invoiceLines(db, move) {
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
-    ...(tax ? [{ account_id: taxAcc, partner_id: move.partner_id, name: 'VAT 14%', ...side(tax, !sale) }] : []),
+    ...(tax ? [{ account_id: taxAcc, partner_id: move.partner_id, name: 'Taxes', ...side(tax, !sale) }] : []),
   ].filter((l) => l.debit || l.credit);
 }
 

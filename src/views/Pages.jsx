@@ -21,7 +21,7 @@ export function Barcode() {
   const scan = () => {
     const q = code.trim().toLowerCase();
     if (!q) return;
-    const found = search(db, 'product').find((p) => p.default_code?.toLowerCase() === q)
+    const found = search(db, 'product').find((p) => p.barcode?.toLowerCase() === q || p.default_code?.toLowerCase() === q)
       ?? search(db, 'product').find((p) => p.name.toLowerCase().includes(q));
     setCode('');
     if (!found) { setMessage(t('No product found for "{q}"', { q })); return; }
