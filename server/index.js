@@ -141,6 +141,7 @@ const failures = new Map();
 const WINDOW = 15 * 60 * 1000;
 const CHAT_MESSAGES_PER_WINDOW = 30;
 const TRACKING_HITS_PER_WINDOW = 300;
+const CART_PRICINGS_PER_WINDOW = 120;
 const recent = (k) => (failures.get(k) ?? []).filter((t) => Date.now() - t < WINDOW);
 const tooMany = (k) => recent(k).length >= 10;
 const recordFailure = (k) => failures.set(k, [...recent(k), Date.now()]);
@@ -275,6 +276,8 @@ async function api(req, res, path) {
   // Cart prices are read-only (computed server-side); order status is limited on wrong tokens like live chat.
   if (path === '/api/public/cart' && req.method === 'POST') {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (recent(`cart:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
+    recordFailure(`cart:${ip}`);
     const out = publicCart(db, await readJson(req));
     return send(res, out.status, out.body);
   }

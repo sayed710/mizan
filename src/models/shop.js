@@ -9,7 +9,7 @@ export const SORTS = ['featured', 'newest', 'name', 'price_asc', 'price_desc'];
 const cents = (n) => Math.round(n * 100) / 100;
 
 /** Visible on the website: published (new flag and the older "Sold Online" one), sellable and priced. */
-export const isSellable = (p) => !!p && p.sale_ok !== false && p.is_published !== false && p.website_published !== false && Number(p.list_price) > 0;
+export const isSellable = (p) => !!p && p.active !== false && p.sale_ok !== false && p.is_published !== false && p.website_published !== false && Number(p.list_price) > 0;
 
 /** Can go in a cart: sellable, a variant of a published template, and not a template that has variants. */
 export function isPurchasable(db, p) {

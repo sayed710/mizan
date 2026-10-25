@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { read, search, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
-import { publicCart, publicOrder, publicOrderStatus, publicSite } from './api.js';
+import { demoPaymentsAllowed, publicCart, publicOrder, publicOrderStatus, publicSite } from './api.js';
+
+// Demo payments are a test-only provider: enabled and allowed explicitly where a test needs them.
+const withDemo = (db) => write(db, 'payment.provider', search(db, 'payment.provider').find((p) => p.code === 'demo').id, { state: 'enabled' });
 
 const visitor = { name: 'Hala Adel', email: 'hala@example.com', phone: '+20 100', street: '1 Nile St', city: 'Cairo', zip: '11511', country: 'Egypt' };
 const checkout = (db, extra = {}) => publicOrder(db, { ...visitor, lines: [{ product_id: 1, qty: 2, price_unit: 1 }], carrier_id: 1, provider_code: 'wire', ...extra });
@@ -12,7 +15,7 @@ test('publicSite exposes categories, published carriers, enabled providers and s
   const site = publicSite(seed());
   assert.deepEqual(site.categories.map((c) => c.name), ['Desks', 'Chairs']);
   assert.deepEqual(site.carriers.map((c) => c.name), ['Standard Delivery', 'Freight by weight']);
-  assert.deepEqual(site.providers.map((p) => p.code), ['wire', 'cod', 'demo']);
+  assert.deepEqual(site.providers.map((p) => p.code), ['wire', 'cod']);
   assert.deepEqual(Object.keys(site.providers[0]).sort(), ['code', 'name', 'pending_msg']);
   const desk = site.products.find((p) => p.id === 2);
   assert.equal(desk.ribbon, 'new');
@@ -44,8 +47,16 @@ test('wire payment leaves a sent quotation with the provider noted', () => {
   assert.equal(order.source, 'website');
 });
 
+test('the demo provider is off by default and never allowed in production', () => {
+  assert.equal(checkout(withDemo(seed()), { provider_code: 'demo' }).status, 400);
+  assert.equal(demoPaymentsAllowed({ MIZAN_DEMO_PAYMENTS: '1', NODE_ENV: 'production' }), false);
+  assert.equal(demoPaymentsAllowed({}), false);
+});
+
 test('demo payment confirms the order and records it as paid', () => {
-  const out = checkout(seed(), { provider_code: 'demo' });
+  process.env.MIZAN_DEMO_PAYMENTS = '1';
+  const out = checkout(withDemo(seed()), { provider_code: 'demo' });
+  delete process.env.MIZAN_DEMO_PAYMENTS;
   const order = lastOrder(out.db);
   assert.deepEqual([order.state, order.payment_state], ['sale', 'paid']);
   assert.ok(search(out.db, 'stock.picking').some((p) => p.sale_id === order.id), 'confirmation creates the delivery');
@@ -78,14 +89,22 @@ test('unpublished products, unknown carriers or providers and bad quantities are
   assert.equal(checkout(disabled, { provider_code: 'demo' }).status, 400);
 });
 
-test('a selectable pricelist applies, a non-selectable one is ignored; known contacts are not overwritten', () => {
+test('a selectable pricelist applies, a non-selectable one is ignored; a known email gets its own contact to merge', () => {
   const promo = checkout(seed(), { pricelist: 2 });
   assert.equal(lastOrder(promo.db).order_line[0].price_unit, 199.5);
   const wholesale = checkout(seed(), { pricelist: 1, lines: [{ product_id: 4, qty: 10 }] });
   assert.equal(lastOrder(wholesale.db).order_line[0].price_unit, 35);
   const known = checkout(seed(), { email: 'SARA.H@mail.example', street: 'Elsewhere' });
   const order = lastOrder(known.db);
-  assert.equal(order.partner_id, 3);
-  assert.notEqual(order.partner_shipping_id, 3);
+  assert.notEqual(order.partner_id, 3);
+  assert.ok(read(known.db, 'res.partner', order.partner_id).tag_ids.includes('To Merge'));
   assert.equal(read(known.db, 'res.partner', 3).street, undefined);
+});
+
+test('goods beyond the stock on hand and archived products are refused', () => {
+  const db = seed();
+  const stock = read(db, 'product', 1).qty_available;
+  assert.match(checkout(db, { lines: [{ product_id: 1, qty: stock + 1 }] }).body.error, /in stock/);
+  const archived = write(db, 'product', 1, { active: false });
+  assert.match(checkout(archived).body.error, /not available online/);
 });

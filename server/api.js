@@ -20,7 +20,9 @@ const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) &&
   public_categ_ids: (p.public_categ_ids ?? []).map((l) => ({ category_id: l.category_id })), website_description: p.website_description ?? '',
   website_sequence: p.website_sequence ?? 0, ribbon: p.ribbon ?? '', image: safeImage(p.image), qty_available: p.type === 'goods' ? Number(p.qty_available) || 0 : null,
 }));
-const enabledProviders = (db) => search(db, 'payment.provider').filter((p) => p.state === 'enabled');
+/** Demo payments confirm orders as paid without a payment: only when MIZAN_DEMO_PAYMENTS=1 outside production. */
+export const demoPaymentsAllowed = (env = process.env) => env.MIZAN_DEMO_PAYMENTS === '1' && env.NODE_ENV !== 'production';
+const enabledProviders = (db) => search(db, 'payment.provider').filter((p) => p.state === 'enabled' && (p.code !== 'demo' || demoPaymentsAllowed()));
 const selectablePricelists = (db) => search(db, 'product.pricelist').filter((p) => p.selectable);
 
 /** Public website content: only published pages and sellable products (no internal fields). */
@@ -134,6 +136,7 @@ function cartLines(db, raw) {
     if (!Number.isInteger(l?.qty) || l.qty < 1 || l.qty > 1000) return { error: 'Enter a quantity between 1 and 1000' };
     const product = Number.isInteger(l.product_id) ? read(db, 'product', l.product_id) : null;
     if (!isPurchasable(db, product)) return { error: 'A product in your cart is not available online' };
+    if (product.type === 'goods' && l.qty > (Number(product.qty_available) || 0)) return { error: `Only ${Math.max(0, Number(product.qty_available) || 0)} of ${product.name} in stock` };
     lines.push({ product_id: product.id, qty: l.qty });
   }
   return { lines };
@@ -169,11 +172,14 @@ const tokenMatches = (token, hash) => {
   return a.length === b.length && timingSafeEqual(a, b);
 };
 
-/** Customer for a checkout: a new contact holds the address; a known email keeps its contact and gets a delivery contact (visitors never overwrite one). */
+/**
+ * Customer for a checkout: always a new Website contact holding the address. An unverified email never puts orders,
+ * credit or payment terms on an existing customer; staff merge the contacts when the order is genuine.
+ */
 function checkoutPartners(db, v, address) {
-  const known = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === v.email.toLowerCase());
-  const res = create(db, 'res.partner', { ...v, ...address, tag_ids: ['Website'] });
-  return { db: res.db, partnerId: known?.id ?? res.id, shippingId: res.id };
+  const known = search(db, 'res.partner').some((p) => p.email?.toLowerCase() === v.email.toLowerCase());
+  const res = create(db, 'res.partner', { ...v, ...address, tag_ids: known ? ['Website', 'To Merge'] : ['Website'] });
+  return { db: res.db, partnerId: res.id, shippingId: res.id };
 }
 
 /**

@@ -366,7 +366,7 @@ export function seed() {
   // eCommerce: payment providers, website categories, published carriers, a selectable pricelist and desk variants.
   add('payment.provider', { name: 'Wire Transfer', code: 'wire', state: 'enabled', pending_msg: 'Please transfer the amount to IBAN EG00 0000 0000 0000 0000 0000 0000, using your order number as the reference.', done_msg: 'Your order will ship once we receive the transfer.' });
   add('payment.provider', { name: 'Cash on Delivery', code: 'cod', state: 'enabled', pending_msg: 'Pay the courier in cash when your order arrives.', done_msg: '' });
-  add('payment.provider', { name: 'Demo', code: 'demo', state: 'enabled', pending_msg: 'Test payment: the order is confirmed and marked as paid.', done_msg: 'Your payment has been received.' });
+  add('payment.provider', { name: 'Demo', code: 'demo', state: 'disabled', pending_msg: 'Test payment: the order is confirmed and marked as paid.', done_msg: 'Your payment has been received.' });
   const desks = add('product.public.category', { name: 'Desks', sequence: 1 });
   const chairs = add('product.public.category', { name: 'Chairs', sequence: 2 });
   [[1, chairs], [2, desks], [3, desks]].forEach(([id, category_id]) => set('product', id, { public_categ_ids: [{ category_id }] }));
