@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { apps, APP_INFO } from '../models/index.js';
 import { create, read, search, updateSettings, write } from '../orm.js';
 import { workedHours } from '../models/apps2.js';
+import { checkIn, checkOut, kioskScan } from '../models/attendanceplus.js';
 import { capTable } from '../models/apps4.js';
 import { today } from '../models/common.js';
 import { commit, getDb, useDb } from '../store.js';
@@ -71,21 +72,33 @@ const nowHM = () => new Date().toTimeString().slice(0, 5);
 export function Kiosk() {
   const db = useDb();
   const [flash, setFlash] = useState(null);
-  const open = (empId) => search(db, 'hr.attendance').find((a) => a.employee_id === empId && a.date === today() && !a.check_out);
-  const tap = (emp) => {
-    const current = open(emp.id);
-    if (current) {
-      const next = write(getDb(), 'hr.attendance', current.id, { check_out: nowHM() });
-      commit(next);
-      setFlash(t('Goodbye {name}! Worked {h} h today.', { name: emp.name, h: workedHours(read(next, 'hr.attendance', current.id)) }));
-    } else {
-      commit(create(getDb(), 'hr.attendance', { employee_id: emp.id, date: today(), check_in: nowHM() }).db);
-      setFlash(t('Welcome {name}! Checked in at {time}.', { name: emp.name, time: nowHM() }));
-    }
+  const [badge, setBadge] = useState('');
+  const open = (empId) => search(db, 'hr.attendance').find((a) => a.employee_id === empId && !a.check_out);
+  // Check-ins and outs go through the attendance rules (overtime, overnight shifts, double-open refusal).
+  const show = (out) => {
+    commit(out.db);
+    const rec = read(out.db, 'hr.attendance', out.attendanceId);
+    setFlash(out.action === 'check_out'
+      ? t('Goodbye {name}! Worked {h} h today.', { name: out.employee.name, h: rec.worked_hours ?? workedHours(rec) })
+      : t('Welcome {name}! Checked in at {time}.', { name: out.employee.name, time: rec.check_in }));
+  };
+  const act = (fn) => { try { show(fn(getDb(), `${today()}T${nowHM()}`)); } catch (e) { setFlash(t(e.message)); } };
+  const tap = (emp) => act((d, at) => (open(emp.id) ? checkOut : checkIn)(d, emp.id, at, 'kiosk'));
+  const scan = (e) => {
+    e.preventDefault();
+    const code = badge.trim();
+    setBadge('');
+    if (!code) return;
+    const byBadge = search(getDb(), 'hr.employee').some((emp) => emp.barcode && String(emp.barcode) === code);
+    act((d, at) => kioskScan(d, byBadge ? { barcode: code } : { pin: code }, at));
   };
   return (
     <main className="action kiosk">
       <div className="control-panel"><h1 className="cp-title">{t('Kiosk Mode')}</h1>{flash && <span role="status" className="kiosk-flash">{flash}</span>}</div>
+      <form className="kiosk-scan" onSubmit={scan}>
+        <input type="password" inputMode="numeric" autoComplete="off" aria-label={t('Scan your badge or enter your PIN')} placeholder={t('Scan your badge or enter your PIN')} value={badge} onChange={(e) => setBadge(e.target.value)} />
+        <button type="submit" className="btn btn-primary">{t('OK')}</button>
+      </form>
       <div className="kiosk-grid">
         {search(db, 'hr.employee').map((e) => {
           const isIn = !!open(e.id);

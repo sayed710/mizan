@@ -426,6 +426,8 @@ const allApps = [
     menus: [
       { key: 'kiosk', label: 'Kiosk Mode', type: 'kiosk' },
       { key: 'attendances', label: 'Attendances', model: 'hr.attendance' },
+      { key: 'overtime', label: 'Overtime to Approve', model: 'hr.attendance', domain: (r) => r.overtime_status === 'to_approve' },
+      { label: 'Configuration', children: [{ key: 'overtime-rules', label: 'Overtime Rules', model: 'hr.attendance.overtime.rule' }] },
     ],
   },
   { id: 'appraisals', name: 'Appraisals', color: ['#e879f9', '#4f46e5'], menus: [{ key: 'appraisals', label: 'Appraisals', model: 'hr.appraisal' }, { key: 'goals', label: 'Goals', model: 'hr.appraisal.goal' }, { label: 'Configuration', children: [{ key: 'templates', label: 'Appraisal Templates', model: 'hr.appraisal.template' }] }] },
