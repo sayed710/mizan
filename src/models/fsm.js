@@ -22,6 +22,7 @@ export function startTimer(db, task, now) {
 export function stopTimer(db, task, now, description = '') {
   if (!task.timer_start) throw new Error('No timer is running on this task');
   const minutes = (new Date(now) - new Date(task.timer_start)) / 60000;
+  if (!Number.isFinite(minutes) || minutes < 0) throw new Error('The stop time must be after the start time');
   const quarters = Math.max(1, Math.ceil(minutes / QUARTER_MINUTES));
   const line = { date: now.slice(0, 10), technician_id: task.technician_id ?? null, hours: (quarters * QUARTER_MINUTES) / 60, description };
   return write(db, 'fsm.task', task.id, { timer_start: null, timesheet_ids: [...(task.timesheet_ids ?? []), line] });
@@ -38,9 +39,10 @@ export function markDone(db, task, { date = today() } = {}) {
   const sheet = task.worksheet ?? [];
   if (sheet.length && !sheet.every((l) => l.done)) throw new Error('Complete every worksheet item before marking the task done');
   if (sheet.length && !task.customer_signature) throw new Error('The customer must sign the worksheet first');
+  if (task.timer_start) throw new Error('Stop the timer before marking the task done');
   const closed = write(db, 'fsm.task', task.id, { stage_id: 'done' });
   return search(closed, 'helpdesk.ticket')
-    .filter((t) => (t.id === task.helpdesk_ticket_id || t.fsm_task_id === task.id) && t.stage_id !== 'solved')
+    .filter((t) => (t.id === task.helpdesk_ticket_id || t.fsm_task_id === task.id) && !['solved', 'cancelled'].includes(t.stage_id))
     .reduce((acc, t) => write(acc, 'helpdesk.ticket', t.id, { stage_id: 'solved', close_date: date }), closed);
 }
 

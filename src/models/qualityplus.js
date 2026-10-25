@@ -8,6 +8,7 @@ const results = [['none', 'To Do'], ['pass', 'Passed'], ['fail', 'Failed']];
 
 /** A measured value passes when it is inside the point's inclusive tolerance range. */
 export function evaluateMeasure(point, value) {
+  if (typeof value === 'boolean' || value == null || String(value).trim() === '') return 'fail';
   const measure = Number(value);
   if (!Number.isFinite(measure)) return 'fail';
   const min = point?.tolerance_min ?? point?.norm_min;
@@ -29,8 +30,9 @@ export function checksFor(db, picking) {
   const operation = picking.picking_type === 'incoming' ? 'receipt' : picking.picking_type === 'outgoing' ? 'delivery' : null;
   if (!operation) return [];
   const productIds = new Set((picking.move_ids ?? []).map((line) => line.product_id).filter((id) => id != null));
+  if (!productIds.size) return [];
   return (db.records['quality.point'] ?? []).filter((point) =>
-    point.operation === operation
+    point.active !== false && point.operation === operation
       && (point.product_id == null || productIds.has(point.product_id))
       && pointAppliesByFrequency(point, picking));
 }

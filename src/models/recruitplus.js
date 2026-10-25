@@ -71,7 +71,7 @@ export function jobPipeline(db, jobId) {
   const records = search(db, 'hr.applicant', { includeArchived: true }).filter((r) => r.job_id === jobId);
   const counts = Object.fromEntries(stages.map(([id]) => [id, 0]));
   for (const r of records) counts[r.stage_id] = (counts[r.stage_id] ?? 0) + 1;
-  const hired = records.filter((r) => r.emp_id || r.stage_id === 'hired');
+  const hired = records.filter((r) => r.active !== false && (r.emp_id || r.stage_id === 'hired'));
   const days = hired.map((r) => (dateStamp(r.date_closed) - dateStamp(r.create_date)) / 86400000).filter((n) => Number.isFinite(n) && n >= 0);
   return { stages: counts, applicants: records.length, hired: hired.length, refused: records.filter((r) => r.active === false).length, avgDaysToHire: days.length ? days.reduce((a, b) => a + b, 0) / days.length : 0 };
 }
@@ -96,7 +96,7 @@ export function applicantScore(applicant, job) {
   const skills = new Set((applicant.skills ?? []).map(normalize));
   const priority = Math.max(0, Math.min(3, Number(applicant.priority) || 0)) / 3;
   const coverage = required.length ? required.filter((s) => skills.has(s)).length / required.length : 0;
-  const salary = Number(applicant.salary_expected ?? applicant.expected_salary);
+  const salary = Number(applicant.salary_expected || applicant.expected_salary);
   const budget = Number(job.salary_max);
   return Math.round(priority * 40 + coverage * 40 + (salary > 0 && budget > 0 && salary <= budget ? 20 : 0));
 }

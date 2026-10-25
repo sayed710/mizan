@@ -112,3 +112,21 @@ test('agy review: fleet ignores unset odometers, payroll ignores short days, hel
   assert.equal(read(assignTicket(t.db, read(t.db, 'helpdesk.ticket', t.id)), 'helpdesk.ticket', t.id).user_id ?? null, null);
   assert.notEqual(read(autoCloseStale(t.db, '2026-10-08'), 'helpdesk.ticket', t.id).stage_id, 'hold');
 });
+
+test('agy review 2: empty measures fail, archived points ignored, timers and ticket closing guarded, hired excludes refused', async () => {
+  const { evaluateMeasure } = await import('./models/qualityplus.js');
+  const { stopTimer, markDone } = await import('./models/fsm.js');
+  const { jobPipeline, applicantScore } = await import('./models/recruitplus.js');
+  const point = { tolerance_min: -1, tolerance_max: 1 };
+  assert.deepEqual(['', null, '  ', true, '0'].map((v) => evaluateMeasure(point, v)), ['fail', 'fail', 'fail', 'fail', 'pass']);
+  const task = { id: 1, timer_start: '2026-01-01T10:00:00Z' };
+  assert.throws(() => stopTimer(seed(), task, '2026-01-01T09:00:00Z'), /after the start/);
+  assert.throws(() => markDone(seed(), { id: 1, timer_start: '2026-01-01T10:00:00Z', worksheet: [] }), /Stop the timer/);
+  const t = create(seed(), 'helpdesk.ticket', { name: 'X', stage_id: 'cancelled' });
+  const fsm = create(t.db, 'fsm.task', { name: 'Visit', helpdesk_ticket_id: t.id });
+  assert.equal(read(markDone(fsm.db, read(fsm.db, 'fsm.task', fsm.id)), 'helpdesk.ticket', t.id).stage_id, 'cancelled');
+  const job = create(seed(), 'hr.job', { name: 'Dev' });
+  const ap = create(job.db, 'hr.applicant', { name: 'A', partner_name: 'A', job_id: job.id, stage_id: 'hired', active: false });
+  assert.equal(jobPipeline(ap.db, job.id).hired, 0);
+  assert.equal(applicantScore({ priority: 0, salary_expected: 0, expected_salary: 900 }, { salary_max: 1000 }), 20);
+});
