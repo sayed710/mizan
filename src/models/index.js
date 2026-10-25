@@ -303,6 +303,7 @@ const allApps = [
     id: 'timesheets', name: 'Timesheets', color: ['#0f766e', '#1e3a8a'],
     menus: [
       { key: 'timesheets', label: 'My Timesheets', model: 'account.analytic.line', domain: (r) => !r.move_id && (r.category ?? 'timesheet') === 'timesheet' },
+      { key: 'to-validate', label: 'To Validate', model: 'account.analytic.line', domain: (r) => !r.move_id && (r.category ?? 'timesheet') === 'timesheet' && !r.validated },
       { key: 'report', label: 'Reporting', model: 'account.analytic.line', view: 'pivot', domain: (r) => !r.move_id && (r.category ?? 'timesheet') === 'timesheet' },
     ],
   },
