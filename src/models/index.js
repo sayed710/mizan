@@ -71,7 +71,7 @@ const allApps = [
     ],
   },
   {
-    id: 'accounting', name: 'Invoicing', color: ['#ec4899', '#7c3aed'],
+    id: 'accounting', name: 'Accounting', color: ['#ec4899', '#7c3aed'],
     menus: [
       { key: 'dashboard', label: 'Dashboard', type: 'dashboard' },
       { label: 'Customers', children: [
@@ -174,12 +174,12 @@ const allApps = [
       { key: 'products', label: 'Products', model: 'product' },
     ],
   },
+  { id: 'kitchen', name: 'Kitchen Display', color: ['#f97316', '#b91c1c'], menus: [{ key: 'display', label: 'Kitchen Display', type: 'kitchen' }] },
   {
     id: 'pos', name: 'Point of Sale', color: ['#fbbf24', '#ea580c'],
     menus: [
       { key: 'register', label: 'Register', type: 'pos' },
       { key: 'orders', label: 'Orders', model: 'pos.order' },
-      { key: 'kitchen', label: 'Kitchen Display', type: 'kitchen' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
     ],
   },
@@ -359,7 +359,7 @@ const allApps = [
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
-  'pos', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
+  'pos', 'kitchen', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
   'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
 
@@ -368,7 +368,7 @@ export const APP_INFO = {
   discuss: ['Productivity', 'Chat, channels and activities'], calendar: ['Productivity', 'Schedule meetings'], appointments: ['Productivity', 'Let people book time with you'],
   todo: ['Productivity', 'Organize your work'], knowledge: ['Productivity', 'Centralize your knowledge'], contacts: ['Sales', 'Centralize your address book'],
   crm: ['Sales', 'Track leads and close opportunities'], sales: ['Sales', 'From quotations to invoices'], dashboards: ['Productivity', 'Key figures across apps'],
-  subscriptions: ['Sales', 'Recurring revenue and renewals'], rental: ['Sales', 'Rental contracts, pickups and returns'], pos: ['Sales', 'Shop checkout and payments'],
+  subscriptions: ['Sales', 'Recurring revenue and renewals'], rental: ['Sales', 'Rental contracts, pickups and returns'], pos: ['Sales', 'Shop checkout and payments'], kitchen: ['Sales', 'Send POS orders to the kitchen screen'],
   accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'],
   project: ['Services', 'Tasks and projects'], timesheets: ['Services', 'Track time on tasks'], planning: ['Services', 'Employee schedules'],
   helpdesk: ['Services', 'Solve customer tickets'], website: ['Website', 'Website builder and online shop'], marketing: ['Marketing', 'Design, send and track emails'],
