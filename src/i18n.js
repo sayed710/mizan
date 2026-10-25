@@ -676,6 +676,9 @@ const ar = {
   'Scrap Orders': 'أوامر الإتلاف', Scrap: 'إتلاف', 'Scrap Reason': 'سبب الإتلاف', 'Unbuild Orders': 'أوامر التفكيك', Unbuild: 'تفكيك',
   'Recovered Components': 'المكونات المستردة', 'Quantity Producing': 'الكمية قيد الإنتاج', 'Backorder of': 'طلب متأخر من',
   'The quantity to scrap must be positive': 'كمية الإتلاف يجب أن تكون موجبة', 'The quantity to unbuild must be positive': 'كمية التفكيك يجب أن تكون موجبة',
+  'Sales Teams': 'فرق المبيعات', 'Sales Team': 'فريق المبيعات', 'Team Leader': 'قائد الفريق', 'Auto Assignment': 'التوزيع التلقائي',
+  'Country Rule': 'قاعدة الدولة', 'Tag Rule': 'قاعدة الوسم', 'Leads per 30 days (0 = unlimited)': 'العملاء المحتملون لكل 30 يومًا (0 = بلا حد)', 'Assign Leads': 'توزيع العملاء المحتملين',
+  'Automated Probability (%)': 'الاحتمال التلقائي (%)', 'Assigned on': 'تاريخ التوزيع',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

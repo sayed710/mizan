@@ -320,6 +320,8 @@ export function seed() {
       A4: 'Invoiced total', B4: '=MIZAN.SUM("account.move","amount_total","move_type=out_invoice")', A5: 'Average invoice', B5: '=IF(B3>0,ROUND(B4/B3,2),0)',
     }),
   });
+  add('crm.team', { name: 'Egypt Sales', leader: 'Mona Adel', auto_assign: true, country: 'Egypt', member_ids: [{ name: 'Mona Adel', capacity: 20 }, { name: 'Omar Fathy', capacity: 20 }] });
+  add('crm.team', { name: 'Gulf Sales', leader: 'Laila Samir', auto_assign: true, country: 'UAE', member_ids: [{ name: 'Laila Samir', capacity: 15 }] });
   add('social.post', { name: 'Expo announcement', message: 'Meet us at the Office Design Expo!', stage_id: 'scheduled', accounts: ['LinkedIn'] });
   add('social.post', {
     name: 'New desk launch', message: 'Our new standing desk is here.', stage_id: 'posted', scheduled_date: addDays(today(), -4), published_date: addDays(today(), -4),

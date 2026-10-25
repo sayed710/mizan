@@ -74,6 +74,9 @@ export const crmModels = {
       phone: { type: 'char', label: 'Phone' },
       expected_revenue: { type: 'monetary', label: 'Expected Revenue' },
       probability: { type: 'float', label: 'Probability (%)' },
+      automated_probability: { type: 'float', label: 'Automated Probability (%)', readonly: true },
+      team_id: { type: 'many2one', relation: 'crm.team', label: 'Sales Team' },
+      assign_date: { type: 'date', label: 'Assigned on', readonly: true },
       stage_id: {
         type: 'selection',
         label: 'Stage',
@@ -143,8 +146,8 @@ export const crmModels = {
       smart: [{ label: 'Quotations', model: 'sale.order', field: 'opportunity_id', target: 'sales/quotations', sum: 'amount_total' }],
       title: 'name',
       groups: [
-        ['expected_revenue', 'probability', 'partner_id', 'email', 'phone'],
-        ['user', 'date_deadline', 'priority', 'tag_ids'],
+        ['expected_revenue', 'probability', 'automated_probability', 'partner_id', 'email', 'phone'],
+        ['team_id', 'user', 'date_deadline', 'priority', 'tag_ids'],
       ],
       tabs: [
         { label: 'Notes', fields: ['description'] },
