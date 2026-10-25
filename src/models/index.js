@@ -253,6 +253,7 @@ const allApps = [
       { key: 'orders', label: 'Orders', model: 'pos.order' },
       { key: 'sessions', label: 'Sessions', model: 'pos.session' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
+      { label: 'Configuration', children: [{ key: 'pos-config', label: 'Point of Sale', model: 'pos.config' }, { key: 'floors', label: 'Floors', model: 'restaurant.floor' }] },
     ],
   },
   {
