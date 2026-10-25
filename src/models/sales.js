@@ -2,6 +2,7 @@ import { create, read, search, write } from '../orm.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
+import { dueDate } from './terms.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
@@ -14,25 +15,59 @@ export function moveStock(db, lines = [], sign) {
 }
 
 /** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
-export function createPicking(db, { type, partner_id, origin, lines, link, carrier_id = null }) {
+export function createPicking(db, { type, partner_id, origin, lines, link, carrier_id = null, scheduled_date }) {
   const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: Number(l.qty) || 0 }));
   if (!moves.length) return db;
-  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', carrier_id, ...link }).db;
+  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link }).db;
 }
 
-/** Create a draft invoice/bill from order lines and return where to go. */
+/**
+ * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced), filling lines in order.
+ * ponytail: matches by product, so two lines of the same product share the quantity first-come.
+ */
+function addLineQty(db, model, order, field, moves) {
+  const left = new Map();
+  for (const m of moves) left.set(m.product_id, (left.get(m.product_id) ?? 0) + (Number(m.qty) || 0));
+  const order_line = order.order_line.map((l) => {
+    const room = (Number(l.qty) || 0) - (Number(l[field]) || 0);
+    const take = Math.max(0, Math.min(room, left.get(l.product_id) ?? 0));
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) - take);
+    return take ? { ...l, [field]: (Number(l[field]) || 0) + take } : l;
+  });
+  return write(db, model, order.id, { order_line });
+}
+
+/** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField) {
+  const lines = order.order_line
+    .map((l) => ({ ...l, qty: (Number(l.qty) || 0) - (Number(l.qty_invoiced) || 0) }))
+    .filter((l) => l.qty > 0)
+    .map(({ qty_invoiced, qty_delivered, ...l }) => l);
+  if (!lines.length) throw new Error('Everything on this order is already invoiced');
+  const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {
     move_type: moveType,
-    partner_id: order.partner_id,
+    partner_id: order.partner_invoice_id ?? order.partner_id,
     invoice_date: today(),
-    invoice_date_due: addDays(today(), 30),
+    invoice_payment_term_id: term?.id ?? null,
+    invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     [originField]: order.id,
-    invoice_line_ids: order.order_line.map((l) => ({ ...l })),
+    invoice_line_ids: lines,
   });
-  return { db: next, go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
+  const model = originField === 'sale_id' ? 'sale.order' : 'purchase.order';
+  return { db: addLineQty(next, model, order, 'qty_invoiced', lines), go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
 }
+
+const orderLines = (label, priceField = 'list_price') => {
+  const base = productLines(label, priceField);
+  return { ...base, fields: { ...base.fields, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true } } };
+};
+const invoiceStatus = (r, confirmed) => {
+  if (r.state !== confirmed) return 'no';
+  return (r.order_line ?? []).every((l) => (Number(l.qty_invoiced) || 0) >= (Number(l.qty) || 0)) ? 'invoiced' : 'to_invoice';
+};
+const INVOICE_STATUS = [['no', 'Nothing to Invoice'], ['to_invoice', 'To Invoice'], ['invoiced', 'Fully Invoiced']];
 
 /** "Color: Red, Blue; Size: S, M" → [['Red','Blue'], ['S','M']] (empty groups ignored). */
 export const parseAttributes = (text = '') => String(text).split(';')
@@ -109,6 +144,8 @@ export const salesModels = {
             const sign = r.picking_type === 'incoming' ? 1 : r.picking_type === 'outgoing' ? -1 : 0;
             let next = write(moveStock(applyLots(db, r, sign || 0), r.move_ids, sign), 'stock.picking', r.id, { state: 'done', date_done: today() });
             if (r.purchase_id) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
+            const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
+            if (order) next = addLineQty(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', r.move_ids ?? []);
             return { db: next };
           },
         },
@@ -177,32 +214,38 @@ export const salesModels = {
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer', required: true },
+      partner_invoice_id: { type: 'many2one', relation: 'res.partner', label: 'Invoice Address' },
+      partner_shipping_id: { type: 'many2one', relation: 'res.partner', label: 'Delivery Address' },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
+      payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Delivery Method' },
       date_order: { type: 'date', label: 'Order Date' },
+      commitment_date: { type: 'date', label: 'Promised Delivery' },
+      note: { type: 'text', label: 'Terms and Conditions' },
+      invoice_status: { type: 'selection', label: 'Invoice Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'sale') },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
       source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website'], ['marketplace', 'Marketplace']] },
       client_order_ref: { type: 'char', label: 'Customer Reference', readonly: true },
       connector_id: { type: 'many2one', relation: 'marketplace.connector', label: 'Marketplace', readonly: true },
       state: orderState([['draft', 'Quotation'], ['sent', 'Quotation Sent'], ['sale', 'Sales Order'], ['cancel', 'Cancelled']]),
-      order_line: productLines('Order Lines', 'list_price'),
+      order_line: orderLines('Order Lines'),
       ...amountFields('order_line'),
     },
     onchange: (r, key, db) => {
       if (key !== 'partner_id' || !r.partner_id) return {};
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
-      return p ? { pricelist_id: p.pricelist_id ?? null } : {};
+      return p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {};
     },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
       [{ id: 'quotations', label: 'Quotations', fn: (r) => ['draft', 'sent'].includes(r.state) }, { id: 'orders', label: 'Sales Orders', fn: (r) => r.state === 'sale' }],
       monthFilters('date_order'),
     ],
-    groupBys: ['state', 'partner_id', 'user', 'date_order'],
+    groupBys: ['state', 'invoice_status', 'partner_id', 'user', 'date_order'],
     views: ['list', 'kanban', 'graph', 'pivot', 'calendar'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total'], badge: 'state' },
-    list: ['name', 'date_order', 'partner_id', 'user', 'amount_total', 'state'],
+    list: ['name', 'date_order', 'partner_id', 'user', 'amount_total', 'invoice_status', 'state'],
     graph: { groupBy: 'date_order', measure: 'amount_total' },
     pivot: { row: 'partner_id', col: 'state', measure: 'amount_total' },
     calendar: { date: 'date_order' },
@@ -231,10 +274,10 @@ export const salesModels = {
           run: (db, r) => {
             checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
             const { db: procured, stockLines } = procure(write(db, 'sale.order', r.id, { state: 'sale' }), r);
-            return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null }) };
+            return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_shipping_id ?? r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null, scheduled_date: r.commitment_date }) };
           },
         },
-        { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
+        { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale' && invoiceStatus(r, 'sale') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
       ],
       smart: [
@@ -242,8 +285,8 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
-      groups: [['partner_id', 'pricelist_id', 'carrier_id'], ['date_order', 'validity_date', 'user']],
-      tabs: [{ label: 'Order Lines', fields: ['order_line'] }],
+      groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
+      tabs: [{ label: 'Order Lines', fields: ['order_line'] }, { label: 'Notes', fields: ['note'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,
     },
@@ -258,9 +301,11 @@ export const salesModels = {
       date_planned: { type: 'date', label: 'Expected Arrival' },
       state: orderState([['draft', 'RFQ'], ['sent', 'RFQ Sent'], ['purchase', 'Purchase Order'], ['cancel', 'Cancelled']]),
       receipt_done: { type: 'boolean', label: 'Received', readonly: true },
+      payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      invoice_status: { type: 'selection', label: 'Billing Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'purchase') },
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
-      order_line: productLines('Products', 'cost'),
+      order_line: orderLines('Products', 'cost'),
       ...amountFields('order_line'),
     },
     defaults: (id) => ({ name: 'P' + pad(id), date_order: today(), date_planned: addDays(today(), 7), state: 'draft', order_line: [], receipt_done: false }),
@@ -290,7 +335,7 @@ export const salesModels = {
             return { db: r.dropship_partner_id ? confirmed : createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
           },
         },
-        { label: 'Create Bill', when: (r) => r.state === 'purchase', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
+        { label: 'Create Bill', when: (r) => r.state === 'purchase' && invoiceStatus(r, 'purchase') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'purchase'].includes(r.state) },
       ],
       smart: [
