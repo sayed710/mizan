@@ -201,6 +201,9 @@ const allApps = [
     menus: [
       { key: 'projects', label: 'Projects', model: 'project.project' },
       { key: 'tasks', label: 'All Tasks', model: 'project.task' },
+      { key: 'milestones', label: 'Milestones', model: 'project.milestone' },
+      { key: 'updates', label: 'Project Updates', model: 'project.update' },
+      { key: 'recurring', label: 'Recurring Tasks', model: 'project.recurrence' },
       { key: 'report', label: 'Reporting', model: 'project.task', view: 'pivot' },
     ],
   },

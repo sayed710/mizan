@@ -691,6 +691,10 @@ const ar = {
   'Submitted templates cannot be edited': 'لا يمكن تعديل القوالب المرسلة', 'WhatsApp message sent': 'تم إرسال رسالة واتساب', 'Message not found': 'الرسالة غير موجودة',
   'Merge Tickets': 'دمج التذاكر', 'Record Rating': 'تسجيل التقييم', 'Customer Rating': 'تقييم العميل', 'Merged Into': 'مدمج في',
   'Assignment Method': 'طريقة الإسناد', Balanced: 'متوازن', 'Auto Close': 'إغلاق تلقائي', 'Auto Close After (days)': 'إغلاق تلقائي بعد (أيام)',
+  Milestone: 'المرحلة', Milestones: 'المراحل', 'Project Updates': 'تحديثات المشروع', 'Recurring Tasks': 'المهام المتكررة', Recurrence: 'التكرار',
+  'Last Generated Date': 'آخر تاريخ توليد', 'Mark as Reached': 'تحديد كمنجز', 'Maximum Occurrences': 'أقصى عدد للتكرار',
+  'Progress (%)': 'التقدم (%)', 'Reached Date': 'تاريخ الإنجاز', Reached: 'منجز', Reopen: 'إعادة فتح', 'Repeat Every': 'التكرار كل',
+  Until: 'حتى', 'At Risk': 'معرض للخطر', 'Off Track': 'خارج المسار',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

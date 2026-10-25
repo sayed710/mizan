@@ -152,6 +152,8 @@ export const workModels = {
       state: { type: 'selection', label: 'Status', tracking: true, options: [['in_progress', 'In Progress'], ['changes_requested', 'Changes Requested'], ['approved', 'Approved'], ['waiting', 'Waiting'], ['canceled', 'Cancelled'], ['done', 'Done']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       parent_id: { type: 'many2one', relation: 'project.task', label: 'Parent Task' },
+      milestone_id: { type: 'many2one', relation: 'project.milestone', label: 'Milestone' },
+      recurrence_id: { type: 'many2one', relation: 'project.recurrence', label: 'Recurrence', readonly: true },
       depend_on: {
         type: 'one2many', label: 'Blocked By',
         fields: { task_id: { type: 'many2one', relation: 'project.task', label: 'Task' } },
