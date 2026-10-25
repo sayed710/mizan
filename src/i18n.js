@@ -500,6 +500,7 @@ const ar = {
   'Check in': 'تسجيل الحضور', 'Cancel Registration': 'إلغاء التسجيل', 'Parent Department': 'القسم الأب', 'Extra Hours': 'ساعات إضافية', 'Bookings per Slot': 'الحجوزات لكل موعد',
   Availabilities: 'الأوقات المتاحة', Day: 'اليوم', 'From (HH:MM)': 'من (س:د)', 'To (HH:MM)': 'إلى (س:د)', Monday: 'الإثنين', Tuesday: 'الثلاثاء', Wednesday: 'الأربعاء',
   Thursday: 'الخميس', Friday: 'الجمعة', Saturday: 'السبت', Sunday: 'الأحد',
+  Book: 'احجز', 'Thank you! We will confirm by email.': 'شكرًا! سنؤكد عبر البريد الإلكتروني.',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

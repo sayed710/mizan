@@ -3,6 +3,29 @@ import { useEffect, useState } from 'react';
 import { t } from '../i18n.js';
 import { money, setCurrency } from '../ui.jsx';
 
+/** Name/email/phone form posting to a public endpoint, with an optional choice and date/time; shows the server's answer. */
+function VisitorForm({ action, path, extra, choices, dateTime }) {
+  const [state, setState] = useState({ open: false, done: false, error: null });
+  if (state.done) return <p role="status">{t('Thank you! We will confirm by email.')}</p>;
+  if (!state.open) return <button type="button" className="btn primary" onClick={() => setState({ ...state, open: true })}>{action}</button>;
+  return (
+    <form className="checkout" onSubmit={async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.currentTarget));
+      const r = await post(path, { ...extra, ...f });
+      setState(r.ok ? { ...state, done: true } : { ...state, error: r.data.error });
+    }}>
+      <label>{t('Name')}<input name="name" required maxLength={120} /></label>
+      <label>{t('Email')}<input name="email" type="email" required /></label>
+      <label>{t('Phone')}<input name="phone" type="tel" /></label>
+      {choices && <label>{choices.label}<select name={choices.name}>{choices.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>}
+      {dateTime && <><label>{t('Date')}<input name="date" type="date" required /></label><label>{t('Time')}<input name="time" type="time" required /></label></>}
+      {state.error && <div className="alert" role="alert">{state.error}</div>}
+      <button type="submit" className="btn primary">{action}</button>
+    </form>
+  );
+}
+
 const post = (path, body) => fetch(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body),
 }).then(async (r) => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
@@ -59,12 +82,31 @@ export function PublicSite() {
         <nav>
           {site.pages.map((p) => <button key={p.slug} type="button" aria-current={slug === p.slug ? 'page' : undefined} onClick={() => { setSlug(p.slug); setStep('browse'); }}>{p.name}</button>)}
           <button type="button" aria-current={slug === 'shop' ? 'page' : undefined} onClick={() => { setSlug('shop'); setStep('browse'); }}>{t('Shop')}</button>
+          {site.events?.length > 0 && <button type="button" aria-current={slug === 'events' ? 'page' : undefined} onClick={() => { setSlug('events'); setStep('browse'); }}>{t('Events')}</button>}
+          {site.appointments?.length > 0 && <button type="button" aria-current={slug === 'appointments' ? 'page' : undefined} onClick={() => { setSlug('appointments'); setStep('browse'); }}>{t('Appointments')}</button>}
           {site.jobs?.length > 0 && <button type="button" aria-current={slug === 'jobs' ? 'page' : undefined} onClick={() => { setSlug('jobs'); setStep('browse'); setApplied(false); }}>{t('Jobs')}</button>}
         </nav>
         <a className="btn sm" href="#/">{t('Log in')}</a>
       </header>
       <div className="site-body">
         {step === 'done' && <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your order {name} has been received.', { name: result })}</p></div>}
+        {slug === 'events' && site.events.map((e) => (
+          <article key={e.id} className="shop-item job">
+            <h3>{e.name}</h3>
+            <p className="muted">{e.date_begin}{e.location ? ` · ${e.location}` : ''}</p>
+            <p>{e.description}</p>
+            <VisitorForm action={t('Register')} path="/api/public/register" extra={{ event_id: e.id }}
+              choices={e.tickets.length ? { name: 'ticket', label: t('Ticket'), options: e.tickets.map((tk) => [tk.name, `${tk.name}${tk.price ? ` (${tk.price})` : ''}`]) } : null} />
+          </article>
+        ))}
+        {slug === 'appointments' && site.appointments.map((a) => (
+          <article key={a.id} className="shop-item job">
+            <h3>{a.name}</h3>
+            <p className="muted">{a.duration} h{a.location ? ` · ${a.location}` : ''}</p>
+            <p>{a.description}</p>
+            <VisitorForm action={t('Book')} path="/api/public/book" extra={{ type_id: a.id }} dateTime />
+          </article>
+        ))}
         {slug === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
           <>
             <h2>{t('Jobs')}</h2>

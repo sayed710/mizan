@@ -1,6 +1,7 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
 import { models } from '../src/models/index.js';
 import { create, matches, read, search, unlink, write } from '../src/orm.js';
+import { today } from '../src/models/common.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 
 const MAX_LIMIT = 500;
@@ -15,7 +16,63 @@ export const publicSite = (db) => ({
     .map((p) => ({ name: p.name, slug: p.slug, content: p.content })),
   products: sellable(db).map((p) => ({ id: p.id, name: p.name, price: p.list_price })),
   jobs: search(db, 'hr.job').filter((j) => j.is_published).map((j) => ({ id: j.id, name: j.name, description: j.description ?? '' })),
+  events: openEvents(db).map((e) => ({
+    id: e.id, name: e.name, date_begin: e.date_begin, location: e.location ?? '', description: e.description ?? '',
+    tickets: (e.ticket_ids ?? []).map((t) => ({ name: t.name, price: Number(t.price) || 0 })),
+  })),
+  appointments: search(db, 'appointment.type').map((a) => ({
+    id: a.id, name: a.name, duration: a.duration, location: a.location ?? '', description: a.description ?? '',
+    slots: (a.slot_ids ?? []).map((s) => ({ weekday: s.weekday, start: s.start, end: s.end })),
+  })),
 });
+
+const openEvents = (db) => search(db, 'event.event').filter((e) => ['booked', 'announced'].includes(e.stage_id) && e.date_begin >= today());
+
+/** Visitor contact, matched by email or created (tagged Website). */
+function websitePartner(db, { name, email, phone }) {
+  const known = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase());
+  return known ? { db, id: known.id } : create(db, 'res.partner', { name, email, phone, tag_ids: ['Website'] });
+}
+
+const visitor = (b) => ({ name: String(b.name ?? '').trim().slice(0, 120), email: String(b.email ?? '').trim().slice(0, 254), phone: String(b.phone ?? '').slice(0, 40) });
+
+/** Run a public create; model guards (sold out, slot taken…) become a 400 with their message. */
+function publicCreate(db, build) {
+  try {
+    const next = build();
+    return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: 'Website', isAdmin: false }) };
+  } catch (e) {
+    return { status: 400, body: { error: e.message } };
+  }
+}
+
+/** Anonymous registration to an announced event (seat and ticket limits apply). */
+export function publicRegister(db, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const event = openEvents(db).find((e) => e.id === b.event_id);
+  const v = visitor(b);
+  if (!event) return { status: 400, body: { error: 'Registrations for this event are closed' } };
+  if (!v.name || !EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
+  const ticket = (event.ticket_ids ?? []).find((t) => t.name === b.ticket)?.name ?? null;
+  return publicCreate(db, () => {
+    const { db: withPartner, id: partner_id } = websitePartner(db, v);
+    return create(withPartner, 'event.registration', { ...v, event_id: event.id, partner_id, ticket }).db;
+  });
+}
+
+/** Anonymous appointment booking inside the type's availabilities. */
+export function publicBook(db, body) {
+  const b = body && typeof body === 'object' ? body : {};
+  const type = search(db, 'appointment.type').find((a) => a.id === b.type_id);
+  const v = visitor(b);
+  if (!type) return { status: 400, body: { error: 'Unknown appointment' } };
+  if (!v.name || !EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(b.date ?? '') || b.date < today() || !/^\d{2}:\d{2}$/.test(b.time ?? '')) return { status: 400, body: { error: 'Pick a future date and a time' } };
+  return publicCreate(db, () => {
+    const { db: withPartner, id: partner_id } = websitePartner(db, v);
+    return create(withPartner, 'appointment.booking', { name: v.name, type_id: type.id, partner_id, date: b.date, time: b.time }).db;
+  });
+}
 
 /** Anonymous job application to a published position. */
 export function publicApply(db, body) {
@@ -41,7 +98,7 @@ export function publicOrder(db, body) {
   const products = new Map(sellable(db).map((p) => [p.id, p]));
   const lines = (Array.isArray(b.lines) ? b.lines : []).slice(0, 50)
     .filter((l) => products.has(l?.product_id) && Number.isInteger(l.qty) && l.qty > 0 && l.qty <= 1000)
-    .map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: products.get(l.product_id).list_price, tax: 14 }));
+    .map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: products.get(l.product_id).list_price, tax: products.get(l.product_id).sale_tax ?? 14 }));
   if (!lines.length) return { status: 400, body: { error: 'Your cart is empty' } };
   let next = db;
   let partnerId = search(db, 'res.partner').find((p) => p.email?.toLowerCase() === email.toLowerCase())?.id;

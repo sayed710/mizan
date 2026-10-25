@@ -11,7 +11,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
-import { handleApi, publicApply, publicOrder, publicSite } from './api.js';
+import { handleApi, publicApply, publicBook, publicOrder, publicRegister, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
@@ -196,6 +196,16 @@ async function api(req, res, path) {
     if (tooMany(`apply:${ip}`)) return send(res, 429, { error: 'Too many applications, try again later' });
     recordFailure(`apply:${ip}`);
     const out = publicApply(db, await readJson(req));
+    if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
+  // Event registrations and appointment bookings: same CSRF header and per-client limit as job applications.
+  const publicForms = { '/api/public/register': publicRegister, '/api/public/book': publicBook };
+  if (publicForms[path] && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (tooMany(`form:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
+    recordFailure(`form:${ip}`);
+    const out = publicForms[path](db, await readJson(req));
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
