@@ -60,9 +60,9 @@ function replies(socket) {
 
 /**
  * Send one email: plain text, or text plus an HTML alternative. Resolves on 250 after DATA; rejects with the server's reply otherwise.
- * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string}} msg
+ * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string, listUnsubscribe?: string}} msg
  */
-export async function sendMail(cfg, { to, subject, text, html, replyTo }) {
+export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsubscribe }) {
   if (!ADDRESS.test(to)) throw new Error(`Invalid recipient ${to}`);
   const timeoutMs = 20000;
   let socket = cfg.secure
@@ -104,6 +104,7 @@ export async function sendMail(cfg, { to, subject, text, html, replyTo }) {
       : part('text/plain', text);
     const message = [
       `From: ${header(cfg.from)}`, `To: ${header(to)}`, ...(replyTo && ADDRESS.test(replyTo) ? [`Reply-To: ${header(replyTo)}`] : []),
+      ...(/^https?:\/\/\S+$/.test(listUnsubscribe ?? '') ? [`List-Unsubscribe: <${header(listUnsubscribe)}>`, 'List-Unsubscribe-Post: List-Unsubscribe=One-Click'] : []),
       `Subject: ${encodeWord(subject)}`, `Date: ${new Date().toUTCString()}`, `Message-ID: <${randomUUID()}@mizan>`, 'MIME-Version: 1.0', ...content,
     ].join('\r\n');
     await cmd(`${message}\r\n.`, [250]);

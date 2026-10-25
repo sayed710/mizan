@@ -1,6 +1,6 @@
-// Social Marketing, PLM, Meeting Rooms, Referrals, Skills, ESG.
+// PLM, Meeting Rooms, Referrals, Skills, ESG.
 import { write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { today } from './common.js';
 import { simple } from './apps2.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -9,30 +9,6 @@ const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.empl
 export const EMISSION_FACTORS = { electricity: 0.45, diesel: 2.68, gasoline: 2.31, flight: 0.15, natural_gas: 2.0 };
 
 export const apps3Models = {
-  'social.post': simple({
-    label: 'Posts',
-    fields: {
-      name: { type: 'char', label: 'Title', required: true },
-      message: { type: 'text', label: 'Message' },
-      accounts: { type: 'tags', label: 'Accounts' },
-      scheduled_date: { type: 'date', label: 'Scheduled Date' },
-      likes: { type: 'integer', label: 'Likes' },
-      shares: { type: 'integer', label: 'Shares' },
-    },
-    stages: [['draft', 'Draft'], ['scheduled', 'Scheduled'], ['posted', 'Posted']],
-    lines: ['accounts', 'scheduled_date', 'likes'],
-    list: ['scheduled_date', 'name', 'accounts', 'likes', 'shares', 'stage_id'],
-    extra: {
-      defaults: () => ({ accounts: ['Facebook', 'LinkedIn'], scheduled_date: addDays(today(), 1), likes: 0, shares: 0 }),
-      views: ['kanban', 'list', 'calendar', 'graph'],
-      calendar: { date: 'scheduled_date' },
-      graph: { groupBy: 'stage_id', measure: 'likes' },
-      kanban: { groupBy: 'stage_id', title: 'name', lines: ['scheduled_date', 'likes'], tags: 'accounts', quickCreate: true },
-      groups: [['accounts', 'scheduled_date'], ['likes', 'shares']],
-      form: { tabs: [{ label: 'Message', fields: ['message'] }] },
-    },
-  }),
-
   'mrp.eco': simple({
     label: 'Engineering Changes',
     fields: {

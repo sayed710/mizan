@@ -25,33 +25,41 @@ export function emailFor(db, mailing, trace, baseUrl) {
     + `<div>${escapeHtml(body).replace(LINK, (u) => (links.includes(u) ? `<a href="${tracked(u)}">${u}</a>` : u)).replace(/\n/g, '<br>')}</div>`
     + `<p style="font-size:12px;color:#888"><a href="${unsubscribeUrl}">Unsubscribe</a></p>`
     + `<img src="${baseUrl}/api/public/mail/open/${trace.token}" width="1" height="1" alt=""></body></html>`;
-  return { to: trace.email, subject: renderTemplate(mailing.subject ?? '', object), text, html, replyTo: mailing.reply_to };
+  return { to: trace.email, subject: renderTemplate(mailing.subject ?? '', object), text, html, replyTo: mailing.reply_to, listUnsubscribe: unsubscribeUrl };
 }
 
 /**
  * Run `queue` (which creates traces) and email every new trace; failed deliveries become bounces.
+ * The queued state is committed before any network I/O (so a second send sees the mailing as sent, and changes
+ * made while emails go out, like unsubscribes, are kept); each bounce is then applied to the current db.
+ * @param {{get: () => object, commit: (next: object) => void}} store current db and a validated commit
  * @param {(db: object, opts: {now: string, token: () => string}) => object} queue
- * @returns {Promise<{db: object, sent: number, delivered: number}>}
+ * @returns {Promise<{sent: number, delivered: number}>}
  */
-export async function deliver(cfg, db, queue, baseUrl, now = today()) {
-  const before = new Set(search(db, 'mailing.trace').map((t) => t.id));
-  let next = queue(db, { now, token: randomUUID });
-  const fresh = search(next, 'mailing.trace').filter((t) => !before.has(t.id));
+export async function deliver(cfg, store, queue, baseUrl, now = today()) {
+  const base = store.get();
+  const before = new Set(search(base, 'mailing.trace').map((t) => t.id));
+  const queued = queue(base, { now, token: randomUUID });
+  store.commit(queued);
+  const fresh = search(queued, 'mailing.trace').filter((t) => !before.has(t.id));
   let delivered = 0;
   for (const trace of fresh) {
     try {
-      await sendMail(cfg, emailFor(next, read(next, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
+      await sendMail(cfg, emailFor(queued, read(queued, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
       delivered += 1;
     } catch (e) {
       console.warn(`Mailing ${trace.mailing_id}: ${trace.email} failed: ${e.message}`);
-      next = markBounced(next, trace.token);
+      store.commit(markBounced(store.get(), trace.token));
     }
   }
-  return { db: next, sent: fresh.length, delivered };
+  return { sent: fresh.length, delivered };
 }
 
-/** Public tracking endpoints: /api/public/mail/(open|click|unsubscribe)/<token>[/<link index>]. */
-export function trackingResponse(db, path, now = today()) {
+/**
+ * Public tracking endpoints: /api/public/mail/(open|click|unsubscribe)/<token>[/<link index>].
+ * Unsubscribing asks for confirmation on GET and acts on POST, so mail scanners that follow links do not unsubscribe people.
+ */
+export function trackingResponse(db, path, now = today(), method = 'GET') {
   const m = /^\/api\/public\/mail\/(open|click|unsubscribe)\/([^/]+)(?:\/(\d+))?$/.exec(path);
   if (!m || !TOKEN.test(m[2])) return null;
   const [, kind, token, index] = m;
@@ -63,10 +71,11 @@ export function trackingResponse(db, path, now = today()) {
     if (!url) return { status: 404, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Unknown link' };
     return { status: 302, headers: { Location: url, 'Cache-Control': 'no-store' }, body: '', db: trackEvent(db, token, 'click', { now, url }) };
   }
-  return {
-    status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, db: unsubscribe(db, token),
-    body: '<!doctype html><meta charset="utf-8"><title>Unsubscribed</title><p style="font-family:sans-serif">You have been unsubscribed. You will not receive these emails any more.</p>',
-  };
+  const page = (inner) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Unsubscribe</title><div style="font-family:sans-serif;max-width:480px;margin:40px auto;padding:0 16px">${inner}</div>`;
+  if (method !== 'POST') {
+    return { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, body: page(`<p>Stop receiving these emails at <b>${escapeHtml(trace.email)}</b>?</p><form method="post"><button type="submit">Unsubscribe</button></form>`) };
+  }
+  return { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' }, db: unsubscribe(db, token), body: page('<p>You have been unsubscribed. You will not receive these emails any more.</p>') };
 }
 
-export const deliverMailing = (cfg, db, mailingId, baseUrl, now) => deliver(cfg, db, (d, opts) => queueMailing(d, read(d, 'mailing.mailing', mailingId), opts), baseUrl, now);
+export const deliverMailing = (cfg, store, mailingId, baseUrl, now) => deliver(cfg, store, (d, opts) => queueMailing(d, read(d, 'mailing.mailing', mailingId), opts), baseUrl, now);

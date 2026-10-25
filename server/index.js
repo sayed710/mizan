@@ -11,7 +11,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
-import { handleApi, publicApply, publicBook, publicOrder, publicRegister, publicSite } from './api.js';
+import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { sendDocument, sendMailing } from './mail.js';
@@ -25,7 +25,7 @@ const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
   '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b) => digitizeBill(db, b) },
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, run: (b, u) => sendWhatsApp(ENV, db, u, b) },
-  '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b) => sendSmsCampaign(ENV, db, b) },
+  '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
@@ -64,6 +64,17 @@ const storage = openStorage(sql);
 let db = storage.load();
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+/**
+ * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
+ * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
+ */
+const storeFor = (opts) => {
+  let base = db;
+  return {
+    get: () => { base = db; return db; },
+    commit: (next) => { commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
+  };
+};
 if (!db) commitDb(seed(), { full: true });
 installCustomFields(db.settings?.customFields);
 
@@ -128,6 +139,8 @@ const visibleDb = (u) => {
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
 const failures = new Map();
 const WINDOW = 15 * 60 * 1000;
+const CHAT_MESSAGES_PER_WINDOW = 30;
+const TRACKING_HITS_PER_WINDOW = 300;
 const recent = (k) => (failures.get(k) ?? []).filter((t) => Date.now() - t < WINDOW);
 const tooMany = (k) => recent(k).length >= 10;
 const recordFailure = (k) => failures.set(k, [...recent(k), Date.now()]);
@@ -186,11 +199,14 @@ async function serveStatic(req, res) {
 /** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
 const baseUrlOf = (req) => (process.env.MIZAN_PUBLIC_URL ?? `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`).replace(/\/$/, '');
 let lastBaseUrl = process.env.MIZAN_PUBLIC_URL ?? `http://localhost:${PORT}`;
+let mailBaseKnown = false;
 
 async function api(req, res, path) {
   const ip = clientIp(req);
-  if (path.startsWith('/api/public/mail/') && req.method === 'GET') {
-    const out = trackingResponse(db, path);
+  if (path.startsWith('/api/public/mail/') && ['GET', 'POST'].includes(req.method)) {
+    if (recent(`track:${ip}`).length >= TRACKING_HITS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    recordFailure(`track:${ip}`);
+    const out = trackingResponse(db, path, undefined, req.method);
     if (!out) return send(res, 404, { error: 'Not found' });
     if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }));
     res.writeHead(out.status, out.headers);
@@ -237,7 +253,13 @@ async function api(req, res, path) {
   if (chatRoute) {
     if (req.method === 'POST' && req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`chatauth:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
-    const out = chatRoute(db, req.method === 'GET' ? new URL(req.url, 'http://x').searchParams : await readJson(req));
+    const input = req.method === 'GET' ? new URL(req.url, 'http://x').searchParams : await readJson(req);
+    if (path.endsWith('/message')) {
+      const key = `chatmsg:${Number(input?.sessionId) || 0}`;
+      if (recent(key).length >= CHAT_MESSAGES_PER_WINDOW) return send(res, 429, { error: 'You are sending messages too fast, please wait a moment' });
+      recordFailure(key);
+    }
+    const out = chatRoute(db, input);
     if (out.denied) recordFailure(`chatauth:${ip}`);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
@@ -248,6 +270,18 @@ async function api(req, res, path) {
     recordFailure(`order:${ip}`); // counts every order: max 10 per client per 15 minutes
     const out = publicOrder(db, await readJson(req));
     if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
+  // Cart prices are read-only (computed server-side); order status is limited on wrong tokens like live chat.
+  if (path === '/api/public/cart' && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    const out = publicCart(db, await readJson(req));
+    return send(res, out.status, out.body);
+  }
+  if (path === '/api/public/order-status' && req.method === 'GET') {
+    if (tooMany(`orderstatus:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
+    const out = publicOrderStatus(db, new URL(req.url, 'http://x').searchParams);
+    if (out.denied) recordFailure(`orderstatus:${ip}`);
     return send(res, out.status, out.body);
   }
   if (path.startsWith('/api/v1/')) {
@@ -288,9 +322,10 @@ async function api(req, res, path) {
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
-      const out = await action.run(body, user);
-      // Changes made by integrations go through the same validation as client edits.
-      if (out.db) commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      const snapshot = db;
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }));
+      // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -304,8 +339,12 @@ async function api(req, res, path) {
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
       lastBaseUrl = baseUrlOf(req);
-      const out = await (path.endsWith('mailing') ? sendMailing : sendDocument)(SMTP, db, user, body, lastBaseUrl);
-      if (out.db) commitDb(out.db);
+      mailBaseKnown = true;
+      const snapshot = db;
+      const out = path.endsWith('mailing')
+        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }), body, lastBaseUrl)
+        : await sendDocument(SMTP, db, user, body);
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
       return send(res, out.status, out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -386,20 +425,20 @@ setInterval(runJobs, JOB_INTERVAL_MS).unref();
 
 // Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
 const MAIL_JOB_INTERVAL_MS = 10 * 60 * 1000;
+// Links in scheduled emails need the public address; without MIZAN_PUBLIC_URL they wait for a manual send to learn it.
 const runMailJobs = async () => {
-  if (!SMTP) return;
+  if (!SMTP || (!process.env.MIZAN_PUBLIC_URL && !mailBaseKnown)) return;
   const at = new Date().toISOString().slice(0, 10);
   const jobs = [
-    ...dueMailings(db, at).map((m) => (d) => deliverMailing(SMTP, d, m.id, lastBaseUrl)),
-    ...dueAbWinners(db, at).map((key) => (d) => {
-      const winner = selectWinner(d, key);
-      return winner ? deliver(SMTP, d, (x, opts) => sendWinner(x, winner.id, opts), lastBaseUrl) : Promise.resolve({ db: d });
+    ...dueMailings(db, at).map((m) => (store) => deliverMailing(SMTP, store, m.id, lastBaseUrl)),
+    ...dueAbWinners(db, at).map((key) => (store) => {
+      const winner = selectWinner(store.get(), key);
+      return winner ? deliver(SMTP, store, (x, opts) => sendWinner(x, winner.id, opts), lastBaseUrl) : null;
     }),
   ];
   for (const job of jobs) {
     try {
-      const out = await job(db);
-      if (out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Scheduler' }));
+      await job(storeFor({ author: 'Scheduler' }));
     } catch (e) {
       console.error('Scheduled mailing failed:', e.message);
     }

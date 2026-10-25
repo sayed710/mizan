@@ -4,6 +4,8 @@ import { today } from './common.js';
 import { t } from '../i18n.js';
 
 export const MAX_MESSAGE = 2000;
+/** Messages kept per conversation; a longer one must be continued in a new conversation. */
+export const MAX_MESSAGES = 200;
 const STAGES = [['waiting', 'Waiting'], ['open', 'In Conversation'], ['closed', 'Closed']];
 const AUTHORS = [['visitor', 'Visitor'], ['operator', 'Operator'], ['bot', 'Bot']];
 const RULE_ACTIONS = [['display_button', 'Show'], ['auto_popup', 'Open automatically'], ['hide_button', 'Hide']];
@@ -110,6 +112,7 @@ export function postMessage(db, sessionId, { author, body, now = new Date().toIS
   if (!text) throw new Error('Write a message first');
   if (text.length > MAX_MESSAGE) throw new Error(`Messages are limited to ${MAX_MESSAGE} characters`);
   if (s.stage_id === 'closed') throw new Error('This conversation is closed');
+  if ((s.messages ?? []).length >= MAX_MESSAGES) throw new Error('This conversation is too long; please start a new one');
   const next = addMessages(db, s, [{ author, body: expandCanned(db, author, text).slice(0, MAX_MESSAGE), date: now }]);
   return author === 'operator' && s.stage_id === 'waiting' ? write(next, 'livechat.session', s.id, { stage_id: 'open' }) : next;
 }

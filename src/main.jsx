@@ -17,7 +17,10 @@ const root = createRoot(document.getElementById('root'));
 initStore().then(({ mode, user }) => {
   // Visitors without an account can browse the public website at #/shop.
   const anonymous = mode === 'server' && !user;
-  const page = anonymous && location.hash.startsWith('#/shop') ? <PublicSite /> : anonymous ? <Login /> : <App />;
+  const isPublic = () => anonymous && location.hash.startsWith('#/shop');
+  const startedPublic = isPublic();
+  const page = startedPublic ? <PublicSite /> : anonymous ? <Login /> : <App />;
   root.render(<StrictMode>{page}</StrictMode>);
-  window.addEventListener('hashchange', () => { if (anonymous) location.reload(); });
+  // The public site routes inside #/shop… itself: reload only when switching between it and the login page.
+  window.addEventListener('hashchange', () => { if (anonymous && isPublic() !== startedPublic) location.reload(); });
 });

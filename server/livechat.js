@@ -70,11 +70,13 @@ export function livechatMessage(db, body, now = new Date().toISOString()) {
 }
 
 /** GET /api/public/livechat/poll?sessionId&token&since → messages newer than `since` (ISO date) and the stage. */
+const POLL_LIMIT = 100;
+
 export function livechatPoll(db, query) {
   const s = visitorSession(db, Number(query.get('sessionId')), query.get('token'));
   if (!s) return denied;
   const since = String(query.get('since') ?? '');
-  const messages = (s.messages ?? []).filter((m) => !since || String(m.date) > since);
+  const messages = (s.messages ?? []).filter((m) => !since || String(m.date) > since).slice(-POLL_LIMIT);
   return { status: 200, body: { messages, stage: s.stage_id, rated: Number(s.rating) > 0, operator: read(db, 'hr.employee', s.operator_id)?.name ?? null } };
 }
 

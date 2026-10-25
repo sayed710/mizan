@@ -14,6 +14,7 @@ import { Website } from './views/Website.jsx';
 import { AppStore, CapTable, Kiosk } from './views/AppStore.jsx';
 import { SurveyResults, SurveyTake } from './views/Survey.jsx';
 import { ErrorBoundary } from './ui.jsx';
+import { Spreadsheet } from './views/Spreadsheet.jsx';
 import { Studio } from './views/Studio.jsx';
 import { Kitchen } from './views/Kitchen.jsx';
 import { Knowledge } from './views/Knowledge.jsx';
@@ -28,7 +29,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);

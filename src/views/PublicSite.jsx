@@ -1,8 +1,10 @@
 // Public website (no login): published pages + shop, served from /api/public/* on the Mizan server.
+// Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments, #/shop/jobs.
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n.js';
-import { money, setCurrency } from '../ui.jsx';
+import { setCurrency } from '../ui.jsx';
 import { matchRule } from '../models/livechat.js';
+import { Shop, parseShopRoute, useCart, useStored } from './Shop.jsx';
 
 /** Name/email/phone form posting to a public endpoint, with an optional choice and date/time; shows the server's answer. */
 function VisitorForm({ action, path, extra, choices, dateTime }) {
@@ -135,59 +137,78 @@ function Content({ text = '' }) {
   });
 }
 
+const SITE_PAGES = ['page', 'events', 'appointments', 'jobs'];
+
+/** Current location.hash, updated on navigation. */
+function useHash() {
+  const [hash, setHash] = useState(location.hash);
+  useEffect(() => {
+    const update = () => { setHash(location.hash); window.scrollTo(0, 0); };
+    window.addEventListener('hashchange', update);
+    return () => window.removeEventListener('hashchange', update);
+  }, []);
+  return hash;
+}
+
+/** Header: pages, Shop, Events…, then search, pricelist, cart count, Sign in and Contact Us. */
+function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
+  const link = (href, label, current) => <a key={href} href={href} aria-current={current ? 'page' : undefined}>{label}</a>;
+  const contact = site.pages.find((p) => p.slug === 'contact');
+  return (
+    <header className="site-nav shop-header">
+      <a className="site-brand" href={site.pages[0] ? `#/shop/page/${encodeURIComponent(site.pages[0].slug)}` : '#/shop'}><b>{site.company}</b></a>
+      <nav aria-label={t('Website')}>
+        {site.pages.filter((p) => p.slug !== 'contact').map((p) => link(`#/shop/page/${encodeURIComponent(p.slug)}`, p.name, route.page === 'page' && route.arg === p.slug))}
+        {link('#/shop', t('Shop'), !SITE_PAGES.includes(route.page))}
+        {site.events?.length > 0 && link('#/shop/events', t('Events'), route.page === 'events')}
+        {site.appointments?.length > 0 && link('#/shop/appointments', t('Appointments'), route.page === 'appointments')}
+        {site.jobs?.length > 0 && link('#/shop/jobs', t('Jobs'), route.page === 'jobs')}
+      </nav>
+      <div className="shop-header-tools">
+        <form role="search" onSubmit={(e) => { e.preventDefault(); location.hash = `#/shop?${new URLSearchParams({ search: new FormData(e.currentTarget).get('search') })}`; }}>
+          <input name="search" type="search" placeholder={t('Search…')} aria-label={t('Search products')} />
+        </form>
+        {site.pricelists?.length > 0 && (
+          <select aria-label={t('Pricelist')} value={pricelist ?? ''} onChange={(e) => setPricelist(e.target.value ? Number(e.target.value) : null)}>
+            <option value="">{site.currency}</option>
+            {site.pricelists.map((p) => <option key={p.id} value={p.id}>{p.name} ({site.currency})</option>)}
+          </select>
+        )}
+        <a className="shop-cart-link" href="#/shop/cart" aria-label={t('Cart ({count})', { count: cartCount })}>{t('Cart')} <span className="shop-badge">{cartCount}</span></a>
+        <a className="btn sm" href="#/">{t('Sign in')}</a>
+        {contact && <a className="btn sm primary" href="#/shop/page/contact">{t('Contact Us')}</a>}
+      </div>
+    </header>
+  );
+}
+
 export function PublicSite() {
   const [site, setSite] = useState(null);
-  const [slug, setSlug] = useState(null);
-  const [cart, setCart] = useState({});
-  const [form, setForm] = useState({ name: '', email: '', phone: '', city: '' });
-  const [step, setStep] = useState('browse');
-  const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [applying, setApplying] = useState(null);
   const [applied, setApplied] = useState(false);
+  const cart = useCart();
+  const [pricelist, setPricelist] = useStored('mizan-shop-pricelist', null);
+  const route = parseShopRoute(useHash());
 
   useEffect(() => {
     fetch('/api/public/site').then((r) => r.json()).then((s) => {
       setCurrency(s.currency);
       setSite(s);
-      setSlug(s.pages[0]?.slug ?? 'shop');
     }).catch(() => setError(t('The website is not available right now.')));
   }, []);
 
   if (error && !site) return <main className="site"><div className="site-body"><p className="alert">{error}</p></div></main>;
   if (!site) return <main className="site"><div className="site-body muted">…</div></main>;
 
-  const product = (id) => site.products.find((p) => p.id === Number(id));
-  const lines = Object.entries(cart).map(([id, qty]) => ({ product_id: Number(id), qty }));
-  const total = lines.reduce((s, l) => s + l.qty * (product(l.product_id)?.price ?? 0) * 1.14, 0);
-  const page = site.pages.find((p) => p.slug === slug);
-
-  const checkout = async (e) => {
-    e.preventDefault();
-    setError(null);
-    const r = await post('/api/public/order', { ...form, lines });
-    if (!r.ok) { setError(r.data.error ?? t('Could not place the order')); return; }
-    setResult(r.data.order);
-    setCart({});
-    setStep('done');
-  };
+  const page = route.page === 'page' && site.pages.find((p) => p.slug === route.arg);
+  const validPricelist = site.pricelists?.some((p) => p.id === pricelist) ? pricelist : null;
 
   return (
     <main className="site">
-      <header className="site-nav">
-        <b className="site-brand">{site.company}</b>
-        <nav>
-          {site.pages.map((p) => <button key={p.slug} type="button" aria-current={slug === p.slug ? 'page' : undefined} onClick={() => { setSlug(p.slug); setStep('browse'); }}>{p.name}</button>)}
-          <button type="button" aria-current={slug === 'shop' ? 'page' : undefined} onClick={() => { setSlug('shop'); setStep('browse'); }}>{t('Shop')}</button>
-          {site.events?.length > 0 && <button type="button" aria-current={slug === 'events' ? 'page' : undefined} onClick={() => { setSlug('events'); setStep('browse'); }}>{t('Events')}</button>}
-          {site.appointments?.length > 0 && <button type="button" aria-current={slug === 'appointments' ? 'page' : undefined} onClick={() => { setSlug('appointments'); setStep('browse'); }}>{t('Appointments')}</button>}
-          {site.jobs?.length > 0 && <button type="button" aria-current={slug === 'jobs' ? 'page' : undefined} onClick={() => { setSlug('jobs'); setStep('browse'); setApplied(false); }}>{t('Jobs')}</button>}
-        </nav>
-        <a className="btn sm" href="#/">{t('Log in')}</a>
-      </header>
+      <SiteHeader site={site} route={route} cartCount={cart.count} pricelist={validPricelist} setPricelist={setPricelist} />
       <div className="site-body">
-        {step === 'done' && <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your order {name} has been received.', { name: result })}</p></div>}
-        {slug === 'events' && site.events.map((e) => (
+        {route.page === 'events' && site.events.map((e) => (
           <article key={e.id} className="shop-item job">
             <h3>{e.name}</h3>
             <p className="muted">{e.date_begin}{e.location ? ` · ${e.location}` : ''}</p>
@@ -196,7 +217,7 @@ export function PublicSite() {
               choices={e.tickets.length ? { name: 'ticket', label: t('Ticket'), options: e.tickets.map((tk) => [tk.name, `${tk.name}${tk.price ? ` (${tk.price})` : ''}`]) } : null} />
           </article>
         ))}
-        {slug === 'appointments' && site.appointments.map((a) => (
+        {route.page === 'appointments' && site.appointments.map((a) => (
           <article key={a.id} className="shop-item job">
             <h3>{a.name}</h3>
             <p className="muted">{a.duration} h{a.location ? ` · ${a.location}` : ''}</p>
@@ -204,7 +225,7 @@ export function PublicSite() {
             <VisitorForm action={t('Book')} path="/api/public/book" extra={{ type_id: a.id }} dateTime />
           </article>
         ))}
-        {slug === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
+        {route.page === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
           <>
             <h2>{t('Jobs')}</h2>
             {site.jobs.map((j) => (
@@ -230,40 +251,8 @@ export function PublicSite() {
             ))}
           </>
         ))}
-        {step !== 'done' && slug !== 'shop' && slug !== 'jobs' && page && <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article>}
-        {step === 'browse' && slug === 'shop' && (
-          <>
-            <h2>{t('Shop')}</h2>
-            <div className="shop-grid">
-              {site.products.map((p) => (
-                <article key={p.id} className="shop-item">
-                  <div className="shop-thumb" aria-hidden="true">{p.name[0]}</div>
-                  <h3>{p.name}</h3>
-                  <p className="price">{money(p.price)}</p>
-                  <button type="button" className="btn primary" onClick={() => setCart({ ...cart, [p.id]: (cart[p.id] ?? 0) + 1 })}>{t('Add to Cart')}</button>
-                </article>
-              ))}
-            </div>
-            {lines.length > 0 && (
-              <aside className="shop-cart">
-                <h3>{t('Your Cart')}</h3>
-                {lines.map((l) => <div key={l.product_id}>{l.qty} × {product(l.product_id)?.name}</div>)}
-                <button type="button" className="btn primary" onClick={() => setStep('checkout')}>{t('Checkout')}</button>
-              </aside>
-            )}
-          </>
-        )}
-        {step === 'checkout' && (
-          <form className="checkout" onSubmit={checkout}>
-            <h2>{t('Checkout')}</h2>
-            <p>{t('Total')}: <b>{money(total)}</b></p>
-            {[['name', 'Name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone', 'tel', false], ['city', 'City', 'text', false]].map(([k, label, type, req]) => (
-              <label key={k}>{t(label)}<input type={type} required={req} maxLength={120} value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} /></label>
-            ))}
-            {error && <div className="alert" role="alert">{error}</div>}
-            <button type="submit" className="btn primary">{t('Place Order')}</button>
-          </form>
-        )}
+        {route.page === 'page' && (page ? <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article> : <p className="alert">{t('Page not found')}</p>)}
+        {!SITE_PAGES.includes(route.page) && <Shop site={site} route={route} cart={cart} pricelist={validPricelist} />}
       </div>
       {site.livechat && <LiveChat info={site.livechat} />}
       <footer className="site-footer">© {new Date().getFullYear()} {site.company}</footer>

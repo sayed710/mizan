@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
-import { channelStats, chatbotReply, closeSession, matchRule, pickOperator, postMessage, rateSession, startSession } from './models/livechat.js';
+import { MAX_MESSAGES, channelStats, chatbotReply, closeSession, matchRule, pickOperator, postMessage, rateSession, startSession } from './models/livechat.js';
 import { seed } from './seed.js';
 
 const T0 = '2026-01-01T10:00:00.000Z';
@@ -111,4 +111,17 @@ test('close, then rate once; stats follow', () => {
   const ch = read(rated, 'livechat.channel', channel.id);
   assert.equal(ch.rating_avg, 4);
   assert.equal(ch.session_count, 1);
+});
+
+test('a conversation is capped so one visitor cannot grow it without bound', () => {
+  const db = seed();
+  const channel = search(db, 'livechat.channel')[0];
+  const started = startSession(db, channel, { name: 'Flood', email: 'f@x.example', url: '/', token: 'tok-flood-0001', now: '2026-01-01T00:00:00Z' });
+  const sid = started.id;
+  const full = Array.from({ length: MAX_MESSAGES }).reduce((acc, _, i) => {
+    const s = read(acc, 'livechat.session', sid);
+    return (s.messages ?? []).length >= MAX_MESSAGES ? acc : postMessage(acc, sid, { author: 'visitor', body: `m${i}`, now: `2026-01-01T00:00:${String(i % 60).padStart(2, '0')}Z` });
+  }, started.db);
+  assert.equal(read(full, 'livechat.session', sid).messages.length, MAX_MESSAGES);
+  assert.throws(() => postMessage(full, sid, { author: 'visitor', body: 'one more' }), /too long/);
 });

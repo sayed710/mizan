@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from '../src/orm.js';
 import { queueMailing } from '../src/models/mailing.js';
-import { emailFor, linksOf, trackingResponse } from './mailtrack.js';
+import { deliverMailing, emailFor, linksOf, trackingResponse } from './mailtrack.js';
 import { seed } from '../src/seed.js';
 
 const queued = () => {
@@ -41,9 +41,36 @@ test('the pixel counts an open, a click redirects only to a link of the mailing,
   assert.equal(trackingResponse(db, '/api/public/mail/open/<script>'), null);
 });
 
-test('the unsubscribe link opts the contact out', () => {
+test('the unsubscribe link asks first (GET) and opts the contact out on POST, once', () => {
   const { db, trace } = queued();
-  const out = trackingResponse(db, `/api/public/mail/unsubscribe/${trace.token}`);
-  assert.equal(out.status, 200);
+  const ask = trackingResponse(db, `/api/public/mail/unsubscribe/${trace.token}`);
+  assert.equal(ask.db, undefined);
+  assert.match(ask.body, /method="post"/);
+  const out = trackingResponse(db, `/api/public/mail/unsubscribe/${trace.token}`, '2026-05-02', 'POST');
   assert.equal(read(out.db, trace.res_model, trace.res_id).opt_out, true);
+  assert.equal(trackingResponse(out.db, `/api/public/mail/unsubscribe/${trace.token}`, '2026-05-02', 'POST').db, out.db);
+});
+
+test('repeat opens change nothing, so nothing is saved', () => {
+  const { db, trace } = queued();
+  const once = trackingResponse(db, `/api/public/mail/open/${trace.token}`).db;
+  assert.equal(trackingResponse(once, `/api/public/mail/open/${trace.token}`).db, once);
+});
+
+test('delivery commits the queue first and keeps changes made while emails go out', async () => {
+  const base = seed();
+  const list = search(base, 'mailing.list')[0].id;
+  const { db: start, id } = create(base, 'mailing.mailing', { subject: 'Hi', list_id: list, body: 'Hello' });
+  let current = start;
+  const commits = [];
+  const store = { get: () => current, commit: (next) => { commits.push(next); current = next; } };
+  // An unreachable SMTP server: every email bounces after the queue is committed.
+  const pending = deliverMailing({ host: '127.0.0.1', port: 9, from: 'a@x.example' }, store, id, 'https://erp.example');
+  assert.equal(read(current, 'mailing.mailing', id).state, 'sent');
+  const contact = search(current, 'mailing.contact').find((c) => !c.opt_out);
+  current = { ...current, records: { ...current.records, 'mailing.contact': current.records['mailing.contact'].map((c) => (c.id === contact.id ? { ...c, phone: 'changed meanwhile' } : c)) } };
+  const out = await pending;
+  assert.equal(out.delivered, 0);
+  assert.equal(read(current, 'mailing.mailing', id).bounced, out.sent);
+  assert.equal(read(current, 'mailing.contact', contact.id).phone, 'changed meanwhile');
 });

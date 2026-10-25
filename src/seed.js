@@ -1,6 +1,6 @@
 import { create, emptyDb, postNote, read, search, write } from './orm.js';
 import { addDays, today } from './models/common.js';
-import { moveStock } from './models/sales.js';
+import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 
@@ -302,8 +302,20 @@ export function seed() {
   add('livechat.session', { name: 'Visitor #1042', channel_id: 1, operator_id: 5, country: 'Egypt', stage_id: 'closed', rating: 3, transcript: 'Asked about delivery times to Giza.' });
   add('livechat.session', { name: 'Visitor #1043', channel_id: 1, operator_id: 6, country: 'UAE', stage_id: 'open' });
   add('sms.campaign', { name: 'Weekend promo', list_id: 1, body: 'Mizan: 15% off ergonomic chairs this weekend only!' });
+  const [fbPage] = [['Mizan Furniture', 'facebook', '@mizanfurniture', 4200], ['Mizan', 'linkedin', 'mizan-co', 1800], ['Mizan', 'x', '@mizan', 950]]
+    .map(([name, media, handle, followers]) => add('social.account', { name, media, handle, followers, active: true }));
+  add('spreadsheet.document', {
+    name: 'Sales Overview', folder: 'Finance', rows: 20, cols: 6,
+    cells: JSON.stringify({
+      A1: 'Metric', B1: 'Value', A2: 'Customers', B2: '=MIZAN.COUNT("res.partner")', A3: 'Posted invoices', B3: '=MIZAN.COUNT("account.move","","move_type=out_invoice")',
+      A4: 'Invoiced total', B4: '=MIZAN.SUM("account.move","amount_total","move_type=out_invoice")', A5: 'Average invoice', B5: '=IF(B3>0,ROUND(B4/B3,2),0)',
+    }),
+  });
   add('social.post', { name: 'Expo announcement', message: 'Meet us at the Office Design Expo!', stage_id: 'scheduled', accounts: ['LinkedIn'] });
-  add('social.post', { name: 'New desk launch', message: 'Our new standing desk is here.', stage_id: 'posted', likes: 128, shares: 14, scheduled_date: addDays(today(), -4) });
+  add('social.post', {
+    name: 'New desk launch', message: 'Our new standing desk is here.', stage_id: 'posted', scheduled_date: addDays(today(), -4), published_date: addDays(today(), -4),
+    account_ids: [{ account_id: fbPage }], live_post_ids: [{ account_id: fbPage, media: 'facebook', state: 'posted', published_date: addDays(today(), -4), likes: 128, comments: 9, shares: 14, clicks: 41 }],
+  });
   add('marketing.campaign', { name: 'Welcome series', list_id: 1, steps: [{ action: 'email', detail: 'Welcome email', delay_days: 0 }, { action: 'wait', detail: '', delay_days: 3 }, { action: 'email', detail: 'Product tips', delay_days: 0 }] });
   add('mrp.eco', { name: 'Thicker oak top for standing desk', bom_id: 1, user_id: 4, stage_id: 'progress', priority: 1 });
   const room = add('room.room', { name: 'Nile Room', capacity: 8, location: '1st floor', equipment: ['Screen', 'Whiteboard'] });
@@ -350,6 +362,21 @@ export function seed() {
   set('res.partner', 3, { property_payment_term_id: t30 });
   add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
   add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+
+  // eCommerce: payment providers, website categories, published carriers, a selectable pricelist and desk variants.
+  add('payment.provider', { name: 'Wire Transfer', code: 'wire', state: 'enabled', pending_msg: 'Please transfer the amount to IBAN EG00 0000 0000 0000 0000 0000 0000, using your order number as the reference.', done_msg: 'Your order will ship once we receive the transfer.' });
+  add('payment.provider', { name: 'Cash on Delivery', code: 'cod', state: 'enabled', pending_msg: 'Pay the courier in cash when your order arrives.', done_msg: '' });
+  add('payment.provider', { name: 'Demo', code: 'demo', state: 'enabled', pending_msg: 'Test payment: the order is confirmed and marked as paid.', done_msg: 'Your payment has been received.' });
+  const desks = add('product.public.category', { name: 'Desks', sequence: 1 });
+  const chairs = add('product.public.category', { name: 'Chairs', sequence: 2 });
+  [[1, chairs], [2, desks], [3, desks]].forEach(([id, category_id]) => set('product', id, { public_categ_ids: [{ category_id }] }));
+  set('product', 1, { ribbon: 'sale', website_description: 'Breathable mesh back, adjustable lumbar support and 4D armrests.' });
+  set('product', 2, { ribbon: 'new', attributes: 'Color: White, Black; Legs: Steel, Aluminium', website_description: 'Electric height adjustment from 65 to 130 cm with two memory presets.' });
+  db = generateVariants(db, read(db, 'product', 2));
+  search(db, 'product').filter((p) => p.variant_of === 2 && p.variant_values.includes('Aluminium')).forEach((p) => set('product', p.id, { list_price: 590 }));
+  set('product', 13, { is_published: false });
+  (db.records['delivery.carrier'] ?? []).filter((c) => c.delivery_type !== 'api').forEach((c) => set('delivery.carrier', c.id, { is_published: true }));
+  add('product.pricelist', { name: 'Online Promotion', selectable: true, items: [{ product_id: null, min_qty: 1, fixed_price: 0, percent: 5 }] });
 
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');

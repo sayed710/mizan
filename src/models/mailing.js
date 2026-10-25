@@ -108,6 +108,8 @@ export function trackEvent(db, token, kind, { now = today(), url } = {}) {
     ...(kind === 'click' && url && !links.includes(url) ? { links_clicked: [...links, url] } : {}),
   };
   const deltas = { ...(firstOpen ? { opened: 1 } : {}), ...(firstClick ? { clicked: 1 } : {}), ...(firstReply ? { replied: 1 } : {}) };
+  // Repeat hits (another open, the same link again) change nothing: return the same db so nothing is saved.
+  if (vals.state === t.state && Object.keys(vals).length === 1) return db;
   return bump(write(db, 'mailing.trace', t.id, vals), t.mailing_id, deltas);
 }
 
@@ -115,7 +117,10 @@ export function trackEvent(db, token, kind, { now = today(), url } = {}) {
 export function unsubscribe(db, token) {
   const t = traceBy(db, token);
   if (!t) return db;
-  if (t.res_model === 'mailing.contact') return read(db, 'mailing.contact', t.res_id) ? write(db, 'mailing.contact', t.res_id, { opt_out: true }) : db;
+  if (t.res_model === 'mailing.contact') {
+    const contact = read(db, 'mailing.contact', t.res_id);
+    return contact && !contact.opt_out ? write(db, 'mailing.contact', t.res_id, { opt_out: true }) : db;
+  }
   if (search(db, 'mail.blacklist').some((b) => norm(b.email) === norm(t.email))) return db;
   return create(db, 'mail.blacklist', { email: t.email, reason: 'Unsubscribed from mailing', active: true }).db;
 }

@@ -21,7 +21,7 @@ test('ESG emissions convert quantity × factor into tonnes CO2e', () => {
 });
 
 test('every app menu points to a registered model or a known page type', () => {
-  const pages = new Set(['dashboard', 'settings', 'pos', 'discuss', 'report', 'barcode', 'shopfloor', 'overview', 'website', 'appstore', 'kiosk', 'surveytake', 'surveyresults', 'studio', 'kitchen', 'captable', 'knowledge']);
+  const pages = new Set(['dashboard', 'settings', 'pos', 'discuss', 'report', 'barcode', 'shopfloor', 'overview', 'website', 'appstore', 'kiosk', 'surveytake', 'surveyresults', 'spreadsheet', 'studio', 'kitchen', 'captable', 'knowledge']);
   for (const app of apps) {
     for (const leaf of app.menus.flatMap((m) => m.children ?? [m])) {
       assert.ok(leaf.model ? models[leaf.model] : pages.has(leaf.type), `${app.id}/${leaf.key}`);

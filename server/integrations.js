@@ -188,22 +188,28 @@ export async function sendSms(env, to, body) {
 
 const MAX_SMS = 500;
 
-/** Queue the campaign's traces, then send each through the gateway and record its result. */
-export async function sendSmsCampaign(env, db, { id }) {
-  const c = read(db, 'sms.campaign', Number(id));
+/**
+ * Queue the campaign's traces and commit them first (a second send then sees it sent; concurrent edits survive),
+ * then send each through the gateway and commit its result against the current db.
+ * @param {{get: () => object, commit: (next: object) => void}} store
+ */
+export async function sendSmsCampaign(env, store, { id }) {
+  const c = read(store.get(), 'sms.campaign', Number(id));
   if (!c) throw new Error('Campaign not found');
-  let next = queueSms(db, c);
-  const traces = search(next, 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
+  const queued = queueSms(store.get(), c);
+  store.commit(queued);
+  const traces = search(queued, 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
+  let sent = 0;
   for (const trace of traces) {
     try {
       await sendSms(env, trace.phone, c.body);
-      next = markSms(next, trace.id, true);
+      store.commit(markSms(store.get(), trace.id, true));
+      sent += 1;
     } catch (e) {
-      next = markSms(next, trace.id, false, e.message);
+      store.commit(markSms(store.get(), trace.id, false, e.message));
     }
   }
-  const done = read(next, 'sms.campaign', c.id);
-  return { db: next, message: `${done.delivered} SMS sent, ${done.failed} failed` };
+  return { message: `${sent} SMS sent, ${traces.length - sent} failed` };
 }
 
 // ---- Shipping rate APIs ----

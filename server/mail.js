@@ -41,14 +41,14 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
 }
 
-/** Send a mailing now: one tracked email per recipient (see mailtrack.js); the result goes through normal validation. */
-export async function sendMailing(cfg, db, user, { id }, baseUrl) {
-  const mailing = read(db, 'mailing.mailing', Number(id));
+/** Send a mailing now: one tracked email per recipient (see mailtrack.js); `store` commits through normal validation. */
+export async function sendMailing(cfg, store, { id }, baseUrl) {
+  const mailing = read(store.get(), 'mailing.mailing', Number(id));
   if (!mailing) return { status: 404, body: { error: 'Mailing not found' } };
   if (mailing.state === 'sent') return { status: 400, body: { error: 'Already sent' } };
   try {
-    const out = await deliverMailing(cfg, db, mailing.id, baseUrl);
-    return { status: 200, body: { ok: true, sent: out.sent, delivered: out.delivered }, db: applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin }) };
+    const out = await deliverMailing(cfg, store, mailing.id, baseUrl);
+    return { status: 200, body: { ok: true, sent: out.sent, delivered: out.delivered } };
   } catch (e) {
     return { status: 400, body: { error: e.message } };
   }

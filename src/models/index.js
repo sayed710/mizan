@@ -9,6 +9,8 @@ import { elearningModels } from './elearning.js';
 import { surveyModels } from './surveys.js';
 import { smsModels } from './sms.js';
 import { automationModels } from './automation.js';
+import { socialModels } from './social.js';
+import { spreadsheetModels } from './spreadsheet.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -35,11 +37,12 @@ import { posModels } from './pos.js';
 import { knowledgeModels } from './knowledge.js';
 import { livechatModels } from './livechat.js';
 import { lunchModels } from './lunch.js';
+import { ecommerceModels } from './ecommerce.js';
 import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...knowledgeModels, ...lunchModels, ...livechatModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -320,7 +323,12 @@ const allApps = [
     menus: [
       { key: 'site', label: 'Site', type: 'website' },
       { key: 'pages', label: 'Pages', model: 'website.page' },
-      { key: 'orders', label: 'Online Orders', model: 'sale.order', domain: (r) => r.source === 'website' },
+      { label: 'eCommerce', children: [
+        { key: 'shop_products', label: 'Products', model: 'product', view: 'kanban', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true, is_published: true } },
+        { key: 'shop_categories', label: 'Product Categories', model: 'product.public.category' },
+        { key: 'providers', label: 'Payment Providers', model: 'payment.provider' },
+        { key: 'orders', label: 'Orders', model: 'sale.order', domain: (r) => r.source === 'website' },
+      ] },
     ],
   },
   { id: 'barcode', name: 'Barcode', color: ['#334155', '#0f172a'], menus: [{ key: 'scan', label: 'Inventory Count', type: 'barcode' }] },
@@ -384,7 +392,7 @@ const allApps = [
   { id: 'repairs', name: 'Repairs', color: ['#78716c', '#dc2626'], menus: [{ key: 'orders', label: 'Repair Orders', model: 'repair.order' }] },
   { id: 'fieldservice', name: 'Field Service', color: ['#0d9488', '#ca8a04'], menus: [{ key: 'tasks', label: 'Field Service Tasks', model: 'fsm.task' }] },
   { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }] },
-  { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }] },
+  { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }, { key: 'attendees', label: 'Attendees', model: 'slide.channel.partner' }] },
   {
     id: 'livechat', name: 'Live Chat', color: ['#38bdf8', '#7c3aed'],
     menus: [
@@ -398,7 +406,7 @@ const allApps = [
     ],
   },
   { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
-  { id: 'social', name: 'Social Marketing', color: ['#3b82f6', '#ec4899'], menus: [{ key: 'posts', label: 'Posts', model: 'social.post' }] },
+  { id: 'social', name: 'Social Marketing', color: ['#3b82f6', '#ec4899'], menus: [{ key: 'posts', label: 'Posts', model: 'social.post' }, { key: 'accounts', label: 'Social Accounts', model: 'social.account' }] },
   { id: 'automation', name: 'Marketing Automation', color: ['#f97316', '#4f46e5'], menus: [{ key: 'campaigns', label: 'Campaigns', model: 'marketing.campaign' }, { key: 'participants', label: 'Participants', model: 'marketing.participant' }] },
   { id: 'plm', name: 'PLM', color: ['#16a34a', '#334155'], menus: [{ key: 'changes', label: 'Engineering Changes', model: 'mrp.eco' }, { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' }] },
   {
@@ -418,6 +426,7 @@ const allApps = [
   { id: 'studio', name: 'Studio', color: ['#0ea5e9', '#9333ea'], menus: [{ key: 'fields', label: 'Custom Fields', type: 'studio' }] },
   { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
+  { id: 'spreadsheet', name: 'Spreadsheet', color: ['#16a34a', '#0f766e'], menus: [{ key: 'sheet', label: 'Spreadsheet', type: 'spreadsheet' }, { key: 'all', label: 'All Spreadsheets', model: 'spreadsheet.document' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', type: 'knowledge' }, { key: 'all', label: 'All Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
 ];
