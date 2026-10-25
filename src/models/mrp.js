@@ -1,8 +1,7 @@
 // Scrap (stock written off from inventory, a transfer or a manufacturing order) and Unbuild (a product back into its components).
 import { read, write } from '../orm.js';
 import { pad, today } from './common.js';
-import { moveStock } from './sales.js';
-import { postEntry } from './ledger.js';
+import { deliver, moveValued } from './valuation.js';
 import { explode } from './more.js';
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -15,14 +14,11 @@ export function validateScrap(db, scrap, date = today()) {
   if (!product) throw new Error('Choose a product to scrap');
   if (!(qty > 0)) throw new Error('The quantity to scrap must be positive');
   if (product.type === 'goods' && (Number(product.qty_available) || 0) < qty) throw new Error(`Only ${Number(product.qty_available) || 0} ${product.name} in stock`);
-  const value = round2(qty * (Number(product.cost) || 0));
-  let next = moveStock(db, [{ product_id: product.id, qty }], -1);
-  let moveId = null;
-  if (value > 0) {
-    const entry = postEntry(next, { journal: 'MISC', date, ref: `Scrap ${scrap.name}: ${product.name}`, lines: [{ account: '600000', debit: value }, { account: '110100', credit: value }] });
-    next = entry.db;
-    moveId = entry.id;
-  }
+  const automated = product.type === 'goods' && product.valuation !== 'manual_periodic';
+  const out = automated ? deliver(db, product.id, qty, { date, reference: `Scrap ${scrap.name}: ${product.name}`, counterpart: '600000' }) : null;
+  const value = out?.value ?? round2(qty * (Number(product.cost) || 0));
+  const next = out?.db ?? moveValued(db, [{ product_id: product.id, qty }], -1);
+  const moveId = out ? next.records['stock.valuation.layer'].at(-1).move_id ?? null : null;
   return write(next, 'stock.scrap', scrap.id, { state: 'done', date_done: date, scrap_value: value, move_id: moveId });
 }
 
@@ -35,7 +31,7 @@ export function unbuild(db, order, date = today()) {
   if (product?.type === 'goods' && (Number(product.qty_available) || 0) < qty) throw new Error(`Only ${Number(product.qty_available) || 0} ${product.name} in stock`);
   const { move_raw } = explode(db, { bom_id: order.bom_id, product_qty: qty });
   const back = move_raw.map((m) => ({ product_id: m.product_id, qty: round2(m.to_consume) }));
-  const next = moveStock(moveStock(db, [{ product_id: order.product_id, qty }], -1), back, 1);
+  const next = moveValued(moveValued(db, [{ product_id: order.product_id, qty }], -1, { date, reference: order.name, counterpart: '600000' }), back, 1, { date, reference: order.name, counterpart: '600000' });
   return write(next, 'mrp.unbuild', order.id, { state: 'done', date_done: date, components: back });
 }
 

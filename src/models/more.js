@@ -1,7 +1,7 @@
 // Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Point of Sale.
 import { create, read, write } from '../orm.js';
 import { addDays, amountFields, amounts, pad, productLines, today } from './common.js';
-import { moveStock } from './sales.js';
+import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
@@ -62,6 +62,7 @@ export function confirmMo(db, mo) {
  * product (with its lot), close work orders. Producing less than planned leaves a backorder MO for the rest.
  */
 export function produce(db, mo) {
+  if (['done', 'cancel'].includes(mo.state)) throw new Error('This manufacturing order is already processed');
   const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
   const planned = Number(mo.product_qty) || 0;
   const producing = Number(mo.qty_producing) > 0 ? Math.min(Number(mo.qty_producing), planned) : planned;
@@ -77,7 +78,26 @@ export function produce(db, mo) {
   if (product?.tracking && product.tracking !== 'none' && !mo.lot_name) throw new Error(`Set a lot/serial number for ${product.name}`);
   if (product?.tracking === 'serial' && producing !== 1) throw new Error('Serial-tracked products are produced one at a time');
   const finished = [{ product_id: mo.product_id, qty: producing, lot_name: mo.lot_name || undefined }];
-  const stocked = moveStock(applyLots(moveStock(db, used, -1), { move_ids: finished }, 1), finished, 1);
+  let consumed = db;
+  let value = 0;
+  for (const l of used) {
+    const p = read(consumed, 'product', l.product_id);
+    if (p?.type !== 'goods' || !l.qty) continue;
+    if (p.valuation === 'manual_periodic') {
+      consumed = moveValued(consumed, [l], -1);
+      value += l.qty * (Number(p.cost) || 0);
+    } else {
+      const out = deliver(consumed, p.id, l.qty, { reference: mo.name, counterpart: '600000' });
+      consumed = out.db;
+      value += out.value;
+    }
+  }
+  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000', actualCost: true });
+  if (mo.operation_cost_move_id && product?.valuation !== 'manual_periodic') {
+    const operation = read(stocked, 'account.move', mo.operation_cost_move_id);
+    const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
+    if (cost) stocked = capitalizeStock(stocked, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: operation.id });
+  }
   const closed = write(stocked, 'mrp.production', mo.id, {
     state: 'done', date_finished: today(), product_qty: producing, qty_producing: producing,
     move_raw: moves.map((m, i) => ({ ...m, to_consume: round2((Number(m.to_consume) || 0) * ratio), consumed: used[i].qty })),

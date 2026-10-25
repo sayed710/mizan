@@ -1,4 +1,5 @@
 import { create, read, search, write } from '../orm.js';
+import { moveValued } from './valuation.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
@@ -168,7 +169,27 @@ export const salesModels = {
             if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
             const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
             const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
-            const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => moveStock(applyLots(d, p, sign || 0), p.move_ids, sign) });
+            const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
+              const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
+              const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
+              const purchase = (po?.order_line ?? []).map((l) => ({ ...l, remaining: Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0)) }));
+              const lines = p.move_ids.map((m) => {
+                const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
+                const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
+                let left = Number(m.qty);
+                let value = 0;
+                for (const l of purchase.filter((l) => l.product_id === m.product_id)) {
+                  const take = Math.min(left, l.remaining);
+                  value += take * Number(l.price_unit);
+                  l.remaining -= take;
+                  left -= take;
+                }
+                const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
+                  : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
+                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200', actualCost: true } : {} };
+              });
+              return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id });
+            } });
             let next = out.db;
             if (r.purchase_id && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
             const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;

@@ -54,7 +54,7 @@ test('standard receipts use standard value and book positive and negative price 
   assert.deepEqual([l.unit_cost, l.value, l.price_difference], [10, 50, 15]);
   const entry = entryFor(db, l);
   assert.equal(balance(db, entry, '110100'), 50);
-  assert.equal(balance(db, entry, '211000'), -65);
+  assert.equal(balance(db, entry, '110200'), -65);
   assert.equal(balance(db, entry, '600000'), 15);
   db = receive(db, id, 5, 8, { date });
   assert.equal(balance(db, entryFor(db, layers(db, id)[1]), '600000'), -10);

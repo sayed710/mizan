@@ -13,7 +13,7 @@ export const ACCOUNT_TYPES = [
 /** Default chart of accounts (codes follow a common 6-digit layout). */
 export const CHART = [
   ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['121000', 'Account Receivable', 'asset_receivable'],
-  ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
+  ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['110200', 'Stock Interim (Received)', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
   ['211000', 'Account Payable', 'liability_payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
   ['212000', 'Deferred Revenue', 'liability_current'], ['132000', 'Prepaid Expenses', 'asset_current'], ['230000', 'Salaries Payable', 'liability_current'], ['230100', 'Employee Expenses Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
   ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
@@ -51,7 +51,11 @@ export function invoiceLines(db, move) {
   const base = accountId(db, sale ? '400000' : '600000');
   // Each line may override the income/expense account; amounts are grouped per account.
   const byAccount = new Map();
-  const productAccount = (l) => (db.records.product ?? []).find((p) => p.id === l.product_id)?.[sale ? 'property_account_income_id' : 'property_account_expense_id'];
+  const productAccount = (l) => {
+    const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
+    if (!sale && p?.type === 'goods' && p.valuation === 'real_time') return accountId(db, '110200');
+    return p?.[sale ? 'property_account_income_id' : 'property_account_expense_id'];
+  };
   for (const l of move.invoice_line_ids ?? []) {
     const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
     byAccount.set(account, (byAccount.get(account) ?? 0) + subtotal(l));

@@ -2,6 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { moreModels, explode } from './more.js';
 import { accountId, postEntry } from './ledger.js';
+import { capitalizeStock } from './valuation.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const get = (db, model, id) => {
@@ -113,9 +114,11 @@ export function postOperationCost(db, productionId) {
   if (orders(db, productionId).some((w) => !['done', 'cancel'].includes(w.state) || open(w))) throw new Error('Finish work orders before posting operation costs');
   const cost = productionCost(db, productionId).operations;
   if (!cost) return db;
+  if (read(db, 'product', mo.product_id)?.valuation === 'manual_periodic') return db;
   if (cost < 0 || !accountId(db, '110100') || !accountId(db, '600000')) throw new Error('Operation costs require stock valuation and expense accounts');
   const entry = postEntry(db, { journal: 'MISC', ref: `Operation costs ${mo.name}`, lines: [{ account: '110100', debit: cost }, { account: '600000', credit: cost }] });
-  return write(entry.db, 'mrp.production', productionId, { operation_cost_move_id: entry.id });
+  const next = mo.state === 'done' ? capitalizeStock(entry.db, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: entry.id }) : entry.db;
+  return write(next, 'mrp.production', productionId, { operation_cost_move_id: entry.id });
 }
 
 const period = ({ from, to }) => {

@@ -49,7 +49,7 @@ export function postValuation(db, layerId) {
   const diff = Number(l.price_difference) || 0;
   if (!l.value && !diff) return db;
   const line = (account, amount) => ({ account, ...(amount >= 0 ? { debit: amount } : { credit: -amount }) });
-  const counterpart = l.kind === 'in' ? '211000' : l.kind === 'out' ? '500000' : '600000';
+  const counterpart = l.counterpart || (l.kind === 'in' ? '110200' : l.kind === 'out' ? '500000' : '600000');
   const lines = [line('110100', l.value), line(counterpart, -round(l.value + diff)), ...(diff ? [line('600000', diff)] : [])];
   if (lines.some((x) => !accountId(db, x.account))) throw new Error('Configure stock valuation accounts first');
   const entry = postEntry(db, { journal: 'MISC', date: l.date, ref: l.reference || l.description, lines });
@@ -62,23 +62,23 @@ function addLayer(db, vals) {
 }
 
 /** Receive and increase stock; standard costing expenses the purchase price difference. */
-export function receive(db, productId, qty, unitCost, { date = today(), reference = '' } = {}) {
+export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, actualCost = false, pickingId } = {}) {
   nonnegative(qty, 'Quantity');
   nonnegative(unitCost, 'Unit cost');
   if (!qty) throw new Error('Receive a positive quantity');
   let next = prepare(db, productId, date);
   const p = product(next, productId);
   const method = costMethod(next, productId);
-  const cost = method === 'standard' ? Number(p.cost) || 0 : unitCost;
+  const cost = method === 'standard' && !actualCost ? Number(p.cost) || 0 : unitCost;
   const value = round(qty * cost);
   const onHand = Number(p.qty_available) || 0;
-  if (method !== 'standard') next = write(next, 'product', productId, {
-    cost: method === 'average' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
+  if (method !== 'standard' || actualCost) next = write(next, 'product', productId, {
+    cost: method === 'average' || method === 'standard' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
   });
   next = moveStock(next, [{ product_id: productId, qty }], 1);
   return addLayer(next, { product_id: productId, date, reference, description: reference || 'Receipt',
     quantity: qty, unit_cost: cost, value, remaining_qty: qty, remaining_value: value,
-    price_difference: method === 'standard' ? round(qty * unitCost) - value : 0, kind: 'in' });
+    price_difference: method === 'standard' && !actualCost ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
 }
 
 function consume(db, productId, qty, method) {
@@ -108,7 +108,7 @@ function consume(db, productId, qty, method) {
 }
 
 /** Deliver at FIFO/average/standard cost; insufficient stock is refused, including negative stock. */
-export function deliver(db, productId, qty, { date = today(), reference = '' } = {}) {
+export function deliver(db, productId, qty, { date = today(), reference = '', counterpart, pickingId } = {}) {
   nonnegative(qty, 'Quantity');
   if (!qty) throw new Error('Deliver a positive quantity');
   const next = prepare(db, productId, date);
@@ -117,7 +117,38 @@ export function deliver(db, productId, qty, { date = today(), reference = '' } =
   const value = used.value;
   const stocked = moveStock(used.db, [{ product_id: productId, qty }], -1);
   return { db: addLayer(stocked, { product_id: productId, date, reference, description: reference || 'Delivery',
-    quantity: -qty, unit_cost: value / qty, value: -value, kind: 'out' }), value };
+    quantity: -qty, unit_cost: value / qty, value: -value, kind: 'out', counterpart, picking_id: pickingId }), value };
+}
+
+/** Move goods once, retaining quantity-only behavior for periodic products. */
+export function moveValued(db, lines, sign, options = {}) {
+  return lines.reduce((next, l) => {
+    const p = read(next, 'product', l.product_id);
+    const qty = Number(l.qty) || 0;
+    if (!p || p.type !== 'goods' || !qty || !sign) return next;
+    if (p.valuation === 'manual_periodic') return moveStock(next, [l], sign);
+    const spec = { ...options, ...l.valuation_options };
+    return sign > 0 ? receive(next, p.id, qty, l.unit_cost ?? p.cost ?? 0, spec) : deliver(next, p.id, qty, spec).db;
+  }, db);
+}
+
+/** Capitalize an already-posted additional cost without posting it twice. */
+export function capitalizeStock(db, productId, amount, { date = today(), reference = '', moveId } = {}) {
+  nonnegative(amount, 'Additional cost');
+  amount = round(amount);
+  let next = prepare(db, productId, date);
+  const p = product(next, productId);
+  const remaining = layers(next, productId).filter((l) => l.remaining_qty > 0);
+  if (!(p.qty_available > 0)) throw new Error('Stock is required to capitalize additional costs');
+  let allocated = 0;
+  for (const [i, l] of remaining.entries()) {
+    const share = i === remaining.length - 1 ? round(amount - allocated) : round(amount * l.remaining_qty / p.qty_available);
+    allocated = round(allocated + share);
+    next = write(next, 'stock.valuation.layer', l.id, { remaining_value: round(l.remaining_value + share) });
+  }
+  next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + amount / p.qty_available) });
+  return create(next, 'stock.valuation.layer', { product_id: p.id, date, reference, description: reference,
+    quantity: 0, value: amount, unit_cost: 0, kind: 'landed', move_id: moveId }).db;
 }
 
 /** Set on-hand value to quantity times the new cost without rewriting historical layer values. */
@@ -197,7 +228,8 @@ const money = (label) => ({ type: 'monetary', label, readonly: true });
 const relation = (model, label) => ({ type: 'many2one', relation: model, label });
 
 export const valuationModels = {
-  product: {
+  get product() {
+    return {
     ...salesModels.product,
     fields: {
       ...salesModels.product.fields,
@@ -206,6 +238,7 @@ export const valuationModels = {
     },
     defaults: (id) => ({ ...salesModels.product.defaults?.(id), cost_method: 'standard', valuation: 'real_time' }),
     form: { ...salesModels.product.form, groups: [...salesModels.product.form.groups, ['cost_method', 'valuation']] },
+    };
   },
   'stock.valuation.layer': {
     label: 'Stock Valuation',

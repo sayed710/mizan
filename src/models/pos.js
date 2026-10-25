@@ -1,7 +1,7 @@
 // Point of Sale sessions (opening/closing cash control), paying and refunding orders.
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
-import { moveStock } from './sales.js';
+import { deliver, moveValued } from './valuation.js';
 import { postEntry } from './ledger.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -32,7 +32,23 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
   const total = amounts(lines);
   const sign = refund_of ? -1 : 1;
   const side = (amount, debit) => ((debit === (sign > 0)) ? { debit: round(amount) } : { credit: round(amount) });
-  const { db: booked } = postEntry(moveStock(next, lines, -sign), {
+  let stocked = next;
+  const costs = [];
+  const original = refund_of ? read(db, 'pos.order', refund_of) : null;
+  for (const [index, l] of lines.entries()) {
+    const p = read(stocked, 'product', l.product_id);
+    if (p?.type !== 'goods' || !l.qty) continue;
+    if (!refund_of && p.valuation !== 'manual_periodic') {
+      const out = deliver(stocked, p.id, Number(l.qty), { reference: name });
+      stocked = out.db;
+      costs.push({ index, unit_cost: out.value / Number(l.qty) });
+    } else {
+      const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
+      stocked = moveValued(stocked, [{ ...l, unit_cost }], -sign, { reference: name, counterpart: '500000', actualCost: true });
+    }
+  }
+  stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
+  const { db: booked } = postEntry(stocked, {
     journal: 'POSS', ref: name,
     lines: [
       { account: method === 'cash' ? CASH : BANK, ...side(total.total, true) },

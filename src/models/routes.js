@@ -2,6 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
+import { capitalizeStock } from './valuation.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -85,24 +86,37 @@ export function replenish(db) {
 
 /** Distribute landed costs over the received products by quantity and raise their (average) cost. */
 export function applyLandedCost(db, lc) {
+  if (lc.state === 'done') throw new Error('These landed costs are already posted');
   const picking = read(db, 'stock.picking', lc.picking_id);
   if (!picking || picking.state !== 'done' || picking.picking_type !== 'incoming') throw new Error('Select a validated receipt');
   const total = (lc.cost_lines ?? []).reduce((s, l) => s + (Number(l.amount) || 0), 0);
   const units = (picking.move_ids ?? []).reduce((s, m) => s + (Number(m.qty) || 0), 0);
   if (!(total > 0) || !(units > 0)) throw new Error('Nothing to allocate');
-  let next = db;
-  for (const m of picking.move_ids) {
+  let allocated = 0;
+  const allocations = picking.move_ids.map((m, i) => {
+    const amount = i === picking.move_ids.length - 1 ? round(total - allocated) : round(total * Number(m.qty) / units);
+    allocated = round(allocated + amount);
+    return { ...m, amount };
+  });
+  const automated = allocations.filter((m) => {
+    const p = read(db, 'product', m.product_id);
+    return p?.type === 'goods' && p.valuation !== 'manual_periodic';
+  }).reduce((s, m) => s + m.amount, 0);
+  const entry = automated ? postEntry(db, {
+    journal: 'MISC', ref: `Landed costs ${picking.name}`,
+    lines: [{ account: '110100', debit: automated }, { account: '211000', credit: automated }],
+  }) : { db, id: null };
+  let next = entry.db;
+  for (const m of allocations) {
     const p = read(next, 'product', m.product_id);
     if (!p) continue;
-    const share = (total * (Number(m.qty) || 0)) / units;
+    const share = m.amount;
     const onHand = Math.max(Number(p.qty_available) || 0, Number(m.qty) || 0);
-    next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + share / onHand) });
+    next = p.type === 'goods' && p.valuation !== 'manual_periodic'
+      ? capitalizeStock(next, p.id, share, { reference: `Landed costs ${picking.name}`, moveId: entry.id })
+      : write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + share / onHand) });
   }
-  const { db: booked } = postEntry(next, {
-    journal: 'MISC', ref: `Landed costs ${picking.name}`,
-    lines: [{ account: '110100', debit: total }, { account: '211000', credit: total }],
-  });
-  return write(booked, 'stock.landed.cost', lc.id, { state: 'done', amount_total: total });
+  return write(next, 'stock.landed.cost', lc.id, { state: 'done', amount_total: total });
 }
 
 /** On-hand per location from validated transfers that carry locations (incoming adds to dest, outgoing removes from source). */
