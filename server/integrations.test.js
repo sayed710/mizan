@@ -84,3 +84,27 @@ test('AI draft sends record context to Claude and returns the text', async () =>
   assert.equal(req.fallbacks, 'default');
   assert.match(req.messages[0].content, /Office chairs for new HQ/);
 });
+
+test('bill digitization sends the document to Claude and fills the draft bill', async () => {
+  process.env.ANTHROPIC_API_KEY ??= 'test-key';
+  const { create } = await import('../src/orm.js');
+  const { digitizeBill } = await import('./integrations.js');
+  const calls = mockFetch(() => ({
+    id: 'msg_2', type: 'message', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'tool_use', stop_sequence: null,
+    content: [{ type: 'tool_use', id: 'tu_1', name: 'record_bill', input: {
+      vendor: 'Delta Timber Co', vendor_vat: 'EG-555', reference: 'DT-2041', invoice_date: '2026-10-20', due_date: '2026-11-19',
+      lines: [{ description: 'Oak planks', quantity: 12, unit_price: 45.5, tax_percent: 14 }],
+    } }],
+    usage: { input_tokens: 10, output_tokens: 10 },
+  }));
+  const { db, id } = create(seed(), 'account.move', { move_type: 'in_invoice', invoice_line_ids: [] });
+  const out = await digitizeBill(db, { id, file: { name: 'bill.pdf', type: 'application/pdf', data: 'JVBERi0xLjQ=' } });
+  const req = JSON.parse(calls[0].init.body);
+  assert.equal(req.tool_choice.name, 'record_bill');
+  assert.equal(req.messages[0].content[0].type, 'document');
+  const bill = read(out.db, 'account.move', id);
+  assert.equal(read(out.db, 'res.partner', bill.partner_id).name, 'Delta Timber Co');
+  assert.deepEqual([bill.ref, bill.invoice_date, bill.invoice_date_due], ['DT-2041', '2026-10-20', '2026-11-19']);
+  assert.deepEqual(bill.invoice_line_ids.map((l) => [l.name, l.qty, l.price_unit, l.tax]), [['Oak planks', 12, 45.5, 14]]);
+  await assert.rejects(digitizeBill(db, { id, file: { name: 'x.exe', type: 'application/octet-stream', data: 'AA==' } }), /Upload a PDF or an image/);
+});

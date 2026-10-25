@@ -102,7 +102,7 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
-const invoiceLineField = { ...invoiceLineBase, fields: { ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } } };
+const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } } };
 
 const lineItem = {
   type: 'one2many',
@@ -226,6 +226,8 @@ export const accountingModels = {
       lockedWhen: (r) => r.state !== 'draft',
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
+        // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
+        { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
         { label: 'Credit Note', when: (r) => r.state === 'posted' && r.move_type === 'out_invoice', run: creditNote },

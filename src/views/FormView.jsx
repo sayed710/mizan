@@ -229,10 +229,21 @@ export function FormView({ leaf, id, base, params }) {
     if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
       const savedId = save();
       if (savedId == null) return;
-      serverAction(endpoint, { model, id: savedId })
+      const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
         .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
+      if (!b.upload) { send(); return; }
+      const input = Object.assign(document.createElement('input'), { type: 'file', accept: b.upload });
+      input.onchange = () => {
+        const f = input.files[0];
+        if (!f) return;
+        const reader = new FileReader();
+        reader.onload = () => send({ file: { name: f.name, type: f.type, data: String(reader.result).split(',')[1] } });
+        reader.readAsDataURL(f);
+      };
+      input.click();
       return;
     }
+    if (b.upload) { fail(new Error(t('This needs the server with AI enabled'))); return; }
     if (!b.run) {
       if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
       return;

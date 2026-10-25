@@ -48,7 +48,8 @@ const digits = (phone) => String(phone ?? '').replace(/[^\d+]/g, '');
 
 // ---- AI ----
 let anthropic;
-const aiClient = () => (anthropic ??= new Anthropic());
+// fetch is resolved per call so the client honours a fetch swapped in after it was created (tests, proxies).
+const aiClient = () => (anthropic ??= new Anthropic({ fetch: (url, init) => globalThis.fetch(url, init) }));
 
 /** Compact text view of a record + its chatter, for the model. */
 function recordContext(db, model, rec) {
@@ -61,30 +62,97 @@ function recordContext(db, model, rec) {
 }
 
 /** Ask Claude to draft text (email, note, summary) about a record. Returns { text } or throws a user-facing error. */
-export async function aiDraft(db, user, { model, id, instruction }) {
-  const rec = models[model] && read(db, model, Number(id));
-  if (!rec) throw new Error('Record not found');
-  const task = String(instruction ?? '').slice(0, 2000) || 'Summarize this record and suggest the next step.';
+/** One Claude request with the shared model, fallback and effort settings; API errors become user-readable. */
+async function callClaude(params) {
   try {
     const response = await aiClient().beta.messages.create({
       model: AI_MODEL,
-      max_tokens: 16000,
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',
       output_config: { effort: 'low' },
-      system: `You help employees of ${db.settings?.company ?? 'a company'} inside their ERP. Write in the language of the instruction. Be concise and practical. Output only the text to use, no preamble.`,
-      messages: [{ role: 'user', content: `${recordContext(db, model, rec)}\n\nTask (from ${user.name}): ${task}` }],
+      ...params,
     });
     if (response.stop_reason === 'refusal') throw new Error('The AI declined this request.');
-    const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    if (!text) throw new Error('The AI returned no text.');
-    return { text };
+    return response;
   } catch (e) {
     if (e instanceof Anthropic.AuthenticationError) throw new Error('AI credentials are invalid (ANTHROPIC_API_KEY).');
     if (e instanceof Anthropic.RateLimitError) throw new Error('The AI is busy, try again in a moment.');
     if (e instanceof Anthropic.APIError) throw new Error(`AI service error ${e.status}.`);
     throw e;
   }
+}
+
+export async function aiDraft(db, user, { model, id, instruction }) {
+  const rec = models[model] && read(db, model, Number(id));
+  if (!rec) throw new Error('Record not found');
+  const task = String(instruction ?? '').slice(0, 2000) || 'Summarize this record and suggest the next step.';
+  const response = await callClaude({
+    max_tokens: 16000,
+    system: `You help employees of ${db.settings?.company ?? 'a company'} inside their ERP. Write in the language of the instruction. Be concise and practical. Output only the text to use, no preamble.`,
+    messages: [{ role: 'user', content: `${recordContext(db, model, rec)}\n\nTask (from ${user.name}): ${task}` }],
+  });
+  const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  if (!text) throw new Error('The AI returned no text.');
+  return { text };
+}
+
+// ---- bill digitization (OCR): Claude reads an uploaded vendor bill into a draft bill ----
+const DOC_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']);
+const BILL_TOOL = {
+  name: 'record_bill',
+  description: 'Record the fields read from the vendor bill document.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      vendor: { type: 'string', description: 'Vendor (supplier) company name' },
+      vendor_vat: { type: 'string', description: 'Vendor tax ID, empty if absent' },
+      reference: { type: 'string', description: 'Bill / invoice number printed on the document' },
+      invoice_date: { type: 'string', description: 'Bill date as YYYY-MM-DD' },
+      due_date: { type: 'string', description: 'Due date as YYYY-MM-DD, empty if absent' },
+      lines: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { description: { type: 'string' }, quantity: { type: 'number' }, unit_price: { type: 'number' }, tax_percent: { type: 'number' } },
+          required: ['description', 'quantity', 'unit_price', 'tax_percent'],
+        },
+      },
+    },
+    required: ['vendor', 'reference', 'invoice_date', 'lines'],
+  },
+};
+const isoOrNull = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s ?? '')) ? s : null);
+const num = (n, min = 0) => (Number.isFinite(Number(n)) && Number(n) >= min ? Number(n) : min);
+
+/** Fill a draft vendor bill from an uploaded image/PDF: vendor (matched or created), reference, dates and lines. */
+export async function digitizeBill(db, { id, file }) {
+  const bill = read(db, 'account.move', Number(id));
+  if (!bill || bill.move_type !== 'in_invoice' || bill.state !== 'draft') throw new Error('Open a draft vendor bill to digitize a document');
+  if (!file || !DOC_TYPES.has(file.type) || typeof file.data !== 'string' || !file.data) throw new Error('Upload a PDF or an image (JPEG, PNG, GIF, WebP)');
+  const source = { type: 'base64', media_type: file.type, data: file.data };
+  const response = await callClaude({
+    max_tokens: 4000,
+    tools: [BILL_TOOL],
+    tool_choice: { type: 'tool', name: 'record_bill' },
+    messages: [{ role: 'user', content: [
+      { type: file.type === 'application/pdf' ? 'document' : 'image', source },
+      { type: 'text', text: 'Read this vendor bill and record its fields. Amounts are unit prices before tax.' },
+    ] }],
+  });
+  const data = response.content.find((b) => b.type === 'tool_use')?.input;
+  if (!data?.vendor || !Array.isArray(data.lines)) throw new Error('The document could not be read as a bill.');
+
+  const name = String(data.vendor).trim().slice(0, 200);
+  const known = search(db, 'res.partner').find((p) => p.name.toLowerCase() === name.toLowerCase() || (data.vendor_vat && p.vat === data.vendor_vat));
+  const { db: withVendor, id: partner_id } = known ? { db, id: known.id } : create(db, 'res.partner', { name, is_company: true, vat: String(data.vendor_vat ?? '').slice(0, 50) });
+  const invoice_line_ids = data.lines.slice(0, 200).map((l) => ({
+    product_id: null, name: String(l.description ?? '').slice(0, 500), qty: num(l.quantity), price_unit: num(l.unit_price), discount: 0, tax: num(l.tax_percent),
+  }));
+  const next = write(withVendor, 'account.move', bill.id, {
+    partner_id, ref: String(data.reference ?? '').slice(0, 100), invoice_line_ids,
+    invoice_date: isoOrNull(data.invoice_date) ?? bill.invoice_date, invoice_date_due: isoOrNull(data.due_date) ?? bill.invoice_date_due,
+  });
+  return { db: postNote(next, 'account.move', bill.id, `Digitized from ${String(file.name ?? 'document').slice(0, 100)}`), message: `${invoice_line_ids.length} line(s) read from ${name}` };
 }
 
 // ---- WhatsApp / SMS ----

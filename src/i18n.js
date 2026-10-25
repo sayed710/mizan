@@ -468,6 +468,7 @@ const ar = {
   'Batch Payments': 'الدفعات المجمعة', 'Batch Type': 'نوع الدفعة', Inbound: 'وارد', Outbound: 'صادر', 'First Check Number': 'رقم أول شيك',
   'Payment Lines': 'بنود الدفع', 'Check Number': 'رقم الشيك', 'Add Open Invoices': 'إضافة الفواتير المفتوحة', 'Print Checks': 'طباعة الشيكات', Check: 'شيك',
   'Pay to the order of': 'ادفعوا لأمر', Memo: 'البيان',
+  'Digitize Document': 'رقمنة المستند', 'This needs the server with AI enabled': 'يتطلب الخادم مع تفعيل الذكاء الاصطناعي',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

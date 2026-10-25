@@ -14,12 +14,13 @@ import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicOrder, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
-import { aiDraft, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
+  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b) => digitizeBill(db, b) },
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, run: (b, u) => sendWhatsApp(ENV, db, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b) => sendSmsCampaign(ENV, db, b) },
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },

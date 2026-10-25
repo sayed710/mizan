@@ -62,7 +62,7 @@ Each integration turns on when its environment variables are set; without them t
 
 | Integration | Environment | Used by |
 |---|---|---|
-| AI (Claude, `claude-opus-5-5`) | `ANTHROPIC_API_KEY` (or another Anthropic credential) | **AI Draft** in every chatter |
+| AI (Claude, `claude-opus-5-5`) | `ANTHROPIC_API_KEY` (or another Anthropic credential) | **AI Draft** in every chatter; **Digitize Document** on draft vendor bills (reads an uploaded PDF/image into vendor, reference, dates and lines) |
 | WhatsApp Cloud API | `MIZAN_WHATSAPP_TOKEN`, `MIZAN_WHATSAPP_PHONE_ID` | WhatsApp button on contacts and quotations |
 | SMS (Twilio) | `MIZAN_TWILIO_SID`, `MIZAN_TWILIO_TOKEN`, `MIZAN_TWILIO_FROM` | SMS Marketing campaigns |
 | Carrier rate APIs (DHL, FedEx, Aramex, …) | `MIZAN_SHIPPING_TOKEN` + Rate API URL on the delivery method | **Add Shipping** on quotations |
