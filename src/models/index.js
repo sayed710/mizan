@@ -12,6 +12,7 @@ import { moreModels } from './more.js';
 import { mailModels } from './mail.js';
 import { payrollModels } from './payroll.js';
 import { extraModels } from './extra.js';
+import { mailingModels } from './mailing.js';
 import { apps2Models } from './apps2.js';
 import { apps3Models } from './apps3.js';
 import { bankModels } from './bank.js';
@@ -31,7 +32,7 @@ import { posModels } from './pos.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -277,7 +278,9 @@ const allApps = [
       { label: 'Recipients', children: [
         { key: 'lists', label: 'Mailing Lists', model: 'mailing.list' },
         { key: 'contacts', label: 'Mailing Contacts', model: 'mailing.contact' },
+        { key: 'blacklist', label: 'Blacklist', model: 'mail.blacklist' },
       ] },
+      { label: 'Reporting', children: [{ key: 'traces', label: 'Mailing Traces', model: 'mailing.trace' }] },
     ],
   },
   { id: 'sign', name: 'Sign', color: ['#0ea5e9', '#0f172a'], menus: [{ key: 'documents', label: 'Documents to Sign', model: 'sign.request' }] },

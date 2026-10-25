@@ -59,10 +59,10 @@ function replies(socket) {
 }
 
 /**
- * Send one plain-text email. Resolves on 250 after DATA; rejects with the server's reply otherwise.
- * @param {{to: string, subject: string, text: string}} msg
+ * Send one email: plain text, or text plus an HTML alternative. Resolves on 250 after DATA; rejects with the server's reply otherwise.
+ * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string}} msg
  */
-export async function sendMail(cfg, { to, subject, text }) {
+export async function sendMail(cfg, { to, subject, text, html, replyTo }) {
   if (!ADDRESS.test(to)) throw new Error(`Invalid recipient ${to}`);
   const timeoutMs = 20000;
   let socket = cfg.secure
@@ -96,10 +96,15 @@ export async function sendMail(cfg, { to, subject, text }) {
     await cmd(`MAIL FROM:<${cfg.from}>`, [250]);
     await cmd(`RCPT TO:<${to}>`, [250, 251]);
     await cmd('DATA', [354]);
-    const body = String(text).replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
+    const crlf = (v) => String(v).replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
+    const boundary = `mizan-${randomUUID()}`;
+    const part = (type, value) => [`Content-Type: ${type}; charset=UTF-8`, 'Content-Transfer-Encoding: 8bit', '', crlf(value)];
+    const content = html
+      ? [`Content-Type: multipart/alternative; boundary="${boundary}"`, '', `--${boundary}`, ...part('text/plain', text), `--${boundary}`, ...part('text/html', html), `--${boundary}--`]
+      : part('text/plain', text);
     const message = [
-      `From: ${header(cfg.from)}`, `To: ${header(to)}`, `Subject: ${encodeWord(subject)}`, `Date: ${new Date().toUTCString()}`,
-      `Message-ID: <${randomUUID()}@mizan>`, 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: 8bit', '', body,
+      `From: ${header(cfg.from)}`, `To: ${header(to)}`, ...(replyTo && ADDRESS.test(replyTo) ? [`Reply-To: ${header(replyTo)}`] : []),
+      `Subject: ${encodeWord(subject)}`, `Date: ${new Date().toUTCString()}`, `Message-ID: <${randomUUID()}@mizan>`, 'MIME-Version: 1.0', ...content,
     ].join('\r\n');
     await cmd(`${message}\r\n.`, [250]);
     await cmd('QUIT', [221]).catch(() => {});

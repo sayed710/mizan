@@ -14,6 +14,8 @@ import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicOrder, publicRegister, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
 import { sendDocument, sendMailing } from './mail.js';
+import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
+import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 
 const ENV = process.env;
@@ -180,8 +182,19 @@ async function serveStatic(req, res) {
 }
 
 // ---- routes ----
+/** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
+const baseUrlOf = (req) => (process.env.MIZAN_PUBLIC_URL ?? `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`).replace(/\/$/, '');
+let lastBaseUrl = process.env.MIZAN_PUBLIC_URL ?? `http://localhost:${PORT}`;
+
 async function api(req, res, path) {
   const ip = clientIp(req);
+  if (path.startsWith('/api/public/mail/') && req.method === 'GET') {
+    const out = trackingResponse(db, path);
+    if (!out) return send(res, 404, { error: 'Not found' });
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }));
+    res.writeHead(out.status, out.headers);
+    return res.end(out.body);
+  }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, publicSite(db));
   if (path === '/api/iot/ingest' && req.method === 'POST') {
     if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
@@ -270,7 +283,8 @@ async function api(req, res, path) {
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
-      const out = await (path.endsWith('mailing') ? sendMailing : sendDocument)(SMTP, db, user, body);
+      lastBaseUrl = baseUrlOf(req);
+      const out = await (path.endsWith('mailing') ? sendMailing : sendDocument)(SMTP, db, user, body, lastBaseUrl);
       if (out.db) commitDb(out.db);
       return send(res, out.status, out.body);
     } catch (e) {
@@ -349,5 +363,29 @@ const runJobs = () => {
 };
 runJobs();
 setInterval(runJobs, JOB_INTERVAL_MS).unref();
+
+// Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
+const MAIL_JOB_INTERVAL_MS = 10 * 60 * 1000;
+const runMailJobs = async () => {
+  if (!SMTP) return;
+  const at = new Date().toISOString().slice(0, 10);
+  const jobs = [
+    ...dueMailings(db, at).map((m) => (d) => deliverMailing(SMTP, d, m.id, lastBaseUrl)),
+    ...dueAbWinners(db, at).map((key) => (d) => {
+      const winner = selectWinner(d, key);
+      return winner ? deliver(SMTP, d, (x, opts) => sendWinner(x, winner.id, opts), lastBaseUrl) : Promise.resolve({ db: d });
+    }),
+  ];
+  for (const job of jobs) {
+    try {
+      const out = await job(db);
+      if (out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Scheduler' }));
+    } catch (e) {
+      console.error('Scheduled mailing failed:', e.message);
+    }
+  }
+};
+runMailJobs();
+setInterval(runMailJobs, MAIL_JOB_INTERVAL_MS).unref();
 
 sql.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now());

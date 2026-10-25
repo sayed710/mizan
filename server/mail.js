@@ -1,11 +1,11 @@
 // Email actions: send a business document to its partner, or a mailing to its list.
 import { models } from '../src/models/index.js';
-import { postNote, read, search, write } from '../src/orm.js';
+import { postNote, read, write } from '../src/orm.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
+import { deliverMailing } from './mailtrack.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
-const MAX_RECIPIENTS = 500;
 
 const money = (db, n) => (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: db.settings?.currency ?? 'USD' });
 
@@ -41,21 +41,15 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
 }
 
-export async function sendMailing(cfg, db, user, { id }) {
+/** Send a mailing now: one tracked email per recipient (see mailtrack.js); the result goes through normal validation. */
+export async function sendMailing(cfg, db, user, { id }, baseUrl) {
   const mailing = read(db, 'mailing.mailing', Number(id));
   if (!mailing) return { status: 404, body: { error: 'Mailing not found' } };
   if (mailing.state === 'sent') return { status: 400, body: { error: 'Already sent' } };
-  const recipients = search(db, 'mailing.contact').filter((c) => c.list_id === mailing.list_id && !c.opt_out && c.email).slice(0, MAX_RECIPIENTS);
-  if (!recipients.length) return { status: 400, body: { error: 'The mailing list has no subscribed recipients' } };
-  let delivered = 0;
-  for (const c of recipients) {
-    try {
-      await sendMail(cfg, { to: c.email, subject: mailing.subject, text: `Hello ${c.name},\n\n${mailing.body ?? ''}` });
-      delivered += 1;
-    } catch (e) {
-      console.warn(`Mailing ${mailing.id}: ${c.email} failed: ${e.message}`);
-    }
+  try {
+    const out = await deliverMailing(cfg, db, mailing.id, baseUrl);
+    return { status: 200, body: { ok: true, sent: out.sent, delivered: out.delivered }, db: applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin }) };
+  } catch (e) {
+    return { status: 400, body: { error: e.message } };
   }
-  const next = write(db, 'mailing.mailing', mailing.id, { state: 'sent', sent_date: new Date().toISOString().slice(0, 10), sent: recipients.length, delivered });
-  return { status: 200, body: { ok: true, sent: recipients.length, delivered }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
 }

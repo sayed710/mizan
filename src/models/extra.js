@@ -1,17 +1,10 @@
-// Email Marketing, Sign, Documents, Planning, Rental, Appointments.
-import { create, read, search, write } from '../orm.js';
+// Sign, Documents, Planning, Rental, Appointments.
+import { create, read, write } from '../orm.js';
 import { addDays, pad, today } from './common.js';
 import { moveStock } from './sales.js';
 
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const days = (a, b) => (a && b ? Math.max(1, Math.round((new Date(b) - new Date(a)) / 864e5)) : 1);
-
-/** ponytail: sending is simulated (counts recipients, no SMTP); plug a mail transport into the server to deliver for real. */
-function sendMailing(db, m) {
-  const recipients = search(db, 'mailing.contact').filter((c) => c.list_id === m.list_id && !c.opt_out && c.email);
-  if (!recipients.length) throw new Error('The mailing list has no subscribed recipients');
-  return { db: write(db, 'mailing.mailing', m.id, { state: 'sent', sent_date: today(), sent: recipients.length, delivered: recipients.length }) };
-}
 
 /** Turn a document into work elsewhere and link it back (bill to digitize, signature request, task). */
 function documentTo(db, d, model, vals, target, note) {
@@ -144,68 +137,6 @@ export const extraModels = {
       title: 'name',
       groups: [['slug', 'sequence'], ['is_published']],
       tabs: [{ label: 'Content', fields: ['content'] }],
-      chatter: true,
-    },
-  },
-
-  'mailing.list': {
-    label: 'Mailing Lists',
-    fields: { name: { type: 'char', label: 'Mailing List', required: true } },
-    kanban: { title: 'name', lines: [], counter: { label: 'Contacts', model: 'mailing.contact', field: 'list_id' } },
-    list: ['name'],
-    form: { title: 'name', smart: [{ label: 'Contacts', model: 'mailing.contact', field: 'list_id', target: 'marketing/contacts' }], groups: [[], []] },
-  },
-
-  'mailing.contact': {
-    label: 'Mailing Contacts',
-    fields: {
-      name: { type: 'char', label: 'Name', required: true },
-      email: { type: 'char', label: 'Email', required: true },
-      phone: { type: 'char', label: 'Mobile' },
-      list_id: { type: 'many2one', relation: 'mailing.list', label: 'Mailing List' },
-      opt_out: { type: 'boolean', label: 'Opted Out' },
-    },
-    filters: [[{ id: 'subscribed', label: 'Subscribed', fn: (r) => !r.opt_out }, { id: 'optout', label: 'Opted Out', fn: (r) => r.opt_out }]],
-    groupBys: ['list_id', 'opt_out'],
-    kanban: { title: 'name', lines: ['email', 'list_id'], avatar: true },
-    list: ['name', 'email', 'list_id', 'opt_out'],
-    views: ['list', 'kanban'],
-    form: { title: 'name', groups: [['email', 'list_id'], ['opt_out']] },
-  },
-
-  'mailing.mailing': {
-    label: 'Mailings',
-    fields: {
-      subject: { type: 'char', label: 'Subject', required: true },
-      list_id: { type: 'many2one', relation: 'mailing.list', label: 'Recipients' },
-      user_id: { type: 'many2one', relation: 'hr.employee', label: 'Responsible' },
-      body: { type: 'text', label: 'Mail Body' },
-      state: state([['draft', 'Draft'], ['scheduled', 'Scheduled'], ['sent', 'Sent']]),
-      schedule_date: { type: 'date', label: 'Scheduled for' },
-      sent_date: { type: 'date', label: 'Sent on', readonly: true },
-      sent: { type: 'integer', label: 'Sent', readonly: true },
-      delivered: { type: 'integer', label: 'Delivered', readonly: true },
-      opened: { type: 'integer', label: 'Opened', readonly: true },
-      clicked: { type: 'integer', label: 'Clicked', readonly: true },
-      replied: { type: 'integer', label: 'Replied', readonly: true },
-    },
-    defaults: () => ({ state: 'draft', user_id: 1, sent: 0, delivered: 0, opened: 0, clicked: 0, replied: 0 }),
-    groupBys: ['state', 'list_id', 'user_id', 'sent_date'],
-    kanban: { groupBy: 'state', title: 'subject', lines: ['list_id', 'sent', 'sent_date'], badge: 'user_id' },
-    list: ['sent_date', 'subject', 'user_id', 'sent', 'delivered', 'opened', 'clicked', 'replied', 'state'],
-    views: ['list', 'kanban', 'calendar', 'graph'],
-    calendar: { date: 'schedule_date' },
-    graph: { groupBy: 'list_id', measure: 'sent' },
-    form: {
-      statusbar: 'state',
-      lockedWhen: (r) => r.state === 'sent',
-      buttons: [
-        { label: 'Send', email: 'mailing', primary: true, when: (r) => r.state !== 'sent', run: sendMailing },
-        { label: 'Schedule', when: (r) => r.state === 'draft', vals: { state: 'scheduled', schedule_date: addDays(today(), 1) } },
-      ],
-      title: 'subject',
-      groups: [['list_id', 'user_id', 'schedule_date'], ['sent_date', 'sent', 'delivered', 'opened']],
-      tabs: [{ label: 'Mail Body', fields: ['body'] }],
       chatter: true,
     },
   },
