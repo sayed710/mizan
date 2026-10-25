@@ -1,6 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
+import { rateAt } from './currency.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -13,10 +14,11 @@ export const CHART = [
   ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['121000', 'Account Receivable', 'asset_receivable'],
   ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
   ['211000', 'Account Payable', 'liability_payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
-  ['230000', 'Salaries Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
+  ['212000', 'Deferred Revenue', 'liability_current'], ['132000', 'Prepaid Expenses', 'asset_current'], ['230000', 'Salaries Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
   ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
   ['500000', 'Cost of Goods Sold', 'expense_direct_cost'], ['600000', 'Expenses', 'expense'], ['610000', 'Travel & Meals', 'expense'],
   ['620000', 'Salaries & Wages', 'expense'], ['630000', 'Rent', 'expense'], ['690000', 'Bank Fees', 'expense_other'],
+  ['450100', 'Foreign Exchange Gain', 'income_other'], ['690100', 'Foreign Exchange Loss', 'expense_other'],
 ];
 
 export const JOURNALS = [
@@ -37,7 +39,12 @@ export function invoiceLines(db, move) {
   // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
   const sale = move.move_type !== 'in_invoice';
   const refund = move.move_type === 'out_refund';
-  const { untaxed, tax, total } = amounts(move.invoice_line_ids);
+  // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
+  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today());
+  const { untaxed: u, tax: t } = amounts(move.invoice_line_ids);
+  const untaxed = round(u / rate);
+  const tax = round(t / rate);
+  const total = round(untaxed + tax);
   const counterpart = accountId(db, sale ? '121000' : '211000');
   const base = accountId(db, sale ? '400000' : '600000');
   const taxAcc = accountId(db, sale ? '251000' : '131000');

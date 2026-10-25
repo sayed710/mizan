@@ -317,6 +317,8 @@ export function seed() {
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
+  add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
 
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');

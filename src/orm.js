@@ -8,7 +8,7 @@ export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 
 // ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
 /** Master data shared by all companies (Odoo shares these by default). */
-export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'product.pricelist', 'discuss.channel',
+export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };

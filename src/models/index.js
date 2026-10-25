@@ -15,10 +15,12 @@ import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
 import { routeModels } from './routes.js';
 import { financeModels } from './finance.js';
+import { currencyModels } from './currency.js';
+import { batchModels } from './batch.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -101,6 +103,7 @@ const allApps = [
         { key: 'journals', label: 'Journals', model: 'account.journal' },
         { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
+        { key: 'currencies', label: 'Currencies', model: 'res.currency' },
       ] },
     ],
   },
@@ -127,6 +130,8 @@ const allApps = [
       { key: 'products', label: 'Products', model: 'product' },
       { key: 'stock', label: 'Stock', model: 'product', view: 'list', domain: (r) => r.type === 'goods' },
       { key: 'lots', label: 'Lots/Serial Numbers', model: 'stock.lot' },
+      { key: 'batches', label: 'Batch Transfers', model: 'stock.picking.batch' },
+      { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
       { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'locations', label: 'Locations', model: 'stock.location' }] },
       { key: 'report', label: 'Reporting', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },

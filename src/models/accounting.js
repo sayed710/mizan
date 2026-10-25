@@ -2,6 +2,7 @@ import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
 import { checkLockDate } from './finance.js';
+import { toCompany } from './currency.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => r.move_type === 'out_refund';
@@ -37,11 +38,17 @@ export function payMove(db, id, amount, date = today()) {
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
   const sale = r.move_type === 'out_invoice';
+  // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
+  // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
+  const bank = toCompany(db, r.currency_id, value, date);
+  const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date);
+  const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
+  const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
   const { db: withEntry } = postEntry(db, {
     journal: 'BNK1', date, ref: `Payment ${r.name}`,
     lines: sale
-      ? [{ account: '101401', debit: value, partner_id: r.partner_id }, { account: '121000', credit: value, partner_id: r.partner_id }]
-      : [{ account: '211000', debit: value, partner_id: r.partner_id }, { account: '101401', credit: value, partner_id: r.partner_id }],
+      ? [{ account: '101401', debit: bank, partner_id: r.partner_id }, { account: '121000', credit: open, partner_id: r.partner_id }, ...fx]
+      : [{ account: '211000', debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
   });
   const next = write(withEntry, 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
@@ -51,7 +58,7 @@ export function payMove(db, id, amount, date = today()) {
 function creditNote(db, r) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
-    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`,
+    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null,
   });
   return { db: next, go: `#/accounting/credit-notes/${id}` };
 }
@@ -126,6 +133,7 @@ export const accountingModels = {
       invoice_date_due: { type: 'date', label: 'Due Date' },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
       payment_reference: { type: 'char', label: 'Payment Reference' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
       invoice_line_ids: productLines('Invoice Lines', 'list_price'),
       line_ids: lineItem,
@@ -177,7 +185,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_date_due', 'journal_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_date_due', 'journal_id', 'currency_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

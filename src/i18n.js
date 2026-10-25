@@ -442,6 +442,10 @@ const ar = {
   'Analytic Accounts': 'الحسابات التحليلية', Budgets: 'الموازنات', Analytic: 'تحليلي', 'Output Tax': 'ضريبة المخرجات', 'Input Tax': 'ضريبة المدخلات',
   'Tax Payable': 'الضريبة المستحقة', 'Not due': 'غير مستحق', Older: 'أقدم', Planned: 'المخطط', Actual: 'الفعلي', Achievement: 'نسبة التحقيق', Overdue: 'متأخر',
   'Send Reminder': 'إرسال تذكير', 'Oldest Due': 'أقدم استحقاق',
+  Currencies: 'العملات', Symbol: 'الرمز', Rates: 'الأسعار', 'Current Rate': 'السعر الحالي', 'Unit per Company Currency': 'الوحدة لكل عملة الشركة',
+  'Foreign Exchange Gain': 'أرباح فروق العملة', 'Foreign Exchange Loss': 'خسائر فروق العملة',
+  'Batch Transfers': 'التحويلات المجمعة', 'Batch Transfer': 'تحويل مجمع', Packages: 'الطرود', 'Package Reference': 'مرجع الطرد', 'Package Type': 'نوع الطرد',
+  Box: 'صندوق', Pallet: 'منصة', Crate: 'قفص', Content: 'المحتوى', Transfers: 'التحويلات', 'In Progress': 'قيد التنفيذ',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',
