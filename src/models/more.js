@@ -1,4 +1,4 @@
-// Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Knowledge, Point of Sale.
+// Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Point of Sale.
 import { create, read, write } from '../orm.js';
 import { addDays, amountFields, amounts, pad, productLines, today } from './common.js';
 import { moveStock } from './sales.js';
@@ -572,24 +572,6 @@ export const moreModels = {
     kanban: { groupBy: 'stage', title: 'name', lines: ['date_deadline'], tags: 'tag_ids', priority: 'priority', quickCreate: true },
     list: ['name', 'date_deadline', 'stage'],
     form: { title: 'name', groups: [['stage', 'date_deadline'], ['priority', 'tag_ids']], tabs: [{ label: 'Description', fields: ['description'] }], chatter: true },
-  },
-
-  'knowledge.article': {
-    label: 'Articles',
-    fields: {
-      name: { type: 'char', label: 'Title', required: true },
-      parent_id: { type: 'many2one', relation: 'knowledge.article', label: 'Parent Article' },
-      category: { type: 'selection', label: 'Section', options: [['workspace', 'Workspace'], ['shared', 'Shared'], ['private', 'Private']] },
-      is_favorite: { type: 'boolean', label: 'Favorite' },
-      body: { type: 'text', label: 'Content' },
-      write_date: { type: 'date', label: 'Last Edited', readonly: true },
-    },
-    defaults: () => ({ category: 'workspace', write_date: today() }),
-    filters: [[{ id: 'fav', label: 'Favorites', fn: (r) => r.is_favorite }]],
-    groupBys: ['category', 'parent_id'],
-    kanban: { groupBy: 'category', title: 'name', lines: ['parent_id', 'write_date'] },
-    list: ['name', 'parent_id', 'category', 'write_date'],
-    form: { title: 'name', groups: [['parent_id', 'category'], ['is_favorite', 'write_date']], tabs: [{ label: 'Content', fields: ['body'] }], chatter: true },
   },
 
   'pos.order': {

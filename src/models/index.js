@@ -6,6 +6,7 @@ import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels } from './pay.js';
 import { elearningModels } from './elearning.js';
+import { surveyModels } from './surveys.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -29,10 +30,11 @@ import { paymentModels } from './payments.js';
 import { helpdeskModels } from './helpdesk.js';
 import { leaveGuard, timeoffModels } from './timeoff.js';
 import { posModels } from './pos.js';
+import { knowledgeModels } from './knowledge.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...knowledgeModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -355,7 +357,8 @@ const allApps = [
     menus: [
       { key: 'surveys', label: 'Surveys', model: 'survey.survey' },
       { key: 'take', label: 'Take a Survey', type: 'surveytake' },
-      { key: 'answers', label: 'Answers', model: 'survey.answer' },
+      { key: 'answers', label: 'Participations', model: 'survey.answer' },
+      { key: 'results', label: 'Results', type: 'surveyresults' },
     ],
   },
   {
@@ -392,7 +395,7 @@ const allApps = [
   { id: 'studio', name: 'Studio', color: ['#0ea5e9', '#9333ea'], menus: [{ key: 'fields', label: 'Custom Fields', type: 'studio' }] },
   { id: 'apps', name: 'Apps', color: ['#ef4444', '#3b82f6'], menus: [{ key: 'store', label: 'Apps', type: 'appstore' }] },
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
-  { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', model: 'knowledge.article' }] },
+  { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', type: 'knowledge' }, { key: 'all', label: 'All Articles', model: 'knowledge.article' }] },
   { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
 ];
 

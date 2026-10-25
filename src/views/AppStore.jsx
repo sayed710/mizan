@@ -1,4 +1,4 @@
-// Apps (install/uninstall), Attendance kiosk and Survey taking.
+// Apps (install/uninstall), the Attendance kiosk and the cap table.
 import { useState } from 'react';
 import { apps, APP_INFO } from '../models/index.js';
 import { create, read, search, updateSettings, write } from '../orm.js';
@@ -121,48 +121,6 @@ export function CapTable() {
           </tbody>
         </table>
       </div>
-    </main>
-  );
-}
-
-export function SurveyTake() {
-  const db = useDb();
-  const id = Number(new URLSearchParams(location.hash.split('?')[1] ?? '').get('survey'));
-  const open = search(db, 'survey.survey').filter((s) => s.stage_id === 'open');
-  const survey = read(db, 'survey.survey', id) ?? open[0];
-  const [name, setName] = useState('');
-  const [answers, setAnswers] = useState({});
-  const [done, setDone] = useState(false);
-  if (!survey) return <main className="action"><p className="empty">{t('No open survey.')}</p></main>;
-  if (done) return <main className="action"><div className="sheet survey-done"><h2>{t('Thank you!')}</h2><p>{t('Your answers were recorded.')}</p><button type="button" className="btn" onClick={() => { setDone(false); setAnswers({}); setName(''); }}>{t('Answer again')}</button></div></main>;
-  const submit = (e) => {
-    e.preventDefault();
-    const lines = survey.questions.map((q, i) => ({ question: q.question, answer: String(answers[i] ?? '') }));
-    const res = create(getDb(), 'survey.answer', { survey_id: survey.id, name: name.trim(), answers: lines });
-    commit(write(res.db, 'survey.survey', survey.id, { responses: (survey.responses ?? 0) + 1 }));
-    setDone(true);
-  };
-  return (
-    <main className="action">
-      <form className="sheet survey-form" onSubmit={submit}>
-        <h1>{survey.name}</h1>
-        <label>{t('Your name')}<input required value={name} onChange={(e) => setName(e.target.value)} /></label>
-        {survey.questions.map((q, i) => (
-          <fieldset key={i}>
-            <legend>{i + 1}. {q.question}</legend>
-            {q.kind === 'text' && <textarea value={answers[i] ?? ''} onChange={(e) => setAnswers({ ...answers, [i]: e.target.value })} />}
-            {q.kind === 'choice' && (q.choices ?? '').split(',').map((c) => c.trim()).filter(Boolean).map((c) => (
-              <label key={c} className="choice"><input type="radio" name={`q${i}`} checked={answers[i] === c} onChange={() => setAnswers({ ...answers, [i]: c })} /> {c}</label>
-            ))}
-            {q.kind === 'rating' && (
-              <div className="row">{[1, 2, 3, 4, 5].map((n) => (
-                <button key={n} type="button" className={`btn sm ${answers[i] === n ? 'primary' : ''}`} onClick={() => setAnswers({ ...answers, [i]: n })}>{n}</button>
-              ))}</div>
-            )}
-          </fieldset>
-        ))}
-        <button type="submit" className="btn primary">{t('Submit')}</button>
-      </form>
     </main>
   );
 }

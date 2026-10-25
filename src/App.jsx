@@ -11,9 +11,12 @@ import { Discuss } from './views/Discuss.jsx';
 import { Reports } from './views/Reports.jsx';
 import { Barcode, Overview, ShopFloor } from './views/Pages.jsx';
 import { Website } from './views/Website.jsx';
-import { AppStore, CapTable, Kiosk, SurveyTake } from './views/AppStore.jsx';
+import { AppStore, CapTable, Kiosk } from './views/AppStore.jsx';
+import { SurveyResults, SurveyTake } from './views/Survey.jsx';
+import { ErrorBoundary } from './ui.jsx';
 import { Studio } from './views/Studio.jsx';
 import { Kitchen } from './views/Kitchen.jsx';
+import { Knowledge } from './views/Knowledge.jsx';
 import { PrintDoc } from './views/PrintDoc.jsx';
 
 // Routes: #/                          home
@@ -25,7 +28,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, studio: Studio, kitchen: Kitchen, captable: CapTable };
+const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);
@@ -55,7 +58,7 @@ export function App() {
   return (
     <div className="shell">
       <Navbar app={app} active={leaf.key} />
-      {content}
+      <ErrorBoundary key={location.hash.split('?')[0]}>{content}</ErrorBoundary>
     </div>
   );
 }

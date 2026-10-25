@@ -1,5 +1,5 @@
 // Shared widgets: field display/input, icons, avatar, tags.
-import { useState } from 'react';
+import { Component, useState } from 'react';
 import { models } from './models/index.js';
 import { read, search } from './orm.js';
 import { lang, t } from './i18n.js';
@@ -263,3 +263,25 @@ ICONS.recycle = <path d="M24 6l8 12h-5v6h-6v-6h-5zM10 30l6-10 4 6-3 5h12v6H10zm2
 export const Icon = ({ name, size = 18 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">{ICONS[name] ?? ICONS[ALIAS[name]] ?? ICONS.grid}</svg>
 );
+
+/** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
+export class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="action">
+        <div className="alert" role="alert">{t('This screen could not be displayed')}: {String(this.state.error.message ?? this.state.error)}</div>
+        <button type="button" className="btn" onClick={() => this.setState({ error: null })}>{t('Try again')}</button>
+      </main>
+    );
+  }
+}
