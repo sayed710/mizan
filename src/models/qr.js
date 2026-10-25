@@ -26,7 +26,8 @@ export function invoiceQrPayload(settings, company, move) {
   if (settings.invoice_qr === 'zatca') {
     return zatcaPayload({ seller: company.name, vat: settings.company_vat ?? '', timestamp: `${move.invoice_date}T00:00:00Z`, total: move.amount_total, tax: move.amount_tax });
   }
-  if (company.currency !== 'EUR') return null;
+  // EPC is euro-only and needs at least 0.01 to pay.
+  if (company.currency !== 'EUR' || move.currency_id || !(move.amount_residual >= 0.01)) return null;
   return epcPayload({ name: company.name, iban: settings.company_iban, amount: move.amount_residual, reference: move.payment_reference || move.name });
 }
 

@@ -4,6 +4,7 @@ import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
 import { useDb } from '../store.js';
+import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 
@@ -279,6 +280,11 @@ function Depreciation({ db, period }) {
 }
 
 const REPORTS = {
+  trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
+  executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
   valuation: { title: 'Stock Valuation', Body: Valuation, cols: ['On Hand', 'Unit Cost', 'Total Value'] },
   audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },

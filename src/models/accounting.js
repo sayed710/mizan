@@ -76,23 +76,27 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, { account: via.account, credit: bank, partner_id: r.partner_id }, ...fx],
   });
   const record = { state: 'posted', move_id: paymentMove, journal_id: journalId(db, via.code), invoice_id: r.id, partner_id: r.partner_id, amount: value, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
+  const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
-    ? write(withEntry, 'account.payment', paymentId, record)
-    : create(withEntry, 'account.payment', { ...record, name: nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`) }).db;
+    ? write(withEntry, 'account.payment', paymentId, { ...record, name })
+    : create(withEntry, 'account.payment', { ...record, name }).db;
   const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
-  const next = write(isRefund(r) ? withPayment : releaseCashBasis(withPayment, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
+  const next = write(releaseCashBasis(withPayment, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
 }
 
 /** Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account. */
-function releaseCashBasis(db, r, share, date) {
-  const sale = r.move_type === 'out_invoice';
+export function releaseCashBasis(db, r, share, date) {
+  const sale = !isPurchase(r);
+  // A refund carries the tax the other way round: its release reverses the invoice's.
+  const refund = isRefund(r);
   const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date))
     .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
     .filter(([, amount]) => amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
-  const lines = due.flatMap(([account, amount]) => (sale
+  const lines = due.flatMap(([account, amount]) => (sale !== refund
     ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { account, credit: amount, partner_id: r.partner_id }]
     : [{ account, debit: amount, partner_id: r.partner_id }, { account: transition, credit: amount, partner_id: r.partner_id }]));
   return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;

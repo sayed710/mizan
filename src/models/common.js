@@ -36,6 +36,12 @@ export const productLines = (label, priceField) => ({
     discount: { type: 'float', label: 'Disc.%' },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes' },
     tax: { type: 'float', label: 'Tax %', readonly: true },
+    // Snapshot of the chosen tax, so totals and postings never need the tax record.
+    tax_type: { type: 'char', label: 'Tax Computation', hidden: true },
+    tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
+    tax_cash_basis: { type: 'boolean', label: 'Cash Basis', hidden: true },
+    tax_account_id: { type: 'integer', label: 'Tax Account', hidden: true },
+    tax_name: { type: 'char', label: 'Tax Name', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
   },
   newLine: () => ({ product_id: null, qty: 1, price_unit: 0, discount: 0, tax: 14 }),

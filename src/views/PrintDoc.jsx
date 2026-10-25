@@ -79,7 +79,7 @@ export function PrintDoc({ model, id }) {
 
   const partner = read(db, layout.partnerModel ?? 'res.partner', rec[layout.partner ?? 'partner_id']);
   const lineDef = def.fields[layout.lines];
-  const cols = Object.entries(lineDef.fields);
+  const cols = Object.entries(lineDef.fields).filter(([, f]) => !f.hidden);
   const priced = 'price_unit' in lineDef.fields;
   return (
     <main className="print-page">

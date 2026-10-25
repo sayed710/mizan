@@ -100,6 +100,33 @@ export function agedBalance(db, kind = 'receivable', at = today()) {
   return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
+/**
+ * One summary card per journal, as on the accounting dashboard: documents to validate, unpaid and late
+ * for sales/purchase journals; balance and lines to reconcile for bank/cash journals.
+ */
+export function journalCards(db, at = today()) {
+  const moves = search(db, 'account.move');
+  const items = journalItems(db);
+  // Draft invoices get their journal on posting, so they count on the default INV/BILL journal meanwhile.
+  const draftJournal = (m) => (m.move_type === 'entry' ? null : ['in_invoice', 'in_refund'].includes(m.move_type) ? 'BILL' : 'INV');
+  return search(db, 'account.journal').map((j) => {
+    const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.code));
+    if (['sale', 'purchase'].includes(j.type)) {
+      const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
+      return {
+        journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
+        unpaidAmount: round(unpaid.reduce((s, m) => s + m.amount_residual, 0)), late: unpaid.filter((m) => m.invoice_date_due < at).length,
+      };
+    }
+    if (['bank', 'cash'].includes(j.type)) {
+      const balance = round(items.filter((l) => l.account_id === j.default_account_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+      const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check') : [];
+      return { journal: j, kind: j.type, balance, toReconcile: toCheck.length, toReconcileAmount: round(toCheck.reduce((s, l) => s + (Number(l.amount) || 0), 0)) };
+    }
+    return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
+  });
+}
+
 /** Partners with overdue invoices, for payment reminders. */
 export function followUps(db, at = today()) {
   const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.amount_residual > 0 && m.invoice_date_due < at);

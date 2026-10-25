@@ -4,6 +4,29 @@ import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
+import { journalCards } from '../models/finance.js';
+
+const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
+
+/** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
+function JournalCard({ card }) {
+  const list = `#/accounting/${LINKS[card.kind]}`;
+  const figures = {
+    sale: [['To Validate', card.draft], ['Unpaid', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
+    purchase: [['To Validate', card.draft], ['To Pay', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
+    bank: [['Balance', money(card.balance)], ['To Reconcile', `${card.toReconcile} · ${money(card.toReconcileAmount)}`]],
+    cash: [['Balance', money(card.balance)]],
+    general: [['Posted Entries', card.entries], ['Drafts', card.draft]],
+  }[card.kind];
+  const action = { INV: ['New Invoice', '#/accounting/invoices/new'], BILL: ['New Bill', '#/accounting/bills/new'], BNK1: ['Reconcile', '#/accounting/bank'] }[card.journal.code];
+  return (
+    <section className="panel journal-card">
+      <h2><a href={list}>{card.journal.name}</a></h2>
+      <dl>{figures.map(([label, value]) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>)}</dl>
+      {action && <a className="btn primary sm" href={action[1]}>{t(action[0])}</a>}
+    </section>
+  );
+}
 
 const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
 
@@ -30,6 +53,7 @@ export function Dashboard() {
   return (
     <main className="action dashboard">
       <div className="control-panel"><h1 className="cp-title">{t('Dashboard')}</h1></div>
+      <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
       <div className="kpis">
         {tiles.map(([label, value, href]) => (
           <a key={label} className="kpi" href={href}>

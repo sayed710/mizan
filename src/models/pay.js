@@ -2,7 +2,7 @@
 import { postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { paymentJournal, postEntry } from './ledger.js';
-import { payMove } from './accounting.js';
+import { payMove, releaseCashBasis } from './accounting.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 // Which open documents a payment settles, by direction and partner side.
@@ -36,7 +36,8 @@ export function postPayment(db, p) {
   const { db: applied, left } = open.reduce((acc, m) => {
     const take = round(Math.min(acc.left, m.amount_residual));
     if (!(take > 0)) return acc;
-    const next = write(acc.db, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId }] });
+    const released = releaseCashBasis(acc.db, m, take / m.amount_total, date);
+    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId }] });
     return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - take) };
   }, { db: booked, left: amount });
   return write(applied, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: left });

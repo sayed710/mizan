@@ -539,6 +539,13 @@ const ar = {
   'Import ID': 'معرّف الاستيراد', 'No transactions found in this file': 'لا توجد معاملات في هذا الملف',
   'Sales Lock Date': 'تاريخ إقفال المبيعات', 'Purchase Lock Date': 'تاريخ إقفال المشتريات', 'Hard Lock Date': 'تاريخ الإقفال النهائي',
   'The hard lock date cannot be moved back or removed. Continue?': 'لا يمكن إرجاع تاريخ الإقفال النهائي أو إزالته. هل تريد المتابعة؟',
+  'To Validate': 'للاعتماد', 'To Pay': 'للدفع', 'Posted Entries': 'قيود مرحّلة', Drafts: 'مسودات',
+  'New Invoice': 'فاتورة جديدة', 'New Bill': 'فاتورة مورد جديدة',
+  'Trial Balance': 'ميزان المراجعة', 'Partner Ledger': 'دفتر الشركاء', 'Partner Ledger (Payable)': 'دفتر الشركاء (الدائنون)', 'Cash Flow Statement': 'قائمة التدفقات النقدية',
+  'Executive Summary': 'الملخص التنفيذي', 'End Balance': 'الرصيد الختامي', 'Cash at the beginning of the period': 'النقدية في بداية الفترة',
+  'Cash at the end of the period': 'النقدية في نهاية الفترة', 'Operating Activities': 'الأنشطة التشغيلية', 'Investing Activities': 'الأنشطة الاستثمارية',
+  'Financing Activities': 'الأنشطة التمويلية', 'Net Change in Cash': 'صافي التغير في النقدية', 'Net Profit': 'صافي الربح', Receivables: 'المدينون', Payables: 'الدائنون',
+  'Current Ratio': 'نسبة التداول', 'Gross Margin': 'هامش الربح الإجمالي', 'Net Margin': 'هامش الربح الصافي', 'Days Sales Outstanding': 'متوسط أيام التحصيل',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

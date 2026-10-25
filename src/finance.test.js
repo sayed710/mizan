@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { models } from './models/index.js';
-import { agedBalance, analyticActuals, followUps, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
+import { agedBalance, analyticActuals, followUps, journalCards, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
 import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 
@@ -94,4 +94,17 @@ test('sales and purchase lock dates only lock their side; the hard lock locks ev
   const db = { settings: { sale_lock_date: '2026-03-31' } };
   assert.match(moveGuard(db, null, { move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
   assert.equal(moveGuard(db, null, { move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
+});
+
+test('journal cards count drafts, unpaid and late invoices, and bank balance with lines to reconcile', () => {
+  const db = seed();
+  const cards = journalCards(db, '2999-01-01');
+  const sale = cards.find((c) => c.journal.code === 'INV');
+  const posted = search(db, 'account.move').filter((m) => m.journal_id === sale.journal.id && m.state === 'posted' && m.amount_residual > 0);
+  assert.equal(sale.unpaid, posted.length);
+  assert.equal(sale.late, posted.length);
+  assert.equal(sale.draft, search(db, 'account.move').filter((m) => m.state === 'draft' && m.move_type === 'out_invoice' && !m.journal_id).length);
+  const bank = cards.find((c) => c.journal.code === 'BNK1');
+  assert.ok(bank.balance > 0);
+  assert.equal(bank.toReconcile, search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length);
 });

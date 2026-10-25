@@ -1,6 +1,6 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { postEntry } from './ledger.js';
+import { accountId, postEntry } from './ledger.js';
 import { candidates, reconcileWith } from './bank.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -52,6 +52,8 @@ function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const balance = round(Math.abs(line.amount));
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance).filter((l) => l.value);
+  const unknown = counterparts.find((l) => !accountId(db, l.account_code));
+  if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
   const { db: booked, id } = postEntry(db, {
     journal: 'BNK1', date: line.date, ref: line.payment_ref,
@@ -67,7 +69,8 @@ function writeOff(db, rule, line) {
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (rule.rule_type === 'invoice_matching') {
-    const [match] = candidates(db, line);
+    // Only an exact amount match, and from the line's partner when it has one: never pay someone else's invoice.
+    const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && round(m.amount_residual) === round(Math.abs(line.amount)));
     return match ? reconcileWith(db, line, match.id) : db;
   }
   return writeOff(db, rule, line);
@@ -75,12 +78,21 @@ export function applyRule(db, rule, line) {
 
 const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => r.active !== false).sort(bySequence);
 
-/** Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence). */
+/**
+ * Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence).
+ * Runs unattended on the server, so regex rules (user patterns could backtrack for ages) are left to manual use,
+ * and a line that fails (locked period, bad rule) is skipped rather than stopping the run.
+ */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => r.auto_reconcile);
+  const rules = activeRules(db).filter((r) => r.auto_reconcile && r.match_label !== 'match_regex');
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const rule = rules.find((r) => ruleMatches(r, l));
-    return rule ? applyRule(acc, rule, read(acc, 'account.bank.statement.line', l.id)) : acc;
+    if (!rule) return acc;
+    try {
+      return applyRule(acc, rule, read(acc, 'account.bank.statement.line', l.id));
+    } catch {
+      return acc;
+    }
   }, db);
 }
 

@@ -7,7 +7,8 @@ import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
-const lockValue = (value, current) => (value === null || /^\d{4}-\d{2}-\d{2}$/.test(value ?? '') ? value ?? null : current ?? null);
+const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
+const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
 /** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {

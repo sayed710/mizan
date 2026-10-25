@@ -333,6 +333,15 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .statusbar button:disabled { cursor: default; }
 .statusbar button:disabled:not([aria-current]):hover { background: none; }
 
+.journal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 0 16px 16px; }
+.journal-card { display: flex; flex-direction: column; gap: 8px; }
+.journal-card h2 { margin: 0; font-size: 16px; }
+.journal-card h2 a { color: inherit; text-decoration: none; }
+.journal-card dl { margin: 0; display: grid; gap: 4px; }
+.journal-card dl div { display: flex; justify-content: space-between; gap: 8px; }
+.journal-card dt { color: var(--muted); }
+.journal-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+.journal-card .btn { align-self: flex-start; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; padding: 0 16px 16px; }
 .kpi {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;

@@ -112,7 +112,7 @@ import { subtotal as lineSubtotal } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly, record }) {
-  const cols = Object.entries(field.fields);
+  const cols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
   const priced = 'price_unit' in field.fields;
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));

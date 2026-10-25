@@ -107,8 +107,13 @@ const allApps = [
       { label: 'Reporting', children: [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
         { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
+        { key: 'cash-flow', label: 'Cash Flow Statement', type: 'report', report: 'cashflow' },
+        { key: 'executive-summary', label: 'Executive Summary', type: 'report', report: 'executive' },
+        { key: 'trial-balance', label: 'Trial Balance', type: 'report', report: 'trial' },
         { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
         { key: 'depreciation-schedule', label: 'Depreciation Schedule', type: 'report', report: 'depreciation' },
+        { key: 'partner-ledger', label: 'Partner Ledger', type: 'report', report: 'partnerReceivable' },
+        { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
         { key: 'tax-report', label: 'Tax Return', type: 'report', report: 'tax' },
         { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
         { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
