@@ -533,6 +533,9 @@ const ar = {
   'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   'Depreciation Schedule': 'جدول الإهلاك الدوري',
   Base: 'الأساس',
+  'Payment QR Codes': 'رموز QR للدفع', 'ZATCA (Saudi e-invoicing)': 'زاتكا (الفوترة الإلكترونية السعودية)', 'SEPA Credit Transfer (EPC)': 'تحويل SEPA (EPC)',
+  'Company Tax ID': 'الرقم الضريبي للشركة', 'Bank Account (IBAN)': 'الحساب البنكي (IBAN)', 'Payment QR code': 'رمز QR للدفع', 'Scan to verify this invoice': 'امسح للتحقق من الفاتورة',
+  'Scan to pay': 'امسح للدفع', 'Set a valid IBAN for payment QR codes': 'أدخل رقم IBAN صحيحًا لرموز QR للدفع',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

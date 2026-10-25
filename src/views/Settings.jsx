@@ -167,6 +167,28 @@ export function Settings() {
           </div>
         </div>
         <div className="field">
+          <label htmlFor="invoice_qr">{t('Payment QR Codes')}</label>
+          <div className="field-value">
+            <select id="invoice_qr" value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
+              <option value="">{t('None')}</option>
+              <option value="zatca">{t('ZATCA (Saudi e-invoicing)')}</option>
+              <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
+            </select>
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="company_vat">{t('Company Tax ID')}</label>
+          <div className="field-value">
+            <input id="company_vat" value={db.settings?.company_vat ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_vat: e.target.value }))} />
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="company_iban">{t('Bank Account (IBAN)')}</label>
+          <div className="field-value">
+            <input id="company_iban" value={db.settings?.company_iban ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_iban: e.target.value }))} />
+          </div>
+        </div>
+        <div className="field">
           <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
           <div className="field-value">
             <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={!!db.settings?.audit_trail}

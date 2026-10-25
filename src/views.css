@@ -52,6 +52,8 @@
 .paper-lines .num { text-align: end; }
 .paper-totals { margin-inline-start: auto; }
 .paper-note { color: var(--muted); white-space: pre-wrap; }
+.paper-qr { margin: 16px 0 0; display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
+.paper-qr svg { background: #fff; }
 .paper-foot { margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; text-align: center; }
 @media print {
   .no-print { display: none !important; }
