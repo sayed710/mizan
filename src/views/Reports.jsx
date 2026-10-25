@@ -239,7 +239,35 @@ function Valuation({ db }) {
   );
 }
 
+// Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
+function Depreciation({ db, period }) {
+  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft').map((a) => {
+    const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
+    const sum = (list) => list.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+    const accumulated = (Number(a.already_depreciated) || 0) + sum(posted.filter((l) => l.date <= period.to));
+    const inPeriod = sum(posted.filter((l) => (!period.from || l.date >= period.from) && l.date <= period.to));
+    return { a, inPeriod, accumulated, book: (Number(a.original_value) || 0) - accumulated };
+  });
+  const total = (k) => rows.reduce((s, r) => s + (k === 'original' ? Number(r.a.original_value) || 0 : r[k]), 0);
+  return (
+    <tbody>
+      {rows.map(({ a, inPeriod, accumulated, book }) => (
+        <tr key={a.id} className="rep-detail">
+          <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
+          <td>{a.acquisition_date}</td>
+          <td className="num">{money(a.original_value)}</td>
+          <td className="num">{money(inPeriod)}</td>
+          <td className="num">{money(accumulated)}</td>
+          <td className="num">{money(book)}</td>
+        </tr>
+      ))}
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{money(total('original'))}</td><td className="num">{money(total('inPeriod'))}</td><td className="num">{money(total('accumulated'))}</td><td className="num">{money(total('book'))}</td></tr>
+    </tbody>
+  );
+}
+
 const REPORTS = {
+  depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
   valuation: { title: 'Stock Valuation', Body: Valuation, cols: ['On Hand', 'Unit Cost', 'Total Value'] },
   audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },
   tax: { title: 'Tax Return', Body: Tax, cols: ['Amount'] },

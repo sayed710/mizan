@@ -108,6 +108,7 @@ const allApps = [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
         { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
         { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
+        { key: 'depreciation-schedule', label: 'Depreciation Schedule', type: 'report', report: 'depreciation' },
         { key: 'tax-report', label: 'Tax Return', type: 'report', report: 'tax' },
         { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
         { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
