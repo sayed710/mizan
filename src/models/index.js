@@ -142,7 +142,10 @@ const allApps = [
       { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
       { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'locations', label: 'Locations', model: 'stock.location' }] },
-      { key: 'report', label: 'Reporting', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
+      { label: 'Reporting', children: [
+        { key: 'report', label: 'Stock', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
+        { key: 'valuation', label: 'Valuation', type: 'report', report: 'valuation' },
+      ] },
     ],
   },
   { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }] },

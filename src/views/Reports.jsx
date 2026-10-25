@@ -220,7 +220,27 @@ function AuditTrail({ db, period }) {
   );
 }
 
+/** Current stock value per product (on hand × cost), largest first. */
+function Valuation({ db }) {
+  const rows = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available))
+    .map((p) => ({ p, value: (Number(p.qty_available) || 0) * (Number(p.cost) || 0) })).sort((a, b) => b.value - a.value);
+  return (
+    <tbody>
+      {rows.map(({ p, value }) => (
+        <tr key={p.id} className="rep-detail">
+          <td><a href={`#/open/product/${p.id}`}>{p.default_code ? `[${p.default_code}] ` : ''}{p.name}</a></td>
+          <td className="num">{p.qty_available}</td>
+          <td className="num">{money(p.cost)}</td>
+          <td className="num">{money(value)}</td>
+        </tr>
+      ))}
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td /><td className="num">{money(rows.reduce((s, r) => s + r.value, 0))}</td></tr>
+    </tbody>
+  );
+}
+
 const REPORTS = {
+  valuation: { title: 'Stock Valuation', Body: Valuation, cols: ['On Hand', 'Unit Cost', 'Total Value'] },
   audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },
   tax: { title: 'Tax Return', Body: Tax, cols: ['Amount'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
