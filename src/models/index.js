@@ -187,9 +187,10 @@ const allApps = [
       { label: 'Orders', children: [
         { key: 'rfq', label: 'Requests for Quotation', model: 'purchase.order' },
         { key: 'po', label: 'Purchase Orders', model: 'purchase.order', domain: (r) => r.state === 'purchase' },
+        { key: 'agreements', label: 'Purchase Agreements', model: 'purchase.requisition' },
         vendors,
       ] },
-      { label: 'Products', children: [products] },
+      { label: 'Products', children: [products, { key: 'vendor-pricelists', label: 'Vendor Pricelists', model: 'product.supplierinfo' }] },
       { key: 'report', label: 'Reporting', model: 'purchase.order', view: 'graph' },
     ],
   },

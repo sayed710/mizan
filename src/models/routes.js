@@ -50,6 +50,14 @@ export function procure(db, order) {
   return { db: next, stockLines };
 }
 
+/** Best vendor pricelist line for a product: valid dates, min quantity, then sequence and price. */
+export function vendorPrice(db, productId, { partnerId, qty = 1, date = today() } = {}) {
+  const info = search(db, 'product.supplierinfo').filter((s) => s.product_id === productId && (!partnerId || s.partner_id === partnerId)
+    && Number(s.min_qty ?? 0) <= qty && (!s.date_start || s.date_start <= date) && (!s.date_end || s.date_end >= date))
+    .sort((a, b) => Number(a.sequence ?? 10) - Number(b.sequence ?? 10) || Number(a.price) - Number(b.price) || a.id - b.id)[0];
+  return info ? { price: Number(info.price), delay: Number(info.delay ?? 0), partner_id: info.partner_id } : null;
+}
+
 /**
  * Reordering rules: a bought product whose forecast (on hand + quantities on open RFQs/POs not yet received)
  * falls below its minimum gets one draft RFQ line to its vendor up to the maximum (or the minimum).
@@ -59,14 +67,19 @@ export function replenish(db) {
   for (const po of search(db, 'purchase.order').filter((p) => p.state !== 'cancel' && !p.receipt_done && !p.dropship_partner_id)) {
     for (const l of po.order_line ?? []) incoming.set(l.product_id, (incoming.get(l.product_id) ?? 0) + (Number(l.qty) || 0) - (Number(l.qty_delivered) || 0));
   }
-  const needs = search(db, 'product').filter((p) => p.type === 'goods' && p.vendor_id && p.purchase_ok !== false && Number(p.reorder_min) > 0)
+  const needs = search(db, 'product').filter((p) => p.type === 'goods' && (p.vendor_id || vendorPrice(db, p.id)) && p.purchase_ok !== false && Number(p.reorder_min) > 0)
     .map((p) => {
       const forecast = (Number(p.qty_available) || 0) + (incoming.get(p.id) ?? 0);
       const target = Math.max(Number(p.reorder_max) || 0, Number(p.reorder_min));
       return forecast < Number(p.reorder_min) ? { p, qty: target - forecast } : null;
     }).filter(Boolean);
   const byVendor = new Map();
-  for (const n of needs) byVendor.set(n.p.vendor_id, [...(byVendor.get(n.p.vendor_id) ?? []), { product_id: n.p.id, qty: n.qty, price_unit: n.p.cost, tax: n.p.purchase_tax ?? 14 }]);
+  // A vendor pricelist line wins over the product's default vendor and cost.
+  for (const n of needs) {
+    const best = vendorPrice(db, n.p.id, { qty: n.qty });
+    const vendor = best?.partner_id ?? n.p.vendor_id;
+    byVendor.set(vendor, [...(byVendor.get(vendor) ?? []), { product_id: n.p.id, qty: n.qty, price_unit: best?.price ?? n.p.cost, tax: n.p.purchase_tax ?? 14 }]);
+  }
   return [...byVendor].reduce((acc, [vendor, lines]) => create(acc, 'purchase.order', { partner_id: vendor, order_line: lines, origin: 'Replenishment' }).db, db);
 }
 
