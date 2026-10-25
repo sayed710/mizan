@@ -38,8 +38,9 @@ function conflict(db, slot) {
 }
 
 function matchesRole(employee, role) {
-  return !role || employee.role === role || (employee.tag_ids ?? []).some((tag) => String(tag).toLowerCase() === role)
-    || String(employee.job_title ?? '').toLowerCase().includes(role);
+  const wanted = String(role ?? '').toLowerCase();
+  return !role || employee.role === role || (employee.tag_ids ?? []).some((tag) => String(tag).toLowerCase() === wanted)
+    || String(employee.job_title ?? '').toLowerCase().includes(wanted);
 }
 
 function slotById(db, id) {
@@ -77,7 +78,9 @@ export function generateRecurringSlots(db, slot, horizonDate) {
 }
 
 /** Active, role-compatible employees without overlapping shifts or approved time off. */
-export function availableEmployees(db, { start, end = start, role, start_time, end_time }) {
+export function availableEmployees(db, { start, end: endDate, role, start_time, end_time }) {
+  // Single-day shifts store end as null (copyNextWeek), not undefined.
+  const end = endDate || start;
   period(day(start), day(end));
   return search(db, 'hr.employee').filter((e) => matchesRole(e, role) && !conflict(db, { start, end, start_time, end_time, employee_id: e.id }));
 }

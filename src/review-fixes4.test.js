@@ -68,3 +68,12 @@ test('purchase and leave requests need what their follow-up records need before 
   const noDate = create(leave.db, 'approval.request', { name: 'Holiday', category_id: leave.id, request_owner_id: 5, date: null });
   assert.throws(() => submitRequest(noDate.db, read(noDate.db, 'approval.request', noDate.id)), /start date/);
 });
+
+test('planning availability accepts a null end date and matches roles case-insensitively', async () => {
+  const { availableEmployees } = await import('./models/planningplus.js');
+  const db = seed();
+  const someone = db.records['hr.employee'][0];
+  const tagged = { ...db, records: { ...db.records, 'hr.employee': [{ ...someone, job_title: 'Support Engineer' }] } };
+  assert.doesNotThrow(() => availableEmployees(db, { start: '2032-01-05', end: null }));
+  assert.equal(availableEmployees(tagged, { start: '2032-01-05', end: null, role: 'Support' }).length, 1);
+});
