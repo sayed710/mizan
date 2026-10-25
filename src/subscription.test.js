@@ -47,3 +47,11 @@ test('preventive maintenance is requested when due, once, and the next date move
   const again = schedulePreventive(once, '2026-06-05');
   assert.equal(search(again, 'maintenance.request').filter((r) => r.equipment_id === id).length, 1);
 });
+
+test('odometer readings update the vehicle and never go backwards', async () => {
+  const { logOdometer } = await import('./models/apps2.js');
+  const vehicle = search(seed(), 'fleet.vehicle')[0];
+  const db = logOdometer(seed(), vehicle, 12000, '2026-05-01');
+  assert.equal(read(db, 'fleet.vehicle', vehicle.id).odometer, 12000);
+  assert.throws(() => logOdometer(db, vehicle, 11000, '2026-06-01'), /cannot go below 12000/);
+});

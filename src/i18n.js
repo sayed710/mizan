@@ -503,6 +503,11 @@ const ar = {
   Book: 'احجز', 'Thank you! We will confirm by email.': 'شكرًا! سنؤكد عبر البريد الإلكتروني.',
   'Days between each preventive maintenance': 'الأيام بين كل صيانة وقائية', 'Maintenance Duration (hours)': 'مدة الصيانة (ساعات)',
   'Warranty Expiration Date': 'تاريخ انتهاء الضمان',
+  'Chassis Number': 'رقم الشاسيه', 'Model Year': 'سنة الصنع', Seats: 'المقاعد', 'CO2 Emissions (g/km)': 'انبعاثات CO2 (جم/كم)', 'Catalog Value': 'القيمة الرسمية',
+  'Future Driver': 'السائق القادم', Odometer: 'عداد المسافة', 'Odometer Logs': 'سجلات العداد', 'Odometer Value (km)': 'قراءة العداد (كم)',
+  'Log Odometer': 'تسجيل قراءة العداد', Leasing: 'تأجير تمويلي', Insurance: 'تأمين', 'Expiration Date': 'تاريخ الانتهاء',
+  'Recurring Cost': 'التكلفة المتكررة', 'Recurring Cost Frequency': 'تكرار التكلفة',
+  'Expiring in 30 days': 'ينتهي خلال 30 يومًا',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

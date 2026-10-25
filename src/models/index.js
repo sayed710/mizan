@@ -315,6 +315,8 @@ const allApps = [
     menus: [
       { key: 'vehicles', label: 'Vehicles', model: 'fleet.vehicle' },
       { key: 'services', label: 'Services', model: 'fleet.service' },
+      { key: 'contracts', label: 'Contracts', model: 'fleet.contract' },
+      { key: 'odometer', label: 'Odometer', model: 'fleet.odometer' },
     ],
   },
   {

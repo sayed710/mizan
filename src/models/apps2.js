@@ -54,6 +54,19 @@ export function schedulePreventive(db, at = today()) {
     }, db);
 }
 
+/** Odometer readings never go below an earlier reading of the same vehicle. */
+function odometerGuard(db, before, after) {
+  const last = (db.records['fleet.odometer'] ?? []).filter((o) => o.vehicle_id === after.vehicle_id && o.id !== after.id && o.date <= after.date)
+    .reduce((m, o) => Math.max(m, Number(o.value) || 0), 0);
+  return (Number(after.value) || 0) < last ? `The odometer cannot go below ${last} km` : null;
+}
+
+/** Record a reading and make it the vehicle's current odometer. */
+export function logOdometer(db, vehicle, value, date = today()) {
+  const { db: logged } = create(db, 'fleet.odometer', { vehicle_id: vehicle.id, date, value: Number(value), driver_id: vehicle.driver_id ?? null });
+  return write(logged, 'fleet.vehicle', vehicle.id, { odometer: Number(value) });
+}
+
 function repairInvoice(db, r) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
@@ -170,8 +183,14 @@ export const apps2Models = {
       license_plate: { type: 'char', label: 'License Plate' },
       driver_id: employee('Driver'),
       fuel_type: { type: 'selection', label: 'Fuel Type', options: [['gasoline', 'Gasoline'], ['diesel', 'Diesel'], ['electric', 'Electric'], ['hybrid', 'Hybrid']] },
-      odometer: { type: 'float', label: 'Last Odometer (km)' },
+      odometer: { type: 'float', label: 'Last Odometer (km)', readonly: true },
       acquisition_date: { type: 'date', label: 'Registration Date' },
+      vin_sn: { type: 'char', label: 'Chassis Number' },
+      model_year: { type: 'integer', label: 'Model Year' },
+      seats: { type: 'integer', label: 'Seats' },
+      co2: { type: 'float', label: 'CO2 Emissions (g/km)' },
+      car_value: { type: 'monetary', label: 'Catalog Value' },
+      future_driver_id: employee('Future Driver'),
     },
     stages: [['new', 'New Request'], ['ordered', 'To Order'], ['registered', 'Registered'], ['downgraded', 'Downgraded']],
     lines: ['license_plate', 'driver_id', 'odometer'],
@@ -179,8 +198,64 @@ export const apps2Models = {
     extra: {
       defaults: () => ({ fuel_type: 'gasoline', odometer: 0 }),
       groupBys: ['driver_id', 'fuel_type'],
-      groups: [['license_plate', 'driver_id', 'fuel_type'], ['odometer', 'acquisition_date']],
-      form: { smart: [{ label: 'Services', model: 'fleet.service', field: 'vehicle_id', target: 'fleet/services', sum: 'amount' }] },
+      groups: [['license_plate', 'driver_id', 'future_driver_id', 'fuel_type', 'vin_sn'], ['odometer', 'acquisition_date', 'model_year', 'seats', 'co2', 'car_value']],
+      form: {
+        buttons: [{
+          label: 'Log Odometer',
+          run: (db, r) => {
+            const value = prompt('Odometer value (km)', String(r.odometer ?? 0));
+            return { db: value == null || Number.isNaN(Number(value)) ? db : logOdometer(db, r, value) };
+          },
+        }],
+        smart: [
+        { label: 'Services', model: 'fleet.service', field: 'vehicle_id', target: 'fleet/services', sum: 'amount' },
+        { label: 'Contracts', model: 'fleet.contract', field: 'vehicle_id', target: 'fleet/contracts' },
+        { label: 'Odometer', model: 'fleet.odometer', field: 'vehicle_id', target: 'fleet/odometer' },
+        ],
+      },
+    },
+  }),
+
+  'fleet.odometer': {
+    label: 'Odometer Logs',
+    fields: {
+      vehicle_id: { type: 'many2one', relation: 'fleet.vehicle', label: 'Vehicle', required: true },
+      date: { type: 'date', label: 'Date', required: true },
+      value: { type: 'float', label: 'Odometer Value (km)', required: true },
+      driver_id: employee('Driver'),
+    },
+    defaults: () => ({ date: today(), value: 0 }),
+    guard: odometerGuard,
+    onchange: (r, key, db) => (key === 'vehicle_id' && r.vehicle_id ? { driver_id: (db.records['fleet.vehicle'] ?? []).find((v) => v.id === r.vehicle_id)?.driver_id ?? null } : {}),
+    groupBys: ['vehicle_id', 'date'],
+    kanban: { title: 'vehicle_id', lines: ['date', 'value'] },
+    list: ['date', 'vehicle_id', 'driver_id', 'value'],
+    views: ['list', 'graph'],
+    graph: { groupBy: 'vehicle_id', measure: 'value' },
+    form: { title: 'vehicle_id', groups: [['vehicle_id', 'driver_id'], ['date', 'value']] },
+  },
+
+  'fleet.contract': simple({
+    label: 'Contracts',
+    fields: {
+      name: { type: 'char', label: 'Contract Reference', required: true },
+      vehicle_id: { type: 'many2one', relation: 'fleet.vehicle', label: 'Vehicle', required: true },
+      contract_type: { type: 'selection', label: 'Type', options: [['leasing', 'Leasing'], ['insurance', 'Insurance'], ['service', 'Service']] },
+      vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
+      start_date: { type: 'date', label: 'Start Date' },
+      expiration_date: { type: 'date', label: 'Expiration Date' },
+      cost_generated: { type: 'monetary', label: 'Recurring Cost' },
+      cost_frequency: { type: 'selection', label: 'Recurring Cost Frequency', options: [['monthly', 'Monthly'], ['yearly', 'Yearly'], ['no', 'No']] },
+    },
+    stages: [['futur', 'Incoming'], ['open', 'In Progress'], ['expired', 'Expired'], ['closed', 'Closed']],
+    lines: ['vehicle_id', 'vendor_id', 'expiration_date'],
+    list: ['name', 'vehicle_id', 'contract_type', 'vendor_id', 'start_date', 'expiration_date', 'cost_generated', 'stage_id'],
+    extra: {
+      defaults: () => ({ contract_type: 'leasing', start_date: today(), cost_frequency: 'monthly', cost_generated: 0 }),
+      groupBys: ['vehicle_id', 'contract_type', 'vendor_id'],
+      filters: [[{ id: 'expiring', label: 'Expiring in 30 days', fn: (r) => r.stage_id === 'open' && r.expiration_date && r.expiration_date <= addDays(today(), 30) }]],
+      listDecoration: (r) => (r.stage_id === 'open' && r.expiration_date && r.expiration_date < today() ? 'danger' : null),
+      groups: [['vehicle_id', 'contract_type', 'vendor_id'], ['start_date', 'expiration_date', 'cost_generated', 'cost_frequency']],
     },
   }),
 
