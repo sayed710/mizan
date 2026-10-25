@@ -1,6 +1,6 @@
 // Scheduled actions the server runs periodically (Odoo's cron jobs): recurring invoices, time-off accruals, preventive maintenance, replenishment, follow-ups, asset depreciation, bank auto-reconciliation, marketing automation, scheduled social posts, lead assignment and scoring, helpdesk assignment and auto-close, recurring project tasks.
 import { today } from './common.js';
-import { runRecurring } from './more.js';
+import { subscriptionJobs } from './subscriptionplus.js';
 import { accrue } from './timeoff.js';
 import { schedulePreventive } from './maintplus.js';
 import { replenish } from './routes.js';
@@ -34,5 +34,5 @@ export function runScheduledJobs(db, at = today()) {
     .reduce((acc, a) => accrue(acc, a, at), db);
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
-  return tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(runRecurring(depreciated, at), at)), at)), at), at), at)), at), at), at);
+  return tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
 }

@@ -316,6 +316,7 @@ const allApps = [
     menus: [
       { key: 'subscriptions', label: 'Subscriptions', model: 'sale.subscription' },
       { key: 'report', label: 'Reporting', model: 'sale.subscription', view: 'pivot' },
+      { label: 'Configuration', children: [{ key: 'plans', label: 'Recurring Plans', model: 'sale.subscription.plan' }] },
     ],
   },
   {
