@@ -36,3 +36,14 @@ test('scheduled jobs invoice due subscriptions and run accruals, and change noth
   const quiet = runScheduledJobs(seed(), '2000-01-01');
   assert.equal(quiet.records['account.move'].length, seed().records['account.move'].length);
 });
+
+test('preventive maintenance is requested when due, once, and the next date moves by the period', async () => {
+  const { schedulePreventive } = await import('./models/apps2.js');
+  const { db, id } = create(seed(), 'maintenance.equipment', { name: 'CNC', period: 30, next_maintenance: '2026-05-01', maintenance_duration: 2 });
+  const once = schedulePreventive(db, '2026-05-03');
+  const reqs = search(once, 'maintenance.request').filter((r) => r.equipment_id === id);
+  assert.deepEqual(reqs.map((r) => [r.maintenance_type, r.schedule_date, r.duration]), [['preventive', '2026-05-01', 2]]);
+  assert.equal(read(once, 'maintenance.equipment', id).next_maintenance, '2026-05-31');
+  const again = schedulePreventive(once, '2026-06-05');
+  assert.equal(search(again, 'maintenance.request').filter((r) => r.equipment_id === id).length, 1);
+});

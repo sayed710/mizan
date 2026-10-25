@@ -37,6 +37,23 @@ export function simple({ label, fields, stages, title = 'name', lines, list, ext
   };
 }
 
+/**
+ * Preventive maintenance: equipment with a period gets a preventive request once its next date is reached
+ * (one open request at a time); the next date then moves forward by the period.
+ */
+export function schedulePreventive(db, at = today()) {
+  return (db.records['maintenance.equipment'] ?? [])
+    .filter((e) => Number(e.period) > 0 && e.next_maintenance && e.next_maintenance <= at)
+    .filter((e) => !(db.records['maintenance.request'] ?? []).some((r) => r.equipment_id === e.id && r.maintenance_type === 'preventive' && !['repaired', 'scrap'].includes(r.stage_id)))
+    .reduce((acc, e) => {
+      const { db: next } = create(acc, 'maintenance.request', {
+        name: `Preventive maintenance: ${e.name}`, equipment_id: e.id, maintenance_type: 'preventive', technician_id: e.technician_id ?? null,
+        schedule_date: e.next_maintenance, duration: Number(e.maintenance_duration) || 1,
+      });
+      return write(next, 'maintenance.equipment', e.id, { next_maintenance: addDays(e.next_maintenance, Number(e.period)) });
+    }, db);
+}
+
 function repairInvoice(db, r) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
@@ -55,12 +72,17 @@ export const apps2Models = {
       technician_id: employee('Technician'),
       location: { type: 'char', label: 'Used in location' },
       next_maintenance: { type: 'date', label: 'Next Preventive Maintenance' },
+      period: { type: 'integer', label: 'Days between each preventive maintenance' },
+      maintenance_duration: { type: 'float', label: 'Maintenance Duration (hours)' },
+      cost: { type: 'monetary', label: 'Cost' },
+      warranty_date: { type: 'date', label: 'Warranty Expiration Date' },
+      vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
     },
     lines: ['category', 'serial_no', 'next_maintenance'],
     list: ['name', 'category', 'serial_no', 'technician_id', 'next_maintenance'],
     extra: {
       groupBys: ['category', 'technician_id'],
-      groups: [['category', 'serial_no', 'location'], ['technician_id', 'next_maintenance']],
+      groups: [['category', 'serial_no', 'location', 'vendor_id', 'cost', 'warranty_date'], ['technician_id', 'next_maintenance', 'period', 'maintenance_duration']],
       form: { smart: [{ label: 'Maintenance', model: 'maintenance.request', field: 'equipment_id', target: 'maintenance/requests' }] },
     },
   }),

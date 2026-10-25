@@ -501,6 +501,8 @@ const ar = {
   Availabilities: 'الأوقات المتاحة', Day: 'اليوم', 'From (HH:MM)': 'من (س:د)', 'To (HH:MM)': 'إلى (س:د)', Monday: 'الإثنين', Tuesday: 'الثلاثاء', Wednesday: 'الأربعاء',
   Thursday: 'الخميس', Friday: 'الجمعة', Saturday: 'السبت', Sunday: 'الأحد',
   Book: 'احجز', 'Thank you! We will confirm by email.': 'شكرًا! سنؤكد عبر البريد الإلكتروني.',
+  'Days between each preventive maintenance': 'الأيام بين كل صيانة وقائية', 'Maintenance Duration (hours)': 'مدة الصيانة (ساعات)',
+  'Warranty Expiration Date': 'تاريخ انتهاء الضمان',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
