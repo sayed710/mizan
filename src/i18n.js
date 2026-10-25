@@ -465,6 +465,9 @@ const ar = {
   'Contact Name': 'اسم جهة الاتصال', Street: 'الشارع', Campaign: 'الحملة', Medium: 'الوسيط', 'Social Media': 'وسائل التواصل', Referral: 'إحالة',
   'Extra Info': 'معلومات إضافية', Lead: 'عميل محتمل', Leads: 'العملاء المحتملون',
   'Changes Requested': 'مطلوب تعديلات', Waiting: 'في الانتظار', 'Parent Task': 'المهمة الأم', 'Blocked By': 'محجوب بواسطة', 'Sub-tasks': 'المهام الفرعية',
+  'Batch Payments': 'الدفعات المجمعة', 'Batch Type': 'نوع الدفعة', Inbound: 'وارد', Outbound: 'صادر', 'First Check Number': 'رقم أول شيك',
+  'Payment Lines': 'بنود الدفع', 'Check Number': 'رقم الشيك', 'Add Open Invoices': 'إضافة الفواتير المفتوحة', 'Print Checks': 'طباعة الشيكات', Check: 'شيك',
+  'Pay to the order of': 'ادفعوا لأمر', Memo: 'البيان',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

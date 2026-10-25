@@ -4,6 +4,7 @@ import { read } from '../orm.js';
 import { currentCompany, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { display, formatDate, money } from '../ui.jsx';
+import { amountInWords } from '../models/payments.js';
 
 // Document layouts per model: which fields form the header block and which one2many holds the lines.
 const LAYOUTS = {
@@ -13,7 +14,31 @@ const LAYOUTS = {
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
 };
 
-export const printable = (model) => model in LAYOUTS;
+export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment';
+
+/** One cheque per batch line: payee, date, number, amount in figures and in words. */
+function Checks({ db, batch }) {
+  return (
+    <main className="print-page">
+      <div className="no-print print-toolbar">
+        <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
+        <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
+      </div>
+      {(batch.lines ?? []).map((l) => {
+        const move = read(db, 'account.move', l.move_id);
+        return (
+          <article key={l.check_number ?? l.move_id} className="paper check">
+            <header className="paper-head"><b className="paper-company">{currentCompany(db).name}</b><span>{t('Check')} #{l.check_number}</span></header>
+            <p>{t('Date')}: {formatDate(batch.date)}</p>
+            <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', move?.partner_id)?.name ?? '—'}</b> <span className="num">{money(l.amount)}</span></p>
+            <p className="check-words">{amountInWords(l.amount)}</p>
+            <footer className="paper-foot muted">{t('Memo')}: {move?.name}</footer>
+          </article>
+        );
+      })}
+    </main>
+  );
+}
 
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
 export function PrintDoc({ model, id }) {
@@ -26,6 +51,7 @@ export function PrintDoc({ model, id }) {
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
   }, [rec?.id]);
+  if (rec && model === 'account.batch.payment') return <Checks db={db} batch={rec} />;
   if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
 
   const partner = read(db, layout.partnerModel ?? 'res.partner', rec[layout.partner ?? 'partner_id']);

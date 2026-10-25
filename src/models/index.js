@@ -19,10 +19,11 @@ import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
 import { deferredModels } from './deferred.js';
+import { paymentModels } from './payments.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -87,6 +88,7 @@ const allApps = [
       { label: 'Accounting', children: [
         { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
         { key: 'entries', label: 'Journal Entries', model: 'account.move' },
+        { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
         { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
       ] },
