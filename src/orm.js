@@ -113,11 +113,13 @@ export function unlink(db, model, ids) {
   const drop = new Set(ids);
   const blocked = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
   if (blocked) throw new Error(blocked);
-  return {
+  const removed = (db.records[model] ?? []).filter((r) => drop.has(r.id));
+  const next = {
     ...db,
     records: { ...db.records, [model]: (db.records[model] ?? []).filter((r) => !drop.has(r.id)) },
     messages: db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
   };
+  return removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
 }
 
 export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note')] });

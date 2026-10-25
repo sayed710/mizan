@@ -37,6 +37,16 @@ function addLineQty(db, model, order, field, moves) {
   return write(db, model, order.id, { order_line });
 }
 
+/** Recompute an order's invoiced quantities from its invoices/bills that are not cancelled (`move` is one of them). */
+export function syncInvoicedQty(db, move) {
+  const [model, field] = move.sale_id ? ['sale.order', 'sale_id'] : move.purchase_id ? ['purchase.order', 'purchase_id'] : [];
+  const order = model && read(db, model, move[field]);
+  if (!order) return db;
+  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
+  const reset = write(db, model, order.id, { order_line: order.order_line.map((l) => ({ ...l, qty_invoiced: 0 })) });
+  return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', moves.flatMap((m) => m.invoice_line_ids ?? []));
+}
+
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField) {
   const invoiceable = (l) => (read(db, 'product', l.product_id)?.invoice_policy === 'delivery' ? Number(l.qty_delivered) || 0 : Number(l.qty) || 0);
@@ -56,8 +66,7 @@ function invoiceFrom(db, order, moveType, originField) {
     [originField]: order.id,
     invoice_line_ids: lines,
   });
-  const model = originField === 'sale_id' ? 'sale.order' : 'purchase.order';
-  return { db: addLineQty(next, model, order, 'qty_invoiced', lines), go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
+  return { db: syncInvoicedQty(next, read(next, 'account.move', id)), go: `#/accounting/${moveType === 'out_invoice' ? 'invoices' : 'bills'}/${id}` };
 }
 
 const orderLines = (label, priceField = 'list_price') => {

@@ -4,6 +4,7 @@ import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from '.
 import { moveDeleteGuard, moveGuard } from './finance.js';
 import { toCompany } from './currency.js';
 import { dueDate, earlyDiscount } from './terms.js';
+import { syncInvoicedQty } from './sales.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => r.move_type === 'out_refund';
@@ -73,9 +74,11 @@ export function discountAvailable(db, r, date = today()) {
 /** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
 export function payWithDiscount(db, id, amount, date = today()) {
   const r = read(db, 'account.move', id);
-  const discount = discountAvailable(db, r, date);
+  const due = residual(r);
   const paid = payMove(db, id, amount, date);
-  if (!discount || amount + discount < residual(r) - 0.005) return paid;
+  const gap = Math.round((due - amount) * 100) / 100;
+  const discount = Math.min(discountAvailable(db, r, date), gap);
+  if (!(gap > 0) || discount < gap - 0.005) return paid;
   const sale = r.move_type === 'out_invoice';
   const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date);
   const { db: booked } = postEntry(paid, {
@@ -160,6 +163,7 @@ export const accountingModels = {
     guard: moveGuard,
     protectDelete: moveDeleteGuard,
     audited: (db) => db.settings?.audit_trail === true,
+    onUnlink: (db, r) => syncInvoicedQty(db, r),
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db) => {
       if (key === 'partner_id' && r.partner_id) {
@@ -233,7 +237,7 @@ export const accountingModels = {
         { label: 'Credit Note', when: (r) => r.state === 'posted' && r.move_type === 'out_invoice', run: creditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         { label: 'Reset to Draft', when: (r) => r.state !== 'draft' && !(Number(r.amount_paid) > 0), vals: { state: 'draft' } },
-        { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
+        { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(write(db, 'account.move', r.id, { state: 'cancel' }), r) }) },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',

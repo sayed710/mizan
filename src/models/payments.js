@@ -21,6 +21,7 @@ export function postBatch(db, batch) {
   const lines = batch.lines ?? [];
   if (!lines.length) throw new Error('Add at least one invoice to the batch');
   const expected = MOVE_TYPE[batch.batch_type];
+  if (new Set(lines.map((l) => l.move_id)).size !== lines.length) throw new Error('An invoice can appear only once in a batch');
   for (const line of lines) {
     const move = read(db, 'account.move', line.move_id);
     if (!move) throw new Error(line.move_id ? `Invoice ${line.move_id} not found` : 'Select an invoice on every batch line');

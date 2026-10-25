@@ -20,11 +20,15 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-const LOCKED_FIELDS = ['invoice_line_ids', 'line_ids', 'invoice_date', 'state', 'partner_id', 'currency_id', 'move_type'];
+const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'state', 'partner_id', 'currency_id', 'move_type'];
 const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
 
-/** Entries in a locked period cannot be created posted or have their accounting changed; payments may still be recorded. */
+/**
+ * Entries in a locked period cannot be created posted or have their accounting changed (payments dated after the
+ * lock date may still settle them); with the audit trail on, a posted entry keeps its number.
+ */
 export function moveGuard(db, before, after) {
+  if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   const lock = db.settings?.lock_date;
   if (!lock) return null;
   const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);

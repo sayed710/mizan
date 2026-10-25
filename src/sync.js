@@ -62,7 +62,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
-    const blocked = (records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+    // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
@@ -89,7 +90,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
-      lock_date: s.lock_date === null || /^d{4}-d{2}-d{2}$/.test(s.lock_date ?? '') ? s.lock_date : db.settings.lock_date,
+      lock_date: s.lock_date === null || /^\d{4}-\d{2}-\d{2}$/.test(s.lock_date ?? '') ? s.lock_date : db.settings.lock_date,
       audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
       customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,

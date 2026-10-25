@@ -97,6 +97,7 @@ export async function aiDraft(db, user, { model, id, instruction }) {
 }
 
 // ---- bill digitization (OCR): Claude reads an uploaded vendor bill into a draft bill ----
+const MAX_DOC_BASE64 = 4 * 1024 * 1024; // ≈3 MB file
 const DOC_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']);
 const BILL_TOOL = {
   name: 'record_bill',
@@ -129,6 +130,7 @@ export async function digitizeBill(db, { id, file }) {
   const bill = read(db, 'account.move', Number(id));
   if (!bill || bill.move_type !== 'in_invoice' || bill.state !== 'draft') throw new Error('Open a draft vendor bill to digitize a document');
   if (!file || !DOC_TYPES.has(file.type) || typeof file.data !== 'string' || !file.data) throw new Error('Upload a PDF or an image (JPEG, PNG, GIF, WebP)');
+  if (file.data.length > MAX_DOC_BASE64) throw new Error('The document is too large (3 MB maximum)');
   const source = { type: 'base64', media_type: file.type, data: file.data };
   const response = await callClaude({
     max_tokens: 4000,
