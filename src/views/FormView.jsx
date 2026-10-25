@@ -342,10 +342,13 @@ export function FormView({ leaf, id, base, params }) {
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {(tabs[tab] ?? tabs[0]).fields.map((f) => (
-                    <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current}
-                      readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
-                  ))}
+                  {(tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
+                    ? (
+                      <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current}
+                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
+                    )
+                    // Plain fields in a tab get a label, like fields in the header groups.
+                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} />))}
                   {footer.length > 0 && tab === 0 && (
                     <dl className="totals">
                       {footer.map((f) => (
