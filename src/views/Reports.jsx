@@ -201,7 +201,27 @@ function Analytic({ db, period }) {
   );
 }
 
+const AUDIT_ROWS = 500;
+
+function AuditTrail({ db, period }) {
+  const rows = db.messages
+    .filter((m) => m.model === 'account.move' && (!period.from || m.date.slice(0, 10) >= period.from) && m.date.slice(0, 10) <= period.to)
+    .sort((a, b) => b.date.localeCompare(a.date)).slice(0, AUDIT_ROWS);
+  return (
+    <tbody>
+      {rows.map((m) => (
+        <tr key={m.id} className="rep-detail">
+          <td><a href={`#/open/account.move/${m.res_id}`}>{read(db, 'account.move', m.res_id)?.name ?? `#${m.res_id}`}</a> <span className="muted">{m.body}</span></td>
+          <td className="num">{m.author}</td>
+          <td className="num">{m.date.slice(0, 16).replace('T', ' ')}</td>
+        </tr>
+      ))}
+    </tbody>
+  );
+}
+
 const REPORTS = {
+  audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },
   tax: { title: 'Tax Return', Body: Tax, cols: ['Amount'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },

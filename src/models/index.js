@@ -96,6 +96,7 @@ const allApps = [
         { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
         { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
         { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
+        { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
         { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
       ] },
       { label: 'Configuration', children: [

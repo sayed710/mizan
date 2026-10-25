@@ -1,7 +1,7 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
-import { checkLockDate } from './finance.js';
+import { moveDeleteGuard, moveGuard } from './finance.js';
 import { toCompany } from './currency.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
@@ -19,7 +19,6 @@ const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', ent
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   const r = read(db, 'account.move', id);
-  checkLockDate(db, r.invoice_date ?? r.date ?? today());
   const year = (r.invoice_date ?? today()).slice(0, 4);
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
   if (!isInvoice(r)) {
@@ -123,6 +122,9 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
+    guard: moveGuard,
+    protectDelete: moveDeleteGuard,
+    audited: (db) => db.settings?.audit_trail === true,
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['entry', 'Journal Entry']] },

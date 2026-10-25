@@ -49,3 +49,27 @@ test('analytic actuals sum posted lines tagged with an analytic account', () => 
   const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, analytic_account_id: office }] });
   assert.equal(analyticActuals(db).get(office), 900);
 });
+
+test('the lock date also guards synced changes and deletes; payments on locked invoices still work', async () => {
+  const { applyDiff, diffDb } = await import('./sync.js');
+  const { payMove } = await import('./models/accounting.js');
+  const { db: posted, id } = invoice(seed(), { invoice_date: addDays(today(), -10) });
+  const locked = updateSettings(posted, { lock_date: addDays(today(), -1) });
+  const edited = { ...locked, records: { ...locked.records, 'account.move': locked.records['account.move'].map((m) => (m.id === id ? { ...m, invoice_date: today() } : m)) } };
+  assert.throws(() => applyDiff(locked, diffDb(locked, edited)), /locked/);
+  assert.throws(() => applyDiff(locked, { upserts: {}, deletes: { 'account.move': [id] } }), /locked/);
+  assert.equal(read(payMove(locked, id, 100), 'account.move', id).amount_paid, 100);
+});
+
+test('the audit trail logs every change, keeps numbered entries and cannot be switched off', async () => {
+  const { applyDiff } = await import('./sync.js');
+  const { unlink } = await import('./orm.js');
+  const db0 = updateSettings(seed(), { audit_trail: true });
+  const { db, id } = invoice(db0, {});
+  const noted = write(db, 'account.move', id, { ref: 'PO-77' });
+  assert.ok(noted.messages.some((m) => m.res_id === id && m.model === 'account.move' && /Reference/.test(m.body)));
+  assert.throws(() => unlink(noted, 'account.move', [id]), /audit trail/);
+  assert.equal(applyDiff(noted, { upserts: {}, deletes: {}, settings: { audit_trail: false } }).settings.audit_trail, true);
+  const msg = noted.messages.find((m) => m.model === 'account.move' && m.res_id === id);
+  assert.ok(applyDiff(noted, { upserts: {}, deletes: {}, removedMessages: [msg.id] }).messages.some((m) => m.id === msg.id));
+});

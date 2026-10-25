@@ -1,4 +1,4 @@
-// Credit limits, lock date, tax report, aged balances, follow-ups, analytic accounting and budgets.
+// Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { read, search } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
@@ -20,10 +20,24 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-/** Entries dated on or before the lock date cannot be posted or reset. */
-export function checkLockDate(db, date) {
+const LOCKED_FIELDS = ['invoice_line_ids', 'line_ids', 'invoice_date', 'state', 'partner_id', 'currency_id', 'move_type'];
+const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
+
+/** Entries in a locked period cannot be created posted or have their accounting changed; payments may still be recorded. */
+export function moveGuard(db, before, after) {
   const lock = db.settings?.lock_date;
-  if (lock && date && date <= lock) throw new Error(`The period up to ${lock} is locked`);
+  if (!lock) return null;
+  const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
+  if (!touchesLocked) return null;
+  const changed = !before || LOCKED_FIELDS.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  return changed ? `The period up to ${lock} is locked` : null;
+}
+
+/** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
+export function moveDeleteGuard(db, move) {
+  if (moveDate(move) <= (db.settings?.lock_date ?? '')) return `The period up to ${db.settings.lock_date} is locked`;
+  if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
+  return null;
 }
 
 /** VAT return for a period: output tax (sales) − input tax (purchases) = payable. */

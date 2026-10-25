@@ -446,6 +446,8 @@ const ar = {
   'Foreign Exchange Gain': 'أرباح فروق العملة', 'Foreign Exchange Loss': 'خسائر فروق العملة',
   'Batch Transfers': 'التحويلات المجمعة', 'Batch Transfer': 'تحويل مجمع', Packages: 'الطرود', 'Package Reference': 'مرجع الطرد', 'Package Type': 'نوع الطرد',
   Box: 'صندوق', Pallet: 'منصة', Crate: 'قفص', Content: 'المحتوى', Transfers: 'التحويلات', 'In Progress': 'قيد التنفيذ',
+  'Restrictive Audit Trail': 'سجل التدقيق المقيد', 'The audit trail cannot be disabled once enabled. Continue?': 'لا يمكن تعطيل سجل التدقيق بعد تفعيله. متابعة؟',
+  'Audit Trail': 'سجل التدقيق', Document: 'المستند', Change: 'التغيير', 'Payment reminder': 'تذكير بالدفع',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

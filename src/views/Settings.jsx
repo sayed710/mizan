@@ -166,6 +166,13 @@ export function Settings() {
             <input id="lock_date" type="date" value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
           </div>
         </div>
+        <div className="field">
+          <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
+          <div className="field-value">
+            <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={!!db.settings?.audit_trail}
+              onChange={(e) => e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && commit(updateSettings(getDb(), { audit_trail: true }))} />
+          </div>
+        </div>
         <h3>{t('Data')}</h3>
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">

@@ -68,7 +68,7 @@ export function create(db, model, vals) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec);
+  const err = validate(model, rec) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
   return {
     db: {
@@ -83,10 +83,12 @@ export function create(db, model, vals) {
 
 function trackingMessages(db, model, before, vals) {
   const fields = models[model].fields;
+  const audited = models[model].audited?.(db);
   return Object.entries(vals)
-    .filter(([k, v]) => fields[k]?.tracking && before[k] !== v)
+    .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
-      const label = (x) => fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
+      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking');
+      const label = (x) => fields[k].options?.find((o) => o[0] === x)?.[1] ?? x;
       return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking');
     });
 }
@@ -98,7 +100,7 @@ export function write(db, model, id, vals) {
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
   const after = { ...before, ...clean };
-  const err = validate(model, after);
+  const err = validate(model, after) ?? models[model].guard?.(db, before, after);
   if (err) throw new Error(err);
   return {
     ...db,
@@ -109,6 +111,8 @@ export function write(db, model, id, vals) {
 
 export function unlink(db, model, ids) {
   const drop = new Set(ids);
+  const blocked = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+  if (blocked) throw new Error(blocked);
   return {
     ...db,
     records: { ...db.records, [model]: (db.records[model] ?? []).filter((r) => !drop.has(r.id)) },

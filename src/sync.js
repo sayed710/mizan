@@ -52,7 +52,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
-      const err = validate(model, rec);
+      const err = validate(model, rec) ?? models[model].guard?.(db, current.get(rec.id) ?? null, rec);
       if (err) throw new Error(err);
       current.set(rec.id, rec);
     }
@@ -62,6 +62,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
+    const blocked = (records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+    if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
   const seq = { ...db.seq };
@@ -69,7 +71,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (models[model] && Number.isInteger(n)) seq[model] = Math.max(seq[model] ?? 0, n, ...(records[model] ?? []).map((r) => r.id));
   }
   const known = new Set(db.messages.map((m) => m.id));
-  const removed = new Set(Array.isArray(d.removedMessages) ? d.removedMessages : []);
+  const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
+  const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : []).filter((id) => !kept.has(id)));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
     .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
@@ -86,6 +89,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
+      lock_date: s.lock_date === null || /^d{4}-d{2}-d{2}$/.test(s.lock_date ?? '') ? s.lock_date : db.settings.lock_date,
+      audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
       customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,
     } : {}),
