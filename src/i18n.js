@@ -537,6 +537,8 @@ const ar = {
   'Company Tax ID': 'الرقم الضريبي للشركة', 'Bank Account (IBAN)': 'الحساب البنكي (IBAN)', 'Payment QR code': 'رمز QR للدفع', 'Scan to verify this invoice': 'امسح للتحقق من الفاتورة',
   'Scan to pay': 'امسح للدفع', 'Set a valid IBAN for payment QR codes': 'أدخل رقم IBAN صحيحًا لرموز QR للدفع',
   'Import ID': 'معرّف الاستيراد', 'No transactions found in this file': 'لا توجد معاملات في هذا الملف',
+  'Sales Lock Date': 'تاريخ إقفال المبيعات', 'Purchase Lock Date': 'تاريخ إقفال المشتريات', 'Hard Lock Date': 'تاريخ الإقفال النهائي',
+  'The hard lock date cannot be moved back or removed. Continue?': 'لا يمكن إرجاع تاريخ الإقفال النهائي أو إزالته. هل تريد المتابعة؟',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

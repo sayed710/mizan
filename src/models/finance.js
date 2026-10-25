@@ -28,9 +28,18 @@ const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
  * Entries in a locked period cannot be created posted or have their accounting changed (payments dated after the
  * lock date may still settle them); with the audit trail on, a posted entry keeps its number.
  */
+/**
+ * The latest lock date that applies to a move: the global and hard locks always, the sales or purchase lock
+ * by journal type. Empty when nothing is locked.
+ */
+export function lockDateFor(settings = {}, move = {}) {
+  const side = String(move.move_type ?? '').startsWith('out_') ? settings.sale_lock_date : String(move.move_type ?? '').startsWith('in_') ? settings.purchase_lock_date : null;
+  return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
+}
+
 export function moveGuard(db, before, after) {
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
-  const lock = db.settings?.lock_date;
+  const lock = [before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)).sort().at(-1);
   if (!lock) return null;
   const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
   if (!touchesLocked) return null;
@@ -40,7 +49,8 @@ export function moveGuard(db, before, after) {
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move) {
-  if (moveDate(move) <= (db.settings?.lock_date ?? '')) return `The period up to ${db.settings.lock_date} is locked`;
+  const lock = lockDateFor(db.settings, move);
+  if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   return null;
 }

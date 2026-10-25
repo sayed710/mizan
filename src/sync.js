@@ -6,6 +6,8 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
+/** A submitted lock date if it is a date or null (cleared), else the current one. */
+const lockValue = (value, current) => (value === null || /^\d{4}-\d{2}-\d{2}$/.test(value ?? '') ? value ?? null : current ?? null);
 
 /** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
@@ -91,7 +93,11 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
-      lock_date: s.lock_date === null || /^\d{4}-\d{2}-\d{2}$/.test(s.lock_date ?? '') ? s.lock_date : db.settings.lock_date,
+      lock_date: lockValue(s.lock_date, db.settings.lock_date),
+      sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
+      purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
+      // The hard lock only ever moves forward.
+      hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
       audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
       company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),

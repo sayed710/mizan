@@ -166,6 +166,21 @@ export function Settings() {
             <input id="lock_date" type="date" value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
           </div>
         </div>
+        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date']].map(([key, label]) => (
+          <div className="field" key={key}>
+            <label htmlFor={key}>{t(label)}</label>
+            <div className="field-value">
+              <input id={key} type="date" value={db.settings?.[key] ?? ''} onChange={(e) => commit(updateSettings(getDb(), { [key]: e.target.value || null }))} />
+            </div>
+          </div>
+        ))}
+        <div className="field">
+          <label htmlFor="hard_lock_date">{t('Hard Lock Date')}</label>
+          <div className="field-value">
+            <input id="hard_lock_date" type="date" min={db.settings?.hard_lock_date ?? undefined} value={db.settings?.hard_lock_date ?? ''}
+              onChange={(e) => e.target.value && e.target.value > (db.settings?.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && commit(updateSettings(getDb(), { hard_lock_date: e.target.value }))} />
+          </div>
+        </div>
         <div className="field">
           <label htmlFor="invoice_qr">{t('Payment QR Codes')}</label>
           <div className="field-value">

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { models } from './models/index.js';
-import { agedBalance, analyticActuals, followUps, receivableOf, taxReport } from './models/finance.js';
+import { agedBalance, analyticActuals, followUps, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
 import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 
@@ -84,4 +84,14 @@ test('automatic reminders log each reached level once per customer', async () =>
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
   const later = runFollowUps(first, addDays(today(), 12));
   assert.equal(read(later, 'res.partner', 5).followup_level_delay, 30);
+});
+
+test('sales and purchase lock dates only lock their side; the hard lock locks everything', () => {
+  assert.equal(lockDateFor({ sale_lock_date: '2026-03-31' }, { move_type: 'out_invoice' }), '2026-03-31');
+  assert.equal(lockDateFor({ sale_lock_date: '2026-03-31' }, { move_type: 'in_invoice' }), '');
+  assert.equal(lockDateFor({ purchase_lock_date: '2026-02-28', lock_date: '2026-01-31' }, { move_type: 'in_refund' }), '2026-02-28');
+  assert.equal(lockDateFor({ hard_lock_date: '2026-04-30', sale_lock_date: '2026-03-31' }, { move_type: 'entry' }), '2026-04-30');
+  const db = { settings: { sale_lock_date: '2026-03-31' } };
+  assert.match(moveGuard(db, null, { move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
+  assert.equal(moveGuard(db, null, { move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
 });
