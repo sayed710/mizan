@@ -242,6 +242,7 @@ export const salesModels = {
       source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website'], ['marketplace', 'Marketplace']] },
       client_order_ref: { type: 'char', label: 'Customer Reference', readonly: true },
       connector_id: { type: 'many2one', relation: 'marketplace.connector', label: 'Marketplace', readonly: true },
+      opportunity_id: { type: 'many2one', relation: 'crm.lead', label: 'Opportunity', readonly: true },
       state: orderState([['draft', 'Quotation'], ['sent', 'Quotation Sent'], ['sale', 'Sales Order'], ['cancel', 'Cancelled']]),
       order_line: orderLines('Order Lines'),
       ...amountFields('order_line'),

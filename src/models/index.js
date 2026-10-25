@@ -46,7 +46,8 @@ const allApps = [
     id: 'crm', name: 'CRM', color: ['#14b8a6', '#0e7490'],
     menus: [
       { label: 'Sales', children: [
-        { key: 'pipeline', label: 'My Pipeline', model: 'crm.lead' },
+        { key: 'pipeline', label: 'My Pipeline', model: 'crm.lead', domain: (r) => r.type !== 'lead' },
+        { key: 'leads', label: 'Leads', model: 'crm.lead', domain: (r) => r.type === 'lead', defaults: { type: 'lead' } },
         { key: 'quotations', label: 'Quotations', model: 'sale.order' },
         customers,
       ] },

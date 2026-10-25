@@ -1,4 +1,29 @@
+import { create, write } from '../orm.js';
 import { today } from './common.js';
+
+const LOST_REASONS = [['price', 'Too expensive'], ['competitor', 'We lost to a competitor'], ['timing', 'Not the right timing'], ['no_answer', 'No answer'], ['other', 'Other']];
+
+/** Lead → opportunity; creates the customer from the lead's company/contact when none is set. */
+export function convertLead(db, r) {
+  if (r.partner_id || !(r.partner_name || r.contact_name)) return write(db, 'crm.lead', r.id, { type: 'opportunity' });
+  const { db: withPartner, id } = create(db, 'res.partner', { name: r.partner_name || r.contact_name, is_company: !!r.partner_name, email: r.email ?? '', phone: r.phone ?? '', city: r.city ?? '', country: r.country ?? '' });
+  return write(withPartner, 'crm.lead', r.id, { type: 'opportunity', partner_id: id });
+}
+
+/** Draft quotation for the opportunity's customer, linked back to it. */
+function newQuotation(db, r) {
+  if (!r.partner_id) throw new Error('Set a customer on the opportunity first');
+  const { db: next, id } = create(db, 'sale.order', { partner_id: r.partner_id, opportunity_id: r.id, user: r.user, order_line: [] });
+  return { db: next, go: `#/sales/quotations/${id}` };
+}
+
+function markLost(db, r) {
+  const options = LOST_REASONS.map(([, label], i) => `${i + 1}. ${label}`).join('\n');
+  const pick = prompt(`Lost reason:\n${options}`, '1');
+  if (pick == null) return { db };
+  const reason = LOST_REASONS[Number(pick) - 1]?.[0] ?? 'other';
+  return { db: write(db, 'crm.lead', r.id, { active: false, probability: 0, lost_reason: reason }) };
+}
 
 export const crmModels = {
   'res.partner': {
@@ -58,6 +83,17 @@ export const crmModels = {
       priority: { type: 'priority', label: 'Priority' },
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Notes' },
+      type: { type: 'selection', label: 'Type', options: [['lead', 'Lead'], ['opportunity', 'Opportunity']] },
+      lost_reason: { type: 'selection', label: 'Lost Reason', options: LOST_REASONS },
+      partner_name: { type: 'char', label: 'Company Name' },
+      contact_name: { type: 'char', label: 'Contact Name' },
+      website: { type: 'char', label: 'Website' },
+      street: { type: 'char', label: 'Street' },
+      city: { type: 'char', label: 'City' },
+      country: { type: 'char', label: 'Country' },
+      campaign_id: { type: 'many2one', relation: 'marketing.campaign', label: 'Campaign' },
+      medium: { type: 'selection', label: 'Medium', options: [['email', 'Email'], ['phone', 'Phone'], ['website', 'Website'], ['social', 'Social Media'], ['referral', 'Referral']] },
+      source: { type: 'char', label: 'Source' },
     },
     onchange: (r, key, db) => {
       if (key === 'stage_id') return { probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[r.stage_id] ?? r.probability };
@@ -65,7 +101,7 @@ export const crmModels = {
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
       return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
     },
-    defaults: () => ({ stage_id: 'new', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today() }),
+    defaults: () => ({ type: 'opportunity', stage_id: 'new', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today() }),
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],
       [
@@ -74,7 +110,7 @@ export const crmModels = {
         { id: 'overdue', label: 'Overdue', fn: (r) => r.stage_id !== 'won' && r.date_deadline && r.date_deadline < today() },
       ],
     ],
-    groupBys: ['stage_id', 'user', 'partner_id', 'date_deadline', 'create_date'],
+    groupBys: ['stage_id', 'user', 'partner_id', 'lost_reason', 'medium', 'date_deadline', 'create_date'],
     kanban: {
       groupBy: 'stage_id',
       title: 'name',
@@ -94,16 +130,23 @@ export const crmModels = {
       statusbar: 'stage_id',
       statusbarClickable: true,
       buttons: [
-        { label: 'Won', primary: true, vals: { stage_id: 'won', probability: 100 }, when: (r) => r.stage_id !== 'won' },
-        { label: 'Lost', vals: { active: false, probability: 0 }, when: (r) => r.active !== false },
-        { label: 'Restore', vals: { active: true }, when: (r) => r.active === false },
+        { label: 'Convert to Opportunity', primary: true, when: (r) => r.type === 'lead', run: (db, r) => ({ db: convertLead(db, r) }) },
+        { label: 'New Quotation', primary: true, when: (r) => r.type !== 'lead' && r.active !== false, run: newQuotation },
+        { label: 'Won', primary: true, vals: { stage_id: 'won', probability: 100 }, when: (r) => r.type !== 'lead' && r.stage_id !== 'won' },
+        { label: 'Lost', when: (r) => r.active !== false, run: markLost },
+        { label: 'Restore', vals: { active: true, lost_reason: null }, when: (r) => r.active === false },
       ],
+      ribbon: (r) => (r.active === false ? 'Lost' : r.stage_id === 'won' ? 'Won' : null),
+      smart: [{ label: 'Quotations', model: 'sale.order', field: 'opportunity_id', target: 'sales/quotations', sum: 'amount_total' }],
       title: 'name',
       groups: [
         ['expected_revenue', 'probability', 'partner_id', 'email', 'phone'],
         ['user', 'date_deadline', 'priority', 'tag_ids'],
       ],
-      tabs: [{ label: 'Notes', fields: ['description'] }],
+      tabs: [
+        { label: 'Notes', fields: ['description'] },
+        { label: 'Extra Info', fields: ['partner_name', 'contact_name', 'website', 'street', 'city', 'country', 'campaign_id', 'medium', 'source', 'lost_reason'] },
+      ],
       chatter: true,
     },
   },
