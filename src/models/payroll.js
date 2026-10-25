@@ -8,7 +8,7 @@ const round = (n) => Math.round(n * 100) / 100;
 /**
  * Default salary structure (rules in order). Categories: basic, allowance, gross (= basic + allowances),
  * deduction (stored negative, credited to `account`), net (= gross + deductions).
- * amount_type: 'wage' (contract wage), 'fixed' (value), 'percentage' (value % of the `base` rule's amount).
+ * amount_type: 'wage', 'fixed', 'percentage', 'prorata', 'input', 'overtime', or 'brackets'.
  */
 export const DEFAULT_RULES = [
   { sequence: 1, code: 'BASIC', name: 'Basic Salary', category: 'basic', amount_type: 'wage', base: '', value: 0, account: '' },
@@ -19,8 +19,58 @@ export const DEFAULT_RULES = [
   { sequence: 6, code: 'NET', name: 'Net Salary', category: 'net', amount_type: 'wage', base: '', value: 0, account: '' },
 ];
 
+const DEFAULT_WORK_DAYS = '0,1,2,3,4';
+
+const datesBetween = (from, to) => {
+  if (!from || !to || from > to) return [];
+  const [year, month, day] = from.split('-').map(Number);
+  const end = Date.parse(`${to}T00:00:00Z`);
+  const cursor = new Date(Date.UTC(year, month - 1, day));
+  const dates = [];
+  while (cursor.getTime() <= end) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+};
+
+/** Summarize scheduled working days, validated unpaid leave, and attendance overtime for a slip. */
+export function workedDays(db, slip) {
+  const contract = runningContract(db, slip.employee_id, slip.date_to);
+  const schedule = String(contract?.work_days || DEFAULT_WORK_DAYS);
+  const weekdays = new Set(schedule.split(',').map((day) => Number(day.trim())).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6));
+  const unpaidLeaves = search(db, 'hr.leave').filter((leave) => {
+    const type = String(leave.leave_type?.name ?? leave.leave_type ?? '').toLowerCase();
+    return leave.employee_id === slip.employee_id && leave.state === 'validate' && (leave.unpaid === true || type.includes('unpaid'));
+  });
+  const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => weekdays.has(new Date(`${date}T00:00:00Z`).getUTCDay()));
+  const unpaidDays = workingDates.filter((date) => unpaidLeaves.some((leave) => leave.date_from <= date && leave.date_to >= date)).length;
+  const overtimeHours = search(db, 'hr.attendance')
+    .filter((attendance) => attendance.employee_id === slip.employee_id && attendance.date >= slip.date_from && attendance.date <= slip.date_to)
+    .reduce((sum, attendance) => sum + (Number(attendance.overtime) || 0), 0);
+  return {
+    working_days: workingDates.length,
+    worked_days: workingDates.length - unpaidDays,
+    unpaid_days: unpaidDays,
+    overtime_hours: round(overtimeHours),
+  };
+}
+
+const bracketTax = (base, text) => {
+  const annual = Math.max(0, base * 12);
+  const brackets = String(text ?? '').split(';').map((part) => {
+    const [range, rateText] = part.split(':');
+    const [lowerText, upperText] = (range ?? '').split('-');
+    const lower = Number(lowerText);
+    const upper = upperText ? Number(upperText) : Number.POSITIVE_INFINITY;
+    const rate = Number(rateText);
+    return { lower, upper, rate };
+  }).filter((bracket) => Number.isFinite(bracket.lower) && bracket.upper > bracket.lower && Number.isFinite(bracket.rate));
+  return brackets.reduce((sum, bracket) => sum + Math.max(0, Math.min(annual, bracket.upper) - bracket.lower) * bracket.rate / 100, 0) / 12;
+};
+
 /** Evaluate rules for a wage. The pseudo-base GROSS_AFTER_SI is gross minus deductions computed so far. */
-export function computeLines(wage, rules = DEFAULT_RULES) {
+export function computeLines(wage, rules = DEFAULT_RULES, context = {}) {
   const values = {};
   const out = [];
   let gross = 0;
@@ -32,6 +82,15 @@ export function computeLines(wage, rules = DEFAULT_RULES) {
     else if (r.category === 'net') amount = gross + deductions;
     else if (r.amount_type === 'wage') amount = Number(wage) || 0;
     else if (r.amount_type === 'fixed') amount = Number(r.value) || 0;
+    else if (r.amount_type === 'prorata') {
+      const workingDays = Number(context.worked?.working_days) || 0;
+      amount = workingDays ? (Number(wage) || 0) * (Number(context.worked?.worked_days) || 0) / workingDays : 0;
+    } else if (r.amount_type === 'input') {
+      amount = (context.inputs ?? []).filter((input) => input.code === r.base).reduce((sum, input) => sum + (Number(input.amount) || 0), 0);
+    } else if (r.amount_type === 'overtime') {
+      const workingDays = Number(context.worked?.working_days) || 0;
+      amount = workingDays ? (Number(context.worked?.overtime_hours) || 0) * ((Number(wage) || 0) / (workingDays * 8)) * (Number(r.value) || 0) : 0;
+    } else if (r.amount_type === 'brackets') amount = bracketTax(baseValue, r.brackets);
     else amount = (baseValue * (Number(r.value) || 0)) / 100;
     amount = round(r.category === 'deduction' ? -Math.abs(amount) : amount);
     if (r.category === 'basic' || r.category === 'allowance') gross = round(gross + amount);
@@ -66,7 +125,18 @@ function compute(db, slip) {
   if (!(Number(wage) > 0)) throw new Error(`${emp.name} has no wage set`);
   const structure = read(db, 'hr.payroll.structure', contract?.structure_id ?? slip.structure_id);
   const rules = structure?.rules?.length ? structure.rules : DEFAULT_RULES;
-  return write(db, 'hr.payslip', slip.id, { line_ids: computeLines(wage, rules), structure_id: structure?.id ?? null, rule_accounts: rules.filter((r) => r.category === 'deduction').map((r) => `${r.code}:${r.account || '240000'}`) });
+  const worked = workedDays(db, slip);
+  const workedDaysLines = [
+    { code: 'WORK100', name: 'Regular Work Days', days: worked.worked_days, hours: worked.worked_days * 8 },
+    { code: 'UNPAID', name: 'Unpaid Work Days', days: worked.unpaid_days, hours: worked.unpaid_days * 8 },
+    { code: 'OVERTIME', name: 'Overtime', days: 0, hours: worked.overtime_hours },
+  ];
+  return write(db, 'hr.payslip', slip.id, {
+    line_ids: computeLines(wage, rules, { worked, inputs: slip.input_line_ids ?? [] }),
+    worked_days_ids: workedDaysLines,
+    structure_id: structure?.id ?? null,
+    rule_accounts: rules.filter((r) => r.category === 'deduction').map((r) => `${r.code}:${r.account || '240000'}`),
+  });
 }
 
 /** Confirm: post the salary expense against payables (net to employee, SI and tax to authorities). */
@@ -107,6 +177,14 @@ export function generateSlips(db, batch) {
 const slipsOf = (db, batch) => search(db, 'hr.payslip').filter((p) => p.run_id === batch.id);
 
 export const payrollModels = {
+  'hr.payslip.input.type': {
+    label: 'Other Input Types',
+    fields: {
+      code: { type: 'char', label: 'Code' },
+      name: { type: 'char', label: 'Name' },
+    },
+  },
+
   'hr.payroll.structure': {
     label: 'Salary Structures',
     fields: {
@@ -119,12 +197,13 @@ export const payrollModels = {
           code: { type: 'char', label: 'Code' },
           name: { type: 'char', label: 'Name' },
           category: { type: 'selection', label: 'Category', options: [['basic', 'Basic'], ['allowance', 'Allowance'], ['gross', 'Gross'], ['deduction', 'Deduction'], ['net', 'Net']] },
-          amount_type: { type: 'selection', label: 'Amount Type', options: [['wage', 'Contract Wage'], ['fixed', 'Fixed Amount'], ['percentage', 'Percentage']] },
+          amount_type: { type: 'selection', label: 'Amount Type', options: [['wage', 'Contract Wage'], ['fixed', 'Fixed Amount'], ['percentage', 'Percentage'], ['prorata', 'Prorata'], ['input', 'Other Input'], ['overtime', 'Overtime'], ['brackets', 'Tax Brackets']] },
           base: { type: 'char', label: 'Based on (code)' },
           value: { type: 'float', label: 'Value' },
+          brackets: { type: 'char', label: 'Tax Brackets' },
           account: { type: 'char', label: 'Account' },
         },
-        newLine: () => ({ sequence: 10, code: '', name: '', category: 'allowance', amount_type: 'fixed', base: '', value: 0, account: '' }),
+        newLine: () => ({ sequence: 10, code: '', name: '', category: 'allowance', amount_type: 'fixed', base: '', value: 0, brackets: '', account: '' }),
       },
     },
     defaults: () => ({ rules: DEFAULT_RULES.map((r) => ({ ...r })) }),
@@ -151,12 +230,13 @@ export const payrollModels = {
       employee_id: { type: 'many2one', relation: 'hr.employee', label: 'Employee', required: true },
       structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Salary Structure' },
       wage: { type: 'monetary', label: 'Wage' },
+      work_days: { type: 'char', label: 'Work Days' },
       date_start: { type: 'date', label: 'Contract Start Date' },
       date_end: { type: 'date', label: 'Contract End Date' },
       contract_type: { type: 'selection', label: 'Contract Type', options: [['permanent', 'Permanent'], ['fixed', 'Fixed Term'], ['intern', 'Internship']] },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'New'], ['running', 'Running'], ['close', 'Expired'], ['cancel', 'Cancelled']] },
     },
-    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today() }),
+    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today(), work_days: DEFAULT_WORK_DAYS }),
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'expiring', label: 'Expiring Soon', fn: (r) => r.state === 'running' && r.date_end && r.date_end <= today().slice(0, 7) + '-31' }]],
     groupBys: ['state', 'structure_id', 'contract_type'],
     kanban: { groupBy: 'state', title: 'name', lines: ['employee_id', 'wage', 'date_end'] },
@@ -185,13 +265,26 @@ export const payrollModels = {
         fields: { code: { type: 'char', label: 'Code' }, name: { type: 'char', label: 'Name' }, amount: { type: 'monetary', label: 'Amount' } },
         newLine: () => ({ code: '', name: '', amount: 0 }),
       },
+      input_line_ids: {
+        type: 'one2many',
+        label: 'Other Inputs',
+        fields: { code: { type: 'char', label: 'Code' }, name: { type: 'char', label: 'Name' }, amount: { type: 'monetary', label: 'Amount' } },
+        newLine: () => ({ code: '', name: '', amount: 0 }),
+      },
+      worked_days_ids: {
+        type: 'one2many',
+        label: 'Worked Days',
+        readonly: true,
+        fields: { code: { type: 'char', label: 'Code' }, name: { type: 'char', label: 'Name' }, days: { type: 'float', label: 'Days' }, hours: { type: 'float', label: 'Hours' } },
+        newLine: () => ({ code: '', name: '', days: 0, hours: 0 }),
+      },
       structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Structure' },
       rule_accounts: { type: 'tags', label: 'Rule Accounts', readonly: true },
       basic_wage: { type: 'monetary', label: 'Basic Wage', compute: (r) => amountOf(r, 'BASIC') },
       gross_wage: { type: 'monetary', label: 'Gross Wage', compute: grossOf },
       net_wage: { type: 'monetary', label: 'Net Wage', compute: netOf },
     },
-    defaults: (id) => ({ name: 'SLIP/' + pad(id), state: 'draft', line_ids: [], ...monthBounds() }),
+    defaults: (id) => ({ name: 'SLIP/' + pad(id), state: 'draft', line_ids: [], input_line_ids: [], worked_days_ids: [], ...monthBounds() }),
     filters: [[{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'done', label: 'Done', fn: (r) => r.state === 'done' }]],
     groupBys: ['employee_id', 'run_id', 'state', 'date_from'],
     kanban: { groupBy: 'state', title: 'name', lines: ['employee_id', 'net_wage', 'date_to'] },
