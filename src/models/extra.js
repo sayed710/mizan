@@ -13,6 +13,13 @@ function sendMailing(db, m) {
   return { db: write(db, 'mailing.mailing', m.id, { state: 'sent', sent_date: today(), sent: recipients.length, delivered: recipients.length }) };
 }
 
+/** Turn a document into work elsewhere and link it back (bill to digitize, signature request, task). */
+function documentTo(db, d, model, vals, target, note) {
+  if (d.res_model) throw new Error('This document is already linked to a record');
+  const { db: next, id } = create(db, model, vals);
+  return { db: write(next, 'documents.document', d.id, { res_model: model, res_id: id, folder: d.folder === 'inbox' ? note : d.folder }), go: `#/${target}/${id}` };
+}
+
 /** Signers in signing order; a request without lines is signed by its single signer. */
 const signersOf = (r) => ((r.signer_ids ?? []).length ? r.signer_ids : [{ partner_id: r.partner_id, role: 'signer', signed: false }]);
 export const nextSigner = (r) => signersOf(r).findIndex((s) => !s.signed);
@@ -258,12 +265,39 @@ export const extraModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
       tag_ids: { type: 'tags', label: 'Tags' },
       create_date: { type: 'date', label: 'Created on', readonly: true },
+      is_request: { type: 'boolean', label: 'Requested Document', readonly: true },
+      request_deadline: { type: 'date', label: 'Request Due Date' },
+      description: { type: 'text', label: 'Description' },
+      locked: { type: 'boolean', label: 'Locked', readonly: true },
+      res_model: { type: 'char', label: 'Linked Model', readonly: true },
+      res_id: { type: 'integer', label: 'Linked Record', readonly: true },
     },
     defaults: () => ({ folder: 'inbox', owner_id: 1, tag_ids: [], create_date: today() }),
+    // Uploading the file fulfils a request.
+    onchange: (r, key) => (key === 'file' && r.file && r.is_request ? { is_request: false } : {}),
+    filters: [[
+      { id: 'requests', label: 'Requested', fn: (r) => r.is_request && !r.file },
+      { id: 'overdue', label: 'Overdue Requests', fn: (r) => r.is_request && !r.file && r.request_deadline && r.request_deadline < today() },
+      { id: 'unlinked', label: 'Not Linked', fn: (r) => !r.res_model },
+    ]],
     groupBys: ['folder', 'owner_id', 'partner_id', 'create_date'],
     kanban: { groupBy: 'folder', title: 'name', lines: ['owner_id', 'create_date'], tags: 'tag_ids' },
     list: ['name', 'folder', 'owner_id', 'partner_id', 'create_date'],
-    form: { title: 'name', groups: [['folder', 'file', 'tag_ids'], ['owner_id', 'partner_id', 'create_date']], chatter: true },
+    form: {
+      lockedWhen: (r) => r.locked,
+      buttons: [
+        { label: 'Create Vendor Bill', when: (r) => r.file && !r.res_model, run: (db, r) => documentTo(db, r, 'account.move', { move_type: 'in_invoice', partner_id: r.partner_id ?? null, ref: r.name, invoice_line_ids: [] }, 'accounting/bills', 'finance') },
+        { label: 'Request Signature', when: (r) => r.file && !r.res_model && r.partner_id, run: (db, r) => documentTo(db, r, 'sign.request', { name: r.name, partner_id: r.partner_id, body: r.description ?? '' }, 'sign/documents', 'legal') },
+        { label: 'Create Task', when: (r) => !r.res_model, run: (db, r) => documentTo(db, r, 'project.task', { name: r.name, description: r.description ?? '' }, 'project/tasks', r.folder) },
+        { label: 'Lock', when: (r) => !r.locked, vals: { locked: true } },
+        { label: 'Unlock', when: (r) => r.locked, vals: { locked: false } },
+      ],
+      ribbon: (r) => (r.is_request && !r.file ? 'Requested' : r.locked ? 'Locked' : null),
+      title: 'name',
+      groups: [['folder', 'file', 'tag_ids', 'request_deadline'], ['owner_id', 'partner_id', 'create_date', 'res_model', 'res_id']],
+      tabs: [{ label: 'Description', fields: ['description'] }],
+      chatter: true,
+    },
   },
 
   'planning.slot': {

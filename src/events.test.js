@@ -51,3 +51,16 @@ test('documents are signed by every signer in order, then complete', async () =>
   const late = create(seed(), 'sign.request', { name: 'Old', partner_id: 1, state: 'sent', deadline: '2020-01-01' });
   assert.throws(() => applySignature(late.db, read(late.db, 'sign.request', late.id), 'X'), /expired/);
 });
+
+test('a document becomes a vendor bill once, and a request is fulfilled by uploading the file', async () => {
+  const { models } = await import('./models/index.js');
+  const { db, id } = create(seed(), 'documents.document', { name: 'Invoice scan', file: 'data:application/pdf;base64,AAAA', partner_id: 2 });
+  const btn = (label) => models['documents.document'].form.buttons.find((b) => b.label === label);
+  const out = btn('Create Vendor Bill').run(db, read(db, 'documents.document', id));
+  const doc = read(out.db, 'documents.document', id);
+  assert.equal(doc.res_model, 'account.move');
+  assert.equal(read(out.db, 'account.move', doc.res_id).move_type, 'in_invoice');
+  assert.throws(() => btn('Create Task').run(out.db, doc), /already linked/);
+  const req = create(seed(), 'documents.document', { name: 'Passport copy', is_request: true });
+  assert.equal(read(write(req.db, 'documents.document', req.id, { file: 'data:image/png;base64,AA' }), 'documents.document', req.id).is_request, false);
+});

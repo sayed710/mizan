@@ -262,7 +262,7 @@ const allApps = [
     ],
   },
   { id: 'sign', name: 'Sign', color: ['#0ea5e9', '#0f172a'], menus: [{ key: 'documents', label: 'Documents to Sign', model: 'sign.request' }] },
-  { id: 'documents', name: 'Documents', color: ['#f59e0b', '#be123c'], menus: [{ key: 'all', label: 'Documents', model: 'documents.document' }] },
+  { id: 'documents', name: 'Documents', color: ['#f59e0b', '#be123c'], menus: [{ key: 'all', label: 'Documents', model: 'documents.document' }, { key: 'requests', label: 'Request Document', model: 'documents.document', domain: (r) => r.is_request, defaults: { is_request: true } }] },
   {
     id: 'planning', name: 'Planning', color: ['#facc15', '#0d9488'],
     menus: [
