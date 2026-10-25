@@ -1,5 +1,5 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
-import { read, search } from '../orm.js';
+import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
 
@@ -81,6 +81,28 @@ export function followUps(db, at = today()) {
   return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
+/**
+ * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
+ * invoice is logged on the contact once (the contact remembers the last level sent).
+ */
+export function runFollowUps(db, at = today()) {
+  const levels = search(db, 'account.followup.level').sort((a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0));
+  if (!levels.length) return db;
+  const overdue = followUps(db, at);
+  // Customers who caught up start again from the first level next time.
+  const settled = search(db, 'res.partner').filter((p) => p.followup_level_delay != null && !overdue.some((f) => f.partner_id === p.id))
+    .reduce((acc, p) => write(acc, 'res.partner', p.id, { followup_level_delay: null }), db);
+  return overdue.reduce((acc, f) => {
+    const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
+    const level = [...levels].reverse().find((l) => late >= (Number(l.delay) || 0));
+    const partner = read(acc, 'res.partner', f.partner_id);
+    if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) return acc;
+    const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
+    const noted = postNote(acc, 'res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim());
+    return write(noted, 'res.partner', partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
+  }, settled);
+}
+
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
@@ -96,6 +118,19 @@ export function analyticActuals(db, period = {}) {
 }
 
 export const financeModels = {
+  'account.followup.level': {
+    label: 'Follow-up Levels',
+    fields: {
+      name: { type: 'char', label: 'Level', required: true },
+      delay: { type: 'integer', label: 'Days Overdue' },
+      message: { type: 'text', label: 'Message' },
+    },
+    defaults: () => ({ delay: 15 }),
+    kanban: { title: 'name', lines: ['delay'] },
+    list: ['delay', 'name'],
+    form: { title: 'name', groups: [['delay'], []], tabs: [{ label: 'Message', fields: ['message'] }] },
+  },
+
   'account.analytic.account': {
     label: 'Analytic Accounts',
     fields: {

@@ -116,6 +116,7 @@ const allApps = [
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
         { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
+        { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
       ] },
     ],
   },

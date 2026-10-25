@@ -516,6 +516,7 @@ const ar = {
   Requested: 'مطلوب', 'Overdue Requests': 'طلبات متأخرة', 'Not Linked': 'غير مرتبط', 'Create Vendor Bill': 'إنشاء فاتورة مورد', 'Request Signature': 'طلب توقيع',
   'Create Task': 'إنشاء مهمة', Lock: 'قفل', Unlock: 'فتح القفل', 'Request Document': 'طلب مستند',
   'Max. Quantity': 'الحد الأقصى للكمية', Replenishment: 'إعادة التزويد',
+  'Follow-up Levels': 'مستويات المتابعة', Level: 'المستوى', 'Days Overdue': 'أيام التأخير', 'Last Reminder Level (days)': 'آخر مستوى تذكير (أيام)', 'Last Reminder': 'آخر تذكير',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

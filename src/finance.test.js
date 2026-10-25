@@ -73,3 +73,15 @@ test('the audit trail logs every change, keeps numbered entries and cannot be sw
   const msg = noted.messages.find((m) => m.model === 'account.move' && m.res_id === id);
   assert.ok(applyDiff(noted, { upserts: {}, deletes: {}, removedMessages: [msg.id] }).messages.some((m) => m.id === msg.id));
 });
+
+test('automatic reminders log each reached level once per customer', async () => {
+  const { runFollowUps } = await import('./models/finance.js');
+  const { messagesOf } = await import('./orm.js');
+  const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
+  const first = runFollowUps(db);
+  assert.equal(read(first, 'res.partner', 5).followup_level_delay, 15);
+  assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
+  assert.equal(runFollowUps(first).messages.length, first.messages.length);
+  const later = runFollowUps(first, addDays(today(), 12));
+  assert.equal(read(later, 'res.partner', 5).followup_level_delay, 30);
+});
