@@ -2,6 +2,7 @@
 import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
+import { lineTaxOf, lineUntaxed } from './taxes.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
@@ -57,6 +58,22 @@ export function taxReport(db, period) {
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
+
+/** Base and tax per tax over posted invoices/bills dated in the period, split into sales and purchases (refunds negative). */
+export function taxesByTax(db, { from, to } = {}) {
+  const rows = new Map();
+  for (const m of search(db, 'account.move').filter((x) => x.state === 'posted' && x.move_type !== 'entry' && (!from || x.invoice_date >= from) && (!to || x.invoice_date <= to))) {
+    const side = ['in_invoice', 'in_refund'].includes(m.move_type) ? 'purchase' : 'sale';
+    const sign = ['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1;
+    for (const l of m.invoice_line_ids ?? []) {
+      const name = l.tax_name || `${Number(l.tax) || 0}%`;
+      const key = `${side}|${name}`;
+      const row = rows.get(key) ?? { side, name, base: 0, tax: 0 };
+      rows.set(key, { ...row, base: round(row.base + sign * lineUntaxed(l)), tax: round(row.tax + sign * lineTaxOf(l)) });
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
+}
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today()) {

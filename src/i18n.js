@@ -532,6 +532,7 @@ const ar = {
   Refunds: 'المرتجعات', 'Vendor Refund': 'مرتجع مورد', 'Payment Type': 'نوع الدفع', 'Partner Type': 'نوع الشريك', Receive: 'استلام',
   'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   'Depreciation Schedule': 'جدول الإهلاك الدوري',
+  Base: 'الأساس',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

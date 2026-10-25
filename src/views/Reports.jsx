@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, taxReport } from '../models/finance.js';
+import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -120,11 +120,23 @@ const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
 
 function Tax({ db, period }) {
   const r = taxReport(db, period);
+  const byTax = taxesByTax(db, period);
+  const side = (key, title) => (
+    <>
+      <tr className="rep-section"><td>{t(title)}</td><td /><td /></tr>
+      {byTax.filter((x) => x.side === key).map((x) => (
+        <tr key={x.name} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>
+      ))}
+    </>
+  );
+  const line = (label, value, strong) => <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td><td /><td className="num">{money(value)}</td></tr>;
   return (
     <tbody>
-      <Total label="Output Tax" value={r.output} />
-      <Total label="Input Tax" value={r.input} />
-      <Total label="Tax Payable" value={r.payable} strong />
+      {side('sale', 'Sales')}
+      {side('purchase', 'Purchases')}
+      {line('Output Tax', r.output)}
+      {line('Input Tax', r.input)}
+      {line('Tax Payable', r.payable, true)}
     </tbody>
   );
 }
@@ -270,7 +282,7 @@ const REPORTS = {
   depreciation: { title: 'Depreciation Schedule', Body: Depreciation, cols: ['Acquisition Date', 'Original Value', 'Depreciation', 'Cumulative Depreciation', 'Book Value'] },
   valuation: { title: 'Stock Valuation', Body: Valuation, cols: ['On Hand', 'Unit Cost', 'Total Value'] },
   audit: { title: 'Audit Trail', Body: AuditTrail, cols: ['Author', 'Date'] },
-  tax: { title: 'Tax Return', Body: Tax, cols: ['Amount'] },
+  tax: { title: 'Tax Return', Body: Tax, cols: ['Base', 'Tax'] },
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },

@@ -6,6 +6,7 @@ import { amounts } from './models/common.js';
 import { accountId, isBalanced, journalItems } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { mapTax, productTax, taxSnapshot } from './models/taxes.js';
+import { taxesByTax } from './models/finance.js';
 import { seed } from './seed.js';
 
 const taxNamed = (db, name, use = 'sale') => search(db, 'account.tax').find((t) => t.name === name && t.type_tax_use === use);
@@ -72,4 +73,13 @@ test('the line onchange applies the fiscal position to the product tax and a pic
   assert.equal(lineDef.onchange({ product_id: 1, tax_id: stamp.id }, 'tax_id', db, {}).tax_type, 'fixed');
   const fp = write(db, 'res.partner', 1, { property_account_position_id: exportFp.id });
   assert.equal(models['account.move'].onchange({ partner_id: 1 }, 'partner_id', fp).fiscal_position_id, exportFp.id);
+});
+
+test('the tax return lists base and tax per tax, refunds negative', () => {
+  const base = seed();
+  const { db } = invoice(base, [line(base, 'VAT 14%', { price_unit: 200 }), line(base, 'Stamp Duty', { qty: 2, price_unit: 10 })], { invoice_date: '2031-01-10' });
+  const refund = create(db, 'account.move', { move_type: 'out_refund', partner_id: 1, invoice_date: '2031-01-12', invoice_line_ids: [line(db, 'VAT 14%', { price_unit: 50 })] });
+  const rows = taxesByTax(postMove(refund.db, refund.id), { from: '2031-01-01', to: '2031-01-31' });
+  assert.deepEqual(rows.find((r) => r.name === 'VAT 14%'), { side: 'sale', name: 'VAT 14%', base: 150, tax: 21 });
+  assert.deepEqual(rows.find((r) => r.name === 'Stamp Duty'), { side: 'sale', name: 'Stamp Duty', base: 20, tax: 10 });
 });
