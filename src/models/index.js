@@ -337,7 +337,9 @@ const allApps = [
     menus: [
       { key: 'orders', label: 'Rental Orders', model: 'sale.rental' },
       { key: 'schedule', label: 'Schedule', model: 'sale.rental', view: 'gantt' },
+      { key: 'deposits', label: 'Security Deposits', model: 'rental.deposit' },
       { key: 'report', label: 'Reporting', model: 'sale.rental', view: 'pivot' },
+      { label: 'Configuration', children: [{ key: 'pricing', label: 'Rental Pricing', model: 'rental.pricing' }] },
     ],
   },
   {
