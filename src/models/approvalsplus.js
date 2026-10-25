@@ -33,6 +33,10 @@ export function submitRequest(db, request) {
   if (c.has_date === 'required' && !r.date) throw new Error('Date is required');
   if (c.has_partner === 'required' && !read(db, 'res.partner', r.partner_id)) throw new Error('Partner is required');
   if (c.has_product === 'required' && (!(r.product_lines?.length) || r.product_lines.some((l) => !read(db, 'product', l.product_id) || !(Number(l.qty) > 0)))) throw new Error('Products with positive quantities are required');
+  // The follow-up records need these whatever the category's field settings say.
+  if (c.approval_type === 'purchase' && !read(db, 'res.partner', r.partner_id)) throw new Error('A vendor is required for a purchase request');
+  if (c.approval_type === 'purchase' && !(r.product_lines?.length)) throw new Error('Add the products to purchase');
+  if (c.approval_type === 'leave' && !r.date) throw new Error('A start date is required for time off');
   if (r.date_end && (!r.date || r.date_end < r.date)) throw new Error('End date must be on or after the start date');
   let lines = (c.approver_ids ?? []).map((a) => ({ employee_id: a.employee_id, required: !!a.required, sequence: Number(a.sequence) || 0, status: 'new' }));
   if (c.manager_approval === 'approver' || c.manager_approval === 'required') {
@@ -66,7 +70,7 @@ function followUp(db, r, c) {
   }
   if (c.approval_type === 'leave' && !r.leave_id) {
     if (!r.date) throw new Error('A start date is required for time off');
-    const out = create(db, 'hr.leave', { name: r.name, employee_id: r.request_owner_id, date_from: r.date, date_to: r.date_end || r.date, leave_type: 'paid', state: 'draft' });
+    const out = create(db, 'hr.leave', { name: r.name, employee_id: r.request_owner_id, date_from: r.date, date_to: r.date_end || r.date, leave_type: 'paid', state: 'confirm' });
     return update(out.db, r, { leave_id: out.id });
   }
   return db;

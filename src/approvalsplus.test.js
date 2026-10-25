@@ -177,7 +177,7 @@ test('leave approval creates a linked draft time off for the owner with matching
   const { db, id } = fixture({ approval_type: 'leave', approver_ids: [{ employee_id: 1 }] }, { date: '2026-08-01', date_end: '2026-08-03' });
   const done = act(approve, act(submitRequest, db, id), id, 1);
   const leave = read(done, 'hr.leave', request(done, id).leave_id);
-  assert.equal(leave.state, 'draft');
+  assert.equal(leave.state, 'confirm');
   assert.equal(leave.employee_id, 5);
   assert.equal(leave.name, 'New equipment');
   assert.equal(leave.date_from, '2026-08-01');

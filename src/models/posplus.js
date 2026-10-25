@@ -109,7 +109,7 @@ export function applyLoyaltyToOrder(db, orderId, code) {
     lines = applied.lines;
     const program = applied.card ? read(db, 'loyalty.program', applied.card.program_id) : search(db, 'loyalty.program').find((p) => p.code === String(code).trim());
     const gift = program.program_type === 'gift_card';
-    const spent = !applied.card ? 0 : gift ? round(amounts(order.lines).total - amounts(lines).total) : (program.reward_ids ?? []).filter((r) => Number(r.required_points || 0) <= applied.card.points).reduce((s, r) => s + Number(r.required_points || 0), 0);
+    const spent = !applied.card ? 0 : gift ? round(amounts(order.lines).total - amounts(lines).total) : applied.pointsSpent;
     uses = [{ programId: program.id, cardCode: applied.card?.code, gift, spent }];
   } else {
     const programs = applicablePrograms(db, order, { channel: 'pos' }).filter((p) => p.trigger !== 'with_code' && ['promotion', 'buy_x_get_y'].includes(p.program_type));

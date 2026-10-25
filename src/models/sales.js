@@ -4,7 +4,7 @@ import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
 import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
-import { applicablePrograms, applyCode, computeRewardLines } from './loyalty.js';
+import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
@@ -308,16 +308,22 @@ export const salesModels = {
           // Promotion, discount code, coupon or gift card code typed by the salesperson.
           label: 'Apply Coupon', when: (r) => ['draft', 'sent'].includes(r.state),
           run: (db, r) => {
-            const code = prompt('Promotion, coupon or gift card code');
-            if (!code?.trim()) return { db };
-            return { db: write(db, 'sale.order', r.id, { order_line: applyCode(db, r, code, { channel: 'sale' }).lines }) };
+            const code = prompt('Promotion, coupon or gift card code')?.trim();
+            if (!code) return { db };
+            const uses = r.loyalty_uses ?? [];
+            if (uses.some((u) => u.code === code)) throw new Error('This code is already applied to this order');
+            const applied = applyCode(db, r, code, { channel: 'sale' });
+            const gift = read(db, 'loyalty.program', applied.programId)?.program_type === 'gift_card';
+            // Recorded now, consumed when the order is confirmed.
+            const use = { code, programId: applied.programId, cardCode: applied.card?.code, gift, spent: applied.pointsSpent };
+            return { db: write(db, 'sale.order', r.id, { order_line: applied.lines, loyalty_uses: [...uses, use] }) };
           },
         },
         {
           // Automatic promotions the order qualifies for (Odoo's "Promotions" button).
           label: 'Promotions', when: (r) => ['draft', 'sent'].includes(r.state),
           run: (db, r) => {
-            const programs = applicablePrograms(db, r, { lines: r.order_line ?? [], partnerId: r.partner_id, channel: 'sale' }).filter((p) => p.trigger !== 'with_code');
+            const programs = applicablePrograms(db, r, { lines: r.order_line ?? [], partnerId: r.partner_id, channel: 'sale' }).filter((p) => p.trigger !== 'with_code' && ['promotion', 'buy_x_get_y'].includes(p.program_type));
             if (!programs.length) throw new Error('No promotion applies to this order');
             const added = programs.flatMap((p) => (p.reward_ids ?? []).flatMap((rw) => computeRewardLines(db, p, rw, r.order_line ?? [])));
             return { db: write(db, 'sale.order', r.id, { order_line: [...(r.order_line ?? []), ...added] }) };
@@ -339,7 +345,7 @@ export const salesModels = {
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
             checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
-            const { db: procured, stockLines } = procure(write(db, 'sale.order', r.id, { state: 'sale' }), r);
+            const { db: procured, stockLines } = procure(write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale' }), r);
             return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_shipping_id ?? r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null, scheduled_date: r.commitment_date }) };
           },
         },

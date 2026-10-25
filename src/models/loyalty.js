@@ -10,7 +10,8 @@ const cardsOf = (db) => db.records['loyalty.card'] ?? [];
 const programsOf = (db) => db.records['loyalty.program'] ?? [];
 
 function matchingLines(lines, rule) {
-  return rule?.product_id == null ? lines : lines.filter((line) => line.product_id === rule.product_id);
+  // Reward lines (no product) never count toward a rule.
+  return rule?.product_id == null ? lines.filter((line) => line.product_id != null) : lines.filter((line) => line.product_id === rule.product_id);
 }
 
 function ruleMetrics(lines, rule) {
@@ -101,18 +102,19 @@ export function computeRewardLines(db, program, reward, lines = []) {
     const total = Math.max(0, amounts(lines).total);
     const mode = reward.discount_mode ?? 'percent';
     let basis = total;
-    if (mode === 'percent' && reward.discount_applicability === 'cheapest') {
-      const candidates = lines
-        .filter((line) => line.product_id != null)
-        .map((line) => ({ line, amount: Math.max(0, amounts([line]).total) }))
-        .filter(({ amount }) => amount > 0)
-        .sort((a, b) => a.amount - b.amount);
-      basis = candidates[0]?.amount ?? 0;
-    } else if (mode === 'percent' && reward.discount_applicability === 'specific') {
+    if (reward.discount_applicability === 'cheapest') {
+      // One unit of the product with the lowest unit price.
+      const units = lines
+        .filter((line) => line.product_id != null && numeric(line.qty) > 0)
+        .map((line) => Math.max(0, amounts([{ ...line, qty: 1 }]).total))
+        .filter((amount) => amount > 0)
+        .sort((a, b) => a - b);
+      basis = units[0] ?? 0;
+    } else if (reward.discount_applicability === 'specific') {
       basis = Math.max(0, amounts(lines.filter((line) => line.product_id === reward.discount_product_id)).total);
     }
     const rawDiscount = mode === 'percent' ? basis * numeric(reward.discount) / 100 : numeric(reward.discount);
-    const discount = round(Math.min(total, Math.max(0, rawDiscount)));
+    const discount = round(Math.min(total, basis, Math.max(0, rawDiscount)));
     if (!discount) return [];
     return [{
       product_id: null,
@@ -171,7 +173,7 @@ export function applyCode(db, order, code, { channel = 'sale', date = today() } 
       throw new Error('This promotion code is not valid for this order');
     }
     const added = (program.reward_ids ?? []).flatMap((reward) => computeRewardLines(db, program, reward, orderLines));
-    return { lines: [...orderLines, ...added] };
+    return { lines: [...orderLines, ...added], programId: program.id, pointsSpent: 0 };
   }
 
   const card = cardsOf(db).find((item) => item.code === value);
@@ -190,20 +192,22 @@ export function applyCode(db, order, code, { channel = 'sale', date = today() } 
   if (linkedProgram.program_type === 'gift_card') {
     const amount = round(Math.min(Math.max(0, amounts(orderLines).total), Math.max(0, numeric(card.points))));
     const giftLine = amount ? [{ product_id: null, name: 'Discount: Gift Card', qty: 1, price_unit: -amount, discount: 0, tax: 0 }] : [];
-    return { lines: [...orderLines, ...giftLine], card };
+    return { lines: [...orderLines, ...giftLine], card, programId: linkedProgram.id, pointsSpent: amount };
   }
 
   if (!programRulesMatch(linkedProgram, orderLines)) throw new Error('This code does not meet the order requirements');
-  const rewards = (linkedProgram.reward_ids ?? []).filter((reward) => numeric(reward.required_points) <= numeric(card.points));
-  if (!rewards.length && (linkedProgram.reward_ids ?? []).some((reward) => numeric(reward.required_points) > 0)) {
+  const affordable = (linkedProgram.reward_ids ?? []).filter((reward) => numeric(reward.required_points) <= numeric(card.points));
+  if (!affordable.length && (linkedProgram.reward_ids ?? []).some((reward) => numeric(reward.required_points) > 0)) {
     throw new Error('Insufficient loyalty points for this reward');
   }
-  const added = rewards.flatMap((reward) => computeRewardLines(db, linkedProgram, reward, orderLines));
-  return { lines: [...orderLines, ...added], card };
+  // ponytail: one reward per code, the richest the card can afford; a reward picker would let the cashier choose.
+  const reward = affordable.toSorted((a, b) => numeric(b.required_points) - numeric(a.required_points))[0];
+  const added = computeRewardLines(db, linkedProgram, reward, orderLines);
+  return { lines: [...orderLines, ...added], card, programId: linkedProgram.id, pointsSpent: numeric(reward?.required_points) };
 }
 
 /** Calculate points earned from the program's matching rules. */
-export function earnPoints(db, program, lines = [], total = 0) {
+export function earnPoints(db, program, lines = [], total = amounts(lines).total) {
   const rules = program?.rule_ids ?? [];
   return round(rules.reduce((sum, rule) => {
     if (!ruleSatisfied(lines, rule)) return sum;
@@ -252,11 +256,22 @@ export function confirmProgramUsage(db, programId, { cardCode, pointsSpent = 0, 
         state: 'active',
       });
     }
+  } else if (card && program.program_type === 'gift_card') {
+    if (numeric(card.points) < spent) throw new Error('Insufficient gift card balance');
+    const remaining = round(numeric(card.points) - spent);
+    next = write(next, 'loyalty.card', card.id, { points: remaining, state: remaining === 0 ? 'used' : 'active' });
   } else if (card) {
     next = write(next, 'loyalty.card', card.id, { state: 'used' });
   }
 
   return write(next, 'loyalty.program', programId, { usage_count: numeric(program.usage_count) + 1 });
+}
+
+/** Consume the codes applied to an order when it is confirmed (coupons used, points and gift balances spent). */
+export function consumeOrderCodes(db, order) {
+  return (order.loyalty_uses ?? []).reduce((next, use) => (use.gift
+    ? giftCardPay(next, use.cardCode, use.spent).db
+    : confirmProgramUsage(next, use.programId, { cardCode: use.cardCode, pointsSpent: use.spent, partnerId: order.partner_id })), db);
 }
 
 /** Spend gift-card balance as currency, returning the amount actually applied. */
