@@ -89,7 +89,8 @@ export function ActionView({ leaf, base, params }) {
   };
   const importCsv = async (file) => {
     try {
-      const res = importRows(getDb(), model, defaults, fromCsv(await file.text()));
+      const text = await file.text();
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text) : importRows(getDb(), model, defaults, fromCsv(text));
       commit(res.db);
       alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
@@ -99,7 +100,7 @@ export function ActionView({ leaf, base, params }) {
   const extra = view === 'list' && (
     <>
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
-      <label className="btn sm">⬆ {t('Import')}<input type="file" accept=".csv,text/csv" hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
+      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       <span className="pager">{records.length ? `1-${records.length}` : '0'} / {records.length}</span>
     </>

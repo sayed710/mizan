@@ -4,6 +4,7 @@ import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { payMove } from './accounting.js';
 import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
+import { importStatement } from './statements.js';
 
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
@@ -47,6 +48,8 @@ function bookToAccount(db, line) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
+    // Statement files from the bank (beside the generic CSV import).
+    importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
     fields: {
       date: { type: 'date', label: 'Date', required: true },
       payment_ref: { type: 'char', label: 'Label', required: true },
@@ -54,6 +57,7 @@ export const bankModels = {
       amount: { type: 'monetary', label: 'Amount', required: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
+      unique_import_id: { type: 'char', label: 'Import ID', readonly: true },
       counterpart: {
         type: 'selection',
         label: 'Book to Account',
