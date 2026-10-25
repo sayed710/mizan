@@ -31,3 +31,13 @@ test('a lead converts to an opportunity with a new customer, then quotes and lin
   const quote = models['crm.lead'].form.buttons.find((b) => b.label === 'New Quotation').run(converted, lead);
   assert.ok(search(quote.db, 'sale.order').some((o) => o.opportunity_id === id && o.partner_id === lead.partner_id));
 });
+
+test('a task blocked by an open task cannot be closed until the blocker is done', async () => {
+  const { create, write } = await import('./orm.js');
+  const db0 = seed();
+  const { db: a, id: blocker } = create(db0, 'project.task', { name: 'Pour foundation' });
+  const { db, id } = create(a, 'project.task', { name: 'Build walls', depend_on: [{ task_id: blocker }] });
+  assert.throws(() => write(db, 'project.task', id, { stage_id: 'done' }), /Blocked by: Pour foundation/);
+  const unblocked = write(db, 'project.task', blocker, { stage_id: 'done' });
+  assert.equal(write(unblocked, 'project.task', id, { stage_id: 'done' }).records['project.task'].find((t) => t.id === id).stage_id, 'done');
+});

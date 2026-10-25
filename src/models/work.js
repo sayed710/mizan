@@ -144,13 +144,29 @@ export const workModels = {
       priority: { type: 'priority', label: 'Priority' },
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Description' },
+      state: { type: 'selection', label: 'Status', tracking: true, options: [['in_progress', 'In Progress'], ['changes_requested', 'Changes Requested'], ['approved', 'Approved'], ['waiting', 'Waiting'], ['canceled', 'Cancelled'], ['done', 'Done']] },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
+      parent_id: { type: 'many2one', relation: 'project.task', label: 'Parent Task' },
+      depend_on: {
+        type: 'one2many', label: 'Blocked By',
+        fields: { task_id: { type: 'many2one', relation: 'project.task', label: 'Task' } },
+        newLine: () => ({ task_id: null }),
+      },
     },
-    defaults: () => ({ stage_id: 'todo', priority: 0, tag_ids: [], planned_hours: 0 }),
+    defaults: () => ({ stage_id: 'todo', state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [] }),
+    // Customer follows the project; a task blocked by open tasks waits and cannot be closed.
+    onchange: (r, key, db) => (key === 'project_id' && r.project_id && !r.partner_id ? { partner_id: (db.records['project.project'] ?? []).find((p) => p.id === r.project_id)?.partner_id ?? null } : {}),
+    guard: (db, before, after) => {
+      const closing = (after.stage_id === 'done' || after.state === 'done') && (!before || before.stage_id !== after.stage_id || before.state !== after.state);
+      if (!closing) return null;
+      const open = (after.depend_on ?? []).map((d) => (db.records['project.task'] ?? []).find((t) => t.id === d.task_id)).filter((t) => t && t.stage_id !== 'done' && t.state !== 'done' && t.state !== 'canceled');
+      return open.length ? `Blocked by: ${open.map((t) => t.name).join(', ')}` : null;
+    },
     filters: [
       [{ id: 'open', label: 'Open Tasks', fn: (r) => r.stage_id !== 'done' }, { id: 'done', label: 'Done', fn: (r) => r.stage_id === 'done' }],
       [{ id: 'late', label: 'Late', fn: (r) => r.stage_id !== 'done' && r.date_deadline && r.date_deadline < today() }],
     ],
-    groupBys: ['stage_id', 'project_id', 'user_id', 'date_deadline'],
+    groupBys: ['stage_id', 'state', 'project_id', 'user_id', 'partner_id', 'date_deadline'],
     kanban: { groupBy: 'stage_id', title: 'name', lines: ['project_id', 'date_deadline'], tags: 'tag_ids', priority: 'priority', badge: 'user_id', quickCreate: true },
     list: ['name', 'project_id', 'user_id', 'date_deadline', 'planned_hours', 'stage_id'],
     graph: { groupBy: 'project_id', measure: '__count' },
@@ -162,9 +178,12 @@ export const workModels = {
       statusbar: 'stage_id',
       statusbarClickable: true,
       title: 'name',
-      smart: [{ label: 'Hours Spent', model: 'account.analytic.line', field: 'task_id', target: 'timesheets/timesheets', sum: 'unit_amount', format: 'number' }],
-      groups: [['project_id', 'user_id', 'tag_ids'], ['date_start', 'date_deadline', 'planned_hours', 'priority']],
-      tabs: [{ label: 'Description', fields: ['description'] }],
+      smart: [
+        { label: 'Hours Spent', model: 'account.analytic.line', field: 'task_id', target: 'timesheets/timesheets', sum: 'unit_amount', format: 'number' },
+        { label: 'Sub-tasks', model: 'project.task', field: 'parent_id', target: 'project/tasks' },
+      ],
+      groups: [['project_id', 'user_id', 'tag_ids', 'partner_id', 'parent_id'], ['state', 'date_start', 'date_deadline', 'planned_hours', 'priority']],
+      tabs: [{ label: 'Description', fields: ['description'] }, { label: 'Blocked By', fields: ['depend_on'] }],
       chatter: true,
     },
   },
