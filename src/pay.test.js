@@ -65,3 +65,12 @@ test('a manual customer payment settles open invoices oldest due first and keeps
   assert.equal(read(postPayment(extra.db, read(extra.db, 'account.payment', extra.id)), 'account.payment', extra.id).unapplied, 30);
   assert.throws(() => postPayment(done, payment), /draft/);
 });
+
+test('a payment through the cash journal books on the cash account', () => {
+  const { db, id } = post(seed(), { move_type: 'out_invoice', partner_id: 1 });
+  const cash = search(db, 'account.journal').find((j) => j.code === 'CSH1');
+  const paid = payMove(db, id, 100, '2026-04-03', { journalId: cash.id });
+  const entry = read(paid, 'account.move', read(paid, 'account.move', id).payments[0].move_id);
+  assert.equal(entry.line_ids.find((l) => l.debit).account_id, accountId(paid, '101501'));
+  assert.match(search(paid, 'account.payment').at(-1).name, /^PCSH1\//);
+});

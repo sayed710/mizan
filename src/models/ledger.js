@@ -90,6 +90,13 @@ export function postEntry(db, { journal, date = today(), ref = '', lines }) {
   });
 }
 
+/** Bank or cash journal code and its default account code (BNK1 / 101401 when unset or not a payment journal). */
+export function paymentJournal(db, journalId) {
+  const j = read(db, 'account.journal', journalId);
+  const account = j && ['bank', 'cash'].includes(j.type) ? read(db, 'account.account', j.default_account_id)?.code : null;
+  return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
+}
+
 /** Posted journal items with their move date, optionally limited to [from, to]. */
 export function journalItems(db, { from, to } = {}) {
   return search(db, 'account.move')

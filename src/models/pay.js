@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry } from './ledger.js';
 import { payMove } from './accounting.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -17,8 +17,9 @@ export function postPayment(db, p) {
   if (!p.partner_id) throw new Error('Set the partner');
   if (!(Number(p.amount) > 0)) throw new Error('The amount must be positive');
   const date = p.date ?? today();
-  if (p.invoice_id) return payMove(db, p.invoice_id, Number(p.amount), date, { paymentId: p.id });
-  const name = p.name && p.name !== '/' ? p.name : nextName(db, 'account.payment', `PBNK1/${date.slice(0, 4)}/`);
+  if (p.invoice_id) return payMove(db, p.invoice_id, Number(p.amount), date, { paymentId: p.id, journalId: p.journal_id });
+  const via = paymentJournal(db, p.journal_id);
+  const name = p.name && p.name !== '/' ? p.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const open = search(db, 'account.move')
     .filter((m) => m.state === 'posted' && m.partner_id === p.partner_id && m.amount_residual > 0 && SETTLES[p.partner_type]?.[p.payment_type]?.includes(m.move_type))
     .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
@@ -26,10 +27,10 @@ export function postPayment(db, p) {
   const counterpart = p.partner_type === 'supplier' ? '211000' : '121000';
   const amount = round(Number(p.amount));
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: 'BNK1', date, ref: p.memo || name,
+    journal: via.code, date, ref: p.memo || name,
     lines: inbound
-      ? [{ account: '101401', debit: amount, partner_id: p.partner_id }, { account: counterpart, credit: amount, partner_id: p.partner_id }]
-      : [{ account: counterpart, debit: amount, partner_id: p.partner_id }, { account: '101401', credit: amount, partner_id: p.partner_id }],
+      ? [{ account: via.account, debit: amount, partner_id: p.partner_id }, { account: counterpart, credit: amount, partner_id: p.partner_id }]
+      : [{ account: counterpart, debit: amount, partner_id: p.partner_id }, { account: via.account, credit: amount, partner_id: p.partner_id }],
   });
   // ponytail: applied in company currency at face value; foreign-currency invoices should be paid from the invoice.
   const { db: applied, left } = open.reduce((acc, m) => {
@@ -52,6 +53,7 @@ export const payModels = {
       partner_type: { type: 'selection', label: 'Partner Type', options: [['customer', 'Customer'], ['supplier', 'Vendor']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       amount: { type: 'monetary', label: 'Amount' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       date: { type: 'date', label: 'Date' },
       memo: { type: 'char', label: 'Memo' },
       invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
@@ -74,7 +76,7 @@ export const payModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['payment_type', 'partner_type', 'partner_id', 'amount'], ['date', 'memo', 'invoice_id', 'move_id', 'unapplied']],
+      groups: [['payment_type', 'partner_type', 'partner_id', 'amount', 'journal_id'], ['date', 'memo', 'invoice_id', 'move_id', 'unapplied']],
       chatter: true,
     },
   },

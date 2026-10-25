@@ -1,6 +1,6 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
-import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
+import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { moveDeleteGuard, moveGuard } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -56,12 +56,13 @@ function draftAssetsFromBill(db, bill) {
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal } = {}) {
   const r = read(db, 'account.move', id);
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
   const sale = isInbound(r);
   const counterpartCode = isPurchase(r) ? '211000' : '121000';
+  const via = paymentJournal(db, payJournal);
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
   const bank = toCompany(db, r.currency_id, value, date);
@@ -69,15 +70,15 @@ export function payMove(db, id, amount, date = today(), { paymentId } = {}) {
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
-    journal: 'BNK1', date, ref: `Payment ${r.name}`,
+    journal: via.code, date, ref: `Payment ${r.name}`,
     lines: sale
-      ? [{ account: '101401', debit: bank, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...fx]
-      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
+      ? [{ account: via.account, debit: bank, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...fx]
+      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, { account: via.account, credit: bank, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', move_id: paymentMove, invoice_id: r.id, partner_id: r.partner_id, amount: value, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const record = { state: 'posted', move_id: paymentMove, journal_id: journalId(db, via.code), invoice_id: r.id, partner_id: r.partner_id, amount: value, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, record)
-    : create(withEntry, 'account.payment', { ...record, name: nextName(withEntry, 'account.payment', `PBNK1/${date.slice(0, 4)}/`) }).db;
+    : create(withEntry, 'account.payment', { ...record, name: nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`) }).db;
   const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
   const next = write(isRefund(r) ? withPayment : releaseCashBasis(withPayment, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
