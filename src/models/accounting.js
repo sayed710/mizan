@@ -6,6 +6,7 @@ import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
+import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -33,8 +34,9 @@ export function postMove(db, id) {
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
+  checkMandatoryPlans(db, r);
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
-  const posted = write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) });
+  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) }), id);
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
 }
 
@@ -286,8 +288,8 @@ export const accountingModels = {
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
         { label: 'Credit Note', when: (r) => r.state === 'posted' && ['out_invoice', 'in_invoice'].includes(r.move_type), run: creditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
-        { label: 'Reset to Draft', when: (r) => r.state !== 'draft' && !(Number(r.amount_paid) > 0), vals: { state: 'draft' } },
-        { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(write(db, 'account.move', r.id, { state: 'cancel' }), r) }) },
+        { label: 'Reset to Draft', when: (r) => r.state !== 'draft' && !(Number(r.amount_paid) > 0), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft' }), r.id) }) },
+        { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(removeAnalytic(write(db, 'account.move', r.id, { state: 'cancel' }), r.id), r) }) },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',

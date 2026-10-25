@@ -167,7 +167,9 @@ const allApps = [
         { key: 'taxes', label: 'Taxes', model: 'account.tax' },
         { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
         { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
+        { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
         { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
+        { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
         { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
@@ -286,8 +288,8 @@ const allApps = [
   {
     id: 'timesheets', name: 'Timesheets', color: ['#0f766e', '#1e3a8a'],
     menus: [
-      { key: 'timesheets', label: 'My Timesheets', model: 'account.analytic.line' },
-      { key: 'report', label: 'Reporting', model: 'account.analytic.line', view: 'pivot' },
+      { key: 'timesheets', label: 'My Timesheets', model: 'account.analytic.line', domain: (r) => !r.move_id && (r.category ?? 'timesheet') === 'timesheet' },
+      { key: 'report', label: 'Reporting', model: 'account.analytic.line', view: 'pivot', domain: (r) => !r.move_id && (r.category ?? 'timesheet') === 'timesheet' },
     ],
   },
   {
@@ -413,7 +415,7 @@ const allApps = [
       { key: 'attendances', label: 'Attendances', model: 'hr.attendance' },
     ],
   },
-  { id: 'appraisals', name: 'Appraisals', color: ['#e879f9', '#4f46e5'], menus: [{ key: 'appraisals', label: 'Appraisals', model: 'hr.appraisal' }] },
+  { id: 'appraisals', name: 'Appraisals', color: ['#e879f9', '#4f46e5'], menus: [{ key: 'appraisals', label: 'Appraisals', model: 'hr.appraisal' }, { key: 'goals', label: 'Goals', model: 'hr.appraisal.goal' }, { label: 'Configuration', children: [{ key: 'templates', label: 'Appraisal Templates', model: 'hr.appraisal.template' }] }] },
   {
     id: 'surveys', name: 'Surveys', color: ['#06b6d4', '#ea580c'],
     menus: [
