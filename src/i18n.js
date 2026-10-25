@@ -673,6 +673,9 @@ const ar = {
   Backorders: 'الطلبات المتأخرة', 'Create a backorder for the remaining quantities?': 'إنشاء طلب متأخر للكميات المتبقية؟',
   'Set the quantities done before validating (or cancel the transfer)': 'حدد الكميات المنفذة قبل الاعتماد (أو ألغِ التحويل)',
   'Only done transfers can be returned': 'يمكن إرجاع التحويلات المنجزة فقط', 'Add at least one product to the transfer': 'أضف منتجًا واحدًا على الأقل للتحويل',
+  'Scrap Orders': 'أوامر الإتلاف', Scrap: 'إتلاف', 'Scrap Reason': 'سبب الإتلاف', 'Unbuild Orders': 'أوامر التفكيك', Unbuild: 'تفكيك',
+  'Recovered Components': 'المكونات المستردة', 'Quantity Producing': 'الكمية قيد الإنتاج', 'Backorder of': 'طلب متأخر من',
+  'The quantity to scrap must be positive': 'كمية الإتلاف يجب أن تكون موجبة', 'The quantity to unbuild must be positive': 'كمية التفكيك يجب أن تكون موجبة',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

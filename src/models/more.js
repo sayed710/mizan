@@ -36,7 +36,7 @@ export function nextPeriod(date, plan) {
 const CLOSE_REASONS = [['price', 'Too expensive'], ['quality', 'Quality issues'], ['competitor', 'Moved to a competitor'], ['no_need', 'No longer needed'], ['other', 'Other']];
 
 /** Components and work orders of an MO, scaled from its bill of materials. */
-function explode(db, mo) {
+export function explode(db, mo) {
   const bom = read(db, 'mrp.bom', mo.bom_id);
   if (!bom) throw new Error('Select a bill of materials first');
   const factor = (Number(mo.product_qty) || 0) / (Number(bom.product_qty) || 1);
@@ -52,16 +52,22 @@ const availability = (db, moves) => (moves.every((m) => {
 }) ? 'available' : 'waiting');
 
 /** Confirm: lay out components and work orders and report whether components are in stock. */
-function confirmMo(db, mo) {
+export function confirmMo(db, mo) {
   const { move_raw, workorders } = explode(db, mo);
   return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw) });
 }
 
-/** Produce: consume what was recorded (to-consume by default), stock the finished product (with its lot), close work orders. */
-function produce(db, mo) {
+/**
+ * Produce: consume what was recorded (to-consume by default, scaled to the quantity producing), stock the finished
+ * product (with its lot), close work orders. Producing less than planned leaves a backorder MO for the rest.
+ */
+export function produce(db, mo) {
   const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
+  const planned = Number(mo.product_qty) || 0;
+  const producing = Number(mo.qty_producing) > 0 ? Math.min(Number(mo.qty_producing), planned) : planned;
+  const ratio = planned ? producing / planned : 1;
   const recorded = (m) => m.consumed !== null && m.consumed !== undefined && m.consumed !== '';
-  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : Number(m.to_consume) || 0 }));
+  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : round2((Number(m.to_consume) || 0) * ratio) }));
   const missing = used.find((c) => {
     const p = read(db, 'product', c.product_id);
     return p?.type === 'goods' && p.qty_available < c.qty;
@@ -69,16 +75,20 @@ function produce(db, mo) {
   if (missing) throw new Error(`Not enough ${read(db, 'product', missing.product_id).name} in stock`);
   const product = read(db, 'product', mo.product_id);
   if (product?.tracking && product.tracking !== 'none' && !mo.lot_name) throw new Error(`Set a lot/serial number for ${product.name}`);
-  if (product?.tracking === 'serial' && Number(mo.product_qty) !== 1) throw new Error('Serial-tracked products are produced one at a time');
-  const finished = [{ product_id: mo.product_id, qty: mo.product_qty, lot_name: mo.lot_name || undefined }];
+  if (product?.tracking === 'serial' && producing !== 1) throw new Error('Serial-tracked products are produced one at a time');
+  const finished = [{ product_id: mo.product_id, qty: producing, lot_name: mo.lot_name || undefined }];
   const stocked = moveStock(applyLots(moveStock(db, used, -1), { move_ids: finished }, 1), finished, 1);
-  return {
-    db: write(stocked, 'mrp.production', mo.id, {
-      state: 'done', date_finished: today(),
-      move_raw: moves.map((m, i) => ({ ...m, consumed: used[i].qty })),
-      workorders: (mo.workorders ?? []).map((w) => ({ ...w, state: 'done', duration: Number(w.duration) || Number(w.duration_expected) || 0 })),
-    }),
-  };
+  const closed = write(stocked, 'mrp.production', mo.id, {
+    state: 'done', date_finished: today(), product_qty: producing, qty_producing: producing,
+    move_raw: moves.map((m, i) => ({ ...m, to_consume: round2((Number(m.to_consume) || 0) * ratio), consumed: used[i].qty })),
+    workorders: (mo.workorders ?? []).map((w) => ({ ...w, state: 'done', duration: Number(w.duration) || Number(w.duration_expected) || 0 })),
+  });
+  if (producing >= planned) return { db: closed };
+  const rest = create(closed, 'mrp.production', {
+    product_id: mo.product_id, bom_id: mo.bom_id, product_qty: round2(planned - producing), origin: mo.name, backorder_of: mo.id,
+    user_id: mo.user_id ?? null, date_deadline: mo.date_deadline ?? null, priority: mo.priority ?? 0,
+  });
+  return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -204,6 +214,8 @@ export const moreModels = {
       product_id: { type: 'many2one', relation: 'product', label: 'Product', required: true },
       bom_id: { type: 'many2one', relation: 'mrp.bom', label: 'Bill of Materials' },
       product_qty: { type: 'float', label: 'Quantity To Produce' },
+      qty_producing: { type: 'float', label: 'Quantity Producing' },
+      backorder_of: { type: 'many2one', relation: 'mrp.production', label: 'Backorder of', readonly: true },
       date_deadline: { type: 'date', label: 'Deadline' },
       date_finished: { type: 'date', label: 'Finished on', readonly: true },
       user_id: employee('Responsible'),
@@ -251,7 +263,7 @@ export const moreModels = {
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) },
       ],
       title: 'name',
-      groups: [['product_id', 'bom_id', 'product_qty', 'lot_name'], ['date_start', 'date_deadline', 'components_availability', 'user_id', 'priority', 'date_finished']],
+      groups: [['product_id', 'bom_id', 'product_qty', 'qty_producing', 'lot_name', 'backorder_of'], ['date_start', 'date_deadline', 'components_availability', 'user_id', 'priority', 'date_finished']],
       tabs: [{ label: 'Components', fields: ['move_raw'] }, { label: 'Work Orders', fields: ['workorders'] }],
       chatter: true,
     },
