@@ -4,6 +4,7 @@ import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
 import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
+import { applicablePrograms, applyCode, computeRewardLines } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
@@ -303,6 +304,25 @@ export const salesModels = {
         { label: 'Send by Email', email: 'document', vals: { state: 'sent' }, when: (r) => ['draft', 'sent'].includes(r.state) },
         { label: 'Print', run: (db, r) => ({ db, go: `#/print/sale.order/${r.id}` }) },
         { label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', run: (db, r) => openWhatsApp(db, r) },
+        {
+          // Promotion, discount code, coupon or gift card code typed by the salesperson.
+          label: 'Apply Coupon', when: (r) => ['draft', 'sent'].includes(r.state),
+          run: (db, r) => {
+            const code = prompt('Promotion, coupon or gift card code');
+            if (!code?.trim()) return { db };
+            return { db: write(db, 'sale.order', r.id, { order_line: applyCode(db, r, code, { channel: 'sale' }).lines }) };
+          },
+        },
+        {
+          // Automatic promotions the order qualifies for (Odoo's "Promotions" button).
+          label: 'Promotions', when: (r) => ['draft', 'sent'].includes(r.state),
+          run: (db, r) => {
+            const programs = applicablePrograms(db, r, { lines: r.order_line ?? [], partnerId: r.partner_id, channel: 'sale' }).filter((p) => p.trigger !== 'with_code');
+            if (!programs.length) throw new Error('No promotion applies to this order');
+            const added = programs.flatMap((p) => (p.reward_ids ?? []).flatMap((rw) => computeRewardLines(db, p, rw, r.order_line ?? [])));
+            return { db: write(db, 'sale.order', r.id, { order_line: [...(r.order_line ?? []), ...added] }) };
+          },
+        },
         {
           label: 'Add Shipping', when: (r) => r.carrier_id && ['draft', 'sent'].includes(r.state),
           // API carriers are quoted by the server; fixed/rule carriers are computed here.
