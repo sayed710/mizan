@@ -81,6 +81,23 @@ export function bookingGuard(db, b) {
   return same.length >= (Number(type.capacity) || 1) ? 'This slot is already booked' : null;
 }
 
+/** Why a shift clashes: another shift of the same resource on overlapping days, or approved time off. */
+export function shiftConflict(db, s) {
+  if (!s.employee_id || !s.start) return '';
+  const end = s.end || s.start;
+  const overlap = (a, b, c, d) => a <= d && c <= b;
+  const shift = (db.records['planning.slot'] ?? []).find((o) => o.id !== s.id && o.employee_id === s.employee_id && overlap(o.start, o.end || o.start, s.start, end));
+  if (shift) return `Overlaps ${shift.name} (${shift.start})`;
+  const leave = (db.records['hr.leave'] ?? []).find((l) => l.state === 'validate' && l.employee_id === s.employee_id && overlap(l.date_from, l.date_to, s.start, end));
+  return leave ? `On time off (${leave.date_from} → ${leave.date_to})` : '';
+}
+
+/** Duplicate a shift one week later as a draft. */
+function copyNextWeek(db, s) {
+  const { db: next, id } = create(db, 'planning.slot', { ...s, id: undefined, start: addDays(s.start, 7), end: s.end ? addDays(s.end, 7) : null, state: 'draft' });
+  return { db: next, go: `#/planning/schedule/${id}` };
+}
+
 export const extraModels = {
   'website.page': {
     label: 'Pages',
@@ -233,9 +250,22 @@ export const extraModels = {
       allocated_hours: { type: 'float', label: 'Allocated Hours' },
       state: state([['draft', 'Draft'], ['published', 'Published']]),
       note: { type: 'text', label: 'Note' },
+      template_id: { type: 'many2one', relation: 'planning.template', label: 'Template' },
+      conflict: { type: 'char', label: 'Conflict', readonly: true },
     },
     defaults: () => ({ name: 'Shift', start: today(), allocated_hours: 8, role: 'sales', state: 'draft' }),
-    filters: [[{ id: 'open', label: 'Open Shifts', fn: (r) => !r.employee_id }, { id: 'published', label: 'Published', fn: (r) => r.state === 'published' }]],
+    // A template fills role/hours/name; any change to who or when re-checks conflicts.
+    onchange: (r, key, db) => {
+      const tpl = key === 'template_id' && r.template_id ? read(db, 'planning.template', r.template_id) : null;
+      const filled = tpl ? { name: tpl.name, role: tpl.role ?? r.role, allocated_hours: Number(tpl.duration) || r.allocated_hours } : {};
+      return ['employee_id', 'start', 'end', 'template_id'].includes(key) ? { ...filled, conflict: shiftConflict(db, { ...r, ...filled }) } : {};
+    },
+    filters: [[
+      { id: 'open', label: 'Open Shifts', fn: (r) => !r.employee_id },
+      { id: 'published', label: 'Published', fn: (r) => r.state === 'published' },
+      { id: 'conflicts', label: 'Conflicts', fn: (r) => !!r.conflict },
+    ]],
+    listDecoration: (r) => (r.conflict ? 'danger' : null),
     groupBys: ['employee_id', 'role', 'start', 'state'],
     kanban: { groupBy: 'employee_id', title: 'name', lines: ['start', 'allocated_hours', 'role'], badge: 'state' },
     list: ['start', 'employee_id', 'role', 'name', 'allocated_hours', 'state'],
@@ -245,12 +275,30 @@ export const extraModels = {
     pivot: { row: 'employee_id', col: 'role', measure: 'allocated_hours' },
     form: {
       statusbar: 'state',
-      buttons: [{ label: 'Publish', primary: true, vals: { state: 'published' }, when: (r) => r.state === 'draft' }],
+      buttons: [
+        { label: 'Publish', primary: true, vals: { state: 'published' }, when: (r) => r.state === 'draft' },
+        { label: 'Take Shift', primary: true, when: (r) => !r.employee_id && r.state === 'published', run: (db, r) => ({ db: write(db, 'planning.slot', r.id, { employee_id: 1, conflict: shiftConflict(db, { ...r, employee_id: 1 }) }) }) },
+        { label: 'Copy to Next Week', run: copyNextWeek },
+      ],
       title: 'name',
-      groups: [['employee_id', 'role'], ['start', 'end', 'allocated_hours']],
+      groups: [['employee_id', 'role', 'template_id'], ['start', 'end', 'allocated_hours', 'conflict']],
       tabs: [{ label: 'Note', fields: ['note'] }],
       chatter: true,
     },
+  },
+
+  'planning.template': {
+    label: 'Shift Templates',
+    fields: {
+      name: { type: 'char', label: 'Template', required: true },
+      role: { type: 'selection', label: 'Role', options: [['sales', 'Salesperson'], ['support', 'Support'], ['install', 'Installer'], ['warehouse', 'Warehouse']] },
+      start_time: { type: 'char', label: 'Start (HH:MM)' },
+      duration: { type: 'float', label: 'Duration (hours)' },
+    },
+    defaults: () => ({ start_time: '09:00', duration: 8, role: 'sales' }),
+    kanban: { title: 'name', lines: ['role', 'start_time', 'duration'] },
+    list: ['name', 'role', 'start_time', 'duration'],
+    form: { title: 'name', groups: [['role'], ['start_time', 'duration']] },
   },
 
   'sale.rental': {

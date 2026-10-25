@@ -22,3 +22,19 @@ test('bookings must fit a weekly slot and its capacity', () => {
   const first = create(db, 'appointment.booking', { name: 'X', type_id: id, date: monday, time: '10:00' });
   assert.throws(() => create(first.db, 'appointment.booking', { name: 'Y', type_id: id, date: monday, time: '10:00' }), /already booked/);
 });
+
+test('planning flags overlapping shifts and time off, fills from templates and copies a week ahead', async () => {
+  const { models } = await import('./models/index.js');
+  const { shiftConflict } = await import('./models/extra.js');
+  const { db: d0, id: tpl } = create(seed(), 'planning.template', { name: 'Morning', role: 'support', duration: 6 });
+  const { db: d1 } = create(d0, 'planning.slot', { name: 'A', employee_id: 4, start: '2027-05-03', end: '2027-05-04' });
+  const { db, id } = create(d1, 'planning.slot', { name: 'B', start: '2027-05-04' });
+  const assigned = write(db, 'planning.slot', id, { employee_id: 4 });
+  assert.match(read(assigned, 'planning.slot', id).conflict, /Overlaps A/);
+  const templated = write(db, 'planning.slot', id, { template_id: tpl });
+  assert.deepEqual([read(templated, 'planning.slot', id).role, read(templated, 'planning.slot', id).allocated_hours], ['support', 6]);
+  const withLeave = create(db, 'hr.leave', { name: 'Off', employee_id: 5, leave_type: 'sick', date_from: '2027-06-01', date_to: '2027-06-02', state: 'validate' }).db;
+  assert.match(shiftConflict(withLeave, { employee_id: 5, start: '2027-06-02' }), /time off/);
+  const copied = models['planning.slot'].form.buttons.find((b) => b.label === 'Copy to Next Week').run(templated, read(templated, 'planning.slot', id));
+  assert.ok(Object.values(copied.db.records['planning.slot']).some((s) => s.start === '2027-05-11' && s.state === 'draft'));
+});

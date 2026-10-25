@@ -268,6 +268,7 @@ const allApps = [
     menus: [
       { key: 'schedule', label: 'Schedule', model: 'planning.slot' },
       { key: 'report', label: 'Reporting', model: 'planning.slot', view: 'pivot' },
+      { label: 'Configuration', children: [{ key: 'templates', label: 'Shift Templates', model: 'planning.template' }] },
     ],
   },
   {
