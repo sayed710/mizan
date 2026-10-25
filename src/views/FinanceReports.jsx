@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { read } from '../orm.js';
 import { cashFlow, executiveSummary, partnerLedger, trialBalance } from '../models/reports.js';
 import { t } from '../i18n.js';
@@ -18,16 +19,27 @@ export function TrialBalance({ db, period }) {
   );
 }
 
+/** One partner: a clickable summary row that unfolds its entries with the running balance. */
+function PartnerRows({ db, p }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')}</td>
+        {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}
+      </tr>
+      {open && p.lines.map((l, i) => (
+        <tr key={i} className="rep-detail"><td>{l.date} · {l.move_name}</td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}</tr>
+      ))}
+    </>
+  );
+}
+
 export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }) {
   const rows = partnerLedger(db, period, kind);
   return (
     <tbody>
-      {rows.map((p) => (
-        <tr key={p.partner_id ?? 'none'} className="rep-detail">
-          <td>{p.partner_id ? <a href={`#/open/res.partner/${p.partner_id}`}>{read(db, 'res.partner', p.partner_id)?.name}</a> : t('Unknown')}</td>
-          {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}
-        </tr>
-      ))}
+      {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}
       <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}</tr>
     </tbody>
   );
