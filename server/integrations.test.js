@@ -55,10 +55,12 @@ test('API carrier quotes are added as the shipping line', async () => {
 
 test('WhatsApp sends to the partner phone and logs it', async () => {
   const calls = mockFetch(() => ({ messages: [{ id: 'wamid' }] }));
-  const out = await sendWhatsApp({ MIZAN_WHATSAPP_TOKEN: 't', MIZAN_WHATSAPP_PHONE_ID: '123' }, seed(), { name: 'Admin' }, { model: 'sale.order', id: 1, text: 'Your quotation is ready' });
+  let db = seed();
+  const store = { get: () => db, commit: (next) => { db = next; } };
+  await sendWhatsApp({ MIZAN_WHATSAPP_TOKEN: 't', MIZAN_WHATSAPP_PHONE_ID: '123' }, store, { name: 'Admin' }, { model: 'sale.order', id: 1, text: 'Your quotation is ready' });
   assert.match(calls[0].url, /graph\.facebook\.com\/v21\.0\/123\/messages$/);
   assert.equal(JSON.parse(calls[0].init.body).to, '20223456789');
-  assert.match(out.db.messages.at(-1).body, /WhatsApp sent/);
+  assert.match(db.messages.at(-1).body, /WhatsApp to \+20223456789/);
 });
 
 test('IoT tokens are stored hashed and authenticate ingestion', () => {

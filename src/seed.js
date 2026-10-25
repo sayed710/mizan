@@ -401,6 +401,17 @@ export function seed() {
   const answer = add('forum.post', { forum_id: help, parent_id: question, name: 'Re: How do I adjust the lumbar support?', content: 'Turn the knob clockwise to push the support forward, and counter-clockwise to release it.', author_name: 'Mizan Support', state: 'active', votes: 1 });
   set('forum.post', answer, { accepted: true });
 
+  // WhatsApp: an approved order confirmation template and a short conversation with Nile Furniture.
+  add('whatsapp.template', {
+    name: 'order_confirmation', language: 'en', category: 'utility', model: 'sale.order', status: 'approved',
+    body: 'Hello {{1}}, your order {{2}} of {{3}} is confirmed.', footer: 'Reply to this message for any question.',
+    variables: [{ index: 1, field: 'partner_id.name' }, { index: 2, field: 'name' }, { index: 3, field: 'amount_total' }],
+  });
+  const waPhone = '20223456789';
+  const hourAgo = (h) => new Date(Date.now() - h * 3600 * 1000).toISOString();
+  add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hi, can you confirm the delivery date of our chairs?', direction: 'incoming', state: 'received', wa_message_id: 'seed-in-1', res_model: 'res.partner', res_id: 1, date: hourAgo(2) });
+  add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

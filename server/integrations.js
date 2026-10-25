@@ -12,6 +12,7 @@ import { models } from '../src/models/index.js';
 import { create, messagesOf, postNote, read, search, write } from '../src/orm.js';
 import { addShipping, orderWeight } from '../src/models/logistics.js';
 import { markSms, queueSms } from '../src/models/sms.js';
+import { markWhatsApp, queueWhatsApp, renderWhatsApp, replyTarget } from '../src/models/whatsapp.js';
 
 const AI_MODEL = 'claude-opus-5-5';
 
@@ -159,22 +160,44 @@ export async function digitizeBill(db, { id, file }) {
 }
 
 // ---- WhatsApp / SMS ----
-function partnerOf(db, model, rec) {
-  if (model === 'res.partner') return rec;
-  return read(db, 'res.partner', rec.partner_id);
-}
-
-export async function sendWhatsApp(env, db, user, { model, id, text }) {
-  const rec = models[model] && read(db, model, Number(id));
-  const partner = rec && partnerOf(db, model, rec);
-  if (!partner?.phone) throw new Error('The contact has no phone number');
-  const body = String(text ?? '').trim() || `${db.settings?.company}: ${rec.name ?? ''}`;
-  await fetchJson(`https://graph.facebook.com/v21.0/${encodeURIComponent(env.MIZAN_WHATSAPP_PHONE_ID)}/messages`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.MIZAN_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messaging_product: 'whatsapp', to: digits(partner.phone).replace(/^\+/, ''), type: 'text', text: { body: body.slice(0, 4096) } }),
-  });
-  return { db: postNote(db, model, rec.id, `WhatsApp sent to ${partner.phone}: ${body.slice(0, 200)}`), message: 'WhatsApp message sent' };
+/**
+ * Queue the message and commit it first, then call the WhatsApp Cloud API and commit the result (sent with the
+ * returned id, or failed with the error). Without text or template, the first approved template of the document's
+ * model is used; a reply to a WhatsApp message goes to that message's document.
+ * @param {{get: () => object, commit: (next: object) => void}} store
+ */
+export async function sendWhatsApp(env, store, user, { model, id, text, templateId }) {
+  let target = { model, id: Number(id) };
+  if (model === 'whatsapp.message') {
+    const msg = read(store.get(), 'whatsapp.message', Number(id));
+    if (!msg) throw new Error('Message not found');
+    target = replyTarget(msg);
+  }
+  const rec = models[target.model] && read(store.get(), target.model, Number(target.id));
+  if (!rec) throw new Error('Document not found');
+  const fallback = !templateId && !String(text ?? '').trim()
+    ? search(store.get(), 'whatsapp.template').find((t) => t.status === 'approved' && t.model === target.model) : null;
+  const tplId = templateId ?? fallback?.id ?? null;
+  const body = tplId ? '' : String(text ?? '').trim() || `${store.get().settings?.company}: ${rec.name ?? ''}`;
+  const queued = queueWhatsApp(store.get(), { templateId: tplId, text: body, ...target });
+  store.commit(queued.db);
+  const msg = read(queued.db, 'whatsapp.message', queued.id);
+  const template = tplId && read(queued.db, 'whatsapp.template', Number(tplId));
+  const content = template
+    ? { type: 'template', template: { name: template.name, language: { code: template.language || 'en' }, components: [{ type: 'body', parameters: renderWhatsApp(queued.db, template, rec).values.map((v) => ({ type: 'text', text: v })) }] } }
+    : { type: 'text', text: { body: msg.body } };
+  try {
+    const out = await fetchJson(`https://graph.facebook.com/v21.0/${encodeURIComponent(env.MIZAN_WHATSAPP_PHONE_ID)}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.MIZAN_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: msg.phone, ...content }),
+    });
+    store.commit(markWhatsApp(store.get(), msg.id, { waMessageId: out?.messages?.[0]?.id ?? '' }));
+  } catch (e) {
+    store.commit(markWhatsApp(store.get(), msg.id, { error: e.message }));
+    throw new Error(`WhatsApp message failed: ${e.message}`);
+  }
+  return { message: 'WhatsApp message sent' };
 }
 
 export async function sendSms(env, to, body) {

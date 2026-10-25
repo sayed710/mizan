@@ -69,7 +69,7 @@ export function ActionView({ leaf, base, params }) {
   const views = viewsOf(model);
   const view = views.includes(params.get('view')) ? params.get('view') : views.includes(leaf.view) ? leaf.view : views[0];
   const relRaw = params.get('rel');
-  const [search, setSearch] = useState(() => emptySearch(model, parseRel(db, model, relRaw)));
+  const [search, setSearch] = useState(() => ({ ...emptySearch(model, parseRel(db, model, relRaw)), groupBy: leaf.groupBy ?? [] }));
   const [selected, setSelected] = useState(() => new Set());
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';

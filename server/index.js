@@ -19,14 +19,16 @@ import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStar
 import { sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
+import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 
 const ENV = process.env;
-/** Server actions: endpoint → integration it needs, model it touches, admin-only flag, implementation. */
+/** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
   '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
   '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b) => digitizeBill(db, b) },
-  '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, run: (b, u) => sendWhatsApp(ENV, db, u, b) },
+  // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
+  '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
@@ -144,6 +146,7 @@ const WINDOW = 15 * 60 * 1000;
 const CHAT_MESSAGES_PER_WINDOW = 30;
 const TRACKING_HITS_PER_WINDOW = 300;
 const CART_PRICINGS_PER_WINDOW = 120;
+const WHATSAPP_HOOKS_PER_WINDOW = 600;
 const recent = (k) => (failures.get(k) ?? []).filter((t) => Date.now() - t < WINDOW);
 const tooMany = (k) => recent(k).length >= 10;
 const recordFailure = (k) => failures.set(k, [...recent(k), Date.now()]);
@@ -214,6 +217,21 @@ async function api(req, res, path) {
     if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }));
     res.writeHead(out.status, out.headers);
     return res.end(out.body);
+  }
+  // WhatsApp Cloud API webhook: verification token on GET, HMAC-signed raw body on POST; Meta retries on non-2xx.
+  if (path === '/api/public/whatsapp/webhook' && ['GET', 'POST'].includes(req.method)) {
+    if (recent(`whatsapp:${ip}`).length >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    recordFailure(`whatsapp:${ip}`);
+    if (req.method === 'GET') {
+      const out = verifyWebhook(ENV, new URL(req.url, 'http://x').searchParams);
+      res.writeHead(out.status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(out.body);
+    }
+    let raw;
+    try { raw = await readRaw(req, MAX_WEBHOOK_BODY); } catch { return send(res, 413, { error: 'Request too large' }); }
+    const out = handleWebhook(ENV, db, raw, req.headers['x-hub-signature-256']);
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), WEBHOOK_WRITE));
+    return send(res, out.status, out.body);
   }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, { ...publicSite(db), ...publicBlogSite(db), livechat: livechatInfo(db) });
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
@@ -352,7 +370,8 @@ async function api(req, res, path) {
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
       const snapshot = db;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }));
+      const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });

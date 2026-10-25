@@ -233,6 +233,11 @@ export function FormView({ leaf, id, base, params }) {
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
         .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
+      if (b.prompt) {
+        const text = prompt(t(b.prompt), '');
+        if (text != null && text.trim()) send({ text });
+        return;
+      }
       if (!b.upload) { send(); return; }
       const input = Object.assign(document.createElement('input'), { type: 'file', accept: b.upload });
       input.onchange = () => {
@@ -267,7 +272,7 @@ export function FormView({ leaf, id, base, params }) {
 
   const statusKey = def.form.statusbar;
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = (def.form.buttons ?? []).filter((b) => !b.when || b.when(current));
+  const buttons = (def.form.buttons ?? []).filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current)));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const resolve = (v) => (typeof v === 'function' ? v(current) : v);

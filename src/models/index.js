@@ -43,11 +43,12 @@ import { lunchModels } from './lunch.js';
 import { ecommerceModels } from './ecommerce.js';
 import { blogModels } from './blog.js';
 import { appointmentModels } from './appointments.js';
+import { whatsappModels } from './whatsapp.js';
 import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels, ...appointmentModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels, ...appointmentModels, ...whatsappModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -426,6 +427,14 @@ const allApps = [
     ],
   },
   { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
+  {
+    id: 'whatsapp', name: 'WhatsApp', color: ['#22c55e', '#0f766e'],
+    menus: [
+      { key: 'messages', label: 'Messages', model: 'whatsapp.message' },
+      { key: 'templates', label: 'Templates', model: 'whatsapp.template' },
+      { key: 'conversations', label: 'Conversations', model: 'whatsapp.message', view: 'list', groupBy: ['phone'] },
+    ],
+  },
   { id: 'social', name: 'Social Marketing', color: ['#3b82f6', '#ec4899'], menus: [{ key: 'posts', label: 'Posts', model: 'social.post' }, { key: 'accounts', label: 'Social Accounts', model: 'social.account' }] },
   { id: 'automation', name: 'Marketing Automation', color: ['#f97316', '#4f46e5'], menus: [{ key: 'campaigns', label: 'Campaigns', model: 'marketing.campaign' }, { key: 'participants', label: 'Participants', model: 'marketing.participant' }] },
   { id: 'plm', name: 'PLM', color: ['#16a34a', '#334155'], menus: [{ key: 'changes', label: 'Engineering Changes', model: 'mrp.eco' }, { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' }] },
@@ -455,7 +464,7 @@ const allApps = [
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
   'pos', 'kitchen', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
-  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
+  'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'whatsapp', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
 
 /** App-store category and one-line summary. */
 export const APP_INFO = {
@@ -476,7 +485,7 @@ export const APP_INFO = {
   frontdesk: ['Productivity', 'Visitor management'], studio: ['Customizations', 'Add fields to any app without code'],
   phone: ['Productivity', 'Click-to-call and call log'], iot: ['Administration', 'Connect scales, sensors and devices'],
   equity: ['Accounting', 'Shareholders and cap table'], recycle: ['Administration', 'Archive old records automatically'],
-  livechat: ['Website', 'Chat with your website visitors'], sms: ['Marketing', 'Design, send and track SMS'], social: ['Marketing', 'Manage your social media posts'],
+  livechat: ['Website', 'Chat with your website visitors'], sms: ['Marketing', 'Design, send and track SMS'], whatsapp: ['Marketing', 'Templates and conversations on WhatsApp'], social: ['Marketing', 'Manage your social media posts'],
   automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],
   referral: ['Human Resources', 'Employees refer candidates'], skills: ['Human Resources', 'Employee skills and levels'], esg: ['ESG', 'Measure your carbon footprint'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
 };
