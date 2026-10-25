@@ -19,10 +19,37 @@ function signDocument(db, r) {
   return { db: write(db, 'sign.request', r.id, { state: 'signed', signature: name.trim(), sign_date: today() }) };
 }
 
+/** Late days past the planned return (actual return date, or today while still out). */
+const lateDays = (r, at = today()) => (r.return_date ? Math.max(0, Math.round((new Date(r.actual_return_date ?? at) - new Date(r.return_date)) / 864e5)) : 0);
+const lateFee = (r, at) => Math.round(lateDays(r, at) * (Number(r.qty) || 0) * (Number(r.price_per_day) || 0) * (Number(r.late_fee_factor) || 0) * 100) / 100;
+
+/** Units of the product reserved or out on other rentals overlapping [from, to]. */
+export function rentedQty(db, productId, from, to, excludeId) {
+  return (db.records['sale.rental'] ?? [])
+    .filter((o) => o.id !== excludeId && o.product_id === productId && ['reserved', 'picked'].includes(o.state) && o.pickup_date <= to && (o.actual_return_date ?? o.return_date) >= from)
+    .reduce((s, o) => s + (Number(o.qty) || 0), 0);
+}
+
+/** Reserve only what the stock can cover for the whole period. */
+function confirmRental(db, r) {
+  const product = read(db, 'product', r.product_id);
+  if (r.return_date < r.pickup_date) throw new Error('The return date must be after the pickup date');
+  const onHand = Number(product?.qty_available) || 0;
+  const busy = rentedQty(db, r.product_id, r.pickup_date, r.return_date, r.id);
+  // Units already picked up are no longer on hand, so add them back before comparing.
+  const out = (db.records['sale.rental'] ?? []).filter((o) => o.id !== r.id && o.product_id === r.product_id && o.state === 'picked').reduce((s, o) => s + (Number(o.qty) || 0), 0);
+  if (product?.type === 'goods' && busy + (Number(r.qty) || 0) > onHand + out) throw new Error(`Only ${Math.max(0, onHand + out - busy)} ${product.name} available for these dates`);
+  return write(db, 'sale.rental', r.id, { state: 'reserved' });
+}
+
 function rentalInvoice(db, r) {
+  const fee = lateFee(r);
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
-    invoice_line_ids: [{ product_id: r.product_id, qty: r.qty * days(r.pickup_date, r.return_date), price_unit: r.price_per_day, tax: 14 }],
+    invoice_line_ids: [
+      { product_id: r.product_id, name: 'Rental', qty: r.qty * days(r.pickup_date, r.return_date), price_unit: r.price_per_day, tax: 14 },
+      ...(fee ? [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: fee, tax: 14 }] : []),
+    ],
   });
   return { db: write(next, 'sale.rental', r.id, { invoiced: true }), go: `#/accounting/invoices/${id}` };
 }
@@ -210,10 +237,14 @@ export const extraModels = {
       return_date: { type: 'date', label: 'Return Date' },
       price_per_day: { type: 'monetary', label: 'Price per Day' },
       amount_total: { type: 'monetary', label: 'Total', compute: (r) => (Number(r.qty) || 0) * (Number(r.price_per_day) || 0) * days(r.pickup_date, r.return_date) },
+      actual_return_date: { type: 'date', label: 'Returned on', readonly: true },
+      late_fee_factor: { type: 'float', label: 'Late Fee (× daily price)' },
+      late_fee: { type: 'monetary', label: 'Late Fee', compute: (r) => lateFee(r) },
+      deposit: { type: 'monetary', label: 'Security Deposit' },
       state: state([['quotation', 'Quotation'], ['reserved', 'Reserved'], ['picked', 'Picked-up'], ['returned', 'Returned'], ['cancel', 'Cancelled']]),
       invoiced: { type: 'boolean', label: 'Invoiced', readonly: true },
     },
-    defaults: (id) => ({ name: 'R' + pad(id), qty: 1, state: 'quotation', pickup_date: today(), return_date: addDays(today(), 3), price_per_day: 0, invoiced: false }),
+    defaults: (id) => ({ name: 'R' + pad(id), qty: 1, state: 'quotation', pickup_date: today(), return_date: addDays(today(), 3), price_per_day: 0, late_fee_factor: 1.5, deposit: 0, invoiced: false }),
     filters: [
       [
         { id: 'pickups', label: 'Pickups', fn: (r) => r.state === 'reserved' && r.pickup_date <= today() },
@@ -236,15 +267,15 @@ export const extraModels = {
       statusbarHide: ['cancel'],
       lockedWhen: (r) => ['returned', 'cancel'].includes(r.state),
       buttons: [
-        { label: 'Confirm', primary: true, vals: { state: 'reserved' }, when: (r) => r.state === 'quotation' },
+        { label: 'Confirm', primary: true, when: (r) => r.state === 'quotation', run: (db, r) => ({ db: confirmRental(db, r) }) },
         { label: 'Pickup', primary: true, when: (r) => r.state === 'reserved', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], -1), 'sale.rental', r.id, { state: 'picked' }) }) },
-        { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], 1), 'sale.rental', r.id, { state: 'returned' }) }) },
+        { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], 1), 'sale.rental', r.id, { state: 'returned', actual_return_date: today() }) }) },
         { label: 'Create Invoice', when: (r) => ['picked', 'returned'].includes(r.state) && !r.invoiced, run: rentalInvoice },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['quotation', 'reserved'].includes(r.state) },
       ],
       ribbon: (r) => (r.state === 'picked' && r.return_date < today() ? 'Late' : null),
       title: 'name',
-      groups: [['partner_id', 'product_id', 'qty'], ['pickup_date', 'return_date', 'price_per_day', 'amount_total']],
+      groups: [['partner_id', 'product_id', 'qty', 'deposit'], ['pickup_date', 'return_date', 'actual_return_date', 'price_per_day', 'amount_total', 'late_fee_factor', 'late_fee']],
       chatter: true,
     },
   },
