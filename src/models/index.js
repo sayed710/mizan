@@ -204,6 +204,7 @@ const allApps = [
         { key: 'scrap', label: 'Scrap', model: 'stock.scrap' },
         { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
         { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },
+        { key: 'physical-inventory', label: 'Physical Inventory', model: 'stock.inventory.count' },
       ] },
       { key: 'products', label: 'Products', model: 'product' },
       { key: 'stock', label: 'Stock', model: 'product', view: 'list', domain: (r) => r.type === 'goods' },
@@ -211,6 +212,7 @@ const allApps = [
       { key: 'batches', label: 'Batch Transfers', model: 'stock.picking.batch' },
       { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
+      { key: 'valuation', label: 'Inventory Valuation', model: 'stock.valuation.layer' },
       { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'locations', label: 'Locations', model: 'stock.location' }] },
       { label: 'Reporting', children: [
         { key: 'report', label: 'Stock', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
