@@ -7,6 +7,8 @@ import { taxModels } from './taxes.js';
 import { payModels } from './pay.js';
 import { elearningModels } from './elearning.js';
 import { surveyModels } from './surveys.js';
+import { smsModels } from './sms.js';
+import { automationModels } from './automation.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -31,10 +33,13 @@ import { helpdeskModels } from './helpdesk.js';
 import { leaveGuard, timeoffModels } from './timeoff.js';
 import { posModels } from './pos.js';
 import { knowledgeModels } from './knowledge.js';
+import { livechatModels } from './livechat.js';
+import { lunchModels } from './lunch.js';
+import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...knowledgeModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...knowledgeModels, ...lunchModels, ...livechatModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -365,7 +370,14 @@ const allApps = [
     id: 'lunch', name: 'Lunch', color: ['#fb923c', '#16a34a'],
     menus: [
       { key: 'orders', label: 'My Orders', model: 'lunch.order' },
-      { key: 'products', label: 'Products', model: 'lunch.product' },
+      { key: 'products', label: 'Products', model: 'lunch.product', view: 'kanban' },
+      { label: 'Manager', children: [
+        { key: 'today', label: "Today's Orders", model: 'lunch.order', view: 'list', domain: (r) => r.date === today() },
+        { key: 'vendors', label: 'Vendors', model: 'lunch.supplier' },
+        { key: 'cashmoves', label: 'Cash Moves', model: 'lunch.cashmove' },
+        { key: 'accounts', label: 'Control Accounts', model: 'lunch.cashmove', view: 'pivot' },
+        { key: 'alerts', label: 'Alerts', model: 'lunch.alert' },
+      ] },
     ],
   },
   { id: 'approvals', name: 'Approvals', color: ['#84cc16', '#0f766e'], menus: [{ key: 'requests', label: 'Approvals', model: 'approval.request' }] },
@@ -373,10 +385,21 @@ const allApps = [
   { id: 'fieldservice', name: 'Field Service', color: ['#0d9488', '#ca8a04'], menus: [{ key: 'tasks', label: 'Field Service Tasks', model: 'fsm.task' }] },
   { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }] },
   { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }] },
-  { id: 'livechat', name: 'Live Chat', color: ['#38bdf8', '#7c3aed'], menus: [{ key: 'sessions', label: 'Sessions', model: 'livechat.session' }] },
-  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }] },
+  {
+    id: 'livechat', name: 'Live Chat', color: ['#38bdf8', '#7c3aed'],
+    menus: [
+      { key: 'sessions', label: 'Sessions', model: 'livechat.session' },
+      { label: 'Configuration', children: [
+        { key: 'channels', label: 'Channels', model: 'livechat.channel' },
+        { key: 'canned', label: 'Canned Responses', model: 'livechat.canned' },
+        { key: 'chatbots', label: 'Chatbots', model: 'livechat.chatbot' },
+      ] },
+      { key: 'report', label: 'Report', model: 'livechat.session', view: 'pivot' },
+    ],
+  },
+  { id: 'sms', name: 'SMS Marketing', color: ['#a855f7', '#f43f5e'], menus: [{ key: 'campaigns', label: 'SMS Campaigns', model: 'sms.campaign' }, { key: 'traces', label: 'SMS Traces', model: 'sms.trace' }, { key: 'blacklist', label: 'Blacklisted Numbers', model: 'phone.blacklist' }] },
   { id: 'social', name: 'Social Marketing', color: ['#3b82f6', '#ec4899'], menus: [{ key: 'posts', label: 'Posts', model: 'social.post' }] },
-  { id: 'automation', name: 'Marketing Automation', color: ['#f97316', '#4f46e5'], menus: [{ key: 'campaigns', label: 'Campaigns', model: 'marketing.campaign' }] },
+  { id: 'automation', name: 'Marketing Automation', color: ['#f97316', '#4f46e5'], menus: [{ key: 'campaigns', label: 'Campaigns', model: 'marketing.campaign' }, { key: 'participants', label: 'Participants', model: 'marketing.participant' }] },
   { id: 'plm', name: 'PLM', color: ['#16a34a', '#334155'], menus: [{ key: 'changes', label: 'Engineering Changes', model: 'mrp.eco' }, { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' }] },
   {
     id: 'rooms', name: 'Meeting Rooms', color: ['#0891b2', '#a21caf'],

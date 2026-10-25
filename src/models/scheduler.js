@@ -1,4 +1,4 @@
-// Scheduled actions the server runs periodically (Odoo's cron jobs): recurring invoices, time-off accruals, preventive maintenance, replenishment, follow-ups, asset depreciation, bank auto-reconciliation.
+// Scheduled actions the server runs periodically (Odoo's cron jobs): recurring invoices, time-off accruals, preventive maintenance, replenishment, follow-ups, asset depreciation, bank auto-reconciliation, marketing automation.
 import { today } from './common.js';
 import { runRecurring } from './more.js';
 import { accrue } from './timeoff.js';
@@ -7,6 +7,7 @@ import { replenish } from './routes.js';
 import { runFollowUps } from './finance.js';
 import { postDepreciation } from './assets.js';
 import { autoReconcile } from './reconcile.js';
+import { processDue } from './automation.js';
 
 /** Apply `step` to db, keeping db unchanged when it throws (e.g. a locked period), so other jobs still run. */
 const tolerant = (step) => (db, ...args) => {
@@ -24,5 +25,5 @@ export function runScheduledJobs(db, at = today()) {
     .reduce((acc, a) => accrue(acc, a, at), db);
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
-  return autoReconcile(runFollowUps(replenish(schedulePreventive(runRecurring(depreciated, at), at)), at));
+  return tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(runRecurring(depreciated, at), at)), at)), at);
 }

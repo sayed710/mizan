@@ -1,7 +1,8 @@
 // Public website (no login): published pages + shop, served from /api/public/* on the Mizan server.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n.js';
 import { money, setCurrency } from '../ui.jsx';
+import { matchRule } from '../models/livechat.js';
 
 /** Name/email/phone form posting to a public endpoint, with an optional choice and date/time; shows the server's answer. */
 function VisitorForm({ action, path, extra, choices, dateTime }) {
@@ -29,6 +30,102 @@ function VisitorForm({ action, path, extra, choices, dateTime }) {
 const post = (path, body) => fetch(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body),
 }).then(async (r) => ({ ok: r.ok, data: await r.json().catch(() => ({})) }));
+
+const CHAT_POLL_MS = 3000;
+const CHAT_STYLE = { position: 'fixed', insetBlockEnd: 16, insetInlineEnd: 16, zIndex: 50, maxInlineSize: 'calc(100vw - 32px)' };
+const PANEL_STYLE = { inlineSize: 320, maxInlineSize: '100%', background: 'var(--surface, #fff)', border: '1px solid var(--border, #ddd)', borderRadius: 8, padding: 12, boxShadow: '0 4px 16px rgba(0,0,0,.15)' };
+
+/** Floating live chat: name/email, then messages polled every 3 seconds, then a 5-star rating once closed. */
+function LiveChat({ info }) {
+  const action = matchRule(info, location.href, '');
+  const [open, setOpen] = useState(action === 'auto_popup');
+  const [chat, setChat] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [status, setStatus] = useState({ stage: 'open', rated: false });
+  const [error, setError] = useState(null);
+  const since = useRef('');
+
+  useEffect(() => {
+    if (!open || !chat) return undefined;
+    const tick = () => fetch(`/api/public/livechat/poll?${new URLSearchParams({ ...chat, since: since.current })}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        if (d.messages.length) { since.current = d.messages.at(-1).date; setMessages((m) => [...m, ...d.messages]); }
+        setStatus({ stage: d.stage, rated: d.rated });
+      })
+      .catch(() => { /* offline: try again on the next tick */ });
+    tick();
+    const timer = setInterval(tick, CHAT_POLL_MS);
+    return () => clearInterval(timer);
+  }, [open, chat]);
+
+  if (action === 'hide_button') return null;
+  if (!open) return <div style={CHAT_STYLE}><button type="button" className="btn primary" onClick={() => setOpen(true)}>{info.button_text || t('Chat with us')}</button></div>;
+
+  const send = async (path, body) => {
+    const r = await post(path, { ...chat, ...body });
+    setError(r.ok ? null : r.data.error ?? t('Could not send the message'));
+    return r;
+  };
+  return (
+    <section style={CHAT_STYLE} aria-label={t('Live Chat')}>
+      <div style={PANEL_STYLE}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <b>{info.name}</b>
+          <button type="button" className="btn sm" aria-label={t('Close')} onClick={() => setOpen(false)}>×</button>
+        </div>
+        {!chat ? (
+          <form className="checkout" onSubmit={async (e) => {
+            e.preventDefault();
+            const f = Object.fromEntries(new FormData(e.currentTarget));
+            const r = await post('/api/public/livechat/start', { ...f, url: location.href });
+            if (r.ok) setChat({ sessionId: r.data.sessionId, token: r.data.token }); else setError(r.data.error);
+          }}>
+            <label>{t('Name')}<input name="name" required maxLength={120} /></label>
+            <label>{t('Email')}<input name="email" type="email" required /></label>
+            {error && <div className="alert" role="alert">{error}</div>}
+            <button type="submit" className="btn primary">{t('Start chatting')}</button>
+          </form>
+        ) : (
+          <>
+            <div role="log" aria-live="polite" style={{ maxBlockSize: 260, overflowY: 'auto', margin: '8px 0' }}>
+              {messages.map((m, i) => (
+                <p key={i} style={{ textAlign: m.author === 'visitor' ? 'end' : 'start', margin: '4px 0' }}>
+                  <small className="muted">{m.author === 'visitor' ? t('You') : m.author === 'bot' ? t('Bot') : t('Operator')}</small><br />{m.body}
+                </p>
+              ))}
+            </div>
+            {error && <div className="alert" role="alert">{error}</div>}
+            {status.stage !== 'closed' ? (
+              <form style={{ display: 'flex', gap: 4 }} onSubmit={async (e) => {
+                e.preventDefault();
+                const input = e.currentTarget.elements.body;
+                if ((await send('/api/public/livechat/message', { body: input.value })).ok) input.value = '';
+              }}>
+                <input name="body" required maxLength={2000} aria-label={t('Message')} style={{ flex: 1 }} />
+                <button type="submit" className="btn primary">{t('Send')}</button>
+              </form>
+            ) : status.rated ? <p role="status">{t('Thank you for your feedback!')}</p> : (
+              <form className="checkout" onSubmit={async (e) => {
+                e.preventDefault();
+                const f = Object.fromEntries(new FormData(e.currentTarget));
+                if ((await send('/api/public/livechat/rate', { rating: Number(f.rating), comment: f.comment })).ok) setStatus({ ...status, rated: true });
+              }}>
+                <fieldset>
+                  <legend>{t('How was this conversation?')}</legend>
+                  {[1, 2, 3, 4, 5].map((n) => <label key={n}><input type="radio" name="rating" value={n} required aria-label={`${n} ★`} />{'★'.repeat(n)}</label>)}
+                </fieldset>
+                <label>{t('Comment')}<textarea name="comment" maxLength={1000} /></label>
+                <button type="submit" className="btn primary">{t('Rate')}</button>
+              </form>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function Content({ text = '' }) {
   return text.split(/\n{2,}/).map((block, i) => {
@@ -168,6 +265,7 @@ export function PublicSite() {
           </form>
         )}
       </div>
+      {site.livechat && <LiveChat info={site.livechat} />}
       <footer className="site-footer">© {new Date().getFullYear()} {site.company}</footer>
     </main>
   );

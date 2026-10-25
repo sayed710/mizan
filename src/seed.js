@@ -236,8 +236,8 @@ export function seed() {
 
   // Email marketing
   const list = add('mailing.list', { name: 'Newsletter' });
-  [['Rania Saleh', 'rania@mail.example'], ['Karim Adel', 'karim.a@mail.example'], ['Salma Nabil', 'salma@mail.example', true]]
-    .forEach(([name, email, opt_out]) => add('mailing.contact', { name, email, list_id: list, opt_out: !!opt_out }));
+  [['Rania Saleh', 'rania@mail.example', '+20 100 200 3001'], ['Karim Adel', 'karim.a@mail.example', '+20 100 200 3002'], ['Salma Nabil', 'salma@mail.example', '+20 100 200 3003', true]]
+    .forEach(([name, email, phone, opt_out]) => add('mailing.contact', { name, email, phone, list_id: list, opt_out: !!opt_out }));
   add('mailing.mailing', { subject: 'Autumn collection is here', list_id: list, body: 'Discover our new ergonomic chairs and desks.', state: 'sent', sent_date: addDays(today(), -6), sent: 2, delivered: 2, opened: 2, clicked: 1, replied: 0 });
   add('mailing.mailing', { subject: 'Invitation: Office Design Expo', list_id: list, body: 'Join us at the expo next month.', state: 'draft' });
 
@@ -297,8 +297,10 @@ export function seed() {
     { title: 'Why posture matters', kind: 'video', duration: 8 }, { title: 'Setting up your desk', kind: 'doc', duration: 12 }, { title: 'Check your knowledge', kind: 'quiz', duration: 5 },
   ] });
 
-  add('livechat.session', { name: 'Visitor #1042', operator_id: 5, country: 'Egypt', stage_id: 'closed', rating: 3, transcript: 'Asked about delivery times to Giza.' });
-  add('livechat.session', { name: 'Visitor #1043', operator_id: 6, country: 'UAE', stage_id: 'open' });
+  add('livechat.channel', { name: 'Website Support', operator_ids: [{ operator_id: 5 }, { operator_id: 6 }], session_count: 2, rating_avg: 3 });
+  add('livechat.canned', { shortcut: 'hello', substitution: 'Hello! Thank you for contacting us. How can I help you today?' });
+  add('livechat.session', { name: 'Visitor #1042', channel_id: 1, operator_id: 5, country: 'Egypt', stage_id: 'closed', rating: 3, transcript: 'Asked about delivery times to Giza.' });
+  add('livechat.session', { name: 'Visitor #1043', channel_id: 1, operator_id: 6, country: 'UAE', stage_id: 'open' });
   add('sms.campaign', { name: 'Weekend promo', list_id: 1, body: 'Mizan: 15% off ergonomic chairs this weekend only!' });
   add('social.post', { name: 'Expo announcement', message: 'Meet us at the Office Design Expo!', stage_id: 'scheduled', accounts: ['LinkedIn'] });
   add('social.post', { name: 'New desk launch', message: 'Our new standing desk is here.', stage_id: 'posted', likes: 128, shares: 14, scheduled_date: addDays(today(), -4) });

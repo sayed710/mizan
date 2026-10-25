@@ -11,6 +11,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { models } from '../src/models/index.js';
 import { create, messagesOf, postNote, read, search, write } from '../src/orm.js';
 import { addShipping, orderWeight } from '../src/models/logistics.js';
+import { markSms, queueSms } from '../src/models/sms.js';
 
 const AI_MODEL = 'claude-opus-5-5';
 
@@ -185,16 +186,24 @@ export async function sendSms(env, to, body) {
   });
 }
 
+const MAX_SMS = 500;
+
+/** Queue the campaign's traces, then send each through the gateway and record its result. */
 export async function sendSmsCampaign(env, db, { id }) {
   const c = read(db, 'sms.campaign', Number(id));
   if (!c) throw new Error('Campaign not found');
-  const recipients = search(db, 'mailing.contact').filter((x) => x.list_id === c.list_id && !x.opt_out);
-  const phones = recipients.map((x) => x.phone ?? read(db, 'res.partner', x.partner_id)?.phone).filter(Boolean);
-  let sent = 0;
-  for (const phone of phones.slice(0, 500)) {
-    try { await sendSms(env, phone, c.body); sent += 1; } catch (e) { console.warn(`SMS ${phone}: ${e.message}`); }
+  let next = queueSms(db, c);
+  const traces = search(next, 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
+  for (const trace of traces) {
+    try {
+      await sendSms(env, trace.phone, c.body);
+      next = markSms(next, trace.id, true);
+    } catch (e) {
+      next = markSms(next, trace.id, false, e.message);
+    }
   }
-  return { db: write(db, 'sms.campaign', c.id, { stage_id: 'sent', sent }), message: `${sent} SMS sent` };
+  const done = read(next, 'sms.campaign', c.id);
+  return { db: next, message: `${done.delivered} SMS sent, ${done.failed} failed` };
 }
 
 // ---- Shipping rate APIs ----

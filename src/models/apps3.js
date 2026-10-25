@@ -1,67 +1,14 @@
-// Live Chat, SMS & Social Marketing, Marketing Automation, PLM, Meeting Rooms, Referrals, Skills, ESG.
+// Social Marketing, PLM, Meeting Rooms, Referrals, Skills, ESG.
 import { write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { simple } from './apps2.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
-const SMS_LIMIT = 160;
 
 /** Kg CO2e per unit for common activity sources (illustrative defaults; editable per entry). */
 export const EMISSION_FACTORS = { electricity: 0.45, diesel: 2.68, gasoline: 2.31, flight: 0.15, natural_gas: 2.0 };
 
 export const apps3Models = {
-  'livechat.session': simple({
-    label: 'Sessions',
-    fields: {
-      name: { type: 'char', label: 'Visitor', required: true },
-      operator_id: employee('Operator'),
-      date: { type: 'date', label: 'Date' },
-      country: { type: 'char', label: 'Country' },
-      rating: { type: 'priority', label: 'Rating' },
-      transcript: { type: 'text', label: 'Transcript' },
-    },
-    stages: [['waiting', 'Waiting'], ['open', 'In Conversation'], ['closed', 'Closed']],
-    lines: ['operator_id', 'date', 'country'],
-    list: ['date', 'name', 'operator_id', 'country', 'rating', 'stage_id'],
-    extra: {
-      defaults: () => ({ date: today(), rating: 0 }),
-      groupBys: ['operator_id', 'country', 'date'],
-      kanban: { groupBy: 'stage_id', title: 'name', lines: ['operator_id', 'country'], priority: 'rating' },
-      form: { tabs: [{ label: 'Transcript', fields: ['transcript'] }] },
-    },
-  }),
-
-  'sms.campaign': simple({
-    label: 'SMS Campaigns',
-    fields: {
-      name: { type: 'char', label: 'Subject', required: true },
-      list_id: { type: 'many2one', relation: 'mailing.list', label: 'Recipients' },
-      body: { type: 'text', label: 'SMS Content' },
-      length: { type: 'integer', label: 'Characters', compute: (r) => (r.body ?? '').length },
-      sent: { type: 'integer', label: 'Sent', readonly: true },
-    },
-    stages: [['draft', 'Draft'], ['scheduled', 'Scheduled'], ['sent', 'Sent']],
-    lines: ['list_id', 'sent'],
-    list: ['name', 'list_id', 'length', 'sent', 'stage_id'],
-    extra: {
-      defaults: () => ({ sent: 0 }),
-      groups: [['list_id'], ['length', 'sent']],
-      form: {
-        statusbarClickable: false,
-        buttons: [{
-          label: 'Send', primary: true, when: (r) => r.stage_id !== 'sent', server: '/api/integrations/sms-campaign', requires: 'sms',
-          run: (db, r) => {
-            if (!(r.body ?? '').trim()) throw new Error('Write the SMS content first');
-            if ((r.body ?? '').length > SMS_LIMIT) throw new Error(`SMS content is longer than ${SMS_LIMIT} characters`);
-            const n = (db.records['mailing.contact'] ?? []).filter((c) => c.list_id === r.list_id && !c.opt_out).length;
-            return { db: write(db, 'sms.campaign', r.id, { stage_id: 'sent', sent: n }) };
-          },
-        }],
-        tabs: [{ label: 'SMS Content', fields: ['body'] }],
-      },
-    },
-  }),
-
   'social.post': simple({
     label: 'Posts',
     fields: {
@@ -83,47 +30,6 @@ export const apps3Models = {
       kanban: { groupBy: 'stage_id', title: 'name', lines: ['scheduled_date', 'likes'], tags: 'accounts', quickCreate: true },
       groups: [['accounts', 'scheduled_date'], ['likes', 'shares']],
       form: { tabs: [{ label: 'Message', fields: ['message'] }] },
-    },
-  }),
-
-  'marketing.campaign': simple({
-    label: 'Campaigns',
-    fields: {
-      name: { type: 'char', label: 'Campaign', required: true },
-      list_id: { type: 'many2one', relation: 'mailing.list', label: 'Target' },
-      steps: {
-        type: 'one2many',
-        label: 'Workflow',
-        fields: {
-          action: { type: 'selection', label: 'Action', options: [['email', 'Send Email'], ['sms', 'Send SMS'], ['wait', 'Wait'], ['tag', 'Add Tag']] },
-          detail: { type: 'char', label: 'Details' },
-          delay_days: { type: 'float', label: 'After (days)' },
-        },
-        newLine: () => ({ action: 'email', detail: '', delay_days: 0 }),
-      },
-      participants: { type: 'integer', label: 'Participants', readonly: true },
-    },
-    stages: [['draft', 'New'], ['running', 'Running'], ['stopped', 'Stopped']],
-    lines: ['list_id', 'participants'],
-    list: ['name', 'list_id', 'participants', 'stage_id'],
-    extra: {
-      defaults: () => ({ steps: [], participants: 0 }),
-      groups: [['list_id'], ['participants']],
-      form: {
-        statusbarClickable: false,
-        buttons: [
-          {
-            label: 'Start', primary: true, when: (r) => r.stage_id !== 'running',
-            run: (db, r) => {
-              if (!r.steps?.length) throw new Error('Add at least one workflow step');
-              const n = (db.records['mailing.contact'] ?? []).filter((c) => c.list_id === r.list_id && !c.opt_out).length;
-              return { db: write(db, 'marketing.campaign', r.id, { stage_id: 'running', participants: n }) };
-            },
-          },
-          { label: 'Stop', vals: { stage_id: 'stopped' }, when: (r) => r.stage_id === 'running' },
-        ],
-        tabs: [{ label: 'Workflow', fields: ['steps'] }],
-      },
     },
   }),
 

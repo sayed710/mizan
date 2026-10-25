@@ -6,12 +6,12 @@ import { seed } from './seed.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
-test('SMS longer than 160 characters is rejected; valid SMS counts subscribed recipients', () => {
+test('an SMS longer than 160 characters goes out in two parts; sending counts subscribed recipients', () => {
   const db = seed();
   const sms = search(db, 'sms.campaign')[0];
   assert.equal(read(run(db, 'sms.campaign', sms.id, 'Send').db, 'sms.campaign', sms.id).sent, 2);
   const long = write(db, 'sms.campaign', sms.id, { body: 'x'.repeat(161) });
-  assert.throws(() => run(long, 'sms.campaign', sms.id, 'Send'), /longer than 160/);
+  assert.equal(read(long, 'sms.campaign', sms.id).segments, 2);
 });
 
 test('ESG emissions convert quantity × factor into tonnes CO2e', () => {

@@ -13,6 +13,7 @@ import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicOrder, publicRegister, publicSite } from './api.js';
 import { smtpConfig } from './smtp.js';
+import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
@@ -195,7 +196,7 @@ async function api(req, res, path) {
     res.writeHead(out.status, out.headers);
     return res.end(out.body);
   }
-  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, publicSite(db));
+  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, { ...publicSite(db), livechat: livechatInfo(db) });
   if (path === '/api/iot/ingest' && req.method === 'POST') {
     if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
     const token = /^Bearer (iot_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
@@ -219,6 +220,25 @@ async function api(req, res, path) {
     if (tooMany(`form:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`form:${ip}`);
     const out = publicForms[path](db, await readJson(req));
+    if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
+  // Live chat: starts count like public forms; messages, polls and ratings are limited on wrong tokens.
+  if (path === '/api/public/livechat/start' && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (tooMany(`chat:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
+    recordFailure(`chat:${ip}`);
+    const out = livechatStart(db, await readJson(req));
+    if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
+  const chatRoutes = { 'POST /api/public/livechat/message': livechatMessage, 'POST /api/public/livechat/rate': livechatRate, 'GET /api/public/livechat/poll': livechatPoll };
+  const chatRoute = chatRoutes[`${req.method} ${path}`];
+  if (chatRoute) {
+    if (req.method === 'POST' && req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    if (tooMany(`chatauth:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
+    const out = chatRoute(db, req.method === 'GET' ? new URL(req.url, 'http://x').searchParams : await readJson(req));
+    if (out.denied) recordFailure(`chatauth:${ip}`);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
