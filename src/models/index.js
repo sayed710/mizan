@@ -20,6 +20,8 @@ import { fleetPlusModels } from './fleetplus.js';
 import { qualityPlusModels } from './qualityplus.js';
 import { maintPlusModels } from './maintplus.js';
 import { timesheetPlusModels } from './timesheetplus.js';
+import { eventsPlusModels } from './eventsplus.js';
+import { recruitPlusModels } from './recruitplus.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -54,7 +56,7 @@ import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...timesheetPlusModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels, ...appointmentModels, ...whatsappModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...timesheetPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels, ...appointmentModels, ...whatsappModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
