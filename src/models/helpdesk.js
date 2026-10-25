@@ -76,7 +76,8 @@ export function mergeTickets(db, targetId, sourceIds) {
 
   const sources = ids.map((id) => read(db, 'helpdesk.ticket', id));
   if (sources.some((source) => !source)) throw new Error('A source ticket was not found');
-  if (sources.some((source) => target.partner_id != null && source.partner_id != null && String(source.partner_id) !== String(target.partner_id))) {
+  const customers = new Set([target, ...sources].map((t) => t.partner_id).filter((p) => p != null).map(String));
+  if (customers.size > 1) {
     throw new Error('Tickets with different customers cannot be merged');
   }
 
@@ -84,7 +85,8 @@ export function mergeTickets(db, targetId, sourceIds) {
     `--- Merged from ${source.name} ---\n${source.description ?? ''}`)]
     .filter((part) => part != null && part !== '')
     .join('\n\n');
-  let next = write(db, 'helpdesk.ticket', targetId, { description });
+  const partnerId = target.partner_id ?? sources.find((s) => s.partner_id != null)?.partner_id ?? null;
+  let next = write(db, 'helpdesk.ticket', targetId, { description, partner_id: partnerId });
   sources.forEach((source) => {
     next = write(next, 'helpdesk.ticket', source.id, {
       stage_id: 'cancelled',
@@ -113,7 +115,7 @@ export function autoCloseStale(db, at, days) {
     if (!team?.auto_close || !WAITING_STAGES.has(ticket.stage_id) || (ticket.stage_id === 'solved' && ticket.close_date)) return;
     const ageDays = Number(days ?? team.auto_close_days ?? 7);
     const lastChange = timestamp(ticket.write_date || ticket.create_date);
-    if (!Number.isFinite(ageDays) || lastChange == null || lastChange >= atTime - ageDays * DAY_MS) return;
+    if (!Number.isFinite(ageDays) || lastChange == null || lastChange > atTime - ageDays * DAY_MS) return;
 
     const closeDate = ticket.stage_id === 'solved' ? ticket.close_date ?? at : at;
     next = write(next, 'helpdesk.ticket', ticket.id, { stage_id: 'solved', close_date: closeDate });
@@ -179,10 +181,10 @@ export const helpdeskModels = {
       use_sla: { type: 'boolean', label: 'SLA Policies' },
       use_fsm: { type: 'boolean', label: 'Field Service' },
     },
-    defaults: () => ({ assignment: 'manual', assign_method: 'balanced', member_ids: [], auto_close: false, auto_close_days: 7, use_rating: true, use_sla: true }),
+    defaults: () => ({ assignment: 'manual', member_ids: [], auto_close: false, auto_close_days: 7, use_rating: true, use_sla: true }),
     kanban: { title: 'name', lines: ['email', 'assignment'] },
     list: ['name', 'email', 'assignment', 'use_sla'],
-    form: { title: 'name', groups: [['email', 'assignment'], ['use_sla', 'use_fsm']], chatter: true },
+    form: { title: 'name', groups: [['email', 'assign_method', 'assignment'], ['use_sla', 'use_fsm', 'auto_close', 'auto_close_days', 'use_rating']], tabs: [{ label: 'Members', fields: ['member_ids'] }], chatter: true },
   },
 
   'helpdesk.sla': {

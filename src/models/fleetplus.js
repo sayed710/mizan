@@ -45,7 +45,7 @@ export function vehicleCosts(db, vehicleId, { from, to }) {
     ...search(db, 'fleet.odometer').filter((r) => r.vehicle_id === vehicleId && inPeriod(r.date, from, to)).map((r) => r.value),
     ...serviceLogs.filter((r) => serviceState(r) === 'done').map((r) => r.odometer),
     ...fuelLogs.map((r) => r.odometer),
-  ].filter((n) => n != null && Number.isFinite(Number(n))).map(Number);
+  ].map(Number).filter((n) => Number.isFinite(n) && n > 0);
   const km = readings.length > 1 ? Math.max(...readings) - Math.min(...readings) : 0;
   const total = services + fuel + contracts;
   return { services, fuel, contracts, total, perKm: km > 0 ? total / km : null, km };

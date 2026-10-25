@@ -87,3 +87,28 @@ test('a payment confirmed from a draft with an invoice gets a number', () => {
   const { db, id } = create(inv.db, 'account.payment', { partner_id: 1, amount: 100, invoice_id: inv.id, payment_type: 'inbound', partner_type: 'customer' });
   assert.match(read(postPayment(db, read(db, 'account.payment', id)), 'account.payment', id).name, /^PBNK1\//);
 });
+
+test('agy review: fleet ignores unset odometers, payroll ignores short days, helpdesk merge and auto-close boundaries', async () => {
+  const { vehicleCosts } = await import('./models/fleetplus.js');
+  const { workedDays } = await import('./models/payroll.js');
+  const { autoCloseStale, mergeTickets, assignTicket } = await import('./models/helpdesk.js');
+  let db = seed();
+  const v = search(db, 'fleet.vehicle')[0];
+  db = create(db, 'fleet.odometer', { vehicle_id: v.id, date: '2026-03-01', value: 1000 }).db;
+  db = create(db, 'fleet.odometer', { vehicle_id: v.id, date: '2026-03-20', value: 1500 }).db;
+  db = create(db, 'fleet.service', { vehicle_id: v.id, name: 'Oil change', date: '2026-03-10', state: 'done', cost: 100, odometer: 0 }).db;
+  assert.equal(vehicleCosts(db, v.id, { from: '2026-03-01', to: '2026-03-31' }).km, 500);
+  const emp = search(db, 'hr.employee')[0];
+  db = create(db, 'hr.attendance', { employee_id: emp.id, date: '2026-03-02', check_in: '08:00', check_out: '18:00' }).db;
+  db = create(db, 'hr.attendance', { employee_id: emp.id, date: '2026-03-03', check_in: '08:00', check_out: '13:00' }).db;
+  assert.equal(workedDays(db, { employee_id: emp.id, date_from: '2026-03-01', date_to: '2026-03-31' }).overtime_hours, 2);
+  const a = create(db, 'helpdesk.ticket', { name: 'Target' });
+  const b = create(a.db, 'helpdesk.ticket', { name: 'S1', partner_id: 1 });
+  const c = create(b.db, 'helpdesk.ticket', { name: 'S2', partner_id: 2 });
+  assert.throws(() => mergeTickets(c.db, a.id, [b.id, c.id]), /different customers/);
+  assert.equal(read(mergeTickets(c.db, a.id, [b.id]), 'helpdesk.ticket', a.id).partner_id, 1);
+  const team = create(db, 'helpdesk.team', { name: 'T', assignment: 'manual', auto_close: true, auto_close_days: 7, member_ids: [{ employee_id: emp.id }] });
+  const t = create(team.db, 'helpdesk.ticket', { name: 'Old', team_id: team.id, stage_id: 'hold', create_date: '2026-10-01' });
+  assert.equal(read(assignTicket(t.db, read(t.db, 'helpdesk.ticket', t.id)), 'helpdesk.ticket', t.id).user_id ?? null, null);
+  assert.notEqual(read(autoCloseStale(t.db, '2026-10-08'), 'helpdesk.ticket', t.id).stage_id, 'hold');
+});

@@ -47,7 +47,7 @@ export function workedDays(db, slip) {
   const unpaidDays = workingDates.filter((date) => unpaidLeaves.some((leave) => leave.date_from <= date && leave.date_to >= date)).length;
   const overtimeHours = search(db, 'hr.attendance')
     .filter((attendance) => attendance.employee_id === slip.employee_id && attendance.date >= slip.date_from && attendance.date <= slip.date_to)
-    .reduce((sum, attendance) => sum + (Number(attendance.overtime) || 0), 0);
+    .reduce((sum, attendance) => sum + Math.max(0, Number(attendance.overtime) || 0), 0);
   return {
     working_days: workingDates.length,
     worked_days: workingDates.length - unpaidDays,

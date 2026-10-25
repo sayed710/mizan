@@ -56,7 +56,7 @@ function validDate(value) {
 export function nextOccurrences(recurrence, upTo) {
   const { start_date: start, last_date: last, until, unit = 'week' } = recurrence;
   const interval = Number(recurrence.interval ?? 1);
-  const count = Number(recurrence.count || 0);
+  const count = Number(recurrence.count ?? 0);
   if (!validDate(start) || !validDate(upTo) || (last && !validDate(last)) || (until && !validDate(until))) throw new Error('Set valid recurrence dates');
   if (!Number.isInteger(interval) || interval < 1) throw new Error('The interval must be at least 1');
   if (!Number.isInteger(count) || count < 0) throw new Error('The occurrence count must be a non-negative integer');
