@@ -177,6 +177,7 @@ const allApps = [
         { key: 'taxes', label: 'Taxes', model: 'account.tax' },
         { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
         { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
+        { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
         { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
         { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
         { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },

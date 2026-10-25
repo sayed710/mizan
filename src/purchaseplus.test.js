@@ -133,3 +133,18 @@ test('replenishment orders from the best vendor pricelist line', async () => {
   assert.equal(rfq.partner_id, vendor.id);
   assert.equal(rfq.order_line.find((l) => l.product_id === product.id).price_unit, 7.5);
 });
+
+test('replenishment rounds up to a vendor minimum and skips products without a valid vendor', async () => {
+  const { replenish } = await import('./models/routes.js');
+  let db = seed();
+  const product = search(db, 'product').find((p) => p.type === 'goods');
+  const vendor = search(db, 'res.partner').at(-1);
+  db = write(db, 'product', product.id, { vendor_id: null, qty_available: 0.5, reorder_min: 1, reorder_max: 1 });
+  db = create(db, 'product.supplierinfo', { partner_id: vendor.id, product_id: product.id, min_qty: 10, price: 4 }).db;
+  const before = search(db, 'purchase.order').length;
+  const line = search(replenish(db), 'purchase.order').slice(before).flatMap((po) => po.order_line).find((l) => l.product_id === product.id);
+  assert.equal(line.qty, 10);
+  assert.equal(line.price_unit, 4);
+  const expired = write(db, 'product.supplierinfo', search(db, 'product.supplierinfo').at(-1).id, { date_end: '2000-01-01' });
+  assert.doesNotThrow(() => replenish(expired));
+});
