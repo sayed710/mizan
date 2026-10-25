@@ -3,6 +3,7 @@ import { amounts, nextName, productLines, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
 import { moveDeleteGuard, moveGuard } from './finance.js';
 import { toCompany } from './currency.js';
+import { dueDate, earlyDiscount } from './terms.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => r.move_type === 'out_refund';
@@ -62,12 +63,42 @@ function creditNote(db, r) {
   return { db: next, go: `#/accounting/credit-notes/${id}` };
 }
 
+/** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
+export function discountAvailable(db, r, date = today()) {
+  const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
+  return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, total(r), r.invoice_date, date) : 0;
+}
+
+/** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
+export function payWithDiscount(db, id, amount, date = today()) {
+  const r = read(db, 'account.move', id);
+  const discount = discountAvailable(db, r, date);
+  const paid = payMove(db, id, amount, date);
+  if (!discount || amount + discount < residual(r) - 0.005) return paid;
+  const sale = r.move_type === 'out_invoice';
+  const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date);
+  const { db: booked } = postEntry(paid, {
+    journal: 'MISC', date, ref: `Early payment discount ${r.name}`,
+    lines: sale
+      ? [{ account: '690200', debit: value, partner_id: r.partner_id }, { account: '121000', credit: value, partner_id: r.partner_id }]
+      : [{ account: '211000', debit: value, partner_id: r.partner_id }, { account: '450200', credit: value, partner_id: r.partner_id }],
+  });
+  const after = read(booked, 'account.move', id);
+  return postNote(write(booked, 'account.move', id, { amount_paid: (Number(after.amount_paid) || 0) + discount }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
+}
+
 function registerPayment(db, r) {
-  const input = prompt(`Payment amount (due ${money(residual(r))})`, String(residual(r)));
+  const due = Math.round((residual(r) - discountAvailable(db, r)) * 100) / 100;
+  const input = prompt(`Payment amount (due ${money(due)})`, String(due));
   const amount = Number(input);
   if (input == null || !(amount > 0)) return { db };
-  return { db: payMove(db, r.id, amount) };
+  return { db: payWithDiscount(db, r.id, amount) };
 }
+
+const termDue = (db, r) => {
+  const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
+  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : {};
+};
 
 const lineItem = {
   type: 'one2many',
@@ -125,6 +156,14 @@ export const accountingModels = {
     guard: moveGuard,
     protectDelete: moveDeleteGuard,
     audited: (db) => db.settings?.audit_trail === true,
+    // The partner's payment term becomes the default; the term and invoice date drive the due date.
+    onchange: (r, key, db) => {
+      if (key === 'partner_id' && r.partner_id) {
+        const term = read(db, 'res.partner', r.partner_id)?.property_payment_term_id;
+        return term ? { invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {};
+      }
+      return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
+    },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['entry', 'Journal Entry']] },
@@ -136,6 +175,7 @@ export const accountingModels = {
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
       invoice_line_ids: productLines('Invoice Lines', 'list_price'),
       line_ids: lineItem,
@@ -187,7 +227,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_date_due', 'journal_id', 'currency_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

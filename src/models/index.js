@@ -17,10 +17,12 @@ import { routeModels } from './routes.js';
 import { financeModels } from './finance.js';
 import { currencyModels } from './currency.js';
 import { batchModels } from './batch.js';
+import { termModels } from './terms.js';
+import { deferredModels } from './deferred.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -84,6 +86,7 @@ const allApps = [
       { label: 'Accounting', children: [
         { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
         { key: 'entries', label: 'Journal Entries', model: 'account.move' },
+        { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
       ] },
       { label: 'Reporting', children: [
@@ -105,6 +108,7 @@ const allApps = [
         { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
+        { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
       ] },
     ],
   },

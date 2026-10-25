@@ -448,6 +448,11 @@ const ar = {
   Box: 'صندوق', Pallet: 'منصة', Crate: 'قفص', Content: 'المحتوى', Transfers: 'التحويلات', 'In Progress': 'قيد التنفيذ',
   'Restrictive Audit Trail': 'سجل التدقيق المقيد', 'The audit trail cannot be disabled once enabled. Continue?': 'لا يمكن تعطيل سجل التدقيق بعد تفعيله. متابعة؟',
   'Audit Trail': 'سجل التدقيق', Document: 'المستند', Change: 'التغيير', 'Payment reminder': 'تذكير بالدفع',
+  'Payment Terms': 'شروط الدفع', 'Early Discount': 'خصم السداد المبكر', 'Discount %': 'نسبة الخصم', 'Discount Days': 'أيام الخصم', 'Due Terms': 'شروط الاستحقاق',
+  'Value Type': 'نوع القيمة', 'Delay Type': 'نوع المهلة', Percent: 'نسبة', Fixed: 'ثابت', 'Days after invoice date': 'أيام بعد تاريخ الفاتورة',
+  'Days after end of month': 'أيام بعد نهاية الشهر', Preview: 'معاينة', 'Cash Discount Gain': 'أرباح خصم السداد', 'Cash Discount Loss': 'خسائر خصم السداد',
+  Deferrals: 'التأجيلات', 'Deferred Revenue': 'إيرادات مؤجلة', 'Deferred Expense': 'مصروفات مؤجلة', 'Recognition Board': 'جدول الاعتراف',
+  'Post Due Entries': 'ترحيل القيود المستحقة', Compute: 'احسب', Running: 'جارٍ', Months: 'الأشهر', 'Prepaid Expenses': 'مصروفات مدفوعة مقدمًا',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',

@@ -317,6 +317,12 @@ export function seed() {
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
+  const line = (value, nb_days, value_type = 'percent') => ({ value, value_type, nb_days, delay_type: 'days_after' });
+  add('account.payment.term', { name: 'Immediate Payment', line_ids: [line(100, 0)] });
+  const t30 = add('account.payment.term', { name: '30 Days', line_ids: [line(100, 30)] });
+  add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
+  add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
+  set('res.partner', 3, { property_payment_term_id: t30 });
   add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
   add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
 
