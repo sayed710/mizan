@@ -321,6 +321,7 @@ export function seed() {
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
+  (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
   add('helpdesk.sla', { name: 'Urgent: same day', team_id: support, priority: '3', days: 0 });
   (db.records['helpdesk.ticket'] ?? []).forEach((t) => set('helpdesk.ticket', t.id, { team_id: support }));

@@ -508,6 +508,7 @@ const ar = {
   'Log Odometer': 'تسجيل قراءة العداد', Leasing: 'تأجير تمويلي', Insurance: 'تأمين', 'Expiration Date': 'تاريخ الانتهاء',
   'Recurring Cost': 'التكلفة المتكررة', 'Recurring Cost Frequency': 'تكرار التكلفة',
   'Expiring in 30 days': 'ينتهي خلال 30 يومًا',
+  'Late Fee Invoiced': 'غرامة التأخير المفوترة', 'Invoice Late Fee': 'فوترة غرامة التأخير',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

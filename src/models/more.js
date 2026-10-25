@@ -41,7 +41,7 @@ function explode(db, mo) {
   if (!bom) throw new Error('Select a bill of materials first');
   const factor = (Number(mo.product_qty) || 0) / (Number(bom.product_qty) || 1);
   return {
-    move_raw: (bom.components ?? []).map((c) => ({ product_id: c.product_id, to_consume: (Number(c.qty) || 0) * factor, consumed: 0 })),
+    move_raw: (bom.components ?? []).map((c) => ({ product_id: c.product_id, to_consume: (Number(c.qty) || 0) * factor, consumed: null })),
     workorders: (bom.operations ?? []).map((o) => ({ name: o.name, workcenter_id: o.workcenter_id, duration_expected: (Number(o.duration) || 0) * factor, duration: 0, state: 'ready' })),
   };
 }
@@ -60,7 +60,8 @@ function confirmMo(db, mo) {
 /** Produce: consume what was recorded (to-consume by default), stock the finished product (with its lot), close work orders. */
 function produce(db, mo) {
   const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
-  const used = moves.map((m) => ({ product_id: m.product_id, qty: Number(m.consumed) || Number(m.to_consume) || 0 }));
+  const recorded = (m) => m.consumed !== null && m.consumed !== undefined && m.consumed !== '';
+  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : Number(m.to_consume) || 0 }));
   const missing = used.find((c) => {
     const p = read(db, 'product', c.product_id);
     return p?.type === 'goods' && p.qty_available < c.qty;
@@ -214,7 +215,7 @@ export const moreModels = {
       move_raw: {
         type: 'one2many', label: 'Components',
         fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, to_consume: { type: 'float', label: 'To Consume', readonly: true }, consumed: { type: 'float', label: 'Consumed' } },
-        newLine: () => ({ product_id: null, to_consume: 0, consumed: 0 }),
+        newLine: () => ({ product_id: null, to_consume: 0, consumed: null }),
       },
       workorders: {
         type: 'one2many', label: 'Work Orders',

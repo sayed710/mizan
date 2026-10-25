@@ -26,7 +26,7 @@ const lateFee = (r, at) => Math.round(lateDays(r, at) * (Number(r.qty) || 0) * (
 /** Units of the product reserved or out on other rentals overlapping [from, to]. */
 export function rentedQty(db, productId, from, to, excludeId) {
   return (db.records['sale.rental'] ?? [])
-    .filter((o) => o.id !== excludeId && o.product_id === productId && ['reserved', 'picked'].includes(o.state) && o.pickup_date <= to && (o.actual_return_date ?? o.return_date) >= from)
+    .filter((o) => o.id !== excludeId && o.product_id === productId && ['reserved', 'picked'].includes(o.state) && o.pickup_date <= to && (o.state === 'picked' && !o.actual_return_date ? '9999-12-31' : o.actual_return_date ?? o.return_date) >= from)
     .reduce((s, o) => s + (Number(o.qty) || 0), 0);
 }
 
@@ -42,6 +42,17 @@ function confirmRental(db, r) {
   return write(db, 'sale.rental', r.id, { state: 'reserved' });
 }
 
+/** Invoice the late fee accrued since the last invoice (rental returned after being invoiced). */
+function lateFeeInvoice(db, r) {
+  const delta = Math.round((lateFee(r) - (Number(r.late_fee_invoiced) || 0)) * 100) / 100;
+  if (!(delta > 0)) throw new Error('No additional late fee to invoice');
+  const { db: next, id } = create(db, 'account.move', {
+    move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
+    invoice_line_ids: [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: delta, tax: 14 }],
+  });
+  return { db: write(next, 'sale.rental', r.id, { late_fee_invoiced: lateFee(r) }), go: `#/accounting/invoices/${id}` };
+}
+
 function rentalInvoice(db, r) {
   const fee = lateFee(r);
   const { db: next, id } = create(db, 'account.move', {
@@ -51,7 +62,7 @@ function rentalInvoice(db, r) {
       ...(fee ? [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: fee, tax: 14 }] : []),
     ],
   });
-  return { db: write(next, 'sale.rental', r.id, { invoiced: true }), go: `#/accounting/invoices/${id}` };
+  return { db: write(next, 'sale.rental', r.id, { invoiced: true, late_fee_invoiced: fee }), go: `#/accounting/invoices/${id}` };
 }
 
 /** A booking must fall inside one of the type's weekly slots (when it defines any) and respect the slot capacity. */
@@ -62,7 +73,11 @@ export function bookingGuard(db, b) {
   const weekday = String(new Date(`${b.date}T00:00:00`).getDay());
   const slots = type.slot_ids ?? [];
   if (slots.length && !slots.some((s) => s.weekday === weekday && (!b.time || (b.time >= s.start && b.time < s.end)))) return `${type.name} is not available at that time`;
-  const same = (db.records['appointment.booking'] ?? []).filter((x) => x.id !== b.id && x.type_id === b.type_id && x.date === b.date && x.time === b.time && x.state !== 'cancel');
+  const minutes = (t) => (/^\d{2}:\d{2}$/.test(t ?? '') ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3)) : null);
+  const length = Math.max(1, Math.round((Number(type.duration) || 1) * 60));
+  const start = minutes(b.time);
+  const overlaps = (x) => (start == null || minutes(x.time) == null ? x.time === b.time : minutes(x.time) < start + length && start < minutes(x.time) + length);
+  const same = (db.records['appointment.booking'] ?? []).filter((x) => x.id !== b.id && x.type_id === b.type_id && x.date === b.date && x.state !== 'cancel' && overlaps(x));
   return same.length >= (Number(type.capacity) || 1) ? 'This slot is already booked' : null;
 }
 
@@ -253,6 +268,7 @@ export const extraModels = {
       late_fee_factor: { type: 'float', label: 'Late Fee (× daily price)' },
       late_fee: { type: 'monetary', label: 'Late Fee', compute: (r) => lateFee(r) },
       deposit: { type: 'monetary', label: 'Security Deposit' },
+      late_fee_invoiced: { type: 'monetary', label: 'Late Fee Invoiced', readonly: true },
       state: state([['quotation', 'Quotation'], ['reserved', 'Reserved'], ['picked', 'Picked-up'], ['returned', 'Returned'], ['cancel', 'Cancelled']]),
       invoiced: { type: 'boolean', label: 'Invoiced', readonly: true },
     },
@@ -283,6 +299,7 @@ export const extraModels = {
         { label: 'Pickup', primary: true, when: (r) => r.state === 'reserved', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], -1), 'sale.rental', r.id, { state: 'picked' }) }) },
         { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], 1), 'sale.rental', r.id, { state: 'returned', actual_return_date: today() }) }) },
         { label: 'Create Invoice', when: (r) => ['picked', 'returned'].includes(r.state) && !r.invoiced, run: rentalInvoice },
+        { label: 'Invoice Late Fee', when: (r) => r.state === 'returned' && r.invoiced && lateFee(r) > (Number(r.late_fee_invoiced) || 0), run: lateFeeInvoice },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['quotation', 'reserved'].includes(r.state) },
       ],
       ribbon: (r) => (r.state === 'picked' && r.return_date < today() ? 'Late' : null),
@@ -301,6 +318,7 @@ export const extraModels = {
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Host' },
       description: { type: 'text', label: 'Introduction Message' },
       capacity: { type: 'integer', label: 'Bookings per Slot' },
+      is_published: { type: 'boolean', label: 'Published on Website' },
       slot_ids: {
         type: 'one2many', label: 'Availabilities',
         fields: {
@@ -316,7 +334,7 @@ export const extraModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Bookings', model: 'appointment.booking', field: 'type_id', target: 'appointments/bookings' }],
-      groups: [['duration', 'location'], ['user_id', 'capacity']],
+      groups: [['duration', 'location'], ['user_id', 'capacity', 'is_published']],
       tabs: [{ label: 'Availabilities', fields: ['slot_ids'] }, { label: 'Introduction Message', fields: ['description'] }],
     },
   },

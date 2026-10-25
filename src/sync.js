@@ -52,7 +52,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
-      const err = validate(model, rec) ?? models[model].guard?.(db, current.get(rec.id) ?? null, rec);
+      const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
+      const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec);
       if (err) throw new Error(err);
       current.set(rec.id, rec);
     }

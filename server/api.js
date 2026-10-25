@@ -20,11 +20,19 @@ export const publicSite = (db) => ({
     id: e.id, name: e.name, date_begin: e.date_begin, location: e.location ?? '', description: e.description ?? '',
     tickets: (e.ticket_ids ?? []).map((t) => ({ name: t.name, price: Number(t.price) || 0 })),
   })),
-  appointments: search(db, 'appointment.type').map((a) => ({
+  appointments: search(db, 'appointment.type').filter((a) => a.is_published).map((a) => ({
     id: a.id, name: a.name, duration: a.duration, location: a.location ?? '', description: a.description ?? '',
     slots: (a.slot_ids ?? []).map((s) => ({ weekday: s.weekday, start: s.start, end: s.end })),
   })),
 });
+
+/** A real YYYY-MM-DD day (rejects 2099-02-31). */
+const isCalendarDate = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s ?? '');
+  if (!m) return false;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.getFullYear() === Number(m[1]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3]);
+};
 
 const openEvents = (db) => search(db, 'event.event').filter((e) => ['booked', 'announced'].includes(e.stage_id) && e.date_begin >= today());
 
@@ -53,7 +61,12 @@ export function publicRegister(db, body) {
   const v = visitor(b);
   if (!event) return { status: 400, body: { error: 'Registrations for this event are closed' } };
   if (!v.name || !EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
-  const ticket = (event.ticket_ids ?? []).find((t) => t.name === b.ticket)?.name ?? null;
+  const tickets = event.ticket_ids ?? [];
+  const ticket = tickets.find((t) => t.name === b.ticket)?.name ?? null;
+  if (tickets.length && !ticket) return { status: 400, body: { error: 'Choose a ticket' } };
+  if (search(db, 'event.registration').some((r) => r.event_id === event.id && r.state !== 'cancel' && r.email?.toLowerCase() === v.email.toLowerCase())) {
+    return { status: 400, body: { error: 'You are already registered for this event' } };
+  }
   return publicCreate(db, () => {
     const { db: withPartner, id: partner_id } = websitePartner(db, v);
     return create(withPartner, 'event.registration', { ...v, event_id: event.id, partner_id, ticket }).db;
@@ -63,11 +76,11 @@ export function publicRegister(db, body) {
 /** Anonymous appointment booking inside the type's availabilities. */
 export function publicBook(db, body) {
   const b = body && typeof body === 'object' ? body : {};
-  const type = search(db, 'appointment.type').find((a) => a.id === b.type_id);
+  const type = search(db, 'appointment.type').find((a) => a.is_published && a.id === b.type_id);
   const v = visitor(b);
   if (!type) return { status: 400, body: { error: 'Unknown appointment' } };
   if (!v.name || !EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(b.date ?? '') || b.date < today() || !/^\d{2}:\d{2}$/.test(b.time ?? '')) return { status: 400, body: { error: 'Pick a future date and a time' } };
+  if (!isCalendarDate(b.date) || b.date < today() || !/^([01]\d|2[0-3]):[0-5]\d$/.test(b.time ?? '')) return { status: 400, body: { error: 'Pick a future date and a time' } };
   return publicCreate(db, () => {
     const { db: withPartner, id: partner_id } = websitePartner(db, v);
     return create(withPartner, 'appointment.booking', { name: v.name, type_id: type.id, partner_id, date: b.date, time: b.time }).db;
