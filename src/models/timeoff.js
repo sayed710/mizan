@@ -20,7 +20,8 @@ function monthsBetween(from, to) {
 export function accrue(db, a, at = today()) {
   if (a.allocation_type !== 'accrual') return db;
   const until = a.date_to && a.date_to < at ? a.date_to : at;
-  return write(db, 'hr.leave.allocation', a.id, { number_of_days: round((Number(a.accrual_days_per_month) || 0) * monthsBetween(a.date_from, until)) });
+  const number_of_days = round((Number(a.accrual_days_per_month) || 0) * monthsBetween(a.date_from, until));
+  return number_of_days === Number(a.number_of_days) ? db : write(db, 'hr.leave.allocation', a.id, { number_of_days });
 }
 
 export const allocated = (db, employeeId, type) => round(search(db, 'hr.leave.allocation')

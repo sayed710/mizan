@@ -27,3 +27,12 @@ test('MRR comes from the recurring lines; recurring invoicing bills due subscrip
   assert.equal(search(runRecurring(billed, '2026-12-31'), 'account.move').filter((m) => m.subscription_id === id).length, 1);
   assert.ok(models['sale.subscription'].form.buttons.some((b) => b.label === 'Renew'));
 });
+
+test('scheduled jobs invoice due subscriptions and run accruals, and change nothing when nothing is due', async () => {
+  const { runScheduledJobs } = await import('./models/scheduler.js');
+  const { db, id } = create(seed(), 'hr.leave.allocation', { name: 'Accrual', employee_id: 1, allocation_type: 'accrual', accrual_days_per_month: 2, date_from: '2026-01-01', state: 'validate' });
+  const ran = runScheduledJobs(db, '2026-04-02');
+  assert.equal(read(ran, 'hr.leave.allocation', id).number_of_days, 6);
+  const quiet = runScheduledJobs(seed(), '2000-01-01');
+  assert.equal(quiet.records['account.move'].length, seed().records['account.move'].length);
+});

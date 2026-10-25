@@ -30,6 +30,7 @@ const ACTIONS = {
 
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
+import { runScheduledJobs } from '../src/models/scheduler.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -325,5 +326,18 @@ createServer(async (req, res) => {
     if (!res.headersSent) send(res, 500, { error: 'Server error' });
   }
 }).listen(PORT, () => console.info(`Mizan listening on http://localhost:${PORT}`));
+
+// Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
+const JOB_INTERVAL_MS = 60 * 60 * 1000;
+const runJobs = () => {
+  try {
+    const next = runScheduledJobs(db);
+    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }));
+  } catch (e) {
+    console.error('Scheduled job failed:', e.message);
+  }
+};
+runJobs();
+setInterval(runJobs, JOB_INTERVAL_MS).unref();
 
 sql.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now());
