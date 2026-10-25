@@ -453,6 +453,8 @@ const ar = {
   'Days after end of month': 'أيام بعد نهاية الشهر', Preview: 'معاينة', 'Cash Discount Gain': 'أرباح خصم السداد', 'Cash Discount Loss': 'خسائر خصم السداد',
   Deferrals: 'التأجيلات', 'Deferred Revenue': 'إيرادات مؤجلة', 'Deferred Expense': 'مصروفات مؤجلة', 'Recognition Board': 'جدول الاعتراف',
   'Post Due Entries': 'ترحيل القيود المستحقة', Compute: 'احسب', Running: 'جارٍ', Months: 'الأشهر', 'Prepaid Expenses': 'مصروفات مدفوعة مقدمًا',
+  'Invoice Address': 'عنوان الفاتورة', 'Delivery Address': 'عنوان التسليم', 'Promised Delivery': 'موعد التسليم الموعود', 'Invoice Status': 'حالة الفوترة',
+  'Nothing to Invoice': 'لا شيء للفوترة', 'Fully Invoiced': 'مفوتر بالكامل', 'Billing Status': 'حالة الفواتير', Delivered: 'تم التسليم', Invoiced: 'مفوتر',
   // dashboard & settings
   Receivable: 'المستحق من العملاء', Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', 'Company Name': 'اسم الشركة', Language: 'اللغة', Data: 'البيانات',
