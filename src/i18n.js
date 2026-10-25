@@ -493,6 +493,8 @@ const ar = {
   'Cash Payments': 'مدفوعات نقدية', 'Card Payments': 'مدفوعات بالبطاقة', 'Expected Cash': 'النقدية المتوقعة', 'Counted Cash': 'النقدية المعدودة', Difference: 'الفرق',
   'Close Session': 'إغلاق الجلسة', 'Open Session': 'فتح الجلسة', 'Opening Cash Control': 'مراقبة النقدية الافتتاحية', Refund: 'استرداد', Refunded: 'مُسترد', 'Refund of': 'استرداد للطلب',
   'Counted cash in the drawer (expected {n})': 'النقدية المعدودة في الدرج (المتوقع {n})',
+  Weekly: 'أسبوعي', Quarterly: 'ربع سنوي', 'Recurring Lines': 'البنود المتكررة', 'Close Reason': 'سبب الإغلاق', 'Quality issues': 'مشاكل الجودة',
+  'Moved to a competitor': 'انتقل إلى منافس', 'No longer needed': 'لم تعد هناك حاجة', Renew: 'تجديد', Subscription: 'الاشتراك',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

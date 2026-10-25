@@ -184,6 +184,7 @@ export const accountingModels = {
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
       invoice_line_ids: invoiceLineField,
       payments: {

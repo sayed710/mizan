@@ -1,6 +1,6 @@
 // Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Knowledge, Point of Sale.
 import { create, read, write } from '../orm.js';
-import { addDays, amountFields, pad, productLines, today } from './common.js';
+import { addDays, amountFields, amounts, pad, productLines, today } from './common.js';
 import { moveStock } from './sales.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
@@ -19,7 +19,21 @@ const components = {
 };
 
 const daysBetween = (a, b) => (a && b ? Math.max(0, Math.round((new Date(b) - new Date(a)) / 864e5) + 1) : 0);
-const monthly = (r) => (r.plan === 'yearly' ? (Number(r.recurring_amount) || 0) / 12 : Number(r.recurring_amount) || 0);
+const PLAN_MONTHS = { weekly: 12 / 52, monthly: 1, quarterly: 3, yearly: 12 };
+/** Recurring price per period: the untaxed lines when there are any, else the single recurring price. */
+const periodAmount = (r) => ((r.order_line ?? []).length ? amounts(r.order_line).untaxed : Number(r.recurring_amount) || 0);
+const monthly = (r) => Math.round((periodAmount(r) / (PLAN_MONTHS[r.plan] ?? 1)) * 100) / 100;
+/** Next period start: calendar months (day clamped to month end), or 7 days for weekly plans. */
+export function nextPeriod(date, plan) {
+  if (plan === 'weekly') return addDays(date, 7);
+  const [y, m, d] = date.split('-').map(Number);
+  const total = m - 1 + (PLAN_MONTHS[plan] ?? 1);
+  const year = y + Math.floor(total / 12);
+  const month = (total % 12) + 1;
+  const day = Math.min(d, new Date(year, month, 0).getDate());
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+const CLOSE_REASONS = [['price', 'Too expensive'], ['quality', 'Quality issues'], ['competitor', 'Moved to a competitor'], ['no_need', 'No longer needed'], ['other', 'Other']];
 
 /** Components and work orders of an MO, scaled from its bill of materials. */
 function explode(db, mo) {
@@ -119,16 +133,31 @@ function refuseApplicant(db, r) {
 }
 
 function invoiceSubscription(db, sub) {
+  const lines = (sub.order_line ?? []).length ? sub.order_line.map((l) => ({ ...l })) : [{ product_id: sub.product_id, qty: 1, price_unit: sub.recurring_amount, tax: 14 }];
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice',
     partner_id: sub.partner_id,
     invoice_date: today(),
     invoice_date_due: addDays(today(), 15),
     invoice_origin: sub.name,
-    invoice_line_ids: [{ product_id: sub.product_id, qty: 1, price_unit: sub.recurring_amount, tax: 14 }],
+    subscription_id: sub.id,
+    invoice_line_ids: lines,
   });
-  const step = sub.plan === 'yearly' ? 365 : 30;
-  return { db: write(next, 'sale.subscription', sub.id, { next_invoice_date: addDays(sub.next_invoice_date ?? today(), step) }), go: `#/accounting/invoices/${id}` };
+  const nextDate = nextPeriod(sub.next_invoice_date ?? today(), sub.plan);
+  const ended = sub.end_date && nextDate > sub.end_date;
+  return { db: write(next, 'sale.subscription', sub.id, { next_invoice_date: nextDate, ...(ended ? { stage: 'closed', close_reason: null } : {}) }), go: `#/accounting/invoices/${id}` };
+}
+
+/** Recurring invoicing: one invoice for every running subscription due on or before `at`. */
+export function runRecurring(db, at = today()) {
+  return (db.records['sale.subscription'] ?? []).filter((s) => s.stage === 'progress' && s.next_invoice_date && s.next_invoice_date <= at)
+    .reduce((acc, s) => invoiceSubscription(acc, s).db, db);
+}
+
+function closeSubscription(db, r) {
+  const pick = prompt(`Close reason:\n${CLOSE_REASONS.map(([, l], i) => `${i + 1}. ${l}`).join('\n')}`, '1');
+  if (pick == null) return { db };
+  return { db: write(db, 'sale.subscription', r.id, { stage: 'closed', close_reason: CLOSE_REASONS[Number(pick) - 1]?.[0] ?? 'other', end_date: today() }) };
 }
 
 export const moreModels = {
@@ -468,8 +497,11 @@ export const moreModels = {
       name: { type: 'char', label: 'Number', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer', required: true },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
-      plan: { type: 'selection', label: 'Recurring Plan', options: [['monthly', 'Monthly'], ['yearly', 'Yearly']] },
+      plan: { type: 'selection', label: 'Recurring Plan', options: [['weekly', 'Weekly'], ['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['yearly', 'Yearly']] },
       recurring_amount: { type: 'monetary', label: 'Recurring Price' },
+      order_line: productLines('Recurring Lines', 'list_price'),
+      end_date: { type: 'date', label: 'End Date' },
+      close_reason: { type: 'selection', label: 'Close Reason', options: CLOSE_REASONS },
       recurring_monthly: { type: 'monetary', label: 'Monthly Recurring Revenue', compute: monthly },
       start_date: { type: 'date', label: 'Start Date' },
       next_invoice_date: { type: 'date', label: 'Next Invoice' },
@@ -477,7 +509,7 @@ export const moreModels = {
     },
     defaults: (id) => ({ name: 'SUB/' + pad(id), plan: 'monthly', start_date: today(), next_invoice_date: today(), stage: 'draft' }),
     filters: [[{ id: 'running', label: 'In Progress', fn: (r) => r.stage === 'progress' }, { id: 'due', label: 'To Invoice', fn: (r) => r.stage === 'progress' && r.next_invoice_date <= today() }]],
-    groupBys: ['stage', 'plan', 'partner_id'],
+    groupBys: ['stage', 'plan', 'partner_id', 'close_reason'],
     kanban: { groupBy: 'stage', title: 'name', lines: ['partner_id', 'recurring_monthly', 'next_invoice_date'], sum: 'recurring_monthly' },
     list: ['name', 'partner_id', 'plan', 'recurring_amount', 'recurring_monthly', 'next_invoice_date', 'stage'],
     views: ['kanban', 'list', 'graph', 'pivot'],
@@ -491,10 +523,13 @@ export const moreModels = {
         { label: 'Generate Invoice', primary: true, when: (r) => r.stage === 'progress', run: invoiceSubscription },
         { label: 'Pause', vals: { stage: 'paused' }, when: (r) => r.stage === 'progress' },
         { label: 'Resume', vals: { stage: 'progress' }, when: (r) => r.stage === 'paused' },
-        { label: 'Close', vals: { stage: 'closed' }, when: (r) => ['progress', 'paused'].includes(r.stage) },
+        { label: 'Close', when: (r) => ['progress', 'paused'].includes(r.stage), run: closeSubscription },
+        { label: 'Renew', when: (r) => r.stage === 'closed', vals: { stage: 'progress', close_reason: null, end_date: null } },
       ],
+      smart: [{ label: 'Invoices', model: 'account.move', field: 'subscription_id', target: 'accounting/invoices', sum: 'amount_total' }],
       title: 'name',
-      groups: [['partner_id', 'product_id', 'plan', 'recurring_amount'], ['start_date', 'next_invoice_date', 'recurring_monthly']],
+      groups: [['partner_id', 'product_id', 'plan', 'recurring_amount'], ['start_date', 'next_invoice_date', 'end_date', 'recurring_monthly', 'close_reason']],
+      tabs: [{ label: 'Recurring Lines', fields: ['order_line'] }],
       chatter: true,
     },
   },
