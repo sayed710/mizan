@@ -254,10 +254,19 @@ export function seed() {
   add('sale.rental', { partner_id: 1, product_id: 2, qty: 4, price_per_day: 15, state: 'reserved', pickup_date: today(), return_date: addDays(today(), 7) });
   add('sale.rental', { partner_id: 5, product_id: 1, qty: 10, price_per_day: 5, state: 'quotation', pickup_date: addDays(today(), 3), return_date: addDays(today(), 10) });
 
-  const demo = add('appointment.type', { name: 'Showroom Visit', duration: 1, location: 'Mizan Showroom, Cairo', user_id: 2, description: 'Book a guided tour of our showroom.' });
-  add('appointment.type', { name: 'Online Consultation', duration: 0.5, location: 'Video call', user_id: 4 });
-  add('appointment.booking', { name: 'Hany Samir', type_id: demo, date: addDays(today(), 2), time: '11:00' });
-  add('appointment.booking', { name: 'Mai Ezzat', type_id: demo, date: addDays(today(), 4), time: '15:30' });
+  const weekdays = (start, end) => ['0', '1', '2', '3', '4'].map((weekday) => ({ weekday, start, end }));
+  const demo = add('appointment.type', {
+    name: 'Showroom Visit', duration: 60, slot_interval: 30, location: 'Mizan Showroom, Cairo', description: 'Book a guided tour of our showroom.',
+    staff_ids: [{ employee_id: 2 }, { employee_id: 3 }], slot_ids: weekdays('09:00', '17:00'), capacity: 1,
+  });
+  add('appointment.type', {
+    name: 'Online Consultation', duration: 30, location: 'Online', is_online: true, price: 150, assign_method: 'chosen',
+    description: 'A video call with an office design consultant.', staff_ids: [{ employee_id: 4 }, { employee_id: 3 }], slot_ids: weekdays('10:00', '15:00'),
+    questions: [{ label: 'What would you like to discuss?', required: true }],
+  });
+  const at = (days, time) => `${addDays(today(), days)}T${time}`;
+  add('appointment.booking', { name: 'Hany Samir', type_id: demo, staff_id: 2, start: at(2, '11:00'), end: at(2, '12:00') });
+  add('appointment.booking', { name: 'Mai Ezzat', type_id: demo, staff_id: 3, start: at(4, '15:30'), end: at(4, '16:30') });
 
   add('website.page', { name: 'Home', slug: 'home', sequence: 1, is_published: true, content: '# Workspaces people love\n\nWe design and furnish modern offices across the region.\n\n## Why us\n\nErgonomic products, fast installation and local support.' });
   add('website.page', { name: 'About Us', slug: 'about', sequence: 2, is_published: true, content: '# Our story\n\nFounded in Cairo, we have equipped more than 200 offices.' });

@@ -40,11 +40,12 @@ import { livechatModels } from './livechat.js';
 import { lunchModels } from './lunch.js';
 import { ecommerceModels } from './ecommerce.js';
 import { blogModels } from './blog.js';
+import { appointmentModels } from './appointments.js';
 import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels, ...appointmentModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -316,8 +317,9 @@ const allApps = [
   {
     id: 'appointments', name: 'Appointments', color: ['#22d3ee', '#7c3aed'],
     menus: [
-      { key: 'types', label: 'Appointment Types', model: 'appointment.type' },
       { key: 'bookings', label: 'Bookings', model: 'appointment.booking' },
+      { key: 'types', label: 'Appointment Types', model: 'appointment.type' },
+      { key: 'report', label: 'Reporting', model: 'appointment.booking', view: 'pivot' },
     ],
   },
   {

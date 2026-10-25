@@ -6,6 +6,7 @@ import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
+import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 
 const MAX_LIMIT = 500;
 
@@ -42,9 +43,11 @@ export const publicSite = (db) => ({
     id: e.id, name: e.name, date_begin: e.date_begin, location: e.location ?? '', description: e.description ?? '',
     tickets: (e.ticket_ids ?? []).map((t) => ({ name: t.name, price: Number(t.price) || 0 })),
   })),
-  appointments: search(db, 'appointment.type').filter((a) => a.is_published).map((a) => ({
-    id: a.id, name: a.name, duration: a.duration, location: a.location ?? '', description: a.description ?? '',
-    slots: (a.slot_ids ?? []).map((s) => ({ weekday: s.weekday, start: s.start, end: s.end })),
+  appointments: publishedTypes(db).map((a) => ({
+    id: a.id, name: a.name, description: a.description ?? '', image: safeImage(a.image), location: a.location ?? '', is_online: !!a.is_online,
+    duration: Number(a.duration) || 60, price: Number(a.price) || 0, assign_method: a.assign_method ?? 'random', timezone: a.timezone || 'Africa/Cairo',
+    staff: (a.staff_ids ?? []).map((l) => read(db, 'hr.employee', l.employee_id)).filter(Boolean).map((e) => ({ id: e.id, name: e.name, avatar: safeImage(e.image) })),
+    questions: (a.questions ?? []).filter((q) => q.label).map((q) => ({ label: q.label, required: !!q.required })),
   })),
 });
 
@@ -55,6 +58,8 @@ const isCalendarDate = (s) => {
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   return d.getFullYear() === Number(m[1]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3]);
 };
+
+const publishedTypes = (db) => search(db, 'appointment.type').filter((a) => a.is_published);
 
 const openEvents = (db) => search(db, 'event.event').filter((e) => ['booked', 'announced'].includes(e.stage_id) && e.date_begin >= today());
 
@@ -95,18 +100,35 @@ export function publicRegister(db, body) {
   });
 }
 
-/** Anonymous appointment booking inside the type's availabilities. */
-export function publicBook(db, body) {
-  const b = body && typeof body === 'object' ? body : {};
-  const type = search(db, 'appointment.type').find((a) => a.is_published && a.id === b.type_id);
-  const v = visitor(b);
+const SLOT_DAYS = 14;
+
+/** Free slots of a published type for the next 14 days (GET /api/public/appointment/<id>/slots?from=&staff=). */
+export function publicSlots(db, id, query, now = new Date()) {
+  const get = (k) => String((typeof query?.get === 'function' ? query.get(k) : query?.[k]) ?? '');
+  const type = publishedTypes(db).find((a) => a.id === Number(id));
+  if (!type) return { status: 404, body: { error: 'Unknown appointment' } };
+  const staff = Number(get('staff'));
+  return { status: 200, body: { slots: availableSlots(db, type, { from: isCalendarDate(get('from')) ? get('from') : undefined, days: SLOT_DAYS, staffId: Number.isInteger(staff) && staff > 0 ? staff : null, now }) } };
+}
+
+const MAX_ANSWERS = 20;
+
+/** Anonymous booking of a free slot (checked by bookAppointment); returns the booking id, start and meeting link. */
+export function publicBook(db, body, now = new Date()) {
+  const b = bodyOf(body);
+  const type = publishedTypes(db).find((a) => a.id === b.type_id);
   if (!type) return { status: 400, body: { error: 'Unknown appointment' } };
-  if (!v.name || !EMAIL.test(v.email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
-  if (!isCalendarDate(b.date) || b.date < today() || !/^([01]\d|2[0-3]):[0-5]\d$/.test(b.time ?? '')) return { status: 400, body: { error: 'Pick a future date and a time' } };
-  return publicCreate(db, () => {
-    const { db: withPartner, id: partner_id } = websitePartner(db, v);
-    return create(withPartner, 'appointment.booking', { name: v.name, type_id: type.id, partner_id, date: b.date, time: b.time }).db;
-  });
+  const answers = (Array.isArray(b.answers) ? b.answers : []).slice(0, MAX_ANSWERS).map((a) => ({ question: clip(a?.question, 200), answer: clip(a?.answer, 2000) }));
+  try {
+    const res = bookAppointment(db, type, {
+      ...visitor(b), start: String(b.start ?? ''), staffId: Number.isInteger(b.staff_id) ? b.staff_id : null, answers, now,
+    });
+    const saved = applyDiff(db, diffDb(db, res.db), { author: 'Website', isAdmin: false });
+    const booking = read(saved, 'appointment.booking', res.id);
+    return { status: 201, body: { booking: booking.id, start: booking.start, ...(booking.meeting_url ? { meeting_url: booking.meeting_url } : {}) }, db: saved };
+  } catch (e) {
+    return { status: 400, body: { error: e.message } };
+  }
 }
 
 /** Anonymous job application to a published position. */

@@ -14,11 +14,11 @@ test('one batched diff cannot overbook an event', () => {
   assert.throws(() => applyDiff(db, { upserts: { 'event.registration': regs }, deletes: {} }), /sold out/);
 });
 
-test('bookings overlapping in time are refused even at different start times', () => {
-  const { db, id } = create(seed(), 'appointment.type', { name: 'Call', duration: 1, capacity: 1 });
-  const first = create(db, 'appointment.booking', { name: 'A', type_id: id, date: '2027-03-01', time: '10:00' });
-  assert.throws(() => create(first.db, 'appointment.booking', { name: 'B', type_id: id, date: '2027-03-01', time: '10:30' }), /already booked/);
-  assert.ok(create(first.db, 'appointment.booking', { name: 'B', type_id: id, date: '2027-03-01', time: '11:00' }).id);
+test('a staff member cannot hold overlapping bookings, even at different start times', () => {
+  const { db, id } = create(seed(), 'appointment.type', { name: 'Call', duration: 60, capacity: 1 });
+  const first = create(db, 'appointment.booking', { name: 'A', type_id: id, staff_id: 2, start: '2027-03-01T10:00', end: '2027-03-01T11:00' });
+  assert.throws(() => create(first.db, 'appointment.booking', { name: 'B', type_id: id, staff_id: 2, start: '2027-03-01T10:30', end: '2027-03-01T11:30' }), /already booked/);
+  assert.ok(create(first.db, 'appointment.booking', { name: 'B', type_id: id, staff_id: 2, start: '2027-03-01T11:00', end: '2027-03-01T12:00' }).id);
 });
 
 test('an overdue rental still out keeps its units busy', () => {

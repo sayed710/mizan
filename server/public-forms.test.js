@@ -19,19 +19,20 @@ test('visitors register to announced events until seats run out', () => {
   assert.equal(publicRegister(db, { event_id: id, name: '', email: 'x' }).status, 400);
 });
 
+const NOW = new Date('2027-03-01T06:00:00Z'); // Monday 08:00 in Cairo
+
 test('visitors book appointments only in available slots', () => {
-  const monday = (() => { let d = addDays(today(), 1); while (new Date(`${d}T00:00:00`).getDay() !== 1) d = addDays(d, 1); return d; })();
   const { db, id } = create(seed(), 'appointment.type', { name: 'Consult', is_published: true, slot_ids: [{ weekday: '1', start: '09:00', end: '12:00' }] });
-  assert.equal(publicBook(db, { type_id: id, date: monday, time: '10:00', name: 'Hala', email: 'hala@example.com' }).status, 201);
-  assert.match(publicBook(db, { type_id: id, date: monday, time: '15:00', name: 'Hala', email: 'hala@example.com' }).body.error, /not available/);
-  assert.equal(publicBook(db, { type_id: id, date: '2000-01-03', time: '10:00', name: 'Hala', email: 'hala@example.com' }).status, 400);
+  assert.equal(publicBook(db, { type_id: id, start: '2027-03-01T10:00', name: 'Hala', email: 'hala@example.com' }, NOW).status, 201);
+  assert.match(publicBook(db, { type_id: id, start: '2027-03-01T15:00', name: 'Hala', email: 'hala@example.com' }, NOW).body.error, /no longer available/);
+  assert.equal(publicBook(db, { type_id: id, start: '2000-01-03T10:00', name: 'Hala', email: 'hala@example.com' }, NOW).status, 400);
 });
 
-test('unpublished appointment types are hidden and impossible dates are refused', () => {
-  const { db, id } = create(seed(), 'appointment.type', { name: 'Internal interview' });
+test('unpublished appointment types are hidden and impossible times are refused', () => {
+  const { db, id } = create(seed(), 'appointment.type', { name: 'Internal interview', slot_ids: [{ weekday: '1', start: '09:00', end: '12:00' }] });
   assert.ok(!publicSite(db).appointments.some((a) => a.id === id));
-  assert.equal(publicBook(db, { type_id: id, date: '2099-03-01', time: '10:00', name: 'A', email: 'a@b.co' }).status, 400);
+  assert.equal(publicBook(db, { type_id: id, start: '2027-03-01T10:00', name: 'A', email: 'a@b.co' }, NOW).status, 400);
   const pub = create(seed(), 'appointment.type', { name: 'Open', is_published: true });
-  assert.equal(publicBook(pub.db, { type_id: pub.id, date: '2099-02-31', time: '10:00', name: 'A', email: 'a@b.co' }).status, 400);
-  assert.equal(publicBook(pub.db, { type_id: pub.id, date: '2099-03-01', time: '99:99', name: 'A', email: 'a@b.co' }).status, 400);
+  assert.equal(publicBook(pub.db, { type_id: pub.id, start: '2027-02-31T10:00', name: 'A', email: 'a@b.co' }, NOW).status, 400);
+  assert.equal(publicBook(pub.db, { type_id: pub.id, start: '2027-03-01T99:99', name: 'A', email: 'a@b.co' }, NOW).status, 400);
 });

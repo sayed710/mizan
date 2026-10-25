@@ -1,4 +1,4 @@
-// Sign, Documents, Planning, Rental, Appointments.
+// Sign, Documents, Planning, Rental (Appointments live in appointments.js).
 import { create, read, write } from '../orm.js';
 import { addDays, pad, today } from './common.js';
 import { moveStock } from './sales.js';
@@ -78,22 +78,6 @@ function rentalInvoice(db, r) {
     ],
   });
   return { db: write(next, 'sale.rental', r.id, { invoiced: true, late_fee_invoiced: fee }), go: `#/accounting/invoices/${id}` };
-}
-
-/** A booking must fall inside one of the type's weekly slots (when it defines any) and respect the slot capacity. */
-export function bookingGuard(db, b) {
-  if (b.state === 'cancel') return null;
-  const type = read(db, 'appointment.type', b.type_id);
-  if (!type) return null;
-  const weekday = String(new Date(`${b.date}T00:00:00`).getDay());
-  const slots = type.slot_ids ?? [];
-  if (slots.length && !slots.some((s) => s.weekday === weekday && (!b.time || (b.time >= s.start && b.time < s.end)))) return `${type.name} is not available at that time`;
-  const minutes = (t) => (/^\d{2}:\d{2}$/.test(t ?? '') ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3)) : null);
-  const length = Math.max(1, Math.round((Number(type.duration) || 1) * 60));
-  const start = minutes(b.time);
-  const overlaps = (x) => (start == null || minutes(x.time) == null ? x.time === b.time : minutes(x.time) < start + length && start < minutes(x.time) + length);
-  const same = (db.records['appointment.booking'] ?? []).filter((x) => x.id !== b.id && x.type_id === b.type_id && x.date === b.date && x.state !== 'cancel' && overlaps(x));
-  return same.length >= (Number(type.capacity) || 1) ? 'This slot is already booked' : null;
 }
 
 /** Why a shift clashes: another shift of the same resource on overlapping days, or approved time off. */
@@ -345,62 +329,6 @@ export const extraModels = {
       ribbon: (r) => (r.state === 'picked' && r.return_date < today() ? 'Late' : null),
       title: 'name',
       groups: [['partner_id', 'product_id', 'qty', 'deposit'], ['pickup_date', 'return_date', 'actual_return_date', 'price_per_day', 'amount_total', 'late_fee_factor', 'late_fee']],
-      chatter: true,
-    },
-  },
-
-  'appointment.type': {
-    label: 'Appointment Types',
-    fields: {
-      name: { type: 'char', label: 'Appointment Title', required: true },
-      duration: { type: 'float', label: 'Duration (hours)' },
-      location: { type: 'char', label: 'Location' },
-      user_id: { type: 'many2one', relation: 'hr.employee', label: 'Host' },
-      description: { type: 'text', label: 'Introduction Message' },
-      capacity: { type: 'integer', label: 'Bookings per Slot' },
-      is_published: { type: 'boolean', label: 'Published on Website' },
-      slot_ids: {
-        type: 'one2many', label: 'Availabilities',
-        fields: {
-          weekday: { type: 'selection', label: 'Day', options: [['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday'], ['0', 'Sunday']] },
-          start: { type: 'char', label: 'From (HH:MM)' }, end: { type: 'char', label: 'To (HH:MM)' },
-        },
-        newLine: () => ({ weekday: '1', start: '09:00', end: '17:00' }),
-      },
-    },
-    defaults: () => ({ duration: 1, user_id: 1, capacity: 1, slot_ids: [] }),
-    kanban: { title: 'name', lines: ['duration', 'location', 'user_id'], counter: { label: 'Bookings', model: 'appointment.booking', field: 'type_id' } },
-    list: ['name', 'duration', 'location', 'user_id'],
-    form: {
-      title: 'name',
-      smart: [{ label: 'Bookings', model: 'appointment.booking', field: 'type_id', target: 'appointments/bookings' }],
-      groups: [['duration', 'location'], ['user_id', 'capacity', 'is_published']],
-      tabs: [{ label: 'Availabilities', fields: ['slot_ids'] }, { label: 'Introduction Message', fields: ['description'] }],
-    },
-  },
-
-  'appointment.booking': {
-    label: 'Bookings',
-    fields: {
-      name: { type: 'char', label: 'Booked by', required: true },
-      type_id: { type: 'many2one', relation: 'appointment.type', label: 'Appointment', required: true },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
-      date: { type: 'date', label: 'Date', required: true },
-      time: { type: 'char', label: 'Time' },
-      state: state([['booked', 'Booked'], ['done', 'Attended'], ['no_show', 'No Show'], ['cancel', 'Cancelled']]),
-    },
-    defaults: () => ({ date: addDays(today(), 1), time: '10:00', state: 'booked' }),
-    guard: (db, before, after) => bookingGuard(db, after),
-    groupBys: ['type_id', 'state', 'date'],
-    kanban: { groupBy: 'state', title: 'name', lines: ['type_id', 'date', 'time'] },
-    list: ['date', 'time', 'name', 'type_id', 'partner_id', 'state'],
-    views: ['calendar', 'list', 'kanban'],
-    calendar: { date: 'date', time: 'time' },
-    form: {
-      statusbar: 'state',
-      statusbarClickable: true,
-      title: 'name',
-      groups: [['type_id', 'partner_id'], ['date', 'time']],
       chatter: true,
     },
   },

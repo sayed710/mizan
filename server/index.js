@@ -11,7 +11,8 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
-import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite } from './api.js';
+import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
+import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
@@ -62,7 +63,7 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
-let db = storage.load();
+let db = migrateAppointments(storage.load());
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
 /**
@@ -297,6 +298,13 @@ async function api(req, res, path) {
     if (recent(`cart:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`cart:${ip}`);
     const out = publicCart(db, await readJson(req));
+    return send(res, out.status, out.body);
+  }
+  const slotsRoute = /^\/api\/public\/appointment\/(\d+)\/slots$/.exec(path);
+  if (slotsRoute && req.method === 'GET') {
+    if (recent(`slots:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
+    recordFailure(`slots:${ip}`);
+    const out = publicSlots(db, slotsRoute[1], new URL(req.url, 'http://x').searchParams);
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/order-status' && req.method === 'GET') {

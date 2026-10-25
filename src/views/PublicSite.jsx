@@ -1,14 +1,15 @@
 // Public website (no login): published pages + shop, served from /api/public/* on the Mizan server.
-// Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments, #/shop/jobs, #/shop/blog…, #/shop/forum… (Blog.jsx).
+// Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments[/<id>] (Appointments.jsx), #/shop/jobs, #/shop/blog…, #/shop/forum… (Blog.jsx).
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n.js';
 import { setCurrency } from '../ui.jsx';
 import { matchRule } from '../models/livechat.js';
 import { Shop, parseShopRoute, useCart, useStored } from './Shop.jsx';
 import { Blog, Forum } from './Blog.jsx';
+import { Appointments } from './Appointments.jsx';
 
-/** Name/email/phone form posting to a public endpoint, with an optional choice and date/time; shows the server's answer. */
-function VisitorForm({ action, path, extra, choices, dateTime }) {
+/** Name/email/phone form posting to a public endpoint, with an optional choice; shows the server's answer. */
+function VisitorForm({ action, path, extra, choices }) {
   const [state, setState] = useState({ open: false, done: false, error: null });
   if (state.done) return <p role="status">{t('Thank you! We will confirm by email.')}</p>;
   if (!state.open) return <button type="button" className="btn primary" onClick={() => setState({ ...state, open: true })}>{action}</button>;
@@ -23,7 +24,6 @@ function VisitorForm({ action, path, extra, choices, dateTime }) {
       <label>{t('Email')}<input name="email" type="email" required /></label>
       <label>{t('Phone')}<input name="phone" type="tel" /></label>
       {choices && <label>{choices.label}<select name={choices.name}>{choices.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>}
-      {dateTime && <><label>{t('Date')}<input name="date" type="date" required /></label><label>{t('Time')}<input name="time" type="time" required /></label></>}
       {state.error && <div className="alert" role="alert">{state.error}</div>}
       <button type="submit" className="btn primary">{action}</button>
     </form>
@@ -220,14 +220,7 @@ export function PublicSite() {
               choices={e.tickets.length ? { name: 'ticket', label: t('Ticket'), options: e.tickets.map((tk) => [tk.name, `${tk.name}${tk.price ? ` (${tk.price})` : ''}`]) } : null} />
           </article>
         ))}
-        {route.page === 'appointments' && site.appointments.map((a) => (
-          <article key={a.id} className="shop-item job">
-            <h3>{a.name}</h3>
-            <p className="muted">{a.duration} h{a.location ? ` · ${a.location}` : ''}</p>
-            <p>{a.description}</p>
-            <VisitorForm action={t('Book')} path="/api/public/book" extra={{ type_id: a.id }} dateTime />
-          </article>
-        ))}
+        {route.page === 'appointments' && <Appointments site={site} route={route} />}
         {route.page === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
           <>
             <h2>{t('Jobs')}</h2>

@@ -548,3 +548,36 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .forum .forum-accepted { color: var(--success, #16a34a); font-weight: 600; margin-block: 0 4px; }
 .forum .forum-notice { padding: 12px 16px; border-radius: var(--radius, 6px); background: var(--brand-soft); }
 @media (max-width: 640px) { .blog .blog-card { flex-direction: column; } .blog .blog-card img { inline-size: 100%; max-inline-size: none; } }
+/* Public appointments */
+.appt h1 { font-size: 30px; margin-block: 4px 16px; letter-spacing: -.01em; }
+.appt .appt-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.appt .appt-head input { min-inline-size: 0; inline-size: min(320px, 100%); padding: 8px 12px; border: 1px solid var(--border); border-radius: 999px; }
+.appt .appt-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+.appt .appt-card { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; color: inherit; text-decoration: none; background: var(--surface, #fff); transition: box-shadow .15s, transform .15s; }
+.appt .appt-card:hover, .appt .appt-card:focus-visible { box-shadow: 0 6px 20px rgba(0, 0, 0, .1); transform: translateY(-2px); }
+.appt .appt-card img, .appt .appt-card-img { inline-size: 100%; block-size: 140px; object-fit: cover; }
+.appt .appt-card-img { display: grid; place-items: center; font-size: 36px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #22d3ee, #7c3aed); }
+.appt .appt-card-body { padding: 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.appt .appt-card-body h2 { font-size: 18px; margin: 0; }
+.appt .appt-card-body p { margin: 0; }
+.appt .appt-card-foot { display: flex; justify-content: space-between; align-items: center; margin-block-start: auto; }
+.appt .appt-avatars { display: flex; }
+.appt .appt-avatars > * { inline-size: 30px; block-size: 30px; border-radius: 50%; border: 2px solid var(--surface, #fff); margin-inline-start: -6px; display: grid; place-items: center; font-size: 11px; font-weight: 600; background: var(--brand-soft); color: var(--brand); object-fit: cover; }
+.appt .appt-avatars > :first-child { margin-inline-start: 0; }
+.appt-page { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: start; }
+.appt .appt-side { border: 1px solid var(--border); border-radius: 12px; padding: 16px; position: sticky; inset-block-start: 16px; }
+.appt .appt-side img { inline-size: 100%; border-radius: 8px; }
+.appt .appt-row { display: flex; align-items: center; gap: 8px; margin-block-end: 12px; }
+.appt .appt-row select { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.appt .appt-label { font-size: 15px; margin-block: 16px 8px; }
+.appt .appt-days { display: flex; gap: 8px; overflow-x: auto; padding-block-end: 6px; scroll-snap-type: x mandatory; }
+.appt .appt-day { flex: 0 0 64px; scroll-snap-align: start; display: flex; flex-direction: column; align-items: center; gap: 2px; padding-block: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface, #fff); cursor: pointer; }
+.appt .appt-day b { font-size: 18px; }
+.appt .appt-day.active { border-color: var(--brand); background: var(--brand); color: #fff; }
+.appt .appt-day:disabled { opacity: .4; cursor: not-allowed; }
+.appt .appt-times { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.appt .appt-continue { margin-block-start: 20px; }
+.appt .appt-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.appt-done { max-inline-size: 560px; margin-inline: auto; text-align: center; }
+.appt-done a { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .appt-page { grid-template-columns: 1fr; } .appt .appt-side { position: static; order: -1; } .appt h1 { font-size: 24px; } }

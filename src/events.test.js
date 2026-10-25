@@ -14,13 +14,11 @@ test('events cap seats overall and per ticket; cancelling frees a seat', () => {
   assert.ok(create(freed, 'event.registration', { name: 'C', event_id: id }).id);
 });
 
-test('bookings must fit a weekly slot and its capacity', () => {
+test('back-office bookings respect the slot capacity', () => {
   const { db, id } = create(seed(), 'appointment.type', { name: 'Demo', capacity: 1, slot_ids: [{ weekday: '1', start: '09:00', end: '12:00' }] });
-  const monday = '2027-03-01';
-  assert.throws(() => create(db, 'appointment.booking', { name: 'X', type_id: id, date: monday, time: '13:00' }), /not available/);
-  assert.throws(() => create(db, 'appointment.booking', { name: 'X', type_id: id, date: '2027-03-02', time: '10:00' }), /not available/);
-  const first = create(db, 'appointment.booking', { name: 'X', type_id: id, date: monday, time: '10:00' });
-  assert.throws(() => create(first.db, 'appointment.booking', { name: 'Y', type_id: id, date: monday, time: '10:00' }), /already booked/);
+  const first = create(db, 'appointment.booking', { name: 'X', type_id: id, start: '2027-03-01T10:00' });
+  assert.throws(() => create(first.db, 'appointment.booking', { name: 'Y', type_id: id, start: '2027-03-01T10:00' }), /already booked/);
+  assert.throws(() => create(db, 'appointment.booking', { name: 'Z', type_id: id, start: '2027-03-01 10:00' }), /YYYY-MM-DDTHH:MM/);
 });
 
 test('planning flags overlapping shifts and time off, fills from templates and copies a week ahead', async () => {
