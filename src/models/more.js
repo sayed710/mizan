@@ -445,6 +445,11 @@ export const moreModels = {
       date_end: { type: 'date', label: 'End Date' },
       location: { type: 'char', label: 'Venue' },
       seats_max: { type: 'float', label: 'Maximum Attendees' },
+      ticket_ids: {
+        type: 'one2many', label: 'Tickets',
+        fields: { name: { type: 'char', label: 'Ticket' }, price: { type: 'monetary', label: 'Price' }, seats_max: { type: 'float', label: 'Seats (0 = unlimited)' } },
+        newLine: () => ({ name: 'Standard', price: 0, seats_max: 0 }),
+      },
       stage_id: state([['new', 'New'], ['booked', 'Booked'], ['announced', 'Announced'], ['ended', 'Ended'], ['cancelled', 'Cancelled']], 'Stage'),
       user_id: employee('Organizer'),
       tag_ids: { type: 'tags', label: 'Tags' },
@@ -462,7 +467,7 @@ export const moreModels = {
       title: 'name',
       smart: [{ label: 'Attendees', model: 'event.registration', field: 'event_id', target: 'events/attendees' }],
       groups: [['date_begin', 'date_end', 'location'], ['seats_max', 'user_id', 'tag_ids']],
-      tabs: [{ label: 'Description', fields: ['description'] }],
+      tabs: [{ label: 'Tickets', fields: ['ticket_ids'] }, { label: 'Description', fields: ['description'] }],
       chatter: true,
     },
   },
@@ -474,9 +479,23 @@ export const moreModels = {
       event_id: { type: 'many2one', relation: 'event.event', label: 'Event', required: true },
       email: { type: 'char', label: 'Email' },
       phone: { type: 'char', label: 'Phone' },
+      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
+      ticket: { type: 'char', label: 'Ticket' },
+      barcode: { type: 'char', label: 'Badge Code', readonly: true },
+      date_checked_in: { type: 'date', label: 'Checked in on', readonly: true },
       state: state([['open', 'Registered'], ['done', 'Attended'], ['cancel', 'Cancelled']]),
     },
-    defaults: () => ({ state: 'open' }),
+    defaults: (id) => ({ state: 'open', barcode: `EVT${pad(id, 8)}` }),
+    // Seats are capped per event and per ticket type (0 = unlimited); cancelled registrations free their seat.
+    guard: (db, before, after) => {
+      if (after.state === 'cancel' || (before && before.state !== 'cancel' && before.event_id === after.event_id && before.ticket === after.ticket)) return null;
+      const event = read(db, 'event.event', after.event_id);
+      const taken = (db.records['event.registration'] ?? []).filter((x) => x.id !== after.id && x.event_id === after.event_id && x.state !== 'cancel');
+      if (Number(event?.seats_max) > 0 && taken.length >= Number(event.seats_max)) return `${event.name} is sold out`;
+      const ticket = (event?.ticket_ids ?? []).find((t) => t.name === after.ticket);
+      if (ticket && Number(ticket.seats_max) > 0 && taken.filter((x) => x.ticket === ticket.name).length >= Number(ticket.seats_max)) return `No ${ticket.name} tickets left`;
+      return null;
+    },
     groupBys: ['event_id', 'state'],
     kanban: { groupBy: 'state', title: 'name', lines: ['event_id', 'email'] },
     list: ['name', 'event_id', 'email', 'phone', 'state'],
@@ -484,9 +503,12 @@ export const moreModels = {
     form: {
       statusbar: 'state',
       statusbarClickable: true,
-      buttons: [{ label: 'Attended', primary: true, vals: { state: 'done' }, when: (r) => r.state === 'open' }],
+      buttons: [
+        { label: 'Check in', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: write(db, 'event.registration', r.id, { state: 'done', date_checked_in: today() }) }) },
+        { label: 'Cancel Registration', when: (r) => r.state === 'open', vals: { state: 'cancel' } },
+      ],
       title: 'name',
-      groups: [['event_id', 'email', 'phone'], []],
+      groups: [['event_id', 'ticket', 'partner_id'], ['email', 'phone', 'barcode', 'date_checked_in']],
       chatter: true,
     },
   },

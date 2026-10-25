@@ -496,6 +496,10 @@ const ar = {
   Weekly: 'أسبوعي', Quarterly: 'ربع سنوي', 'Recurring Lines': 'البنود المتكررة', 'Close Reason': 'سبب الإغلاق', 'Quality issues': 'مشاكل الجودة',
   'Moved to a competitor': 'انتقل إلى منافس', 'No longer needed': 'لم تعد هناك حاجة', Renew: 'تجديد', Subscription: 'الاشتراك',
   'Returned on': 'أُعيد في', 'Late Fee (× daily price)': 'غرامة التأخير (× السعر اليومي)', 'Late Fee': 'غرامة التأخير', 'Security Deposit': 'مبلغ التأمين',
+  Ticket: 'التذكرة', 'Seats (0 = unlimited)': 'المقاعد (0 = بلا حد)', 'Badge Code': 'رمز الشارة', 'Checked in on': 'تاريخ الحضور',
+  'Check in': 'تسجيل الحضور', 'Cancel Registration': 'إلغاء التسجيل', 'Parent Department': 'القسم الأب', 'Extra Hours': 'ساعات إضافية', 'Bookings per Slot': 'الحجوزات لكل موعد',
+  Availabilities: 'الأوقات المتاحة', Day: 'اليوم', 'From (HH:MM)': 'من (س:د)', 'To (HH:MM)': 'إلى (س:د)', Monday: 'الإثنين', Tuesday: 'الثلاثاء', Wednesday: 'الأربعاء',
+  Thursday: 'الخميس', Friday: 'الجمعة', Saturday: 'السبت', Sunday: 'الأحد',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

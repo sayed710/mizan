@@ -9,6 +9,7 @@ const hm = (s) => {
   const m = /^(\d{1,2}):(\d{2})$/.exec(s ?? '');
   return m ? Number(m[1]) + Number(m[2]) / 60 : null;
 };
+const STANDARD_DAY_HOURS = 8;
 export const workedHours = (r) => {
   const a = hm(r.check_in);
   const b = hm(r.check_out);
@@ -192,17 +193,18 @@ export const apps2Models = {
       check_in: { type: 'char', label: 'Check In' },
       check_out: { type: 'char', label: 'Check Out' },
       worked_hours: { type: 'float', label: 'Worked Hours', compute: workedHours },
+      overtime: { type: 'float', label: 'Extra Hours', compute: (r) => (r.check_out ? Math.round((workedHours(r) - STANDARD_DAY_HOURS) * 100) / 100 : 0) },
       name: { type: 'char', label: 'Name', compute: (r) => `${r.date ?? ''} ${r.check_in ?? ''}` },
     },
     defaults: () => ({ date: today(), check_in: '09:00' }),
     filters: [[{ id: 'today', label: 'Today', fn: (r) => r.date === today() }, { id: 'open', label: 'Checked In', fn: (r) => !r.check_out }]],
     groupBys: ['employee_id', 'date'],
     kanban: { title: 'date', lines: ['employee_id', 'check_in', 'check_out', 'worked_hours'] },
-    list: ['employee_id', 'date', 'check_in', 'check_out', 'worked_hours'],
+    list: ['employee_id', 'date', 'check_in', 'check_out', 'worked_hours', 'overtime'],
     views: ['list', 'kanban', 'pivot', 'graph'],
     pivot: { row: 'employee_id', col: 'date', measure: 'worked_hours' },
     graph: { groupBy: 'employee_id', measure: 'worked_hours' },
-    form: { title: 'date', groups: [['employee_id', 'date'], ['check_in', 'check_out', 'worked_hours']] },
+    form: { title: 'date', groups: [['employee_id', 'date'], ['check_in', 'check_out', 'worked_hours', 'overtime']] },
   },
 
   'hr.appraisal': simple({

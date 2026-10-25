@@ -54,6 +54,18 @@ function rentalInvoice(db, r) {
   return { db: write(next, 'sale.rental', r.id, { invoiced: true }), go: `#/accounting/invoices/${id}` };
 }
 
+/** A booking must fall inside one of the type's weekly slots (when it defines any) and respect the slot capacity. */
+export function bookingGuard(db, b) {
+  if (b.state === 'cancel') return null;
+  const type = read(db, 'appointment.type', b.type_id);
+  if (!type) return null;
+  const weekday = String(new Date(`${b.date}T00:00:00`).getDay());
+  const slots = type.slot_ids ?? [];
+  if (slots.length && !slots.some((s) => s.weekday === weekday && (!b.time || (b.time >= s.start && b.time < s.end)))) return `${type.name} is not available at that time`;
+  const same = (db.records['appointment.booking'] ?? []).filter((x) => x.id !== b.id && x.type_id === b.type_id && x.date === b.date && x.time === b.time && x.state !== 'cancel');
+  return same.length >= (Number(type.capacity) || 1) ? 'This slot is already booked' : null;
+}
+
 export const extraModels = {
   'website.page': {
     label: 'Pages',
@@ -288,15 +300,24 @@ export const extraModels = {
       location: { type: 'char', label: 'Location' },
       user_id: { type: 'many2one', relation: 'hr.employee', label: 'Host' },
       description: { type: 'text', label: 'Introduction Message' },
+      capacity: { type: 'integer', label: 'Bookings per Slot' },
+      slot_ids: {
+        type: 'one2many', label: 'Availabilities',
+        fields: {
+          weekday: { type: 'selection', label: 'Day', options: [['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday'], ['0', 'Sunday']] },
+          start: { type: 'char', label: 'From (HH:MM)' }, end: { type: 'char', label: 'To (HH:MM)' },
+        },
+        newLine: () => ({ weekday: '1', start: '09:00', end: '17:00' }),
+      },
     },
-    defaults: () => ({ duration: 1, user_id: 1 }),
+    defaults: () => ({ duration: 1, user_id: 1, capacity: 1, slot_ids: [] }),
     kanban: { title: 'name', lines: ['duration', 'location', 'user_id'], counter: { label: 'Bookings', model: 'appointment.booking', field: 'type_id' } },
     list: ['name', 'duration', 'location', 'user_id'],
     form: {
       title: 'name',
       smart: [{ label: 'Bookings', model: 'appointment.booking', field: 'type_id', target: 'appointments/bookings' }],
-      groups: [['duration', 'location'], ['user_id']],
-      tabs: [{ label: 'Introduction Message', fields: ['description'] }],
+      groups: [['duration', 'location'], ['user_id', 'capacity']],
+      tabs: [{ label: 'Availabilities', fields: ['slot_ids'] }, { label: 'Introduction Message', fields: ['description'] }],
     },
   },
 
@@ -311,6 +332,7 @@ export const extraModels = {
       state: state([['booked', 'Booked'], ['done', 'Attended'], ['no_show', 'No Show'], ['cancel', 'Cancelled']]),
     },
     defaults: () => ({ date: addDays(today(), 1), time: '10:00', state: 'booked' }),
+    guard: (db, before, after) => bookingGuard(db, after),
     groupBys: ['type_id', 'state', 'date'],
     kanban: { groupBy: 'state', title: 'name', lines: ['type_id', 'date', 'time'] },
     list: ['date', 'time', 'name', 'type_id', 'partner_id', 'state'],
