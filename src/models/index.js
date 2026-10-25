@@ -327,8 +327,8 @@ const allApps = [
       { label: 'Reporting', children: [{ key: 'traces', label: 'Mailing Traces', model: 'mailing.trace' }] },
     ],
   },
-  { id: 'sign', name: 'Sign', color: ['#0ea5e9', '#0f172a'], menus: [{ key: 'documents', label: 'Documents to Sign', model: 'sign.request' }] },
-  { id: 'documents', name: 'Documents', color: ['#f59e0b', '#be123c'], menus: [{ key: 'all', label: 'Documents', model: 'documents.document' }, { key: 'requests', label: 'Request Document', model: 'documents.document', domain: (r) => r.is_request, defaults: { is_request: true } }] },
+  { id: 'sign', name: 'Sign', color: ['#0ea5e9', '#0f172a'], menus: [{ key: 'documents', label: 'Documents to Sign', model: 'sign.request' }, { key: 'templates', label: 'Templates', model: 'sign.template' }] },
+  { id: 'documents', name: 'Documents', color: ['#f59e0b', '#be123c'], menus: [{ key: 'all', label: 'Documents', model: 'documents.document' }, { key: 'requests', label: 'Request Document', model: 'documents.document', domain: (r) => r.is_request, defaults: { is_request: true } }, { label: 'Configuration', children: [{ key: 'folders', label: 'Folders', model: 'documents.folder' }, { key: 'tags', label: 'Tags', model: 'documents.tag' }, { key: 'shares', label: 'Share Links', model: 'documents.share' }] }] },
   {
     id: 'planning', name: 'Planning', color: ['#facc15', '#0d9488'],
     menus: [
