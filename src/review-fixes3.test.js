@@ -1,0 +1,89 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { create, read, search } from './orm.js';
+import { cleanRecord } from './validate.js';
+import { accountId, journalItems } from './models/ledger.js';
+import { payMove, postMove } from './models/accounting.js';
+import { postPayment } from './models/pay.js';
+import { confirmAsset } from './models/assets.js';
+import { runScheduledJobs } from './models/scheduler.js';
+import { applyRule } from './models/reconcile.js';
+import { taxSnapshot } from './models/taxes.js';
+import { invoiceQrPayload } from './models/qr.js';
+import { seed } from './seed.js';
+
+const cashTax = (db) => search(db, 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)');
+const balanceOf = (db, code) => journalItems(db).filter((l) => l.account_id === accountId(db, code)).reduce((s, l) => s + l.credit - l.debit, 0);
+const post = (db, vals) => {
+  const { db: next, id } = create(db, 'account.move', { partner_id: 1, invoice_date: '2026-03-01', invoice_date_due: '2026-03-31', ...vals });
+  return { db: postMove(next, id), id };
+};
+
+test('server validation keeps the tax snapshot on invoice lines', () => {
+  const db = seed();
+  const line = { product_id: 1, qty: 1, price_unit: 114, discount: 0, ...taxSnapshot(search(db, 'account.tax').find((t) => t.price_include)) };
+  const clean = cleanRecord('account.move', { move_type: 'out_invoice', invoice_line_ids: [line] }).invoice_line_ids[0];
+  assert.equal(clean.tax_include, true);
+  assert.equal(clean.tax_type, 'percent');
+  assert.equal(clean.tax_name, 'VAT 14% Included');
+});
+
+test('paying a cash-basis credit note reverses the released tax', () => {
+  const base = seed();
+  const before = balanceOf(base, '251000');
+  const lines = [{ product_id: 1, qty: 1, price_unit: 1000, discount: 0, ...taxSnapshot(cashTax(base)) }];
+  const inv = post(base, { move_type: 'out_invoice', invoice_line_ids: lines });
+  const paid = payMove(inv.db, inv.id, 1140, '2026-03-05');
+  const refund = post(paid, { move_type: 'out_refund', invoice_line_ids: lines });
+  const done = payMove(refund.db, refund.id, 1140, '2026-03-06');
+  assert.equal(Math.round(balanceOf(done, '251100') * 100) / 100, 0);
+  assert.equal(Math.round((balanceOf(done, '251000') - before) * 100) / 100, 0);
+});
+
+test('a manual payment releases cash-basis tax of the invoices it settles', () => {
+  const base = seed();
+  const fresh = create(base, 'res.partner', { name: 'Cash Basis Client' });
+  const inv = post(fresh.db, { move_type: 'out_invoice', partner_id: fresh.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, discount: 0, ...taxSnapshot(cashTax(base)) }] });
+  const { db, id } = create(inv.db, 'account.payment', { partner_id: fresh.id, amount: 1140, payment_type: 'inbound', partner_type: 'customer', date: '2026-03-10' });
+  const done = postPayment(db, read(db, 'account.payment', id));
+  assert.equal(Math.round(balanceOf(done, '251100') * 100) / 100, 0);
+});
+
+test('a locked depreciation line does not stop the other scheduled jobs', () => {
+  const { db, id } = create(seed(), 'account.asset', { name: 'Old Van', original_value: 1000, acquisition_date: '2020-01-01', method_number: 2, method_period: '12' });
+  const running = confirmAsset(db, read(db, 'account.asset', id));
+  const locked = { ...running, settings: { ...running.settings, lock_date: '2030-12-31' } };
+  assert.doesNotThrow(() => runScheduledJobs(locked, '2031-01-01'));
+});
+
+test('invoice matching never pays another partner or a different amount', () => {
+  const inv = post(seed(), { move_type: 'out_invoice', partner_id: 1, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const rule = { name: 'Match', rule_type: 'invoice_matching', line_ids: [] };
+  const other = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 2, state: 'to_check' });
+  assert.equal(applyRule(other.db, rule, read(other.db, 'account.bank.statement.line', other.id)), other.db);
+  const bigger = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 1000, partner_id: 1, state: 'to_check' });
+  assert.equal(applyRule(bigger.db, rule, read(bigger.db, 'account.bank.statement.line', bigger.id)), bigger.db);
+  const exact = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 1, state: 'to_check' });
+  const done = applyRule(exact.db, rule, read(exact.db, 'account.bank.statement.line', exact.id));
+  assert.equal(read(done, 'account.move', inv.id).payment_state, 'paid');
+});
+
+test('a write-off to an unknown account is refused', () => {
+  const { db, id } = create(seed(), 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'fee', amount: -5, state: 'to_check' });
+  const rule = { name: 'Typo', rule_type: 'writeoff_button', line_ids: [{ account_code: '690O00', amount_type: 'percentage', amount: 100 }] };
+  assert.throws(() => applyRule(db, rule, read(db, 'account.bank.statement.line', id)), /Unknown account/);
+});
+
+test('no EPC QR for paid or foreign-currency invoices', () => {
+  const settings = { invoice_qr: 'epc', company_iban: 'DE89370400440532013000' };
+  const company = { name: 'Mizan', currency: 'EUR' };
+  const move = { move_type: 'out_invoice', state: 'posted', name: 'INV/1', amount_residual: 0 };
+  assert.equal(invoiceQrPayload(settings, company, move), null);
+  assert.equal(invoiceQrPayload(settings, company, { ...move, amount_residual: 10, currency_id: 2 }), null);
+});
+
+test('a payment confirmed from a draft with an invoice gets a number', () => {
+  const inv = post(seed(), { move_type: 'out_invoice', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const { db, id } = create(inv.db, 'account.payment', { partner_id: 1, amount: 100, invoice_id: inv.id, payment_type: 'inbound', partner_type: 'customer' });
+  assert.match(read(postPayment(db, read(db, 'account.payment', id)), 'account.payment', id).name, /^PBNK1\//);
+});
