@@ -317,6 +317,10 @@ export function seed() {
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
   add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
+  const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
+  add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
+  add('helpdesk.sla', { name: 'Urgent: same day', team_id: support, priority: '3', days: 0 });
+  (db.records['helpdesk.ticket'] ?? []).forEach((t) => set('helpdesk.ticket', t.id, { team_id: support }));
   const line = (value, nb_days, value_type = 'percent') => ({ value, value_type, nb_days, delay_type: 'days_after' });
   add('account.payment.term', { name: 'Immediate Payment', line_ids: [line(100, 0)] });
   const t30 = add('account.payment.term', { name: '30 Days', line_ids: [line(100, 30)] });

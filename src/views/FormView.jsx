@@ -38,9 +38,11 @@ function SmartButtons({ db, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
-        const recs = search(db, s.model).filter((r) => r[s.field] === rec.id);
+        // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
+        const value = rec[s.key ?? 'id'];
+        const recs = value == null ? [] : search(db, s.model).filter((r) => r[s.field] === value);
         return (
-          <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${rec.id}`}>
+          <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${value}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>

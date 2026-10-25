@@ -20,10 +20,11 @@ import { batchModels } from './batch.js';
 import { termModels } from './terms.js';
 import { deferredModels } from './deferred.js';
 import { paymentModels } from './payments.js';
+import { helpdeskModels } from './helpdesk.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels };
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -163,6 +164,7 @@ const allApps = [
     menus: [
       { key: 'tickets', label: 'Tickets', model: 'helpdesk.ticket' },
       { key: 'report', label: 'Reporting', model: 'helpdesk.ticket', view: 'graph' },
+      { label: 'Configuration', children: [{ key: 'teams', label: 'Helpdesk Teams', model: 'helpdesk.team' }, { key: 'sla', label: 'SLA Policies', model: 'helpdesk.sla' }] },
     ],
   },
   {

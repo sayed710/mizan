@@ -470,6 +470,11 @@ const ar = {
   'Pay to the order of': 'ادفعوا لأمر', Memo: 'البيان',
   'Digitize Document': 'رقمنة المستند', 'This needs the server with AI enabled': 'يتطلب الخادم مع تفعيل الذكاء الاصطناعي',
   Valuation: 'التقييم', 'Stock Valuation': 'تقييم المخزون', 'Unit Cost': 'تكلفة الوحدة', 'Total Value': 'القيمة الإجمالية',
+  'Helpdesk Teams': 'فرق الدعم', 'Helpdesk Team': 'فريق الدعم', 'Email Alias': 'البريد المستعار', Assignment: 'التوزيع', Manual: 'يدوي',
+  'Balanced workload': 'توزيع متوازن', Randomly: 'عشوائي', 'SLA Policies': 'سياسات مستوى الخدمة', 'SLA Policy': 'سياسة مستوى الخدمة', 'Minimum Priority': 'أدنى أولوية',
+  'Days to Solve': 'أيام الحل', 'SLA Deadline': 'موعد مستوى الخدمة', 'SLA Status': 'حالة مستوى الخدمة', 'On Track': 'في الموعد', Failed: 'متأخر',
+  'Closed on': 'أُغلق في', Intervention: 'التدخل الميداني', 'Plan Intervention': 'جدولة تدخل ميداني', 'Customer Tickets': 'تذاكر العميل',
+  'SLA Failed': 'تجاوز مستوى الخدمة', 'SLA On Track': 'ضمن مستوى الخدمة', Low: 'منخفضة',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -1,5 +1,7 @@
 // Project, Helpdesk, Employees and Calendar.
+import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
+import { slaDeadline, slaStatus } from './helpdesk.js';
 
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 
@@ -205,15 +207,34 @@ export const workModels = {
       priority: { type: 'priority', label: 'Priority' },
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Description' },
+      team_id: { type: 'many2one', relation: 'helpdesk.team', label: 'Helpdesk Team' },
+      email: { type: 'char', label: 'Email' },
+      phone: { type: 'char', label: 'Phone' },
+      sla_deadline: { type: 'date', label: 'SLA Deadline', readonly: true },
+      sla_status: { type: 'selection', label: 'SLA Status', options: [['ok', 'On Track'], ['failed', 'Failed']], compute: (r) => slaStatus(r, today()) },
+      close_date: { type: 'date', label: 'Closed on', readonly: true },
+      fsm_task_id: { type: 'many2one', relation: 'fsm.task', label: 'Intervention', readonly: true },
     },
     defaults: () => ({ stage_id: 'new', ticket_type: 'question', priority: 0, tag_ids: [], create_date: today() }),
+    // Customer contact fills in; team/priority/type recompute the SLA deadline; solving stamps the close date.
+    onchange: (r, key, db) => {
+      if (key === 'partner_id' && r.partner_id) {
+        const p = read(db, 'res.partner', r.partner_id);
+        return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
+      }
+      if (['team_id', 'priority', 'ticket_type'].includes(key)) return { sla_deadline: slaDeadline(db, r) };
+      if (key === 'stage_id') return { close_date: r.stage_id === 'solved' ? today() : null };
+      return {};
+    },
     filters: [
       [{ id: 'mine', label: 'My Tickets', fn: (r) => r.user_id === 1 }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user_id }],
       [{ id: 'open', label: 'Open', fn: (r) => r.stage_id !== 'solved' }, { id: 'urgent', label: 'Urgent', fn: (r) => r.priority >= 3 }],
+      [{ id: 'sla_failed', label: 'SLA Failed', fn: (r) => slaStatus(r, today()) === 'failed' }, { id: 'sla_ok', label: 'SLA On Track', fn: (r) => slaStatus(r, today()) === 'ok' }],
     ],
-    groupBys: ['stage_id', 'user_id', 'ticket_type', 'partner_id', 'create_date'],
+    groupBys: ['stage_id', 'team_id', 'user_id', 'ticket_type', 'partner_id', 'create_date'],
     kanban: { groupBy: 'stage_id', title: 'name', lines: ['partner_id', 'ticket_type'], tags: 'tag_ids', priority: 'priority', badge: 'user_id', quickCreate: true },
-    list: ['name', 'partner_id', 'ticket_type', 'user_id', 'create_date', 'stage_id'],
+    list: ['name', 'partner_id', 'team_id', 'ticket_type', 'user_id', 'sla_deadline', 'stage_id'],
+    listDecoration: (r) => (slaStatus(r, today()) === 'failed' && r.stage_id !== 'solved' ? 'danger' : null),
     graph: { groupBy: 'ticket_type', measure: '__count' },
     pivot: { row: 'user_id', col: 'stage_id', measure: '__count' },
     views: ['kanban', 'list', 'graph', 'pivot'],
@@ -221,8 +242,16 @@ export const workModels = {
       statusbar: 'stage_id',
       statusbarClickable: true,
       title: 'name',
-      groups: [['partner_id', 'ticket_type', 'tag_ids'], ['user_id', 'priority', 'create_date']],
-      tabs: [{ label: 'Description', fields: ['description'] }],
+      buttons: [{
+        label: 'Plan Intervention', when: (r) => !r.fsm_task_id && r.stage_id !== 'solved',
+        run: (db, r) => {
+          const { db: next, id } = create(db, 'fsm.task', { name: r.name, partner_id: r.partner_id ?? null, technician_id: r.user_id ?? null, date: today(), description: r.description ?? '' });
+          return { db: write(next, 'helpdesk.ticket', r.id, { fsm_task_id: id }), go: `#/fieldservice/tasks/${id}` };
+        },
+      }],
+      smart: [{ label: 'Customer Tickets', model: 'helpdesk.ticket', field: 'partner_id', key: 'partner_id', target: 'helpdesk/tickets' }],
+      groups: [['team_id', 'user_id', 'priority', 'tag_ids'], ['partner_id', 'email', 'phone', 'ticket_type', 'sla_deadline', 'sla_status']],
+      tabs: [{ label: 'Description', fields: ['description'] }, { label: 'Extra Info', fields: ['create_date', 'close_date', 'fsm_task_id'] }],
       chatter: true,
     },
   },
