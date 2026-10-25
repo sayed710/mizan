@@ -669,6 +669,10 @@ const ar = {
   'Pick a time': 'اختر وقتًا للموعد', 'This slot is no longer available': 'هذا الموعد لم يعد متاحًا', 'Booking not found': 'الحجز غير موجود',
   'Only booked appointments can be cancelled': 'يمكن إلغاء المواعيد المحجوزة فقط', 'An appointment can only be cancelled before it starts': 'لا يمكن إلغاء الموعد إلا قبل بدايته',
   'Enter the start as YYYY-MM-DDTHH:MM': 'أدخل البداية بصيغة YYYY-MM-DDTHH:MM', 'This slot is already booked': 'هذا الموعد محجوز بالفعل', 'Unknown appointment': 'موعد غير معروف',
+  Demand: 'المطلوب', 'Back Order of': 'طلب متأخر من', 'Return of': 'مرتجع من',
+  Backorders: 'الطلبات المتأخرة', 'Create a backorder for the remaining quantities?': 'إنشاء طلب متأخر للكميات المتبقية؟',
+  'Set the quantities done before validating (or cancel the transfer)': 'حدد الكميات المنفذة قبل الاعتماد (أو ألغِ التحويل)',
+  'Only done transfers can be returned': 'يمكن إرجاع التحويلات المنجزة فقط', 'Add at least one product to the transfer': 'أضف منتجًا واحدًا على الأقل للتحويل',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -2,6 +2,7 @@ import { create, read, search, write } from '../orm.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
+import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
 import { dueDate } from './terms.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
@@ -126,21 +127,26 @@ export const salesModels = {
       location_id: { type: 'many2one', relation: 'stock.location', label: 'Source Location' },
       location_dest_id: { type: 'many2one', relation: 'stock.location', label: 'Destination Location' },
       carrier_tracking_ref: { type: 'char', label: 'Tracking Reference' },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['ready', 'Ready'], ['done', 'Done'], ['cancel', 'Cancelled']] },
+      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['waiting', 'Waiting'], ['ready', 'Ready'], ['done', 'Done'], ['cancel', 'Cancelled']] },
+      priority: { type: 'priority', label: 'Priority' },
+      backorder_id: { type: 'many2one', relation: 'stock.picking', label: 'Back Order of', readonly: true },
+      return_of: { type: 'many2one', relation: 'stock.picking', label: 'Return of', readonly: true },
+      note: { type: 'text', label: 'Note' },
       move_ids: {
         type: 'one2many',
         label: 'Operations',
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' } },
-        newLine: () => ({ product_id: null, qty: 1, lot_name: '' }),
+        // qty is the demand; quantity is what was actually done (empty = all of the demand).
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' } },
+        newLine: () => ({ product_id: null, qty: 1, quantity: null, lot_name: '' }),
       },
     },
     defaults: (id) => ({ name: `WH/${pad(id)}`, picking_type: 'outgoing', scheduled_date: today(), state: 'draft', move_ids: [] }),
     filters: [
       [{ id: 'receipts', label: 'Receipts', fn: (r) => r.picking_type === 'incoming' }, { id: 'deliveries', label: 'Deliveries', fn: (r) => r.picking_type === 'outgoing' }],
-      [{ id: 'ready', label: 'Ready', fn: (r) => r.state === 'ready' }, { id: 'late', label: 'Late', fn: (r) => r.state === 'ready' && r.scheduled_date < today() }],
+      [{ id: 'ready', label: 'Ready', fn: (r) => r.state === 'ready' }, { id: 'waiting', label: 'Waiting', fn: (r) => r.state === 'waiting' }, { id: 'late', label: 'Late', fn: (r) => ['ready', 'waiting'].includes(r.state) && r.scheduled_date < today() }, { id: 'backorders', label: 'Backorders', fn: (r) => !!r.backorder_id }],
     ],
     groupBys: ['picking_type', 'state', 'partner_id', 'scheduled_date'],
-    kanban: { groupBy: 'state', title: 'name', lines: ['partner_id', 'origin', 'scheduled_date'], badge: 'picking_type' },
+    kanban: { groupBy: 'state', title: 'name', lines: ['partner_id', 'origin', 'scheduled_date'], badge: 'picking_type', priority: 'priority' },
     list: ['name', 'partner_id', 'origin', 'scheduled_date', 'picking_type', 'state'],
     views: ['list', 'kanban', 'calendar'],
     calendar: { date: 'scheduled_date' },
@@ -149,23 +155,29 @@ export const salesModels = {
       statusbarHide: ['cancel'],
       lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
       buttons: [
-        { label: 'Mark as Todo', primary: true, vals: { state: 'ready' }, when: (r) => r.state === 'draft' },
+        { label: 'Mark as Todo', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: reservePicking(db, r) }) },
+        { label: 'Check Availability', primary: true, when: (r) => r.state === 'waiting', run: (db, r) => ({ db: reservePicking(db, r) }) },
         {
-          label: 'Validate', primary: true, when: (r) => r.state === 'ready',
+          // Done quantities below the demand ask whether the rest becomes a backorder (Odoo's backorder wizard).
+          label: 'Validate', primary: true, when: (r) => ['ready', 'waiting'].includes(r.state),
           run: (db, r) => {
-            const sign = r.picking_type === 'incoming' ? 1 : r.picking_type === 'outgoing' ? -1 : 0;
-            let next = write(moveStock(applyLots(db, r, sign || 0), r.move_ids, sign), 'stock.picking', r.id, { state: 'done', date_done: today() });
-            if (r.purchase_id) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
+            const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
+            const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
+            const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => moveStock(applyLots(d, p, sign || 0), p.move_ids, sign) });
+            let next = out.db;
+            if (r.purchase_id && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
             const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
-            if (order) next = addLineQty(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', r.move_ids ?? []);
+            if (order) next = addLineQty(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
             return { db: next };
           },
         },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'ready'].includes(r.state) },
+        { label: 'Return', when: (r) => r.state === 'done', run: (db, r) => { const out = returnPicking(db, r); return { db: out.db, go: `#/inventory/transfers/${out.id}` }; } },
+        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'waiting', 'ready'].includes(r.state) },
       ],
       title: 'name',
-      groups: [['partner_id', 'picking_type', 'origin', 'location_id', 'location_dest_id'], ['scheduled_date', 'date_done', 'carrier_id', 'carrier_tracking_ref']],
-      tabs: [{ label: 'Operations', fields: ['move_ids'] }],
+      groups: [['partner_id', 'picking_type', 'origin', 'location_id', 'location_dest_id'], ['scheduled_date', 'date_done', 'priority', 'carrier_id', 'carrier_tracking_ref', 'backorder_id', 'return_of']],
+      tabs: [{ label: 'Operations', fields: ['move_ids'] }, { label: 'Note', fields: ['note'] }],
+      ribbon: (r) => (r.state === 'waiting' ? 'Waiting' : null),
       chatter: true,
     },
   },
