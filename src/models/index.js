@@ -245,6 +245,7 @@ const allApps = [
     id: 'manufacturing', name: 'Manufacturing', color: ['#10b981', '#0e7490'],
     menus: [
       { key: 'orders', label: 'Manufacturing Orders', model: 'mrp.production' },
+      { key: 'workorders', label: 'Work Orders', model: 'mrp.workorder' },
       { key: 'boms', label: 'Bills of Materials', model: 'mrp.bom' },
       { key: 'workcenters', label: 'Work Centers', model: 'mrp.workcenter' },
       { key: 'unbuild', label: 'Unbuild Orders', model: 'mrp.unbuild' },
@@ -267,6 +268,8 @@ const allApps = [
     id: 'expenses', name: 'Expenses', color: ['#38bdf8', '#7c3aed'],
     menus: [
       { key: 'mine', label: 'My Expenses', model: 'hr.expense' },
+      { key: 'sheets', label: 'My Reports', model: 'hr.expense.sheet' },
+      { key: 'sheets-to-approve', label: 'Reports to Approve', model: 'hr.expense.sheet', domain: (r) => r.state === 'submit' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.expense', domain: (r) => r.state === 'submitted' },
       { key: 'report', label: 'Reporting', model: 'hr.expense', view: 'pivot' },
     ],
