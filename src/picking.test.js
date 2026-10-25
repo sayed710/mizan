@@ -67,3 +67,16 @@ test('a done delivery can be returned: the return brings the stock back', () => 
   assert.equal(read(received, 'product', p.id).qty_available, before);
   assert.throws(() => returnPicking(d1, read(d1, 'stock.picking', id)), /Only done/);
 });
+
+test('Mark as Todo creates the quality checks and Validate waits for them', () => {
+  const db = seed();
+  const p = goods(db);
+  const point = create(db, 'quality.point', { name: 'Inspect', operation: 'delivery', test_type: 'pass_fail', frequency: 'all', product_id: p.id });
+  const d = delivery(point.db, p, 1);
+  const todo = button('Mark as Todo').run(d.db, read(d.db, 'stock.picking', d.id)).db;
+  const check = search(todo, 'quality.check').find((c) => c.picking_id === d.id);
+  assert.equal(check.result, 'none');
+  assert.throws(() => button('Validate').run(todo, read(todo, 'stock.picking', d.id)), /quality check/);
+  const passed = write(todo, 'quality.check', check.id, { result: 'pass' });
+  assert.equal(read(button('Validate').run(passed, read(passed, 'stock.picking', d.id)).db, 'stock.picking', d.id).state, 'done');
+});

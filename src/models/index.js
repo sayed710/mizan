@@ -375,6 +375,7 @@ const allApps = [
   {
     id: 'quality', name: 'Quality', color: ['#22c55e', '#1e40af'],
     menus: [
+      { key: 'points', label: 'Control Points', model: 'quality.point' },
       { key: 'checks', label: 'Quality Checks', model: 'quality.check' },
       { key: 'alerts', label: 'Quality Alerts', model: 'quality.alert' },
     ],

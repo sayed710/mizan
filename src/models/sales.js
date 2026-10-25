@@ -3,6 +3,7 @@ import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
 import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
+import { canValidatePicking, createChecks } from './qualityplus.js';
 import { dueDate } from './terms.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
@@ -155,12 +156,15 @@ export const salesModels = {
       statusbarHide: ['cancel'],
       lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
       buttons: [
-        { label: 'Mark as Todo', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: reservePicking(db, r) }) },
+        // Planning a transfer also creates the quality checks its control points require.
+        { label: 'Mark as Todo', primary: true, when: (r) => r.state === 'draft', run: (db, r) => { const reserved = reservePicking(db, r); return { db: createChecks(reserved, read(reserved, 'stock.picking', r.id)) }; } },
         { label: 'Check Availability', primary: true, when: (r) => r.state === 'waiting', run: (db, r) => ({ db: reservePicking(db, r) }) },
         {
           // Done quantities below the demand ask whether the rest becomes a backorder (Odoo's backorder wizard).
           label: 'Validate', primary: true, when: (r) => ['ready', 'waiting'].includes(r.state),
           run: (db, r) => {
+            const quality = canValidatePicking(db, r);
+            if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
             const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
             const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
             const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => moveStock(applyLots(d, p, sign || 0), p.move_ids, sign) });
