@@ -39,11 +39,12 @@ import { knowledgeModels } from './knowledge.js';
 import { livechatModels } from './livechat.js';
 import { lunchModels } from './lunch.js';
 import { ecommerceModels } from './ecommerce.js';
+import { blogModels } from './blog.js';
 import { today } from './common.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...blogModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -329,6 +330,14 @@ const allApps = [
         { key: 'shop_categories', label: 'Product Categories', model: 'product.public.category' },
         { key: 'providers', label: 'Payment Providers', model: 'payment.provider' },
         { key: 'orders', label: 'Orders', model: 'sale.order', domain: (r) => r.source === 'website' },
+      ] },
+      { label: 'Blog', children: [
+        { key: 'blog_posts', label: 'Posts', model: 'blog.post' },
+        { key: 'blogs', label: 'Blogs', model: 'blog.blog' },
+      ] },
+      { label: 'Forum', children: [
+        { key: 'forum_posts', label: 'Posts', model: 'forum.post' },
+        { key: 'forums', label: 'Forums', model: 'forum.forum' },
       ] },
     ],
   },

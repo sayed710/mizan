@@ -378,6 +378,18 @@ export function seed() {
   (db.records['delivery.carrier'] ?? []).filter((c) => c.delivery_type !== 'api').forEach((c) => set('delivery.carrier', c.id, { is_published: true }));
   add('product.pricelist', { name: 'Online Promotion', selectable: true, items: [{ product_id: null, min_qty: 1, fixed_price: 0, percent: 5 }] });
 
+  // Blog and Forum: one blog with two published posts, one forum with a validated question and its accepted answer.
+  const news = add('blog.blog', { name: 'Mizan News', subtitle: 'Tips and stories from our team' });
+  add('blog.post', { blog_id: news, name: 'Setting up an ergonomic office', subtitle: 'Five quick wins', author_id: 1, tag_ids: ['Ergonomics', 'Office'], is_published: true, published_date: addDays(today(), -12),
+    website_meta_description: 'Five quick wins for a healthier office.',
+    content: '# Small changes, big comfort\n\nA good chair and desk height make **all** the difference:\n\n- Keep the screen at eye level\n- Feet flat on the floor\n- Take a short break every hour\n\nRead the [occupational health guide](https://www.who.int/health-topics/occupational-health) for *more* advice.' });
+  add('blog.post', { blog_id: news, name: 'Standing desks: our new collection', author_id: 1, tag_ids: ['Products'], is_published: true, published_date: addDays(today(), -3),
+    content: 'Our electric standing desks now come in **white** and **black**, with steel or aluminium legs.\n\nVisit the shop to configure yours.' });
+  const help = add('forum.forum', { name: 'Help', description: 'Questions and answers about our products.', mode: 'questions' });
+  const question = add('forum.post', { forum_id: help, name: 'How do I adjust the lumbar support?', content: 'My new ergonomic chair has a knob behind the back rest. What does it do?', author_name: 'Hala Adel', author_email: 'hala@example.com', tag_ids: ['Chairs'], state: 'active', votes: 2 });
+  const answer = add('forum.post', { forum_id: help, parent_id: question, name: 'Re: How do I adjust the lumbar support?', content: 'Turn the knob clockwise to push the support forward, and counter-clockwise to release it.', author_name: 'Mizan Support', state: 'active', votes: 1 });
+  set('forum.post', answer, { accepted: true });
+
   const seeded = { ...db, messages: [] };
   return postNote(seeded, 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

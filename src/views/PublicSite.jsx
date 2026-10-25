@@ -1,10 +1,11 @@
 // Public website (no login): published pages + shop, served from /api/public/* on the Mizan server.
-// Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments, #/shop/jobs.
+// Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments, #/shop/jobs, #/shop/blog…, #/shop/forum… (Blog.jsx).
 import { useEffect, useRef, useState } from 'react';
 import { t } from '../i18n.js';
 import { setCurrency } from '../ui.jsx';
 import { matchRule } from '../models/livechat.js';
 import { Shop, parseShopRoute, useCart, useStored } from './Shop.jsx';
+import { Blog, Forum } from './Blog.jsx';
 
 /** Name/email/phone form posting to a public endpoint, with an optional choice and date/time; shows the server's answer. */
 function VisitorForm({ action, path, extra, choices, dateTime }) {
@@ -137,7 +138,7 @@ function Content({ text = '' }) {
   });
 }
 
-const SITE_PAGES = ['page', 'events', 'appointments', 'jobs'];
+const SITE_PAGES = ['page', 'events', 'appointments', 'jobs', 'blog', 'forum'];
 
 /** Current location.hash, updated on navigation. */
 function useHash() {
@@ -150,7 +151,7 @@ function useHash() {
   return hash;
 }
 
-/** Header: pages, Shop, Events…, then search, pricelist, cart count, Sign in and Contact Us. */
+/** Header: pages, Shop, Events…, Blog, Help, then search, pricelist, cart count, Sign in and Contact Us. */
 function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
   const link = (href, label, current) => <a key={href} href={href} aria-current={current ? 'page' : undefined}>{label}</a>;
   const contact = site.pages.find((p) => p.slug === 'contact');
@@ -163,6 +164,8 @@ function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
         {site.events?.length > 0 && link('#/shop/events', t('Events'), route.page === 'events')}
         {site.appointments?.length > 0 && link('#/shop/appointments', t('Appointments'), route.page === 'appointments')}
         {site.jobs?.length > 0 && link('#/shop/jobs', t('Jobs'), route.page === 'jobs')}
+        {site.posts?.length > 0 && link('#/shop/blog', t('Blog'), route.page === 'blog')}
+        {site.forums?.length > 0 && link(`#/shop/forum?forum=${site.forums[0].id}`, t('Help'), route.page === 'forum')}
       </nav>
       <div className="shop-header-tools">
         <form role="search" onSubmit={(e) => { e.preventDefault(); location.hash = `#/shop?${new URLSearchParams({ search: new FormData(e.currentTarget).get('search') })}`; }}>
@@ -252,6 +255,8 @@ export function PublicSite() {
           </>
         ))}
         {route.page === 'page' && (page ? <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article> : <p className="alert">{t('Page not found')}</p>)}
+        {route.page === 'blog' && <Blog site={site} route={route} />}
+        {route.page === 'forum' && <Forum site={site} route={route} />}
         {!SITE_PAGES.includes(route.page) && <Shop site={site} route={route} cart={cart} pricelist={validPricelist} />}
       </div>
       {site.livechat && <LiveChat info={site.livechat} />}

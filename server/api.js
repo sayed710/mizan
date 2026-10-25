@@ -11,7 +11,7 @@ const MAX_LIMIT = 500;
 
 const IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
 /** Only inline raster images reach the website (the CSP allows data: images). */
-const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data : null);
+export const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data : null);
 
 /** Products the shop can show or sell, in the field names the shared shop logic (src/models/shop.js) reads. */
 const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) && (!p.variant_of || isSellable(read(db, 'product', p.variant_of)))).map((p) => ({
@@ -121,7 +121,7 @@ export function publicApply(db, body) {
   return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, res.db), { author: 'Website', isAdmin: false }) };
 }
 
-const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
+export const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
 
 const MAX_LINES = 50;
 const clip = (v, max) => String(v ?? '').trim().slice(0, max);

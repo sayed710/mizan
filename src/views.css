@@ -516,3 +516,35 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .spreadsheet td.num { text-align: end; font-variant-numeric: tabular-nums; }
 .spreadsheet td.error { color: var(--danger, #dc2626); }
 .spreadsheet td.active { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+/* Website Blog and Forum (public site) */
+.blog h1, .forum h1 { font-size: 34px; margin-block: 0 8px; letter-spacing: -.02em; }
+.blog .blog-subtitle { font-size: 18px; color: var(--muted); margin-block: 0 12px; }
+.blog .blog-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-block: 16px 24px; }
+.blog .blog-tools input { padding-block: 6px; padding-inline: 10px; border: 1px solid var(--border); border-radius: var(--radius, 6px); }
+.blog-tags { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin-block: 8px; }
+.blog-tags a, .blog-tags li { padding-block: 2px; padding-inline: 10px; border-radius: 999px; background: var(--brand-soft); color: var(--brand); font-size: 13px; text-decoration: none; }
+.blog-tags a[aria-current] { background: var(--brand); color: #fff; }
+.blog .blog-card { display: flex; gap: 20px; padding-block: 18px; border-block-end: 1px solid var(--border); }
+.blog .blog-card img { inline-size: 220px; max-inline-size: 40%; aspect-ratio: 16 / 10; object-fit: cover; border-radius: var(--radius, 6px); }
+.blog .blog-card h3 { margin-block: 0 4px; font-size: 22px; }
+.blog .blog-card a { color: inherit; }
+.blog-post { max-inline-size: 760px; margin-inline: auto; }
+.blog-post .blog-cover { inline-size: 100%; max-block-size: 380px; object-fit: cover; border-radius: var(--radius, 6px); margin-block-end: 20px; }
+.blog-content { font-size: 17px; line-height: 1.7; color: var(--text); }
+.blog-content ul { padding-inline-start: 24px; }
+.blog-post aside { margin-block-start: 40px; border-block-start: 2px solid var(--border); }
+.forum .forum-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.forum .forum-tabs { display: flex; gap: 4px; border-block-end: 1px solid var(--border); margin-block: 16px 8px; }
+.forum .forum-tabs a { padding-block: 8px; padding-inline: 14px; color: var(--muted); text-decoration: none; border-block-end: 2px solid transparent; }
+.forum .forum-tabs a[aria-current] { color: var(--brand); border-block-end-color: var(--brand); font-weight: 600; }
+.forum .forum-thread { display: flex; gap: 16px; align-items: flex-start; padding-block: 14px; border-block-end: 1px solid var(--border); }
+.forum .forum-thread h3 { margin-block: 0 4px; font-size: 18px; }
+.forum .forum-stats { display: flex; flex-direction: column; align-items: center; min-inline-size: 56px; padding-block: 6px; border-radius: var(--radius, 6px); color: var(--muted); }
+.forum .forum-stats.accepted { background: var(--success, #16a34a); color: #fff; }
+.forum .forum-post { display: flex; gap: 16px; padding-block: 16px; border-block-end: 1px solid var(--border); }
+.forum .forum-post.accepted { border-inline-start: 4px solid var(--success, #16a34a); padding-inline-start: 12px; }
+.forum .forum-votes { display: flex; flex-direction: column; align-items: center; gap: 4px; min-inline-size: 48px; }
+.forum .forum-accepted { color: var(--success, #16a34a); font-weight: 600; margin-block: 0 4px; }
+.forum .forum-notice { padding: 12px 16px; border-radius: var(--radius, 6px); background: var(--brand-soft); }
+@media (max-width: 640px) { .blog .blog-card { flex-direction: column; } .blog .blog-card img { inline-size: 100%; max-inline-size: none; } }

@@ -12,6 +12,7 @@ import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite } from './api.js';
+import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { sendDocument, sendMailing } from './mail.js';
@@ -213,7 +214,24 @@ async function api(req, res, path) {
     res.writeHead(out.status, out.headers);
     return res.end(out.body);
   }
-  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, { ...publicSite(db), livechat: livechatInfo(db) });
+  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, { ...publicSite(db), ...publicBlogSite(db), livechat: livechatInfo(db) });
+  // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
+  const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
+  if (blogRead && req.method === 'GET') {
+    const out = (blogRead[1] === 'blog' ? publicBlogPost : publicForumThread)(db, blogRead[2]);
+    if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
+  const forumRoutes = { '/api/public/forum/ask': publicAsk, '/api/public/forum/answer': publicAnswer, '/api/public/forum/vote': publicVote };
+  if (forumRoutes[path] && req.method === 'POST') {
+    if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
+    const limitKey = path.endsWith('/vote') ? `vote:${ip}` : `forum:${ip}`;
+    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many requests, try again later' });
+    recordFailure(limitKey); // counts every post or vote: max 10 per client per 15 minutes
+    const out = forumRoutes[path](db, await readJson(req), ip);
+    if (out.db) commitDb(out.db);
+    return send(res, out.status, out.body);
+  }
   if (path === '/api/iot/ingest' && req.method === 'POST') {
     if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
     const token = /^Bearer (iot_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
