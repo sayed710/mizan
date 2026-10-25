@@ -529,6 +529,8 @@ const ar = {
   'Declining then Straight Line': 'متناقص ثم ثابت', 'Reconciliation Models': 'نماذج التسوية', 'Auto-validate': 'تحقق تلقائي', 'Counterpart Entries': 'القيود المقابلة',
   'Matching Partner': 'الشريك المطابق', 'Partner is Set': 'الشريك محدد', 'Label Parameter': 'قيمة الوصف', 'Amount Min': 'الحد الأدنى', 'Amount Max': 'الحد الأقصى',
   'Button to generate counterpart entry': 'زر لإنشاء قيد مقابل', 'Rule to suggest counterpart entry': 'قاعدة لاقتراح قيد مقابل', 'Rule to match invoices/bills': 'قاعدة لمطابقة الفواتير',
+  Refunds: 'المرتجعات', 'Vendor Refund': 'مرتجع مورد', 'Payment Type': 'نوع الدفع', 'Partner Type': 'نوع الشريك', Receive: 'استلام',
+  'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

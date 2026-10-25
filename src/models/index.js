@@ -4,6 +4,7 @@ import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
+import { payModels } from './pay.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -29,7 +30,7 @@ import { posModels } from './pos.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -86,10 +87,13 @@ const allApps = [
       { label: 'Customers', children: [
         { key: 'invoices', label: 'Invoices', model: 'account.move', domain: (r) => r.move_type === 'out_invoice', defaults: { move_type: 'out_invoice' } },
         { key: 'credit-notes', label: 'Credit Notes', model: 'account.move', domain: (r) => r.move_type === 'out_refund', defaults: { move_type: 'out_refund' } },
+        { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' } },
         customers,
       ] },
       { label: 'Vendors', children: [
         { key: 'bills', label: 'Bills', model: 'account.move', domain: (r) => r.move_type === 'in_invoice', defaults: { move_type: 'in_invoice' } },
+        { key: 'refunds', label: 'Refunds', model: 'account.move', domain: (r) => r.move_type === 'in_refund', defaults: { move_type: 'in_refund' } },
+        { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' } },
         vendors,
       ] },
       { label: 'Accounting', children: [

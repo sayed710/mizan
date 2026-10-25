@@ -3,6 +3,11 @@ import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { payMove } from './accounting.js';
+import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
+
+/** The suggested reconciliation model for a line, else the first matching button model. */
+const modelFor = (db, line) => suggestRule(db, line)
+  ?? search(db, 'account.reconcile.model').filter((m) => m.active !== false && m.rule_type === 'writeoff_button' && ruleMatches(m, line)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))[0] ?? null;
 
 const round = (n) => Math.round(n * 100) / 100;
 
@@ -10,7 +15,7 @@ const round = (n) => Math.round(n * 100) / 100;
 export function candidates(db, line) {
   const incoming = line.amount > 0;
   return search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && m.amount_residual > 0 && m.move_type === (incoming ? 'out_invoice' : 'in_invoice'))
+    .filter((m) => m.state === 'posted' && m.amount_residual > 0 && (incoming ? ['out_invoice', 'in_refund'] : ['in_invoice', 'out_refund']).includes(m.move_type))
     .sort((a, b) => Number(b.partner_id === line.partner_id) - Number(a.partner_id === line.partner_id)
       || Math.abs(a.amount_residual - Math.abs(line.amount)) - Math.abs(b.amount_residual - Math.abs(line.amount)));
 }
@@ -71,6 +76,14 @@ export const bankModels = {
       buttons: [
         { label: 'Reconcile', primary: true, when: (r) => r.state === 'to_check' && !r.move_id, run: autoReconcile },
         { label: 'Match', primary: true, when: (r) => r.state === 'to_check' && r.move_id, run: (db, r) => ({ db: reconcileWith(db, r, r.move_id) }) },
+        {
+          label: 'Apply Reconciliation Model', when: (r) => r.state === 'to_check',
+          run: (db, r) => {
+            const model = modelFor(db, r);
+            if (!model) throw new Error('No reconciliation model matches this transaction');
+            return { db: applyRule(db, model, r) };
+          },
+        },
         { label: 'Book to Account', when: (r) => r.state === 'to_check', run: bookToAccount },
       ],
       title: 'payment_ref',

@@ -4,6 +4,7 @@ import { create, read, search } from './orm.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { applyRule, autoReconcile, ruleMatches, suggestRule } from './models/reconcile.js';
+import { models } from './models/index.js';
 import { seed } from './seed.js';
 
 const LINE = 'account.bank.statement.line';
@@ -74,4 +75,14 @@ test('autoReconcile applies the lowest-sequence auto-validated rule and skips th
   assert.equal(byRef('TRF SARA HASSAN INV').state, 'to_check');
   assert.equal(suggestRule(after, byRef('Office rent October')).sequence, 1);
   assert.equal(suggestRule(after, byRef('TRF SARA HASSAN INV')), null);
+});
+
+test('the bank line button applies the matching reconciliation model', () => {
+  const base = create(seed(), 'account.reconcile.model', { name: 'Fees', rule_type: 'writeoff_button', match_label: 'contains', match_label_param: 'fee', line_ids: [{ account_code: '690000', label: 'Fee', amount_type: 'percentage', amount: 100 }] });
+  const { db, id } = create(base.db, 'account.bank.statement.line', { date: '2026-05-01', payment_ref: 'Card fee May', amount: -12, state: 'to_check' });
+  const button = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Apply Reconciliation Model');
+  const done = button.run(db, read(db, 'account.bank.statement.line', id)).db;
+  assert.equal(read(done, 'account.bank.statement.line', id).state, 'reconciled');
+  const other = create(done, 'account.bank.statement.line', { date: '2026-05-02', payment_ref: 'Unknown transfer', amount: 999, state: 'to_check' });
+  assert.throws(() => button.run(other.db, read(other.db, 'account.bank.statement.line', other.id)), /No reconciliation model/);
 });

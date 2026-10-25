@@ -42,8 +42,8 @@ export const isBalanced = (lines = []) =>
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
 export function invoiceLines(db, move) {
   // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
-  const sale = move.move_type !== 'in_invoice';
-  const refund = move.move_type === 'out_refund';
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today());
   const counterpart = accountId(db, sale ? '121000' : '211000');

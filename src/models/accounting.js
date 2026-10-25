@@ -8,7 +8,10 @@ import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
-const isRefund = (r) => r.move_type === 'out_refund';
+const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
+export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_type);
+/** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
+export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
 const total = (r) => (isInvoice(r) ? amounts(r.invoice_line_ids).total : (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0));
 const residual = (r) => (isInvoice(r) ? Math.max(0, Math.round((total(r) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
 const paymentState = (r) => {
@@ -17,7 +20,7 @@ const paymentState = (r) => {
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', entry: 'MISC' };
+const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', in_refund: 'RBILL', entry: 'MISC' };
 
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
@@ -30,16 +33,20 @@ export function postMove(db, id) {
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  const journal = journalId(db, r.move_type === 'in_invoice' ? 'BILL' : 'INV');
+  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
   return write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) });
 }
 
-/** Record a payment: bank entry against receivable/payable + paid amount on the invoice. */
-export function payMove(db, id, amount, date = today()) {
+/**
+ * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
+ * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
+ */
+export function payMove(db, id, amount, date = today(), { paymentId } = {}) {
   const r = read(db, 'account.move', id);
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
-  const sale = r.move_type === 'out_invoice';
+  const sale = isInbound(r);
+  const counterpartCode = isPurchase(r) ? '211000' : '121000';
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
   const bank = toCompany(db, r.currency_id, value, date);
@@ -49,11 +56,15 @@ export function payMove(db, id, amount, date = today()) {
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: 'BNK1', date, ref: `Payment ${r.name}`,
     lines: sale
-      ? [{ account: '101401', debit: bank, partner_id: r.partner_id }, { account: '121000', credit: open, partner_id: r.partner_id }, ...fx]
-      : [{ account: '211000', debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
+      ? [{ account: '101401', debit: bank, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...fx]
+      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
   });
+  const record = { state: 'posted', move_id: paymentMove, invoice_id: r.id, partner_id: r.partner_id, amount: value, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const withPayment = paymentId
+    ? write(withEntry, 'account.payment', paymentId, record)
+    : create(withEntry, 'account.payment', { ...record, name: nextName(withEntry, 'account.payment', `PBNK1/${date.slice(0, 4)}/`) }).db;
   const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
-  const next = write(releaseCashBasis(withEntry, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
+  const next = write(isRefund(r) ? withPayment : releaseCashBasis(withPayment, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
 }
 
@@ -71,13 +82,14 @@ function releaseCashBasis(db, r, share, date) {
   return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
 }
 
-/** Draft credit note reversing a posted customer invoice. */
+/** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill. */
 function creditNote(db, r) {
+  const purchase = isPurchase(r);
   const { db: next, id } = create(db, 'account.move', {
-    move_type: 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
+    move_type: purchase ? 'in_refund' : 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
     invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null, fiscal_position_id: r.fiscal_position_id ?? null,
   });
-  return { db: next, go: `#/accounting/credit-notes/${id}` };
+  return { db: next, go: `#/accounting/${purchase ? 'refunds' : 'credit-notes'}/${id}` };
 }
 
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
@@ -94,7 +106,7 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const gap = Math.round((due - amount) * 100) / 100;
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap - 0.005) return paid;
-  const sale = r.move_type === 'out_invoice';
+  const sale = isInbound(r);
   const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date);
   const { db: booked } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`,
@@ -190,7 +202,7 @@ export const accountingModels = {
     },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
-      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['entry', 'Journal Entry']] },
+      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       ref: { type: 'char', label: 'Reference' },
@@ -252,13 +264,13 @@ export const accountingModels = {
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
-        { label: 'Credit Note', when: (r) => r.state === 'posted' && r.move_type === 'out_invoice', run: creditNote },
+        { label: 'Credit Note', when: (r) => r.state === 'posted' && ['out_invoice', 'in_invoice'].includes(r.move_type), run: creditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         { label: 'Reset to Draft', when: (r) => r.state !== 'draft' && !(Number(r.amount_paid) > 0), vals: { state: 'draft' } },
         { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(write(db, 'account.move', r.id, { state: 'cancel' }), r) }) },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
-      subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
+      subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
