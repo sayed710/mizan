@@ -13,10 +13,25 @@ function sendMailing(db, m) {
   return { db: write(db, 'mailing.mailing', m.id, { state: 'sent', sent_date: today(), sent: recipients.length, delivered: recipients.length }) };
 }
 
+/** Signers in signing order; a request without lines is signed by its single signer. */
+const signersOf = (r) => ((r.signer_ids ?? []).length ? r.signer_ids : [{ partner_id: r.partner_id, role: 'signer', signed: false }]);
+export const nextSigner = (r) => signersOf(r).findIndex((s) => !s.signed);
+
+/** The next signer types their name; the document is signed once everyone has. */
+export function applySignature(db, r, name, date = today()) {
+  if (r.state !== 'sent') throw new Error('Send the document before signing');
+  if (r.deadline && date > r.deadline) throw new Error('This signature request has expired');
+  const i = nextSigner(r);
+  if (i < 0 || !name?.trim()) return db;
+  const signer_ids = signersOf(r).map((s, k) => (k === i ? { ...s, signed: true, signature: name.trim(), sign_date: date } : s));
+  const done = signer_ids.every((s) => s.signed);
+  return write(db, 'sign.request', r.id, { signer_ids, ...(done ? { state: 'signed', signature: signer_ids.map((s) => s.signature).join(', '), sign_date: date } : {}) });
+}
+
 function signDocument(db, r) {
-  const name = prompt('Type your full name to sign', read(db, 'res.partner', r.partner_id)?.name ?? '');
-  if (!name?.trim()) return { db };
-  return { db: write(db, 'sign.request', r.id, { state: 'signed', signature: name.trim(), sign_date: today() }) };
+  const signer = signersOf(r)[nextSigner(r)];
+  const name = prompt('Type your full name to sign', read(db, 'res.partner', signer?.partner_id)?.name ?? '');
+  return { db: name == null ? db : applySignature(db, r, name) };
 }
 
 /** Late days past the planned return (actual return date, or today while still out). */
@@ -198,16 +213,28 @@ export const extraModels = {
       signature: { type: 'char', label: 'Signature', readonly: true },
       sign_date: { type: 'date', label: 'Signed on', readonly: true },
       deadline: { type: 'date', label: 'Valid Until' },
+      signer_ids: {
+        type: 'one2many', label: 'Signers',
+        fields: {
+          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Signer' },
+          role: { type: 'selection', label: 'Role', options: [['signer', 'Signer'], ['customer', 'Customer'], ['employee', 'Employee'], ['witness', 'Witness']] },
+          signed: { type: 'boolean', label: 'Signed', readonly: true },
+          signature: { type: 'char', label: 'Signature', readonly: true },
+          sign_date: { type: 'date', label: 'Signed on', readonly: true },
+        },
+        newLine: () => ({ partner_id: null, role: 'signer', signed: false }),
+      },
+      progress: { type: 'char', label: 'Signatures', compute: (r) => `${signersOf(r).filter((s) => s.signed).length} / ${signersOf(r).length}` },
     },
-    defaults: () => ({ state: 'draft', deadline: addDays(today(), 14) }),
-    filters: [[{ id: 'to_sign', label: 'To Sign', fn: (r) => r.state === 'sent' }, { id: 'signed', label: 'Signed', fn: (r) => r.state === 'signed' }]],
+    defaults: () => ({ state: 'draft', deadline: addDays(today(), 14), signer_ids: [] }),
+    filters: [[{ id: 'to_sign', label: 'To Sign', fn: (r) => r.state === 'sent' }, { id: 'signed', label: 'Signed', fn: (r) => r.state === 'signed' }, { id: 'expired', label: 'Expired', fn: (r) => r.state === 'sent' && r.deadline && r.deadline < today() }]],
     groupBys: ['state', 'partner_id'],
     kanban: { groupBy: 'state', title: 'name', lines: ['partner_id', 'deadline'] },
-    list: ['name', 'partner_id', 'deadline', 'sign_date', 'state'],
+    list: ['name', 'partner_id', 'progress', 'deadline', 'sign_date', 'state'],
     form: {
       statusbar: 'state',
       statusbarHide: ['canceled'],
-      lockedWhen: (r) => r.state === 'signed',
+      lockedWhen: (r) => ['sent', 'signed'].includes(r.state),
       buttons: [
         { label: 'Send', primary: true, vals: { state: 'sent' }, when: (r) => r.state === 'draft' },
         { label: 'Sign Now', primary: true, when: (r) => r.state === 'sent', run: signDocument },
@@ -215,8 +242,8 @@ export const extraModels = {
       ],
       ribbon: (r) => (r.state === 'signed' ? 'Signed' : null),
       title: 'name',
-      groups: [['partner_id', 'deadline'], ['signature', 'sign_date']],
-      tabs: [{ label: 'Document Content', fields: ['body'] }],
+      groups: [['partner_id', 'deadline', 'progress'], ['signature', 'sign_date']],
+      tabs: [{ label: 'Document Content', fields: ['body'] }, { label: 'Signers', fields: ['signer_ids'] }],
       chatter: true,
     },
   },

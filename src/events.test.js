@@ -38,3 +38,16 @@ test('planning flags overlapping shifts and time off, fills from templates and c
   const copied = models['planning.slot'].form.buttons.find((b) => b.label === 'Copy to Next Week').run(templated, read(templated, 'planning.slot', id));
   assert.ok(Object.values(copied.db.records['planning.slot']).some((s) => s.start === '2027-05-11' && s.state === 'draft'));
 });
+
+test('documents are signed by every signer in order, then complete', async () => {
+  const { applySignature, nextSigner } = await import('./models/extra.js');
+  const { db, id } = create(seed(), 'sign.request', { name: 'NDA', partner_id: 1, state: 'sent', signer_ids: [{ partner_id: 1, role: 'customer', signed: false }, { partner_id: 2, role: 'employee', signed: false }] });
+  const one = applySignature(db, read(db, 'sign.request', id), 'Nile Rep');
+  assert.equal(read(one, 'sign.request', id).state, 'sent');
+  assert.equal(nextSigner(read(one, 'sign.request', id)), 1);
+  const two = applySignature(one, read(one, 'sign.request', id), 'Our Manager');
+  assert.equal(read(two, 'sign.request', id).state, 'signed');
+  assert.equal(read(two, 'sign.request', id).progress, '2 / 2');
+  const late = create(seed(), 'sign.request', { name: 'Old', partner_id: 1, state: 'sent', deadline: '2020-01-01' });
+  assert.throws(() => applySignature(late.db, read(late.db, 'sign.request', late.id), 'X'), /expired/);
+});

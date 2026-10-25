@@ -511,6 +511,7 @@ const ar = {
   'Late Fee Invoiced': 'غرامة التأخير المفوترة', 'Invoice Late Fee': 'فوترة غرامة التأخير',
   'Shift Templates': 'قوالب الورديات', Template: 'القالب', 'Start (HH:MM)': 'البداية (س:د)', Conflict: 'تعارض', Conflicts: 'التعارضات',
   'Take Shift': 'استلام الوردية', 'Copy to Next Week': 'نسخ للأسبوع التالي',
+  Signers: 'الموقّعون', Signer: 'الموقّع', Witness: 'شاهد', Signatures: 'التوقيعات',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
