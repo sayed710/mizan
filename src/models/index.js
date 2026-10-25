@@ -22,10 +22,11 @@ import { deferredModels } from './deferred.js';
 import { paymentModels } from './payments.js';
 import { helpdeskModels } from './helpdesk.js';
 import { leaveGuard, timeoffModels } from './timeoff.js';
+import { posModels } from './pos.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -191,6 +192,7 @@ const allApps = [
     menus: [
       { key: 'register', label: 'Register', type: 'pos' },
       { key: 'orders', label: 'Orders', model: 'pos.order' },
+      { key: 'sessions', label: 'Sessions', model: 'pos.session' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
     ],
   },

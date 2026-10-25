@@ -3,6 +3,7 @@ import { create, read, write } from '../orm.js';
 import { addDays, amountFields, pad, productLines, today } from './common.js';
 import { moveStock } from './sales.js';
 import { applyLots } from './logistics.js';
+import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -541,16 +542,28 @@ export const moreModels = {
       date_order: { type: 'date', label: 'Date', readonly: true },
       payment_method: { type: 'selection', label: 'Payment Method', options: [['cash', 'Cash'], ['card', 'Card']] },
       kitchen_state: { type: 'selection', label: 'Kitchen', options: [['new', 'To Cook'], ['cooking', 'Cooking'], ['ready', 'Ready'], ['served', 'Served']] },
+      session_id: { type: 'many2one', relation: 'pos.session', label: 'Session', readonly: true },
+      state: { type: 'selection', label: 'Status', options: [['paid', 'Paid'], ['refunded', 'Refunded'], ['refund', 'Refund']] },
+      refund_of: { type: 'many2one', relation: 'pos.order', label: 'Refund of', readonly: true },
       lines: productLines('Products', 'list_price'),
       ...amountFields('lines'),
     },
-    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', lines: [] }),
-    groupBys: ['payment_method', 'partner_id', 'date_order'],
+    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', lines: [] }),
+    groupBys: ['session_id', 'payment_method', 'state', 'partner_id', 'date_order'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total'], badge: 'payment_method' },
-    list: ['name', 'date_order', 'partner_id', 'payment_method', 'amount_total'],
+    list: ['name', 'date_order', 'session_id', 'partner_id', 'payment_method', 'amount_total', 'state'],
     views: ['list', 'kanban', 'graph', 'pivot'],
     graph: { groupBy: 'date_order', measure: 'amount_total' },
     pivot: { row: 'date_order', col: 'payment_method', measure: 'amount_total' },
-    form: { lockedWhen: () => true, title: 'name', groups: [['partner_id', 'payment_method'], ['date_order']], tabs: [{ label: 'Products', fields: ['lines'] }], footer: ['amount_untaxed', 'amount_tax', 'amount_total'], chatter: true },
+    form: {
+      lockedWhen: () => true,
+      buttons: [{ label: 'Refund', when: (r) => r.state === 'paid' && r.session_id, run: (db, r) => { const out = refundOrder(db, r); return { db: out.db, go: `#/pos/orders/${out.id}` }; } }],
+      ribbon: (r) => (r.state === 'refunded' ? 'Refunded' : r.state === 'refund' ? 'Refund' : null),
+      title: 'name',
+      groups: [['partner_id', 'payment_method', 'session_id'], ['date_order', 'state', 'refund_of']],
+      tabs: [{ label: 'Products', fields: ['lines'] }],
+      footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
+      chatter: true,
+    },
   },
 };

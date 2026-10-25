@@ -1,13 +1,24 @@
 import { useState } from 'react';
-import { create, read, search } from '../orm.js';
+import { read, search } from '../orm.js';
 import { amounts } from '../models/common.js';
-import { moveStock } from '../models/sales.js';
-import { postEntry } from '../models/ledger.js';
+import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 
-const TAX = 14;
+/** No open session: count the opening cash and start one. */
+function OpenSession() {
+  const [cash, setCash] = useState('0');
+  return (
+    <main className="pos pos-done">
+      <form className="sheet receipt" onSubmit={(e) => { e.preventDefault(); commit(startSession(getDb(), cash).db); }}>
+        <h2>{t('Opening Cash Control')}</h2>
+        <label>{t('Opening Cash')} <input type="number" step="0.01" min="0" value={cash} onChange={(e) => setCash(e.target.value)} autoFocus /></label>
+        <button type="submit" className="btn primary">{t('Open Session')}</button>
+      </form>
+    </main>
+  );
+}
 
 /** Touch-friendly register: product grid → cart → cash/card payment creates a pos.order and moves stock. */
 export function Pos() {
@@ -18,10 +29,11 @@ export function Pos() {
   const [partner, setPartner] = useState('');
   const [receipt, setReceipt] = useState(null);
 
-  const products = search(db, 'product');
+  const session = openSession(db);
+  const products = search(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
   const categories = [...new Set(products.map((p) => p.categ).filter(Boolean))];
   const shown = products.filter((p) => (!categ || p.categ === categ) && p.name.toLowerCase().includes(query.toLowerCase()));
-  const lines = cart.map((l) => ({ ...l, price_unit: read(db, 'product', l.product_id)?.list_price ?? 0, tax: TAX }));
+  const lines = priceLines(db, cart);
   const total = amounts(lines);
 
   const add = (id) => setCart((c) => (c.some((l) => l.product_id === id)
@@ -30,20 +42,19 @@ export function Pos() {
   const setQty = (id, qty) => setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
 
   const pay = (method) => {
-    const { db: next, id } = create(getDb(), 'pos.order', { partner_id: Number(partner) || null, payment_method: method, lines });
-    const { db: booked } = postEntry(moveStock(next, lines, -1), {
-      journal: 'POSS', ref: read(next, 'pos.order', id).name,
-      lines: [
-        { account: method === 'cash' ? '101501' : '101401', debit: total.total },
-        { account: '400000', credit: total.untaxed },
-        ...(total.tax ? [{ account: '251000', credit: total.tax }] : []),
-      ],
-    });
+    const { db: booked, id } = payOrder(getDb(), { lines, method, partner_id: Number(partner) || null });
     commit(booked);
-    setReceipt({ id, name: read(next, 'pos.order', id).name, total: total.total, method });
+    setReceipt({ id, name: read(booked, 'pos.order', id).name, total: total.total, method });
     setCart([]);
     setPartner('');
   };
+  const close = () => {
+    const { expected } = sessionTotals(getDb(), session);
+    const counted = prompt(t('Counted cash in the drawer (expected {n})', { n: expected }), String(expected));
+    if (counted != null) commit(closeSession(getDb(), session, counted));
+  };
+
+  if (!session) return <OpenSession />;
 
   if (receipt) {
     return (
@@ -82,6 +93,10 @@ export function Pos() {
         </div>
       </section>
       <aside className="pos-cart" aria-label={t('Order')}>
+        <div className="row">
+          <span className="muted grow">{session.name}</span>
+          <button type="button" className="btn sm" onClick={close}>{t('Close Session')}</button>
+        </div>
         <select aria-label={t('Customer')} value={partner} onChange={(e) => setPartner(e.target.value)}>
           <option value="">{t('Customer')}…</option>
           {search(db, 'res.partner').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}

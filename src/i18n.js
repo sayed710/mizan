@@ -489,6 +489,10 @@ const ar = {
   'Salary expectations too high': 'توقعات الراتب مرتفعة', 'Hired on': 'تاريخ التعيين', 'Create Employee': 'إنشاء موظف', Hired: 'تم التعيين', Contract: 'العقد',
   Allocations: 'الأرصدة المخصصة', 'Allocation Type': 'نوع التخصيص', 'Regular Allocation': 'تخصيص عادي', 'Accrual Allocation': 'تخصيص تراكمي',
   'Allocated Days': 'الأيام المخصصة', 'Days Accrued per Month': 'أيام مكتسبة شهريًا', 'Run Accrual': 'احتساب التراكم',
+  Session: 'الجلسة', 'Opening Date': 'تاريخ الفتح', 'Closing Date': 'تاريخ الإغلاق', 'Opening Cash': 'النقدية الافتتاحية',
+  'Cash Payments': 'مدفوعات نقدية', 'Card Payments': 'مدفوعات بالبطاقة', 'Expected Cash': 'النقدية المتوقعة', 'Counted Cash': 'النقدية المعدودة', Difference: 'الفرق',
+  'Close Session': 'إغلاق الجلسة', 'Open Session': 'فتح الجلسة', 'Opening Cash Control': 'مراقبة النقدية الافتتاحية', Refund: 'استرداد', Refunded: 'مُسترد', 'Refund of': 'استرداد للطلب',
+  'Counted cash in the drawer (expected {n})': 'النقدية المعدودة في الدرج (المتوقع {n})',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
