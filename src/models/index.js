@@ -287,6 +287,9 @@ const allApps = [
     menus: [
       { key: 'events', label: 'Events', model: 'event.event' },
       { key: 'attendees', label: 'Attendees', model: 'event.registration' },
+      { key: 'talks', label: 'Talks', model: 'event.track' },
+      { label: 'Exhibitors', children: [{ key: 'sponsors', label: 'Sponsors', model: 'event.sponsor' }, { key: 'booths', label: 'Booths', model: 'event.booth' }] },
+      { key: 'questions', label: 'Questions', model: 'event.question' },
     ],
   },
   {
