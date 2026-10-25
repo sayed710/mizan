@@ -65,6 +65,40 @@ function produce(db, mo) {
   };
 }
 
+const round2 = (n) => Math.round(n * 100) / 100;
+const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
+
+/**
+ * Post an approved expense: expense (net) + input VAT against the employee (to reimburse) or the bank (company paid).
+ * The product's expense account wins over the category default.
+ */
+function postExpense(db, r) {
+  const total = Number(r.total_amount) || 0;
+  if (!(total > 0)) throw new Error('The expense total must be positive');
+  const tax = round2(total - total / (1 + (Number(r.tax) || 0) / 100));
+  const product = read(db, 'product', r.product_id);
+  const accountCode = (product?.property_account_expense_id && read(db, 'account.account', product.property_account_expense_id)?.code) || CATEGORY_ACCOUNT[r.category] || '600000';
+  const own = r.payment_mode !== 'company_account';
+  const { db: booked, id } = postEntry(db, {
+    journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,
+    lines: [
+      { account: accountCode, debit: round2(total - tax) },
+      ...(tax ? [{ account: '131000', debit: tax }] : []),
+      { account: own ? '230100' : '101401', credit: total },
+    ],
+  });
+  return write(booked, 'hr.expense', r.id, { state: own ? 'posted' : 'paid', move_id: id });
+}
+
+/** Reimburse the employee for a posted expense they paid themselves. */
+function reimburse(db, r) {
+  const { db: paid } = postEntry(db, {
+    journal: 'BNK1', date: today(), ref: `Reimbursement: ${r.name}`,
+    lines: [{ account: '230100', debit: r.total_amount }, { account: '101401', credit: r.total_amount }],
+  });
+  return write(paid, 'hr.expense', r.id, { state: 'paid' });
+}
+
 function invoiceSubscription(db, sub) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice',
@@ -181,13 +215,30 @@ export const moreModels = {
       employee_id: employee(),
       date: { type: 'date', label: 'Expense Date' },
       category: { type: 'selection', label: 'Category', options: [['travel', 'Travel'], ['meals', 'Meals'], ['office', 'Office Supplies'], ['other', 'Other']] },
+      product_id: { type: 'many2one', relation: 'product', label: 'Expense Product' },
+      quantity: { type: 'float', label: 'Quantity' },
+      unit_amount: { type: 'monetary', label: 'Unit Price' },
+      tax: { type: 'float', label: 'Tax % (included)' },
       total_amount: { type: 'monetary', label: 'Total' },
-      state: state([['draft', 'To Submit'], ['submitted', 'Submitted'], ['approved', 'Approved'], ['paid', 'Paid'], ['refused', 'Refused']]),
+      payment_mode: { type: 'selection', label: 'Paid By', options: [['own_account', 'Employee (to reimburse)'], ['company_account', 'Company']] },
+      receipt: { type: 'binary', label: 'Receipt' },
+      move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
+      state: state([['draft', 'To Submit'], ['submitted', 'Submitted'], ['approved', 'Approved'], ['posted', 'Posted'], ['paid', 'Paid'], ['refused', 'Refused']]),
       notes: { type: 'text', label: 'Notes' },
     },
-    defaults: () => ({ date: today(), category: 'other', state: 'draft', employee_id: 1 }),
-    filters: [[{ id: 'to_approve', label: 'To Approve', fn: (r) => r.state === 'submitted' }, { id: 'to_pay', label: 'To Pay', fn: (r) => r.state === 'approved' }]],
-    groupBys: ['employee_id', 'category', 'state', 'date'],
+    defaults: () => ({ date: today(), category: 'other', state: 'draft', employee_id: 1, quantity: 1, tax: 0, payment_mode: 'own_account' }),
+    // A product fills the unit price and tax; quantity × unit price (tax included) gives the total.
+    onchange: (r, key, db) => {
+      if (key === 'product_id' && r.product_id) {
+        const p = read(db, 'product', r.product_id);
+        const unit = Number(p?.cost) || 0;
+        return { unit_amount: unit, tax: p?.purchase_tax ?? r.tax, name: r.name || p?.name || '', total_amount: round2((Number(r.quantity) || 1) * unit * (1 + (Number(p?.purchase_tax ?? r.tax) || 0) / 100)) };
+      }
+      if (['quantity', 'unit_amount', 'tax'].includes(key) && Number(r.unit_amount) > 0) return { total_amount: round2((Number(r.quantity) || 0) * Number(r.unit_amount) * (1 + (Number(r.tax) || 0) / 100)) };
+      return {};
+    },
+    filters: [[{ id: 'to_approve', label: 'To Approve', fn: (r) => r.state === 'submitted' }, { id: 'to_post', label: 'To Post', fn: (r) => r.state === 'approved' }, { id: 'to_pay', label: 'To Reimburse', fn: (r) => r.state === 'posted' }]],
+    groupBys: ['employee_id', 'category', 'payment_mode', 'state', 'date'],
     kanban: { groupBy: 'state', title: 'name', lines: ['total_amount', 'employee_id'], badge: 'category' },
     list: ['date', 'name', 'employee_id', 'category', 'total_amount', 'state'],
     views: ['list', 'kanban', 'graph', 'pivot'],
@@ -201,22 +252,12 @@ export const moreModels = {
         { label: 'Submit', primary: true, vals: { state: 'submitted' }, when: (r) => r.state === 'draft' },
         { label: 'Approve', primary: true, vals: { state: 'approved' }, when: (r) => r.state === 'submitted' },
         { label: 'Refuse', vals: { state: 'refused' }, when: (r) => r.state === 'submitted' },
-        {
-          label: 'Mark as Paid',
-          primary: true,
-          when: (r) => r.state === 'approved',
-          run: (db, r) => {
-            const { db: withEntry } = postEntry(db, {
-              journal: 'BNK1', date: today(), ref: `Expense: ${r.name}`,
-              lines: [{ account: ['travel', 'meals'].includes(r.category) ? '610000' : '600000', debit: r.total_amount }, { account: '101401', credit: r.total_amount }],
-            });
-            return { db: write(withEntry, 'hr.expense', r.id, { state: 'paid' }) };
-          },
-        },
+        { label: 'Post Journal Entries', primary: true, when: (r) => r.state === 'approved', run: (db, r) => ({ db: postExpense(db, r) }) },
+        { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted', run: (db, r) => ({ db: reimburse(db, r) }) },
         { label: 'Reset to Draft', vals: { state: 'draft' }, when: (r) => r.state === 'refused' },
       ],
       title: 'name',
-      groups: [['employee_id', 'date', 'category'], ['total_amount']],
+      groups: [['employee_id', 'date', 'category', 'product_id', 'payment_mode'], ['quantity', 'unit_amount', 'tax', 'total_amount', 'move_id', 'receipt']],
       tabs: [{ label: 'Notes', fields: ['notes'] }],
       chatter: true,
     },

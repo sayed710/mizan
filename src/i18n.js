@@ -479,6 +479,9 @@ const ar = {
   Operation: 'العملية', 'Component Status': 'حالة المكونات', 'Not Available': 'غير متاح',
   'To Consume': 'للاستهلاك', Consumed: 'المستهلك', 'Work Orders': 'أوامر العمل', 'Expected (min)': 'المتوقع (دقيقة)', 'Real (min)': 'الفعلي (دقيقة)',
   Finished: 'منتهٍ', 'Check Availability': 'التحقق من التوفر', 'Waiting Components': 'بانتظار المكونات', 'Scheduled Date': 'التاريخ المجدول',
+  'Employee Expenses Payable': 'مصروفات موظفين مستحقة', 'Expense Product': 'منتج المصروف', 'Tax % (included)': 'نسبة الضريبة (مشمولة)',
+  'Paid By': 'مدفوع بواسطة', 'Employee (to reimburse)': 'الموظف (للاسترداد)', 'Post Journal Entries': 'ترحيل القيود',
+  'To Post': 'للترحيل', 'To Reimburse': 'للاسترداد',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
