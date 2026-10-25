@@ -2,7 +2,8 @@ import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, postEntry } from './ledger.js';
 import { moveDeleteGuard, moveGuard } from './finance.js';
-import { toCompany } from './currency.js';
+import { rateAt, toCompany } from './currency.js';
+import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
 
@@ -52,15 +53,29 @@ export function payMove(db, id, amount, date = today()) {
       : [{ account: '211000', debit: open, partner_id: r.partner_id }, { account: '101401', credit: bank, partner_id: r.partner_id }, ...fx],
   });
   const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
-  const next = write(withEntry, 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
+  const next = write(releaseCashBasis(withEntry, r, value / total(r), date), 'account.move', id, { amount_paid: (Number(r.amount_paid) || 0) + value, payment_date: date, payments });
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
+}
+
+/** Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account. */
+function releaseCashBasis(db, r, share, date) {
+  const sale = r.move_type === 'out_invoice';
+  const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date))
+    .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
+    .filter(([, amount]) => amount > 0);
+  if (!due.length) return db;
+  const transition = TRANSITION[sale ? 'sale' : 'purchase'];
+  const lines = due.flatMap(([account, amount]) => (sale
+    ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { account, credit: amount, partner_id: r.partner_id }]
+    : [{ account, debit: amount, partner_id: r.partner_id }, { account: transition, credit: amount, partner_id: r.partner_id }]));
+  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
 }
 
 /** Draft credit note reversing a posted customer invoice. */
 function creditNote(db, r) {
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
-    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null,
+    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null, fiscal_position_id: r.fiscal_position_id ?? null,
   });
   return { db: next, go: `#/accounting/credit-notes/${id}` };
 }
@@ -168,7 +183,8 @@ export const accountingModels = {
     onchange: (r, key, db) => {
       if (key === 'partner_id' && r.partner_id) {
         const term = read(db, 'res.partner', r.partner_id)?.property_payment_term_id;
-        return term ? { invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {};
+        const fiscal = { fiscal_position_id: fiscalPositionFor(db, r.partner_id) };
+        return term ? { ...fiscal, invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : fiscal;
       }
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
@@ -184,6 +200,7 @@ export const accountingModels = {
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
       invoice_line_ids: invoiceLineField,
@@ -243,7 +260,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

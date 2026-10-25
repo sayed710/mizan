@@ -1,7 +1,8 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
-import { amounts, nextName, subtotal, today } from './common.js';
+import { nextName, subtotal, today } from './common.js';
 import { rateAt } from './currency.js';
+import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -21,6 +22,7 @@ export const CHART = [
   ['450100', 'Foreign Exchange Gain', 'income_other'], ['690100', 'Foreign Exchange Loss', 'expense_other'],
   ['450200', 'Cash Discount Gain', 'income_other'], ['690200', 'Cash Discount Loss', 'expense_other'],
   ['152000', 'Accumulated Depreciation', 'asset_fixed'], ['680000', 'Depreciation Expense', 'expense'],
+  ['251100', 'Tax Received (Cash Basis Transition)', 'liability_current'], ['131100', 'Tax Paid (Cash Basis Transition)', 'asset_current'],
   ['450300', 'Gain on Asset Disposal', 'income_other'], ['690300', 'Loss on Asset Disposal', 'expense_other'],
 ];
 
@@ -50,19 +52,25 @@ export function invoiceLines(db, move) {
   const byAccount = new Map();
   const productAccount = (l) => (db.records.product ?? []).find((p) => p.id === l.product_id)?.[sale ? 'property_account_income_id' : 'property_account_expense_id'];
   for (const l of move.invoice_line_ids ?? []) {
-    const account = l.account_id || productAccount(l) || base;
+    const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
     byAccount.set(account, (byAccount.get(account) ?? 0) + subtotal(l));
   }
   const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate)]);
-  const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
-  const tax = round(amounts(move.invoice_line_ids).tax / rate);
-  const total = round(untaxed + tax);
+  // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
+  const byTax = new Map();
+  for (const l of move.invoice_line_ids ?? []) {
+    const account = l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc;
+    byTax.set(account, (byTax.get(account) ?? 0) + lineTaxOf(l));
+  }
+  const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
+  const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
+  const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
   const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
-    ...(tax ? [{ account_id: taxAcc, partner_id: move.partner_id, name: 'Taxes', ...side(tax, !sale) }] : []),
+    ...taxes.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: 'Taxes', ...side(amount, !sale) })),
   ].filter((l) => l.debit || l.credit);
 }
 

@@ -15,7 +15,7 @@ test('choosing a customer fills the quotation pricelist and the lead contact det
   const db = seed();
   const gulf = db.records['res.partner'].find((p) => p.name === 'Gulf Interiors');
   assert.ok(gulf.pricelist_id);
-  assert.deepEqual(models['sale.order'].onchange({ partner_id: gulf.id }, 'partner_id', db), { pricelist_id: gulf.pricelist_id, payment_term_id: gulf.property_payment_term_id ?? null, partner_invoice_id: gulf.id, partner_shipping_id: gulf.id });
+  assert.deepEqual(models['sale.order'].onchange({ partner_id: gulf.id }, 'partner_id', db), { pricelist_id: gulf.pricelist_id, payment_term_id: gulf.property_payment_term_id ?? null, partner_invoice_id: gulf.id, partner_shipping_id: gulf.id, fiscal_position_id: null });
   assert.deepEqual(models['crm.lead'].onchange({ partner_id: gulf.id, email: '', phone: '' }, 'partner_id', db), { email: gulf.email, phone: gulf.phone });
 });
 

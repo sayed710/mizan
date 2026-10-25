@@ -3,6 +3,7 @@ import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
 import { assetModels } from './assets.js';
+import { taxModels } from './taxes.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -28,7 +29,7 @@ import { posModels } from './pos.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -95,6 +96,7 @@ const allApps = [
         { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
         { key: 'entries', label: 'Journal Entries', model: 'account.move' },
         { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
+        { key: 'assets', label: 'Assets', model: 'account.asset' },
         { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
       ] },
@@ -114,6 +116,9 @@ const allApps = [
       { label: 'Configuration', children: [
         { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
         { key: 'journals', label: 'Journals', model: 'account.journal' },
+        { key: 'taxes', label: 'Taxes', model: 'account.tax' },
+        { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
+        { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
         { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },

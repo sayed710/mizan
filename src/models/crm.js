@@ -39,6 +39,7 @@ export const crmModels = {
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
       credit_limit: { type: 'monetary', label: 'Credit Limit' },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       followup_level_delay: { type: 'integer', label: 'Last Reminder Level (days)', readonly: true },
       followup_date: { type: 'date', label: 'Last Reminder', readonly: true },
       tag_ids: { type: 'tags', label: 'Tags' },

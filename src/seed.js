@@ -83,6 +83,19 @@ export function seed() {
 
   CHART.forEach(([code, name, account_type]) => add('account.account', { code, name, account_type, reconcile: ['asset_receivable', 'liability_payable'].includes(account_type) }));
   JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
+  const vatSale = tax('VAT 14%', 'sale', 14, '251000');
+  const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
+  const zeroExport = tax('0% Exports', 'sale', 0, null);
+  const zeroImport = tax('0% Imports', 'purchase', 0, null);
+  tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
+  tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment' });
+  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group: 'Stamp' });
+  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', tax_ids: [], account_ids: [] });
+  add('account.fiscal.position', {
+    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.',
+    tax_ids: [{ tax_src_id: vatSale, tax_dest_id: zeroExport }, { tax_src_id: vatPurchase, tax_dest_id: zeroImport }], account_ids: [],
+  });
   db = postEntry(db, {
     journal: 'MISC', date: today().slice(0, 4) + '-01-01', ref: 'Opening balance',
     lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],

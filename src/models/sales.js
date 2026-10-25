@@ -3,6 +3,7 @@ import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
 import { dueDate } from './terms.js';
+import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
@@ -63,6 +64,7 @@ function invoiceFrom(db, order, moveType, originField) {
     invoice_payment_term_id: term?.id ?? null,
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
+    fiscal_position_id: order.fiscal_position_id ?? null,
     [originField]: order.id,
     invoice_line_ids: lines,
   });
@@ -181,6 +183,8 @@ export const salesModels = {
       invoice_policy: { type: 'selection', label: 'Invoicing Policy', options: [['order', 'Ordered quantities'], ['delivery', 'Delivered quantities']] },
       sale_tax: { type: 'float', label: 'Sales Tax %' },
       purchase_tax: { type: 'float', label: 'Purchase Tax %' },
+      tax_id: { type: 'many2one', relation: 'account.tax', label: 'Sales Taxes' },
+      supplier_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Purchase Taxes' },
       property_account_income_id: { type: 'many2one', relation: 'account.account', label: 'Income Account' },
       property_account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
       description: { type: 'text', label: 'Internal Notes' },
@@ -242,6 +246,7 @@ export const salesModels = {
       partner_shipping_id: { type: 'many2one', relation: 'res.partner', label: 'Delivery Address' },
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
       payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Delivery Method' },
       date_order: { type: 'date', label: 'Order Date' },
       commitment_date: { type: 'date', label: 'Promised Delivery' },
@@ -260,7 +265,7 @@ export const salesModels = {
     onchange: (r, key, db) => {
       if (key !== 'partner_id' || !r.partner_id) return {};
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
-      return p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {};
+      return p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id, fiscal_position_id: fiscalPositionFor(db, p.id) } : {};
     },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
