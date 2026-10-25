@@ -487,6 +487,8 @@ const ar = {
   Interviewers: 'المقابِلون', Interviewer: 'المقابِل', Feedback: 'الملاحظات', LinkedIn: 'لينكدإن', Agency: 'وكالة', 'LinkedIn Profile': 'ملف لينكدإن',
   'Refuse Reason': 'سبب الرفض', 'Does not fit the job requirements': 'لا يطابق متطلبات الوظيفة', 'Refused by applicant': 'رفضه المتقدم',
   'Salary expectations too high': 'توقعات الراتب مرتفعة', 'Hired on': 'تاريخ التعيين', 'Create Employee': 'إنشاء موظف', Hired: 'تم التعيين', Contract: 'العقد',
+  Allocations: 'الأرصدة المخصصة', 'Allocation Type': 'نوع التخصيص', 'Regular Allocation': 'تخصيص عادي', 'Accrual Allocation': 'تخصيص تراكمي',
+  'Allocated Days': 'الأيام المخصصة', 'Days Accrued per Month': 'أيام مكتسبة شهريًا', 'Run Accrual': 'احتساب التراكم',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -185,6 +185,7 @@ export function seed() {
   [['Taxi to client site', 3, 'travel', 18, 'submitted', -2], ['Team lunch', 2, 'meals', 64, 'approved', -6], ['Printer paper', 4, 'office', 22, 'draft', 0], ['Flight to Dubai', 2, 'travel', 420, 'paid', -20]]
     .forEach(([name, employee_id, category, total_amount, state, d]) => add('hr.expense', { name, employee_id, category, total_amount, state, date: addDays(today(), d) }));
 
+  (db.records['hr.employee'] ?? []).forEach((e) => add('hr.leave.allocation', { name: `Annual leave ${today().slice(0, 4)}`, employee_id: e.id, leave_type: 'paid', number_of_days: 21, state: 'validate' }));
   [['Family visit', 3, 'paid', 5, 8, 'confirm'], ['Flu', 5, 'sick', -4, -3, 'validate'], ['Summer holiday', 2, 'paid', 20, 29, 'validate']]
     .forEach(([name, employee_id, leave_type, a, b, state]) => add('hr.leave', { name, employee_id, leave_type, date_from: addDays(today(), a), date_to: addDays(today(), b), state }));
 

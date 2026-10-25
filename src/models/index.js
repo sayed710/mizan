@@ -21,10 +21,12 @@ import { termModels } from './terms.js';
 import { deferredModels } from './deferred.js';
 import { paymentModels } from './payments.js';
 import { helpdeskModels } from './helpdesk.js';
+import { leaveGuard, timeoffModels } from './timeoff.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels };
+models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 
@@ -205,6 +207,7 @@ const allApps = [
     menus: [
       { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
+      { key: 'allocations', label: 'Allocations', model: 'hr.leave.allocation' },
       { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
     ],
   },
