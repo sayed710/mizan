@@ -5,6 +5,7 @@ import { accountingModels } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels } from './pay.js';
+import { elearningModels } from './elearning.js';
 import { reconcileModels } from './reconcile.js';
 import { workModels } from './work.js';
 import { moreModels } from './more.js';
@@ -30,7 +31,7 @@ import { posModels } from './pos.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels };
+export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels };
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
