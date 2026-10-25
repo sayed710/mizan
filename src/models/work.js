@@ -1,7 +1,7 @@
 // Project, Helpdesk, Employees and Calendar.
 import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
-import { slaDeadline, slaStatus } from './helpdesk.js';
+import { assignTicket, mergeTickets, rateTicket, slaDeadline, slaStatus, ticketExtraFields } from './helpdesk.js';
 
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 
@@ -204,7 +204,7 @@ export const workModels = {
         type: 'selection',
         label: 'Stage',
         tracking: true,
-        options: [['new', 'New'], ['progress', 'In Progress'], ['hold', 'On Hold'], ['solved', 'Solved']],
+        options: [['new', 'New'], ['progress', 'In Progress'], ['hold', 'On Hold'], ['solved', 'Solved'], ['cancelled', 'Cancelled']],
       },
       create_date: { type: 'date', label: 'Created on', readonly: true },
       priority: { type: 'priority', label: 'Priority' },
@@ -217,6 +217,7 @@ export const workModels = {
       sla_status: { type: 'selection', label: 'SLA Status', options: [['ok', 'On Track'], ['failed', 'Failed']], compute: (r) => slaStatus(r, today()) },
       close_date: { type: 'date', label: 'Closed on', readonly: true },
       fsm_task_id: { type: 'many2one', relation: 'fsm.task', label: 'Intervention', readonly: true },
+      ...Object.fromEntries(Object.entries(ticketExtraFields).filter(([k]) => k !== 'user_id')),
     },
     defaults: () => ({ stage_id: 'new', ticket_type: 'question', priority: 0, tag_ids: [], create_date: today() }),
     // Customer contact fills in; team/priority/type recompute the SLA deadline; solving stamps the close date.
@@ -245,7 +246,24 @@ export const workModels = {
       statusbar: 'stage_id',
       statusbarClickable: true,
       title: 'name',
+      statusbarHide: ['cancelled'],
       buttons: [{
+        label: 'Assign', when: (r) => !r.user_id && r.team_id && !['solved', 'cancelled'].includes(r.stage_id), run: (db, r) => ({ db: assignTicket(db, r) }),
+      }, {
+        // Merge duplicates into this ticket: their descriptions and messages move here and they are cancelled.
+        label: 'Merge Tickets', when: (r) => !['solved', 'cancelled'].includes(r.stage_id),
+        run: (db, r) => {
+          const refs = prompt('Ticket ids to merge into this one (comma separated)', '');
+          const ids = String(refs ?? '').split(',').map((x) => Number(x.trim())).filter((x) => Number.isInteger(x) && x > 0);
+          return { db: ids.length ? mergeTickets(db, r.id, ids) : db };
+        },
+      }, {
+        label: 'Record Rating', when: (r) => r.stage_id === 'solved' && !r.rating,
+        run: (db, r) => {
+          const rating = Number(prompt('Customer rating (1-5)', '5'));
+          return { db: Number.isInteger(rating) && rating > 0 ? rateTicket(db, r.id, rating, prompt('Comment', '') ?? '') : db };
+        },
+      }, {
         label: 'Plan Intervention', when: (r) => !r.fsm_task_id && r.stage_id !== 'solved',
         run: (db, r) => {
           const { db: next, id } = create(db, 'fsm.task', { name: r.name, partner_id: r.partner_id ?? null, technician_id: r.user_id ?? null, date: today(), description: r.description ?? '' });
@@ -254,7 +272,7 @@ export const workModels = {
       }],
       smart: [{ label: 'Customer Tickets', model: 'helpdesk.ticket', field: 'partner_id', key: 'partner_id', target: 'helpdesk/tickets' }],
       groups: [['team_id', 'user_id', 'priority', 'tag_ids'], ['partner_id', 'email', 'phone', 'ticket_type', 'sla_deadline', 'sla_status']],
-      tabs: [{ label: 'Description', fields: ['description'] }, { label: 'Extra Info', fields: ['create_date', 'close_date', 'fsm_task_id'] }],
+      tabs: [{ label: 'Description', fields: ['description'] }, { label: 'Extra Info', fields: ['create_date', 'close_date', 'fsm_task_id', 'merged_into'] }, { label: 'Rating', fields: ['rating', 'rating_comment'] }],
       chatter: true,
     },
   },

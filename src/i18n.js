@@ -689,6 +689,8 @@ const ar = {
   "More than 24 hours since the customer's last message: use an approved template": 'مرّ أكثر من 24 ساعة على آخر رسالة من العميل: استخدم قالبًا معتمدًا',
   'Only administrators can approve or reject WhatsApp templates': 'يمكن للمسؤولين فقط اعتماد قوالب واتساب أو رفضها',
   'Submitted templates cannot be edited': 'لا يمكن تعديل القوالب المرسلة', 'WhatsApp message sent': 'تم إرسال رسالة واتساب', 'Message not found': 'الرسالة غير موجودة',
+  'Merge Tickets': 'دمج التذاكر', 'Record Rating': 'تسجيل التقييم', 'Customer Rating': 'تقييم العميل', 'Merged Into': 'مدمج في',
+  'Assignment Method': 'طريقة الإسناد', Balanced: 'متوازن', 'Auto Close': 'إغلاق تلقائي', 'Auto Close After (days)': 'إغلاق تلقائي بعد (أيام)',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
