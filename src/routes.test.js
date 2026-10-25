@@ -69,3 +69,13 @@ test('a manufacturing order explodes its BoM into components and work orders, th
   assert.ok(search(done, 'stock.lot').some((l) => l.name === 'LOT-77' && l.qty === 2));
   assert.equal(read(done, 'mrp.production', id).workorders[0].state, 'done');
 });
+
+test('replenishment drafts one RFQ per vendor up to the maximum, counting what is already on order', async () => {
+  const { replenish } = await import('./models/routes.js');
+  const base = (seed().records.product ?? []).reduce((db, p) => write(db, 'product', p.id, { reorder_min: 0 }), seed());
+  const db0 = write(base, 'product', 1, { qty_available: 5, reorder_min: 20, reorder_max: 50, vendor_id: 2 });
+  const once = replenish(db0);
+  const rfq = search(once, 'purchase.order').find((p) => p.origin === 'Replenishment');
+  assert.deepEqual(rfq.order_line.map((l) => [l.product_id, l.qty]), [[1, 45]]);
+  assert.equal(search(replenish(once), 'purchase.order').filter((p) => p.origin === 'Replenishment').length, 1);
+});

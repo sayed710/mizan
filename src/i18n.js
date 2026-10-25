@@ -515,6 +515,7 @@ const ar = {
   'Requested Document': 'مستند مطلوب', 'Request Due Date': 'موعد تسليم الطلب', Locked: 'مقفل', 'Linked Model': 'النموذج المرتبط', 'Linked Record': 'السجل المرتبط',
   Requested: 'مطلوب', 'Overdue Requests': 'طلبات متأخرة', 'Not Linked': 'غير مرتبط', 'Create Vendor Bill': 'إنشاء فاتورة مورد', 'Request Signature': 'طلب توقيع',
   'Create Task': 'إنشاء مهمة', Lock: 'قفل', Unlock: 'فتح القفل', 'Request Document': 'طلب مستند',
+  'Max. Quantity': 'الحد الأقصى للكمية', Replenishment: 'إعادة التزويد',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -50,6 +50,26 @@ export function procure(db, order) {
   return { db: next, stockLines };
 }
 
+/**
+ * Reordering rules: a bought product whose forecast (on hand + quantities on open RFQs/POs not yet received)
+ * falls below its minimum gets one draft RFQ line to its vendor up to the maximum (or the minimum).
+ */
+export function replenish(db) {
+  const incoming = new Map();
+  for (const po of search(db, 'purchase.order').filter((p) => p.state !== 'cancel' && !p.receipt_done && !p.dropship_partner_id)) {
+    for (const l of po.order_line ?? []) incoming.set(l.product_id, (incoming.get(l.product_id) ?? 0) + (Number(l.qty) || 0) - (Number(l.qty_delivered) || 0));
+  }
+  const needs = search(db, 'product').filter((p) => p.type === 'goods' && p.vendor_id && p.purchase_ok !== false && Number(p.reorder_min) > 0)
+    .map((p) => {
+      const forecast = (Number(p.qty_available) || 0) + (incoming.get(p.id) ?? 0);
+      const target = Math.max(Number(p.reorder_max) || 0, Number(p.reorder_min));
+      return forecast < Number(p.reorder_min) ? { p, qty: target - forecast } : null;
+    }).filter(Boolean);
+  const byVendor = new Map();
+  for (const n of needs) byVendor.set(n.p.vendor_id, [...(byVendor.get(n.p.vendor_id) ?? []), { product_id: n.p.id, qty: n.qty, price_unit: n.p.cost, tax: n.p.purchase_tax ?? 14 }]);
+  return [...byVendor].reduce((acc, [vendor, lines]) => create(acc, 'purchase.order', { partner_id: vendor, order_line: lines, origin: 'Replenishment' }).db, db);
+}
+
 /** Distribute landed costs over the received products by quantity and raise their (average) cost. */
 export function applyLandedCost(db, lc) {
   const picking = read(db, 'stock.picking', lc.picking_id);
