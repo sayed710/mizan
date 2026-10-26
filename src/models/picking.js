@@ -62,14 +62,33 @@ export function validatePicking(db, picking, { backorder = true, apply, date = t
   return { db: next, done, backorderId };
 }
 
-/** Reverse a done transfer: same products and quantities the other way, ready to process. */
+/** Per product, what a done transfer still has to return: its quantities minus those of its other returns. */
+export function returnableQty(db, picking) {
+  const left = new Map();
+  for (const l of picking.move_ids ?? []) left.set(l.product_id, (left.get(l.product_id) ?? 0) + (Number(l.qty) || 0));
+  const returns = search(db, 'stock.picking').filter((p) => p.return_of === picking.id && p.state !== 'cancel');
+  for (const l of returns.flatMap((p) => p.move_ids ?? [])) left.set(l.product_id, (left.get(l.product_id) ?? 0) - (Number(l.qty) || 0));
+  return left;
+}
+
+/**
+ * Reverse a done transfer: what is not returned yet, the other way, ready to process. It stays linked to the
+ * order, so validating it takes the quantities back off the order's delivered quantities.
+ */
 export function returnPicking(db, picking) {
   if (picking.state !== 'done') throw new Error('Only done transfers can be returned');
+  const left = returnableQty(db, picking);
+  const move_ids = (picking.move_ids ?? []).map((l) => {
+    const qty = Math.max(0, Math.min(Number(l.qty) || 0, left.get(l.product_id) ?? 0));
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) - qty);
+    return { product_id: l.product_id, qty, lot_name: l.lot_name ?? '' };
+  }).filter((l) => l.qty > 0);
+  if (!move_ids.length) throw new Error('Everything in this transfer has already been returned');
   const type = picking.picking_type === 'outgoing' ? 'incoming' : picking.picking_type === 'incoming' ? 'outgoing' : 'internal';
   const res = create(db, 'stock.picking', {
     picking_type: type, partner_id: picking.partner_id ?? null, origin: `Return of ${picking.name}`, scheduled_date: today(),
     location_id: picking.location_dest_id ?? null, location_dest_id: picking.location_id ?? null, return_of: picking.id,
-    move_ids: (picking.move_ids ?? []).map((l) => ({ product_id: l.product_id, qty: Number(l.qty) || 0, lot_name: l.lot_name ?? '' })), state: 'draft',
+    sale_id: picking.sale_id ?? null, purchase_id: picking.purchase_id ?? null, move_ids, state: 'draft',
   });
   return { db: reservePicking(res.db, read(res.db, 'stock.picking', res.id)), id: res.id };
 }
