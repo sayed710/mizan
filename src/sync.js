@@ -1,7 +1,7 @@
 // Record-level diff between two db snapshots, applied server-side so concurrent edits
 // to different records don't overwrite each other.
 import { models } from './models/index.js';
-import { validate } from './orm.js';
+import { referenceTo, validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { setCompanies } from './models/company.js';
@@ -33,6 +33,40 @@ export function diffDb(prev, next) {
     seq: next.seq,
     settings: prev.settings === next.settings ? null : next.settings,
   };
+}
+
+/**
+ * The first many2one (top level or in lines) of an upserted record that points at a missing record, as an error
+ * message, or null. Only values that differ from the stored record are checked, so old data never blocks an edit.
+ */
+function danglingLink(records, upserts, stored) {
+  const ids = new Map();
+  const exists = (model, id) => {
+    if (!models[model]) return true;
+    if (!ids.has(model)) ids.set(model, new Set((records[model] ?? []).map((r) => r.id)));
+    return ids.get(model).has(id);
+  };
+  const before = (model, id) => (stored[model] ?? []).find((r) => r.id === id);
+  for (const [model, recs] of Object.entries(upserts)) {
+    const fields = models[model]?.fields ?? {};
+    for (const raw of Array.isArray(recs) ? recs : []) {
+      const old = before(model, raw?.id);
+      for (const [key, f] of Object.entries(fields)) {
+        const value = raw?.[key];
+        if (f.compute || value == null || value === '' || JSON.stringify(value) === JSON.stringify(old?.[key])) continue;
+        if (f.type === 'many2one' && !exists(f.relation, value)) return `${f.label}: ${models[f.relation].label} #${value} does not exist`;
+        if (f.type !== 'one2many' || !Array.isArray(value) || !f.fields) continue;
+        const known = new Set((old?.[key] ?? []).flatMap((l) => Object.values(l ?? {})));
+        for (const line of value) {
+          for (const [sub, sf] of Object.entries(f.fields)) {
+            const v = line?.[sub];
+            if (sf.type === 'many2one' && v != null && v !== '' && !known.has(v) && !exists(sf.relation, v)) return `${f.label} › ${sf.label}: ${models[sf.relation].label} #${v} does not exist`;
+          }
+        }
+      }
+    }
+  }
+  return null;
 }
 
 export const isEmptyDiff = (d) =>
@@ -72,6 +106,14 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
+  // Referential integrity, on the result: nothing may still point at a deleted record, and changed links must
+  // point at records that exist.
+  for (const [model, ids] of Object.entries(d.deletes ?? {})) {
+    const used = referenceTo({ records }, model, ids);
+    if (used) throw new Error(`Cannot delete ${models[model].label}: still used by ${used}`);
+  }
+  const missing = danglingLink(records, d.upserts ?? {}, db.records);
+  if (missing) throw new Error(missing);
   const seq = { ...db.seq };
   for (const [model, n] of Object.entries(d.seq ?? {})) {
     if (models[model] && Number.isInteger(n)) seq[model] = Math.max(seq[model] ?? 0, n, ...(records[model] ?? []).map((r) => r.id));
