@@ -745,6 +745,10 @@ const ar = {
   'Terms': 'الشروط',
   'Stock / Sales Unit': 'وحدة المخزون والبيع',
   'Purchase Unit': 'وحدة الشراء',
+  'Share / Customer Preview': 'مشاركة / معاينة العميل',
+  'Customer link': 'رابط العميل',
+  'Customer Preview': 'معاينة العميل',
+  'The customer link could not be generated. Check your access and try again.': 'تعذّر إنشاء رابط العميل. تحقق من صلاحياتك وحاول مرة أخرى.',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

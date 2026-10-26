@@ -23,6 +23,7 @@ import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE 
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { search } from '../src/orm.js';
+import { createPortal } from './portal.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -524,9 +525,12 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   try {
+    if (await portal.handle(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {

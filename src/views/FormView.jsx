@@ -8,6 +8,29 @@ import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
 
+function PortalLink({ model, id }) {
+  const [url, setUrl] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const share = async () => {
+    setLoading(true);
+    setError('');
+    setUrl('');
+    try {
+      const response = await fetch(`/api/portal-link/${model}/${id}`, { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(t('The customer link could not be generated. Check your access and try again.'));
+      const out = await response.json();
+      setUrl(new URL(out.url, location.origin).href);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+  return <span>
+    <button type="button" className="btn" disabled={loading} onClick={share}>{t('Share / Customer Preview')}</button>
+    {url && <span role="status"><label>{t('Customer link')} <input aria-label={t('Customer link')} value={url} readOnly onFocus={(e) => e.target.select()} /></label> <a href={url} target="_blank" rel="noopener noreferrer">{t('Customer Preview')}</a></span>}
+    {error && <span role="alert">{error}</span>}
+  </span>;
+}
+
 function withComputed(model, vals) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals)])) };
@@ -290,6 +313,7 @@ export function FormView({ leaf, id, base, params }) {
             <span>{isNew ? t('New') : current[def.form.title]}</span>
           </nav>
           {!isNew && <ActionsMenu model={model} rec={rec} backHash={backHash} base={base} query={query} />}
+          {!isNew && isServer() && (model === 'sale.order' || (model === 'account.move' && current.move_type === 'out_invoice')) && <PortalLink key={`${model}:${rec.id}`} model={model} id={rec.id} />}
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>
