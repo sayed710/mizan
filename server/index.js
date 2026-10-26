@@ -39,7 +39,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { modelsForApps } from '../src/models/index.js';
+import { modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -142,16 +142,18 @@ const pageUnlocked = (req, p) => {
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
 const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite(db), livechat: livechatInfo(db) });
 
-/** Models a session/API user may touch (null = everything). */
-const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
+/** Models a session/API user may change (null = everything). */
+const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
+/** Models a session/API user may read (null = everything). */
+const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 const visibleDb = (u) => {
-  const allowed = allowedFor(u);
-  if (!allowed) return db;
-  return {
+  const readable = readableFor(u);
+  if (!readable) return db;
+  return redactForApps({
     ...db,
-    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => allowed.has(m))),
-    messages: db.messages.filter((m) => allowed.has(m.model)),
-  };
+    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => readable.has(m))),
+    messages: db.messages.filter((m) => readable.has(m.model)),
+  }, u.apps);
 };
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
@@ -362,7 +364,9 @@ async function api(req, res, path) {
     const keyUser = apiKeyUser(req);
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
+    // Reads see what the web client sees; writes are checked against the stricter write set.
+    const reading = req.method === 'GET';
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser) });
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -525,7 +529,7 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
-const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: readableFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;

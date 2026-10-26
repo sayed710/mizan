@@ -559,13 +559,52 @@ export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.inde
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
+/** Accounting, HR and company records: only an app that shows them in its menus may change them. */
+const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
+  'account.bank.statement.line', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
+/** Private employee fields, and the menu models whose users may see them. */
+const PRIVATE_FIELDS = {
+  'hr.employee': {
+    ...Object.fromEntries(['wage', 'private_email', 'private_phone', 'private_address', 'birthday', 'place_of_birth', 'gender', 'marital', 'children',
+      'nationality', 'identification_id', 'passport_id', 'visa_no', 'permit_no', 'visa_expire', 'bank_account', 'emergency_contact', 'emergency_phone',
+      'departure_reason'].map((f) => [f, HR_OWNERS])),
+    // ponytail: the attendance kiosk still checks PINs in the browser; move that check to the server.
+    pin: [...HR_OWNERS, 'hr.attendance'],
+    badge_id: [...HR_OWNERS, 'hr.attendance'],
+  },
+};
 
-/** Models a user restricted to `appIds` may read/write: their menus' models, related models, shared basics. */
-export function modelsForApps(appIds) {
+/** Models on the menus of `appIds`, plus the shared basics. */
+function menuModels(appIds) {
   const base = new Set(SHARED);
   for (const app of apps.filter((a) => appIds.includes(a.id))) {
     for (const leaf of leavesOf(app)) if (leaf.model) base.add(leaf.model);
   }
+  return base;
+}
+
+/** Models a user restricted to `appIds` may write: the readable ones, minus accounting, HR and company records their apps don't show. */
+export function writableModelsForApps(appIds) {
+  const base = menuModels(appIds);
+  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
+}
+
+/** `db` without the private employee fields the apps in `appIds` may not see. */
+export function redactForApps(db, appIds) {
+  const base = menuModels(appIds);
+  let records = db.records;
+  for (const [model, fields] of Object.entries(PRIVATE_FIELDS)) {
+    const hidden = Object.keys(fields).filter((f) => !fields[f].some((m) => base.has(m)));
+    if (!hidden.length || !records[model]) continue;
+    records = { ...records, [model]: records[model].map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !hidden.includes(k)))) };
+  }
+  return records === db.records ? db : { ...db, records };
+}
+
+/** Models a user restricted to `appIds` may read: their menus' models, related models, shared basics. */
+export function modelsForApps(appIds) {
+  const base = menuModels(appIds);
   const out = new Set(base);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
