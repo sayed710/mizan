@@ -29,6 +29,9 @@ export function cleanValue(field, value, where) {
     case 'date':
       if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(where);
       return value;
+    case 'datetime':
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.test(value) || !Number.isFinite(Date.parse(value))) fail(where);
+      return value;
     case 'tags':
       if (!Array.isArray(value) || value.length > 50 || !value.every((x) => typeof x === 'string')) fail(where);
       return value.map((x) => x.slice(0, 50));

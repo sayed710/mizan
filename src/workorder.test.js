@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
+import { applyDiff, diffDb } from './sync.js';
+import { cleanValue } from './validate.js';
 import { moreModels } from './models/more.js';
 import { accountId, isBalanced, journalId } from './models/ledger.js';
 import { generateWorkorders, startWorkorder, pauseWorkorder, finishWorkorder, blockWorkcenter, unblockWorkcenter, workorderCost, productionCost, postOperationCost, workcenterLoad, oee, workorderModels } from './models/workorder.js';
@@ -165,4 +167,24 @@ test('Produce waits for open work orders', () => {
   const db = generateWorkorders(f.db, f.id);
   const mo = read(db, 'mrp.production', f.id);
   assert.throws(() => produceButton.run(db, mo), /Finish the work orders first/);
+});
+
+test('work order start, pause and finish times survive the server, so MOs with operations can be produced (FLOW-005)', () => {
+  const f = fixture();
+  let db = generateWorkorders(f.db, f.id);
+  const [a] = linked(db, f.id);
+  const steps = [
+    (x) => startWorkorder(x, a.id, { employeeId: 1, at: at('08:00') }),
+    (x) => pauseWorkorder(x, a.id, { at: at('08:15') }),
+    (x) => startWorkorder(x, a.id, { employeeId: 1, at: at('08:20') }),
+    (x) => finishWorkorder(x, a.id, { at: at('09:00'), qty: 4 }),
+  ];
+  for (const step of steps) db = applyDiff(db, diffDb(db, step(db)), { isAdmin: false, author: 'Operator' });
+  const wo = read(db, 'mrp.workorder', a.id);
+  assert.equal(wo.state, 'done');
+  assert.equal(wo.date_start, at('08:00'));
+  assert.equal(wo.date_finished, at('09:00'));
+  assert.deepEqual(wo.time_ids.map((l) => l.minutes), [15, 40]);
+  assert.throws(() => cleanValue({ type: 'datetime' }, '2026-10-19', 'x'), /Invalid value/);
+  assert.throws(() => cleanValue({ type: 'datetime' }, '2026-13-45T99:00', 'x'), /Invalid value/);
 });

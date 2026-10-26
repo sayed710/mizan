@@ -16,6 +16,8 @@ export function setCurrency(code) {
 export const money = (n) => moneyFmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
+/** An ISO instant as a datetime-local input value (local time, minutes). */
+const localInput = (iso) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
 export function display(db, field, value) {
@@ -29,6 +31,7 @@ export function display(db, field, value) {
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
+    case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
   }
 }
@@ -172,6 +175,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
+    case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(e.target.value ? new Date(e.target.value).toISOString() : null) });
     case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (

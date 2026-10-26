@@ -7,7 +7,7 @@ import { t } from '../i18n.js';
 import { formatDate } from '../ui.jsx';
 
 const DAY = 864e5;
-const parse = (s) => new Date(s + 'T00:00');
+const parse = (s) => new Date(String(s).slice(0, 10) + 'T00:00'); // dates, or the day of a datetime
 const diffDays = (a, b) => Math.round((parse(b) - parse(a)) / DAY);
 const weekStart = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return new Date(x.getFullYear(), x.getMonth(), x.getDate()); };
 

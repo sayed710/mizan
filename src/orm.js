@@ -130,7 +130,7 @@ export const messagesOf = (db, model, id) =>
 export const updateSettings = (db, vals) => ({ ...db, settings: { ...db.settings, ...vals } });
 
 const groupKey = (field, v) => {
-  if (field.type === 'date') return v ? v.slice(0, 7) : false;
+  if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;
   if (field.type === 'boolean') return !!v;
   return v ?? false;
 };
@@ -138,7 +138,7 @@ const groupKey = (field, v) => {
 export function groupLabel(db, field, key) {
   if (key === false || key == null || key === '') return field.type === 'boolean' ? 'No' : 'None';
   switch (field.type) {
-    case 'date': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
     case 'many2one': return read(db, field.relation, key)?.name ?? 'None';
     case 'boolean': return 'Yes';
@@ -160,7 +160,7 @@ export function groupRecords(db, model, records, name) {
   }
   const groups = [...buckets].map(([key, recs]) => ({ key, label: groupLabel(db, field, key), records: recs }));
   if (field.type === 'selection') return groups;
-  const rank = (g) => (g.key === false ? '￿' : field.type === 'date' ? String(g.key) : g.label.toLowerCase());
+  const rank = (g) => (g.key === false ? '￿' : ['date', 'datetime'].includes(field.type) ? String(g.key) : g.label.toLowerCase());
   return groups.sort((a, b) => rank(a).localeCompare(rank(b)));
 }
 
