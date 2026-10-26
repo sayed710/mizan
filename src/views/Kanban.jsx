@@ -3,6 +3,7 @@ import { models } from '../models/index.js';
 import { aggregate, create, groupRecords, write } from '../orm.js';
 import { viewRecords as search } from '../companyView.js';
 import { commit, getDb } from '../store.js';
+import { canDropOn } from './kanbanDrop.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';
 
@@ -65,8 +66,6 @@ function QuickCreate({ model, vals, onDone }) {
   );
 }
 
-const DROPPABLE = ['selection', 'many2one', 'char', 'boolean'];
-
 export function Kanban({ db, model, records, open, groupBy, defaults }) {
   const k = models[model].kanban;
   const [quick, setQuick] = useState(null);
@@ -80,7 +79,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
       </div>
     );
   }
-  const canDrop = DROPPABLE.includes(field.type);
+  const canDrop = canDropOn(model, groupBy);
   const groups = groupRecords(db, model, records, groupBy);
   return (
     <div className="kanban">
