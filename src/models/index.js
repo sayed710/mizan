@@ -468,7 +468,7 @@ const allApps = [
   { id: 'approvals', name: 'Approvals', color: ['#84cc16', '#0f766e'], menus: [{ key: 'requests', label: 'Approvals', model: 'approval.request' }, { label: 'Configuration', children: [{ key: 'approval-types', label: 'Approval Types', model: 'approval.category' }] }] },
   { id: 'repairs', name: 'Repairs', color: ['#78716c', '#dc2626'], menus: [{ key: 'orders', label: 'Repair Orders', model: 'repair.order' }] },
   { id: 'fieldservice', name: 'Field Service', color: ['#0d9488', '#ca8a04'], menus: [{ key: 'tasks', label: 'Field Service Tasks', model: 'fsm.task' }] },
-  { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }] },
+  { id: 'frontdesk', name: 'Frontdesk', color: ['#a78bfa', '#0369a1'], menus: [{ key: 'visitors', label: 'Visitors', model: 'frontdesk.visitor' }, { label: 'Configuration', children: [{ key: 'stations', label: 'Stations', model: 'frontdesk.station' }] }] },
   { id: 'elearning', name: 'eLearning', color: ['#f43f5e', '#1d4ed8'], menus: [{ key: 'courses', label: 'Courses', model: 'slide.channel' }, { key: 'attendees', label: 'Attendees', model: 'slide.channel.partner' }] },
   {
     id: 'livechat', name: 'Live Chat', color: ['#38bdf8', '#7c3aed'],

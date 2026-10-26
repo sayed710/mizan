@@ -7,6 +7,7 @@ import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
+import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -35,8 +36,11 @@ export function postMove(db, id) {
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   checkMandatoryPlans(db, r);
+  // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
+  checkBillMatch(db, r);
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids: invoiceLines(db, { ...r, name }) }), id);
+  const line_ids = [...invoiceLines(db, { ...r, name }), ...priceDifferenceLines(db, { ...r, name })];
+  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
 }
 

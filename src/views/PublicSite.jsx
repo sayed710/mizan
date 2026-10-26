@@ -1,12 +1,14 @@
 // Public website (no login): published pages + shop, served from /api/public/* on the Mizan server.
 // Hash routes: #/shop… (Shop.jsx), #/shop/page/<slug>, #/shop/events, #/shop/appointments[/<id>] (Appointments.jsx), #/shop/jobs, #/shop/blog…, #/shop/forum… (Blog.jsx).
 import { useEffect, useRef, useState } from 'react';
-import { t } from '../i18n.js';
+import { lang, t } from '../i18n.js';
 import { setCurrency } from '../ui.jsx';
 import { matchRule } from '../models/livechat.js';
 import { Shop, parseShopRoute, useCart, useStored } from './Shop.jsx';
 import { Blog, Forum } from './Blog.jsx';
 import { Appointments } from './Appointments.jsx';
+import { pageFor } from '../models/websiteplus.js';
+import { SiteMenu, usePageMeta } from './Website.jsx';
 
 /** Name/email/phone form posting to a public endpoint, with an optional choice; shows the server's answer. */
 function VisitorForm({ action, path, extra, choices }) {
@@ -159,7 +161,7 @@ function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
     <header className="site-nav shop-header">
       <a className="site-brand" href={site.pages[0] ? `#/shop/page/${encodeURIComponent(site.pages[0].slug)}` : '#/shop'}><b>{site.company}</b></a>
       <nav aria-label={t('Website')}>
-        {site.pages.filter((p) => p.slug !== 'contact').map((p) => link(`#/shop/page/${encodeURIComponent(p.slug)}`, p.name, route.page === 'page' && route.arg === p.slug))}
+        {site.menus?.length ? <SiteMenu items={site.menus} /> : site.pages.filter((p) => p.slug !== 'contact').map((p) => link(`/${p.slug.replace(/^\/+|\/+$/g, '')}`, pageFor(null, p, lang).name, route.page === 'page' && route.arg === p.slug))}
         {link('#/shop', t('Shop'), !SITE_PAGES.includes(route.page))}
         {site.events?.length > 0 && link('#/shop/events', t('Events'), route.page === 'events')}
         {site.appointments?.length > 0 && link('#/shop/appointments', t('Appointments'), route.page === 'appointments')}
@@ -178,7 +180,7 @@ function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
           </select>
         )}
         <a className="shop-cart-link" href="#/shop/cart" aria-label={t('Cart ({count})', { count: cartCount })}>{t('Cart')} <span className="shop-badge">{cartCount}</span></a>
-        <a className="btn sm" href="#/">{t('Sign in')}</a>
+        <a className="btn sm" href="/#/">{t('Sign in')}</a>
         {contact && <a className="btn sm primary" href="#/shop/page/contact">{t('Contact Us')}</a>}
       </div>
     </header>
@@ -193,9 +195,13 @@ export function PublicSite() {
   const cart = useCart();
   const [pricelist, setPricelist] = useStored('mizan-shop-pricelist', null);
   const route = parseShopRoute(useHash());
+  const original = route.page === 'page' && site?.pages.find((p) => p.slug.replace(/^\/+|\/+$/g, '') === route.arg);
+  const page = original && pageFor(null, original, lang);
+  usePageMeta(page);
 
   useEffect(() => {
-    fetch('/api/public/site').then((r) => r.json()).then((s) => {
+    const source = location.pathname !== '/' ? `${location.pathname}?website_data=1` : '/api/public/site';
+    fetch(source).then((r) => r.json()).then((s) => {
       setCurrency(s.currency);
       setSite(s);
     }).catch(() => setError(t('The website is not available right now.')));
@@ -204,12 +210,11 @@ export function PublicSite() {
   if (error && !site) return <main className="site"><div className="site-body"><p className="alert">{error}</p></div></main>;
   if (!site) return <main className="site"><div className="site-body muted">…</div></main>;
 
-  const page = route.page === 'page' && site.pages.find((p) => p.slug === route.arg);
   const validPricelist = site.pricelists?.some((p) => p.id === pricelist) ? pricelist : null;
 
   return (
     <main className="site">
-      <SiteHeader site={site} route={route} cartCount={cart.count} pricelist={validPricelist} setPricelist={setPricelist} />
+      {page?.header_visible !== false && <SiteHeader site={site} route={route} cartCount={cart.count} pricelist={validPricelist} setPricelist={setPricelist} />}
       <div className="site-body">
         {route.page === 'events' && site.events.map((e) => (
           <article key={e.id} className="shop-item job">
@@ -253,7 +258,7 @@ export function PublicSite() {
         {!SITE_PAGES.includes(route.page) && <Shop site={site} route={route} cart={cart} pricelist={validPricelist} />}
       </div>
       {site.livechat && <LiveChat info={site.livechat} />}
-      <footer className="site-footer">© {new Date().getFullYear()} {site.company}</footer>
+      {page?.footer_visible !== false && <footer className="site-footer">© {new Date().getFullYear()} {site.company}</footer>}
     </main>
   );
 }

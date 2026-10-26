@@ -167,7 +167,7 @@ export function seed() {
   const po1rec = read(db, 'purchase.order', po1);
   // Received through stock valuation at the PO price, so the bill clears the interim account.
   db = moveValued(db, po1rec.order_line.map((l) => ({ ...l, unit_cost: l.price_unit })), 1, { reference: po1rec.name, date: addDays(today(), -11) });
-  set('purchase.order', po1, { state: 'purchase', receipt_done: true });
+  set('purchase.order', po1, { state: 'purchase', receipt_done: true, order_line: po1rec.order_line.map((l) => ({ ...l, qty_delivered: l.qty })) });
   const bill = add('account.move', {
     move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,
     invoice_date: addDays(today(), -10), invoice_date_due: addDays(today(), 20), invoice_line_ids: po1rec.order_line,

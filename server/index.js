@@ -3,7 +3,7 @@
 // Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS.
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,8 @@ import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
+import { search } from '../src/orm.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -128,6 +130,17 @@ function apiKeyUser(req) {
 const SECURE = process.env.MIZAN_SECURE_COOKIE ? process.env.MIZAN_SECURE_COOKIE === '1' : process.env.NODE_ENV === 'production';
 const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${SECURE ? '; Secure' : ''}`;
 
+// Sessions use opaque random tokens, not a signing secret. Persist a separate key in the existing kv store.
+sql.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)").run(randomBytes(32).toString('hex'));
+const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
+const pageToken = (p) => createHmac('sha256', PAGE_SECRET).update(`${p.id}:${p.visibility_password}`).digest('hex');
+const pageUnlocked = (req, p) => {
+  const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`mizan_page_${p.id}=`))?.split('=')[1] ?? '';
+  return /^[a-f0-9]{64}$/.test(given) && timingSafeEqual(Buffer.from(given), Buffer.from(pageToken(p)));
+};
+const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
+const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite(db), livechat: livechatInfo(db) });
+
 /** Models a session/API user may touch (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 const visibleDb = (u) => {
@@ -183,7 +196,7 @@ const SECURITY_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
 };
 
-async function serveStatic(req, res) {
+async function serveStatic(req, res, status = 200, routeHash) {
   const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   let file = normalize(join(DIST, path));
   if (!file.startsWith(DIST + sep) && file !== DIST) return send(res, 403, { error: 'Forbidden' });
@@ -193,8 +206,15 @@ async function serveStatic(req, res) {
     file = join(DIST, 'index.html'); // SPA fallback
   }
   try {
-    const body = await readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS });
+    let body = await readFile(file);
+    const headers = { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS };
+    if (extname(file) === '.html' && routeHash) {
+      const script = `if (!location.hash) location.hash = ${JSON.stringify(routeHash).replace(/</g, '\\u003c')};`;
+      body = body.toString().replace('</head>', `<script>${script}</script></head>`);
+      headers['Content-Security-Policy'] += `; script-src 'self' 'sha256-${createHash('sha256').update(script).digest('base64')}'`;
+      headers['Cache-Control'] = 'no-store';
+    }
+    res.writeHead(status, headers);
     res.end(body);
   } catch {
     send(res, 404, { error: 'Run "npm run build" first' });
@@ -204,6 +224,10 @@ async function serveStatic(req, res) {
 // ---- routes ----
 /** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
 const baseUrlOf = (req) => (process.env.MIZAN_PUBLIC_URL ?? `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`).replace(/\/$/, '');
+// No Host allow-list exists: crawler URLs are relative unless the operator configured MIZAN_PUBLIC_URL.
+const websiteOrigin = () => {
+  try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
+};
 let lastBaseUrl = process.env.MIZAN_PUBLIC_URL ?? `http://localhost:${PORT}`;
 let mailBaseKnown = false;
 
@@ -233,7 +257,7 @@ async function api(req, res, path) {
     if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), WEBHOOK_WRITE));
     return send(res, out.status, out.body);
   }
-  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, { ...publicSite(db), ...publicBlogSite(db), livechat: livechatInfo(db) });
+  if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, siteOf(req));
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
@@ -447,16 +471,69 @@ async function api(req, res, path) {
   return send(res, 404, { error: 'Not found' });
 }
 
-createServer(async (req, res) => {
+async function website(req, res, path) {
+  const url = new URL(req.url, 'http://x');
+  const user = sessionUser(req);
+  const back = url.searchParams.get('return');
+  if (req.method === 'GET' && path === '/' && user && /^\/(?!\/)/.test(back ?? '') && !/[\u0000-\u0020\u007f\\]/.test(back)) {
+    res.writeHead(302, { Location: back, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+  if (req.method === 'GET' && ['/sitemap.xml', '/robots.txt'].includes(path)) {
+    const xml = path === '/sitemap.xml';
+    res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': `${xml ? 'application/xml' : 'text/plain'}; charset=utf-8`, 'Cache-Control': 'public, max-age=300' });
+    return res.end((xml ? sitemap : robots)(db, websiteOrigin()));
+  }
+  if (!['GET', 'POST'].includes(req.method) || path.startsWith('/assets/') || extname(path)) return serveStatic(req, res);
+  let decoded;
+  try { decoded = decodeURIComponent(path); } catch { return send(res, 400, { error: 'Invalid URL' }); }
+  const access = resolveUrl(db, decoded);
+  const page = search(db, 'website.page').find((p) => p.slug.replace(/^\/+|\/+$/g, '') === decoded.replace(/^\/+|\/+$/g, ''));
+  if (access?.redirect && req.method === 'GET') {
+    res.writeHead(access.redirect.status, { Location: access.redirect.to, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+  if (access?.needsPassword && !pageUnlocked(req, page)) {
+    let status = 200;
+    if (req.method === 'POST') {
+      const key = `pagepassword:${clientIp(req)}`;
+      if (tooMany(key)) return send(res, 429, { error: 'Too many attempts, try again later' });
+      recordFailure(key);
+      if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site request refused' });
+      if (!String(req.headers['content-type']).startsWith('application/x-www-form-urlencoded')) return send(res, 415, { error: 'Submit the password form' });
+      let raw;
+      try { raw = await readRaw(req, 4096); } catch { return send(res, 413, { error: 'Request too large' }); }
+      if (checkPagePassword(page, new URLSearchParams(raw.toString('utf8')).get('password'))) {
+        res.writeHead(303, { Location: path, 'Cache-Control': 'no-store', 'Set-Cookie': `mizan_page_${page.id}=${pageToken(page)}; HttpOnly; SameSite=Lax; Path=${/^[\w\-./%~]*$/.test(path) ? path : '/'}; Max-Age=1209600${SECURE ? '; Secure' : ''}` });
+        return res.end();
+      }
+      status = 403;
+    }
+    const action = path.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    return res.end(`<!doctype html><html lang="en"><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Page password</title></head><body><main><h1>Page password</h1>${status === 403 ? '<p role="alert">Wrong password</p>' : ''}<form method="post" action="${action}"><label>Password <input type="password" name="password" autocomplete="current-password" required maxlength="4000"></label><button type="submit">Continue</button></form></main></body></html>`);
+  }
+  if (access?.needsLogin && !user) {
+    res.writeHead(302, { Location: `/?return=${encodeURIComponent(path + url.search)}#/`, 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+  if (req.method === 'POST') return send(res, 405, { error: 'Method not allowed' });
+  if (url.searchParams.has('website_data')) return send(res, access ? 200 : 404, siteOf(req));
+  const builtIn = path === '/' || /^\/(shop|blog|forum)(\/|$)/.test(path);
+  const hash = user ? '#/website/site' : /^\/(shop|blog|forum)(\/|$)/.test(path) ? `#/shop/${path.replace(/^\/(shop\/?)?/, '')}` : `#/shop/page/${encodeURIComponent(decoded.replace(/^\/+|\/+$/g, ''))}`;
+  return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
+}
+
+const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   try {
     if (path.startsWith('/api/')) await api(req, res, path);
-    else await serveStatic(req, res);
+    else await website(req, res, path);
   } catch (e) {
     console.error(`${req.method} ${path} failed:`, e);
     if (!res.headersSent) send(res, 500, { error: 'Server error' });
   }
-}).listen(PORT, () => console.info(`Mizan listening on http://localhost:${PORT}`));
+}).listen(PORT, () => console.info(`Mizan listening on http://localhost:${server.address().port}`));
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;

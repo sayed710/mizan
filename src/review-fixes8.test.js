@@ -57,3 +57,15 @@ test('Update Quantity and rentals keep stock valuation usable', () => {
   assert.equal(read(picked, 'product', goods.id).qty_rented, 2);
   assert.doesNotThrow(() => receive(picked, goods.id, 1, 10, { date: '2026-12-01' }));
 });
+
+test('posting a vendor bill refuses billing more than was received unless forced', async () => {
+  const { postMove } = await import('./models/accounting.js');
+  let db = seed();
+  const goods = search(db, 'product').find((p) => p.type === 'goods');
+  const po = create(db, 'purchase.order', { partner_id: 7, state: 'purchase', order_line: [{ product_id: goods.id, qty: 5, qty_delivered: 3, price_unit: 10, tax: 0 }] });
+  const bill = (force) => create(po.db, 'account.move', { move_type: 'in_invoice', partner_id: 7, purchase_id: po.id, invoice_date: '2026-10-26', force_post: force, invoice_line_ids: [{ product_id: goods.id, qty: 5, price_unit: 10, tax: 0 }] });
+  const strict = bill(false);
+  assert.throws(() => postMove(strict.db, strict.id), /exceeds received/);
+  const forced = bill(true);
+  assert.equal(read(postMove(forced.db, forced.id), 'account.move', forced.id).state, 'posted');
+});

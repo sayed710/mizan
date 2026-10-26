@@ -1,9 +1,40 @@
 // Website: published pages + an online shop whose checkout creates a customer and a quotation.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { create, read, search } from '../orm.js';
 import { commit, getDb, useDb } from '../store.js';
-import { t } from '../i18n.js';
+import { lang, t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { menuTree, pageFor, resolveUrl } from '../models/websiteplus.js';
+
+/** Nested native links remain keyboard accessible; only HTTP and local destinations are navigable. */
+export function SiteMenu({ items, onPage }) {
+  return <ul>{items.map((item) => {
+    const href = /^(https?:\/\/|\/(?!\/)|#)/i.test(item.href) ? item.href : '#';
+    return <li key={item.id}><a href={href} target={item.new_window ? '_blank' : undefined} rel={item.new_window ? 'noopener' : undefined} onClick={onPage && !item.new_window ? (e) => {
+      if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && onPage(href)) e.preventDefault();
+    } : undefined}>{item.name}</a>{item.children?.length > 0 && <SiteMenu items={item.children} onPage={onPage} />}</li>;
+  })}</ul>;
+}
+
+/** Apply page SEO while mounted and restore the host application's metadata on navigation. */
+export function usePageMeta(page) {
+  const title = page?.website_meta_title || page?.name;
+  const description = page?.website_meta_description ?? '';
+  useEffect(() => {
+    if (!title) return undefined;
+    const previousTitle = document.title;
+    let meta = document.querySelector('meta[name="description"]');
+    const existed = !!meta;
+    const previous = meta?.getAttribute('content');
+    if (!meta) { meta = document.createElement('meta'); meta.name = 'description'; document.head.append(meta); }
+    document.title = title;
+    meta.setAttribute('content', description);
+    return () => {
+      document.title = previousTitle;
+      if (!existed) meta.remove(); else if (previous === null) meta.removeAttribute('content'); else meta.setAttribute('content', previous);
+    };
+  }, [title, description]);
+}
 
 /** Very small text format: "# " heading, "## " subheading, blank line = new paragraph. Rendered as text (no HTML injection). */
 function Content({ text = '' }) {
@@ -79,31 +110,38 @@ function Checkout({ db, cart, onDone }) {
 
 export function Website() {
   const db = useDb();
-  const pages = search(db, 'website.page').filter((p) => p.is_published).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-  const [slug, setSlug] = useState(pages[0]?.slug ?? 'shop');
+  const pages = search(db, 'website.page').filter((p) => !!resolveUrl(db, p.slug)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+  const [slug, setSlug] = useState(() => location.pathname !== '/' ? decodeURIComponent(location.pathname).replace(/^\/+|\/+$/g, '') : pages[0]?.slug ?? 'shop');
   const [cart, setCart] = useState({});
   const [step, setStep] = useState('browse');
   const [done, setDone] = useState(null);
-  const page = pages.find((p) => p.slug === slug);
+  const original = pages.find((p) => p.slug.replace(/^\/+|\/+$/g, '') === slug);
+  const page = original && pageFor(db, original, lang);
+  const menus = menuTree(db);
+  usePageMeta(page);
   const go = (s) => { setSlug(s); setStep('browse'); setDone(null); };
 
   return (
     <main className="site">
-      <header className="site-nav">
+      {page?.header_visible !== false && <header className="site-nav">
         <b className="site-brand">{db.settings?.company}</b>
-        <nav>
-          {pages.map((p) => <button key={p.id} type="button" aria-current={slug === p.slug ? 'page' : undefined} onClick={() => go(p.slug)}>{p.name}</button>)}
+        <nav aria-label={t('Website')}>
+          {menus.length ? <SiteMenu items={menus} onPage={(href) => {
+            const target = pages.find((p) => `/${p.slug.replace(/^\/+|\/+$/g, '')}` === href);
+            if (!target) return false;
+            go(target.slug); return true;
+          }} /> : pages.map((p) => <button key={p.id} type="button" aria-current={slug === p.slug ? 'page' : undefined} onClick={() => go(p.slug)}>{pageFor(db, p, lang).name}</button>)}
           <button type="button" aria-current={slug === 'shop' ? 'page' : undefined} onClick={() => go('shop')}>{t('Shop')}</button>
         </nav>
         <a className="btn sm" href="#/website/pages">{t('Edit Pages')}</a>
-      </header>
+      </header>}
       <div className="site-body">
         {done && <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your order {name} has been received.', { name: done })}</p></div>}
         {!done && slug === 'shop' && step === 'browse' && <Shop db={db} cart={cart} setCart={setCart} onCheckout={() => setStep('checkout')} />}
         {!done && slug === 'shop' && step === 'checkout' && <Checkout db={db} cart={cart} onDone={(name) => { setDone(name); setCart({}); }} />}
-        {!done && slug !== 'shop' && page && <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article>}
+        {!done && slug !== 'shop' && (page ? <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article> : <p className="alert">{t('Page not found')}</p>)}
       </div>
-      <footer className="site-footer">© {new Date().getFullYear()} {db.settings?.company}</footer>
+      {page?.footer_visible !== false && <footer className="site-footer">© {new Date().getFullYear()} {db.settings?.company}</footer>}
     </main>
   );
 }

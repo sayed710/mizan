@@ -7,6 +7,7 @@ import { categoryPath } from '../src/models/ecommerce.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
+import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
 
 const MAX_LIMIT = 500;
 
@@ -27,11 +28,15 @@ const enabledProviders = (db) => search(db, 'payment.provider').filter((p) => p.
 const selectablePricelists = (db) => search(db, 'product.pricelist').filter((p) => p.selectable);
 
 /** Public website content: only published pages and sellable products (no internal fields). */
-export const publicSite = (db) => ({
+export const publicSite = (db, canAccess = () => false) => ({
   company: db.settings?.company,
   currency: db.settings?.currency ?? 'USD',
-  pages: search(db, 'website.page').filter((p) => p.is_published).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
-    .map((p) => ({ name: p.name, slug: p.slug, content: p.content })),
+  pages: search(db, 'website.page').filter((p) => {
+    const access = resolveUrl(db, p.slug);
+    return access?.page || ((access?.needsPassword || access?.needsLogin) && canAccess(p));
+  }).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map((p) => ({ id: p.id, name: p.name, slug: p.slug, content: p.content, translations: p.translations ?? [], website_meta_title: p.website_meta_title ?? '', website_meta_description: p.website_meta_description ?? '', header_visible: p.header_visible !== false, footer_visible: p.footer_visible !== false })),
+  menus: menuTree(db),
   products: shopCatalog(db),
   categories: search(db, 'product.public.category').sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
     .map((c) => ({ id: c.id, name: c.name, parent_id: c.parent_id ?? null, sequence: c.sequence ?? 0, display_name: categoryPath(db, c.id), image: safeImage(c.image) })),
