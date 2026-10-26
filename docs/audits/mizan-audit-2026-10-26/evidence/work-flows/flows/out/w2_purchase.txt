@@ -1,0 +1,25 @@
+[sync vendor] lost: 0 
+[sync rfq] lost: 0 
+PO P00003 total 1197 lines [[7,10,100,14],[6,1,50,14]]
+[sync confirm] lost: 1 purchase.order#3.order_line: client=[{"discount":0,"price_unit":100,"product_id":7,"purchase_method":"receive","qty" server=[{"discount":0,"price_unit":100,"product_id":7,"qty":10,"tax":14,"tax_account_id
+after confirm: state purchase receipts WH/IN/00002:ready:incoming invoice_status no
+Confirm Order again (run, hidden): REFUSED Only draft quotations can be confirmed
+Create Bill before receipt: visible= false lines undefined
+[sync receipt partial] lost: 0 
+after receipt 6/10: oak 40 -> 46 backorder WH/00003:ready:[4] qty_delivered [6,null] receipt_done false
+receipt ledger delta {"110100":540,"110200":-600,"600000":60} product cost now 90
+[sync create bill] lost: 1 purchase.order#3.order_line: client=[{"discount":0,"price_unit":100,"product_id":7,"purchase_method":"receive","qty" server=[{"discount":0,"price_unit":100,"product_id":7,"qty":10,"qty_delivered":6,"qty_i
+bill lines [[7,6,100]] total 684 PO invoice_status no
+[sync post bill] lost: 0 
+bill posted BILL/2026/00002 ledger delta {"110200":600,"131000":84,"211000":-684}
+[sync pay bill] lost: 0 
+after payment: payment_state paid ledger delta {"101401":-684,"211000":684} vendor 211000 balance 0
+[sync backorder receipt] lost: 0 
+after backorder: oak 50 receipt_done true invoice_status to_invoice
+second bill lines [[7,4]] PO invoice_status no
+Create Bill third time: Nothing is eligible for billing
+whole-flow ledger delta {"101401":-684,"110100":900,"131000":140,"211000":-456,"600000":100}
+interim 110200 balance (should be 0 after receipt+bill at same price): 0
+receive 50 on a PO for 2: Done quantities must be finite and cannot exceed demand
+post a bill for 20 when 2 were received: Billed quantity exceeds received quantity; receive the goods or enable force post
+post a bill at price 999 vs PO 120: ACCEPTED ledger {"110200":240,"131000":279.72,"211000":-2277.72,"600000":1758}

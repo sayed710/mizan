@@ -1,0 +1,19 @@
+receipt after Mark as Todo: ready
+after receipt 10@10: on hand 10 GL {"110100":100,"110200":-100}
+after receipt 10@12: on hand 20 layers [[10,100,10],[10,120,10]]
+two deliveries of 15 vs 20 on hand: states ready ready | availability d1 partial d2 partial | freeQty excluding nothing -10
+Check Availability visible on d2? false
+manual delivery of 1 after Mark as Todo: waiting (stock 20, reserved 30 by ready deliveries)
+validate that WAITING delivery anyway (Validate is shown for waiting): ACCEPTED on hand 19
+deliver 15: on hand 5 COGS/stock delta {"110100":-160,"500000":160} (FIFO expected 10*10+5*12=160)
+validate d1 (15) with 5 left: REFUSED Not enough stock to deliver
+partial 5: on hand 0 backorder WH/00006 waiting [10]
+valuationReport {"qty":0,"value":0,"unitCost":0} GL 110100 delta whole flow undefined interim 110200 delta -220
+ALL products: valuation report total 35852 vs GL 110100 balance 8100
+locationStock of widget [{"location_id":10,"qty":20}]
+periodic product: deliver 50 with 0 on hand -> ACCEPTED on hand -50
+
+concurrent deliveries of the same 10 units: second diff ACCEPTED
+  pickings done,done | on hand 0 (20 units shipped from 10)
+  layer ids created by A [ 6 ] by B [ 6 ] | server layers for item [[5,10,2],[6,-10,4]]
+  journal entry ids A [ 11 ] B [ 11 ] | server entry WH/OUT/00004 | A's entry survived? false

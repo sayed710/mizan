@@ -1,0 +1,19 @@
+company 2 2 partner 9 record company_id 1
+settings after switch {"current":2,"allowed":[2]}
+form defaults for a new SO while in company 2 (FormView calls defaults(id) without db): 1
+orm.create(sale.order) while current company = 2 -> company_id 1
+company-2 SO 4 company 2 -> picking 1 | invoice 1 | payment 1 | entries [["WH/OUT/00002",1],["Payment INV/2026/00003",1]] | valuation layer 1
+company-2 list of account.move includes its own invoice? false | count visible 0 of 12
+P&L (Reports page uses raw useDb): income all companies {"revenue":8820,"cost":240,"gross":8580,"expense":0,"operating":8580,"otherIncome":0,"otherExpense":0,"net":8580,"detail
+P&L through companyViewDb (company 2 only) {"revenue":0,"cost":0,"gross":0,"expense":0,"operating":0,"otherIncome":0,"otherExpense":0,"net":0,"detail":{"revenue":[],"cost":[],"expense":[]}}
+product.qty_available is one shared figure (product is SHARED_MODELS): true
+non-admin (restricted to sale.order) changes the GLOBAL company selection: {"current":2,"allowed":[1,2]}
+non-admin re-assigns a posted invoice to another company: ACCEPTED
+IC SO line tax [[1,"VAT 14%","251000"]]
+IC Confirm: PO P00003 company 2 partner 8 state draft lines [[1,3,210,1,"VAT 14%"]] | SO auto_purchase_id 3
+IC Confirm twice (run): 1 POs; 2 pickings
+IC PO receipt company 1 (PO company 2)
+IC bill company 1
+IC bill journal items [["211000",0,718.2],["110200",630,0],["251000",88.2,0]]
+after cancelling the IC SO, PO state purchase
+IC rule error when seller has no contact: swallowed; SO state sale, PO created: false

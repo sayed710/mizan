@@ -1,0 +1,12 @@
+import { seed, orm, btn, tryIt, ledger, ledgerDelta, log } from './lib.mjs';
+const { read, search } = orm;
+const pos = await import('../src/models/pos.js');
+let db = seed();
+let r = pos.startSession(db, 0); db = r.db; const s1 = r.id;
+r = pos.payOrder(db, { lines: pos.priceLines(db, [{ product_id: 10, qty: 4 }]), method: 'cash' }); db = r.db; const o = r.id;
+db = pos.closeSession(db, read(db, 'pos.session', s1), pos.sessionTotals(db, read(db, 'pos.session', s1)).expected);
+log('refund with no open session:', tryIt(() => btn(db, 'pos.order', o, 'Refund')).error);
+r = pos.startSession(db, 0); db = r.db; const s2 = r.id;
+const x = btn(db, 'pos.order', o, 'Refund').db;
+const ref = search(x, 'pos.order').find((q) => q.refund_of === o);
+log('refund of an order from closed session', read(x, 'pos.session', s1).name, 'booked in session', read(x, 'pos.session', ref.session_id).name, '| session2 totals', JSON.stringify(pos.sessionTotals(x, read(x, 'pos.session', s2))));

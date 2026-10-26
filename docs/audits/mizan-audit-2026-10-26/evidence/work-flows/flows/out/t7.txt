@@ -1,0 +1,5 @@
+client after Apply Coupon: loyalty_uses [{"code":"GIFT100","programId":1,"cardCode":"GIFT100","gift":true,"spent":100}] lines [[6,45],[null,-100]]
+server copy loyalty_uses undefined | lost: sale.order#4.order_line,sale.order#4.loyalty_uses
+gift card points after Confirm: from client copy 0 used | after reload from server 100 active
+apply the same gift card to another order: ACCEPTED discount line -100
+client reward line keys product_id,name,qty,price_unit,discount,tax | server product_id,qty,price_unit,discount,tax
