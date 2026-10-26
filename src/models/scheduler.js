@@ -21,24 +21,27 @@ import { syncFromApplicant } from './skillsplus.js';
 const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?? []).filter((t) => !t.user_id && t.team_id && t.stage_id === 'new')
   .reduce((acc, t) => assignTicket(acc, acc.records['helpdesk.ticket'].find((x) => x.id === t.id)), db), at);
 
-/** Apply `step` to db, keeping db unchanged when it throws (e.g. a locked period), so other jobs still run. */
-const tolerant = (step) => (db, ...args) => {
-  try {
-    return step(db, ...args);
-  } catch {
-    return db;
-  }
-};
-
-/** Apply every scheduled action due at `at`; returns the same db object when nothing changed. */
-export function runScheduledJobs(db, at = today()) {
+/**
+ * Apply every scheduled action due at `at`; returns the same db object when nothing changed. A job that throws
+ * (e.g. a locked period) leaves db unchanged so the other jobs still run, and is reported through `onError`.
+ */
+export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) {
+  const tolerant = (step) => (d, ...args) => {
+    try {
+      return step(d, ...args);
+    } catch (e) {
+      onError(step.name || 'job', e);
+      return d;
+    }
+  };
   const accrued = (db.records['hr.leave.allocation'] ?? [])
     .filter((a) => a.state === 'validate' && a.allocation_type === 'accrual')
     .reduce((acc, a) => accrue(acc, a, at), db);
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
   const ran = tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
-  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(tolerant(expireQuotes)(ran, at));
+  const autoCheckoutAt = (d) => autoCheckout(d, `${at}T00:00`);
+  const checkedOut = tolerant(autoCheckoutAt)(tolerant(expireQuotes)(ran, at));
   // Referral stages follow their applicants (recruitment has no after-write hook).
   return (checkedOut.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), checkedOut);
 }

@@ -543,7 +543,7 @@ const server = createServer(async (req, res) => {
 const JOB_INTERVAL_MS = 60 * 60 * 1000;
 const runJobs = () => {
   try {
-    const next = runScheduledJobs(db);
+    const next = runScheduledJobs(db, undefined, { onError: (job, e) => console.error(`Scheduled job ${job} failed:`, e.message) });
     if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }));
   } catch (e) {
     console.error('Scheduled job failed:', e.message);
