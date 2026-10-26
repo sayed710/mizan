@@ -18,7 +18,11 @@ const COMPANY_KEY = 'mizan-company';
 const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
 
 /** Companies defined in settings (the first one mirrors the company name/currency fields). */
-export const companiesOf = (d) => (d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: d?.settings?.currency ?? 'USD' }]);
+export const companiesOf = (d) => {
+  const records = (d?.records?.['res.company'] ?? []).filter((c) => c.active !== false);
+  if (records.length) return records.map((c) => ({ id: c.id, name: c.name, currency: d.records['res.currency']?.find((x) => x.id === c.currency_id)?.name ?? d.settings?.currency ?? 'USD' }));
+  return d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: d?.settings?.currency ?? 'USD' }];
+};
 export const currentCompany = (d = db) => companiesOf(d).find((c) => c.id === savedCompany()) ?? companiesOf(d)[0];
 export function switchCompany(id) {
   try { localStorage.setItem(COMPANY_KEY, String(id)); } catch { /* storage blocked: switch lasts for this page only */ }

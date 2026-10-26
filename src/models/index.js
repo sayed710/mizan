@@ -75,10 +75,11 @@ import { blogModels } from './blog.js';
 import { appointmentModels } from './appointments.js';
 import { whatsappModels } from './whatsapp.js';
 import { today } from './common.js';
+import { companyModels, withCompany } from './company.js';
 
 export { today } from './common.js';
 
-export const models = { ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels };
+export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels });
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
@@ -515,7 +516,7 @@ const allApps = [
   { id: 'todo', name: 'To-do', color: ['#14b8a6', '#334155'], menus: [{ key: 'tasks', label: 'To-do', model: 'todo.task' }] },
   { id: 'spreadsheet', name: 'Spreadsheet', color: ['#16a34a', '#0f766e'], menus: [{ key: 'sheet', label: 'Spreadsheet', type: 'spreadsheet' }, { key: 'all', label: 'All Spreadsheets', model: 'spreadsheet.document' }] },
   { id: 'knowledge', name: 'Knowledge', color: ['#e11d48', '#7e22ce'], menus: [{ key: 'articles', label: 'Articles', type: 'knowledge' }, { key: 'all', label: 'All Articles', model: 'knowledge.article' }] },
-  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }] },
+  { id: 'settings', name: 'Settings', color: ['#94a3b8', '#475569'], menus: [{ key: 'general', label: 'General Settings', type: 'settings' }, { key: 'companies', label: 'Companies', model: 'res.company' }] },
 ];
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.

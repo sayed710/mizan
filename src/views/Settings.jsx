@@ -3,6 +3,7 @@ import { updateSettings } from '../orm.js';
 import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
+import { createCompany, setCompanyCurrency } from '../models/company.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -52,10 +53,13 @@ function Companies({ db }) {
   const add = () => {
     const name = prompt(t('Company Name'));
     if (!name?.trim()) return;
+    const current = getDb();
+    if (current.records['res.company']?.length) return commit(setCompanyCurrency(createCompany(current, { name: name.trim() }).db, (current.seq['res.company'] ?? 0) + 1, current.settings?.currency ?? 'USD'));
     const next = [...list, { id: Math.max(...list.map((c) => c.id)) + 1, name: name.trim(), currency: db.settings?.currency ?? 'USD' }];
-    commit(updateSettings(getDb(), { companies: next }));
+    commit(updateSettings(current, { companies: next }));
   };
-  const setCurrencyOf = (id, currency) => commit(updateSettings(getDb(), { companies: list.map((c) => (c.id === id ? { ...c, currency } : c)) }));
+  const setCurrencyOf = (id, currency) => commit(getDb().records['res.company']?.length ? setCompanyCurrency(getDb(), id, currency)
+    : updateSettings(getDb(), { companies: list.map((c) => (c.id === id ? { ...c, currency } : c)) }));
   return (
     <>
       <h3>{t('Companies')}</h3>

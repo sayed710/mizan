@@ -749,6 +749,11 @@ const ar = {
   'Customer link': 'رابط العميل',
   'Customer Preview': 'معاينة العميل',
   'The customer link could not be generated. Check your access and try again.': 'تعذّر إنشاء رابط العميل. تحقق من صلاحياتك وحاول مرة أخرى.',
+  'Parent Company': 'الشركة الأم',
+  'Branches': 'الفروع',
+  'Inter-Company': 'بين الشركات',
+  'Inter-Company Purchase': 'شراء بين الشركات',
+  'Inter-Company Sale': 'بيع بين الشركات',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
