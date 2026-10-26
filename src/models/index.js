@@ -222,7 +222,7 @@ const allApps = [
       { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
       { key: 'valuation', label: 'Inventory Valuation', model: 'stock.valuation.layer' },
-      { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'locations', label: 'Locations', model: 'stock.location' }] },
+      { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'locations', label: 'Locations', model: 'stock.location' }, { key: 'uom-categories', label: 'UoM Categories', model: 'uom.category' }, { key: 'uoms', label: 'Units of Measure', model: 'uom.uom' }, { key: 'packagings', label: 'Packagings', model: 'product.packaging' }] },
       { label: 'Reporting', children: [
         { key: 'report', label: 'Stock', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
         { key: 'valuation', label: 'Valuation', type: 'report', report: 'valuation' },
