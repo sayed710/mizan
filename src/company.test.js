@@ -152,3 +152,13 @@ test('branches inherit their parent currency and reject inconsistent currencies 
   assert.throws(() => createCompany(db, { name: 'Bad parent', parent_id: 99999 }), /existing parent/);
   assert.throws(() => createCompany(db, { name: 'Duplicate contact', partner_id: parent.partner_id }), /own contact/);
 });
+
+test('confirming a sale to an inter-company customer drafts the linked purchase', () => {
+  const db = write(companies(), 'product', 2, { company_id: null });
+  const sale = create(db, 'sale.order', { company_id: 1, partner_id: read(db, 'res.company', 2).partner_id, order_line: [{ product_id: 2, qty: 1, price_unit: 10 }] });
+  const confirm = models['sale.order'].form.buttons.find((b) => b.label === 'Confirm');
+  const after = confirm.run(sale.db, read(sale.db, 'sale.order', sale.id)).db;
+  const order = read(after, 'sale.order', sale.id);
+  assert.equal(order.state, 'sale');
+  assert.equal(read(after, 'purchase.order', order.auto_purchase_id).auto_sale_id, sale.id);
+});

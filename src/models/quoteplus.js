@@ -1,6 +1,7 @@
 // Quotation templates, optional products, validity, online signature and prepayment.
 import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, nextName, productLines, today } from './common.js';
+import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
 import { paymentJournal, postEntry } from './ledger.js';
 
@@ -24,7 +25,12 @@ function quotation(db, id) {
   return r;
 }
 
-const confirm = (db, id) => order.form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', id)).db;
+// Confirm also drafts the inter-company purchase; a misconfigured rule must not block the sale itself.
+const orderButtons = order.form.buttons.map((b) => b.label === 'Confirm' ? { ...b, run: (db, r) => {
+  const res = b.run(db, r);
+  try { return { ...res, db: interCompanyRules(res.db, r.id) }; } catch { return res; }
+} } : b);
+const confirm = (db, id) => orderButtons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', id)).db;
 const lineFields = {
   product_id: { type: 'many2one', relation: 'product', label: 'Product', required: true },
   name: { type: 'char', label: 'Description' },
@@ -171,7 +177,7 @@ export const quotePlusModels = {
       ...order.form,
       groups: [...order.form.groups, ['sale_order_template_id', 'is_expired', 'require_signature', 'require_payment', 'prepayment_percent']],
       tabs: [...order.form.tabs, { label: 'Optional Products', fields: ['option_ids'] }, { label: 'Signature', fields: ['signed_by', 'signed_on', 'signature'] }],
-      buttons: [...order.form.buttons,
+      buttons: [...orderButtons,
         { label: 'Apply Template', when: editable, run: (db, r) => {
           const id = r.sale_order_template_id ?? prompt('Quotation template id');
           return id == null || id === '' ? { db } : { db: applyTemplate(db, r.id, Number(id)) };
