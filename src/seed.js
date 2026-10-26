@@ -1,6 +1,7 @@
 import { create, emptyDb, postNote, read, search, write } from './orm.js';
 import { ensureUoms } from './models/uom.js';
 import { ensureMainCompany } from './models/company.js';
+import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
@@ -417,5 +418,5 @@ export function seed() {
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
 
   const seeded = { ...db, messages: [] };
-  return postNote(ensureMainCompany(ensureUoms(seeded)), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  return postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(seeded))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }

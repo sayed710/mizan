@@ -2,12 +2,13 @@ import { create, read, search, write } from '../orm.js';
 import { adjustQuantity, moveValued } from './valuation.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
+import { createOrderTransfers } from './warehouse.js';
 import { checkCreditLimit } from './finance.js';
 import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
-import { convert, convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
+import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
@@ -21,10 +22,8 @@ export function moveStock(db, lines = [], sign) {
 }
 
 /** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
-export function createPicking(db, { type, partner_id, origin, lines, link, carrier_id = null, scheduled_date }) {
-  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: lineToStockQty(db, l, read(db, 'product', l.product_id)) }));
-  if (!moves.length) return db;
-  return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link }).db;
+export function createPicking(db, args) {
+  return createOrderTransfers(db, args);
 }
 
 /**
