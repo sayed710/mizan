@@ -40,7 +40,9 @@ On first start the server creates user `admin` and prints a random password
 (or set `MIZAN_ADMIN_PASSWORD`). Admins add users in **Settings**.
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
-`MIZAN_SECURE_COOKIE=1` when served over HTTPS.
+`MIZAN_SECURE_COOKIE=1` when served over HTTPS. "Reset demo" (wipe everything back to demo data) is off when
+`NODE_ENV=production` (as in the Docker image) unless `MIZAN_ALLOW_RESET=1`; it needs RESET typed and saves the
+previous data to `<MIZAN_DB>.before-reset-<time>.json` first.
 
 Development: `npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).

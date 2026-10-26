@@ -125,7 +125,7 @@ export async function serverAction(path, body) {
 
 export async function resetDemo() {
   if (mode === 'local') return commit(seed());
-  const r = await api('/api/reset', {});
+  const r = await api('/api/reset', { confirm: 'RESET' });
   if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }
 

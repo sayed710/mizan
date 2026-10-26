@@ -222,9 +222,9 @@ export function Settings() {
             ⬆ {t('Restore backup')}
             <input type="file" accept="application/json" hidden onChange={(e) => e.target.files[0] && restore(e.target.files[0])} />
           </label>
-          <button type="button" className="btn danger" onClick={() => { if (confirm(t('Reset all data to the demo database?'))) resetDemo(); }}>
+          {(!isServer() || getUser()?.canReset) && <button type="button" className="btn danger" onClick={() => { if (prompt(t('This deletes all data and loads the demo database. Type RESET to continue.')) === 'RESET') resetDemo(); }}>
             {t('Reset demo')}
-          </button>
+          </button>}
         </div>
         {status && <p role="status">{status}</p>}
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
