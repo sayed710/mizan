@@ -296,7 +296,7 @@ export function FormView({ leaf, id, base, params }) {
 
   const statusKey = def.form.statusbar;
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = (def.form.buttons ?? []).filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current)));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current)));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const resolve = (v) => (typeof v === 'function' ? v(current) : v);
