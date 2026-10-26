@@ -7,6 +7,7 @@ import { pickingAvailability, reservePicking, returnPicking, validatePicking } f
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
+import { convert, convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
@@ -21,7 +22,7 @@ export function moveStock(db, lines = [], sign) {
 
 /** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
 export function createPicking(db, { type, partner_id, origin, lines, link, carrier_id = null, scheduled_date }) {
-  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: Number(l.qty) || 0 }));
+  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods').map((l) => ({ product_id: l.product_id, qty: lineToStockQty(db, l, read(db, 'product', l.product_id)) }));
   if (!moves.length) return db;
   return create(db, 'stock.picking', { picking_type: type, partner_id, origin, move_ids: moves, state: 'ready', carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link }).db;
 }
@@ -32,12 +33,21 @@ export function createPicking(db, { type, partner_id, origin, lines, link, carri
  */
 function addLineQty(db, model, order, field, moves) {
   const left = new Map();
-  for (const m of moves) left.set(m.product_id, (left.get(m.product_id) ?? 0) + (Number(m.qty) || 0));
+  const stockUnit = (l) => {
+    const p = read(db, 'product', l.product_id);
+    return p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+  };
+  const stockQty = (l, qty) => l.uom_id ? convert(db, qty, l.uom_id, stockUnit(l), { round: false }) : qty;
+  for (const m of moves) {
+    const qty = Number(m.qty) || 0;
+    left.set(m.product_id, (left.get(m.product_id) ?? 0) + (field === 'qty_invoiced' ? stockQty(m, qty) : qty));
+  }
   const order_line = order.order_line.map((l) => {
-    const room = (Number(l.qty) || 0) - (Number(l[field]) || 0);
+    const room = stockQty(l, (Number(l.qty) || 0) - (Number(l[field]) || 0));
     const take = Math.max(0, Math.min(room, left.get(l.product_id) ?? 0));
     left.set(l.product_id, (left.get(l.product_id) ?? 0) - take);
-    return take ? { ...l, [field]: (Number(l[field]) || 0) + take } : l;
+    const qty = l.uom_id ? convert(db, take, stockUnit(l), l.uom_id, { round: false }) : take;
+    return take ? { ...l, [field]: (Number(l[field]) || 0) + qty } : l;
   });
   return write(db, model, order.id, { order_line });
 }
@@ -97,7 +107,7 @@ export function generateVariants(db, template) {
   return combos.filter((c) => !existing.has(c.join('|'))).reduce((acc, values, i) => create(acc, 'product', {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
-    type: template.type, categ: template.categ, uom: template.uom, list_price: template.list_price, cost: template.cost,
+    type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
     qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
@@ -172,7 +182,13 @@ export const salesModels = {
             const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
               const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
               const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
-              const purchase = (po?.order_line ?? []).map((l) => ({ ...l, remaining: Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0)) }));
+              const purchase = (po?.order_line ?? []).map((l) => {
+                const product = read(d, 'product', l.product_id);
+                const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
+                const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
+                return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
+                  price_unit: l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : l.price_unit };
+              });
               const lines = p.move_ids.map((m) => {
                 const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
                 const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
@@ -233,6 +249,8 @@ export const salesModels = {
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       tracking: { type: 'selection', label: 'Tracking', options: [['none', 'No Tracking'], ['lot', 'By Lots'], ['serial', 'By Unique Serial Number']] },
       uom: { type: 'selection', label: 'Unit of Measure', options: [['unit', 'Units'], ['kg', 'kg'], ['m', 'm'], ['l', 'L'], ['hour', 'Hours'], ['box', 'Box']] },
+      uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Stock / Sales Unit' },
+      uom_po_id: { type: 'many2one', relation: 'uom.uom', label: 'Purchase Unit' },
       attributes: { type: 'char', label: 'Attributes' },
       variant_of: { type: 'many2one', relation: 'product', label: 'Variant of', readonly: true },
       variant_values: { type: 'tags', label: 'Variant Values', readonly: true },
@@ -242,6 +260,13 @@ export const salesModels = {
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       reorder_max: { type: 'float', label: 'Max. Quantity' },
       website_published: { type: 'boolean', label: 'Sold Online' },
+    },
+    guard: (db, before, r) => {
+      if (!r.uom_po_id) return null;
+      const stock = r.uom_id ? read(db, 'uom.uom', r.uom_id) : uomForLegacy(db, r.uom ?? 'unit');
+      const purchase = read(db, 'uom.uom', r.uom_po_id);
+      return !stock || !purchase ? 'Select existing stock and purchase units of measure'
+        : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
     defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
     filters: [
@@ -270,7 +295,7 @@ export const salesModels = {
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },

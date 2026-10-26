@@ -5,6 +5,7 @@ import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
+import { lineToStockQty } from './uom.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -13,6 +14,7 @@ const components = {
   label: 'Components',
   fields: {
     product_id: { type: 'many2one', relation: 'product', label: 'Component' },
+    uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Unit of Measure' },
     qty: { type: 'float', label: 'Quantity' },
   },
   newLine: () => ({ product_id: null, qty: 1 }),
@@ -41,7 +43,7 @@ export function explode(db, mo) {
   if (!bom) throw new Error('Select a bill of materials first');
   const factor = (Number(mo.product_qty) || 0) / (Number(bom.product_qty) || 1);
   return {
-    move_raw: (bom.components ?? []).map((c) => ({ product_id: c.product_id, to_consume: (Number(c.qty) || 0) * factor, consumed: null })),
+    move_raw: (bom.components ?? []).map((c) => ({ product_id: c.product_id, to_consume: lineToStockQty(db, { ...c, qty: (Number(c.qty) || 0) * factor }, read(db, 'product', c.product_id)), consumed: null })),
     workorders: (bom.operations ?? []).map((o) => ({ name: o.name, workcenter_id: o.workcenter_id, duration_expected: (Number(o.duration) || 0) * factor, duration: 0, state: 'ready' })),
   };
 }

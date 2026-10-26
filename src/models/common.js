@@ -1,5 +1,6 @@
 import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
+import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { lineTaxOf, lineUntaxed, productTax, taxSnapshot } from './taxes.js';
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
@@ -31,6 +32,7 @@ export const productLines = (label, priceField) => ({
   label,
   fields: {
     product_id: { type: 'many2one', relation: 'product', label: 'Product' },
+    uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Unit of Measure' },
     qty: { type: 'float', label: 'Quantity' },
     price_unit: { type: 'monetary', label: 'Unit Price' },
     discount: { type: 'float', label: 'Disc.%' },
@@ -49,11 +51,15 @@ export const productLines = (label, priceField) => ({
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
   onchange: (line, key, db, record) => {
     if (key === 'tax_id') return { ...line, ...taxSnapshot(read(db, 'account.tax', line.tax_id)) };
-    if (key !== 'product_id' && !(key === 'qty' && record?.pricelist_id)) return line;
-    const product = (db.records.product ?? []).find((p) => p.id === line.product_id);
+    if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
+    const product = read(db, 'product', line.product_id);
+    const stock = product?.uom_id ?? uomForLegacy(db, product?.uom ?? 'unit')?.id;
+    const uom_id = line.uom_id || (priceField === 'cost' ? product?.uom_po_id ?? product?.uom_id : product?.uom_id);
+    const qty = uom_id && stock ? convert(db, line.qty, uom_id, stock, { round: false }) : line.qty;
     const base = product?.[priceField] ?? 0;
+    const price = record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, qty, base) : base;
     const tax = key === 'product_id' ? productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id) : null;
-    return { ...line, price_unit: record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, line.qty, base) : base, ...(tax ?? {}) };
+    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ?? {}) };
   },
 });
 

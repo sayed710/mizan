@@ -3,6 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
 import { postEntry } from './ledger.js';
+import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const CASH = '101501';
@@ -19,7 +20,10 @@ export function startSession(db, openingCash = 0) {
 /** Lines of a cart priced from the products (sales price and sales tax). */
 export const priceLines = (db, cart) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
-  return { product_id: l.product_id, qty: l.qty, price_unit: p?.list_price ?? 0, discount: Number(l.discount) || 0, tax: p?.sale_tax ?? 14 };
+  const uom_id = l.uom_id || p?.uom_id;
+  const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+  const price = p?.list_price ?? 0;
+  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, discount: Number(l.discount) || 0, tax: p?.sale_tax ?? 14 };
 });
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
@@ -38,13 +42,14 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
   for (const [index, l] of lines.entries()) {
     const p = read(stocked, 'product', l.product_id);
     if (p?.type !== 'goods' || !l.qty) continue;
+    const qty = lineToStockQty(stocked, l, p);
     if (!refund_of && p.valuation !== 'manual_periodic') {
-      const out = deliver(stocked, p.id, Number(l.qty), { reference: name });
+      const out = deliver(stocked, p.id, qty, { reference: name });
       stocked = out.db;
-      costs.push({ index, unit_cost: out.value / Number(l.qty) });
+      costs.push({ index, unit_cost: out.value / qty });
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
-      stocked = moveValued(stocked, [{ ...l, unit_cost }], -sign, { reference: name, counterpart: '500000', actualCost: true });
+      stocked = moveValued(stocked, [{ ...l, qty, unit_cost }], -sign, { reference: name, counterpart: '500000', actualCost: true });
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });

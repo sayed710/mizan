@@ -743,6 +743,8 @@ const ar = {
   'Add Option': 'إضافة اختياري',
   'Register Prepayment': 'تسجيل دفعة مقدمة',
   'Terms': 'الشروط',
+  'Stock / Sales Unit': 'وحدة المخزون والبيع',
+  'Purchase Unit': 'وحدة الشراء',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',
