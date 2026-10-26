@@ -21,8 +21,25 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'state', 'partner_id', 'currency_id', 'move_type'];
+const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
+/** Paid status of a locked entry, which only payments dated after the lock may move. */
+const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
+/** Archiving hides a record from every report, so `active` counts as changed only between kept and archived. */
+const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : r?.[k]);
+const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
+
+/** True when the paid status moved only by appending payments dated after the lock, and by exactly their amount. */
+function settlesAfterLock(before, after, lock) {
+  const was = Array.isArray(before.payments) ? before.payments : [];
+  const now = Array.isArray(after.payments) ? after.payments : [];
+  if (now.length < was.length || JSON.stringify(now.slice(0, was.length)) !== JSON.stringify(was)) return false;
+  const added = now.slice(was.length);
+  if (!added.every((p) => p && typeof p.date === 'string' && p.date > lock && Number(p.amount) > 0)) return false;
+  const paid = round((Number(before.amount_paid) || 0) + added.reduce((sum, p) => sum + Number(p.amount), 0));
+  const date = added.length ? added.at(-1).date : before.payment_date;
+  return Math.abs(paid - (Number(after.amount_paid) || 0)) < 0.005 && after.payment_date === date;
+}
 
 /**
  * Entries in a locked period cannot be created posted or have their accounting changed (payments dated after the
@@ -43,9 +60,22 @@ export function moveGuard(db, before, after) {
   if (!lock) return null;
   const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
   if (!touchesLocked) return null;
-  const changed = !before || LOCKED_FIELDS.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
+  const changed = !before || changedFields(before, after, LOCKED_FIELDS)
+    || (before && moveDate(before) <= lock && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, lock));
   return changed ? `The period up to ${lock} is locked` : null;
 }
+
+/**
+ * Lock guard for records that carry their own date (payments, reconciled bank lines): once dated on or before the
+ * lock they cannot change, and nothing new can be booked into the locked period.
+ */
+export const datedLockGuard = (fields, booked) => (db, before, after) => {
+  const lock = lockDateFor(db.settings, {});
+  if (!lock) return null;
+  const inLock = (r) => r && booked(r) && String(r.date ?? today()) <= lock;
+  if (!inLock(before) && !inLock(after)) return null;
+  return !before || changedFields(before, after, fields) ? `The period up to ${lock} is locked` : null;
+};
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move) {

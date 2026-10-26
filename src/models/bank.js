@@ -5,6 +5,7 @@ import { postEntry } from './ledger.js';
 import { payMove } from './accounting.js';
 import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
+import { datedLockGuard } from './finance.js';
 
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
@@ -48,6 +49,7 @@ function bookToAccount(db, line) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
+    guard: datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'counterpart', 'active'], (l) => l.state === 'reconciled' || Boolean(l.move_id)),
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
     fields: {
