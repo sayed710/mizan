@@ -67,28 +67,32 @@ async function api(path, body) {
 
 async function pull() {
   const r = await api('/api/db');
-  if (r.ok) { db = r.data; notify(); }
   if (r.status === 401) location.reload();
+  if (!r.ok || !r.data) throw new Error(r.data?.error ?? `Could not load the database (HTTP ${r.status})`);
+  db = r.data;
+  notify();
 }
 
 const pollFailed = (e) => console.warn('Mizan: refresh failed, will retry', e);
 
 /** Detect the backend; resolves to { mode, user }. A non-JSON answer means no backend (static/dev hosting). */
 export async function initStore() {
+  let session = null;
   try {
-    const r = await api('/api/session');
-    if (r.isJson) {
-      mode = 'server';
-      if (r.ok) {
-        user = r.data;
-        setAuthor(user.name);
-        await pull();
-        setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
-      }
-      return { mode, user };
-    }
+    session = await api('/api/session');
   } catch {
     // no backend reachable: local mode
+  }
+  if (session?.isJson) {
+    mode = 'server';
+    if (session.ok) {
+      user = session.data;
+      setAuthor(user.name);
+      // Never fall back to demo data here: the next save would write it over the real records.
+      await pull();
+      setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
+    }
+    return { mode, user };
   }
   db = loadLocal();
   applyContext();
