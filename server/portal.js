@@ -170,7 +170,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, cl
     try {
       const next = route[3] === 'sign' ? portalSignQuote(db, r, { name: input.get('name'), signature: input.get('signature') })
         : route[3] === 'pay' ? portalPayQuote(db, r, env) : portalAddOption(db, r, input.get('option'));
-      commitDb(next);
+      commitDb(next, { actor: 'portal' });
       message = 'Your quotation has been updated';
     } catch (e) { message = e.message; }
     return send(res, 303, '', { Location: `${back}&message=${encodeURIComponent(message)}` });

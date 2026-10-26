@@ -82,7 +82,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
     .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
-    .map((m) => ({ ...m, author: author ?? m.author }));
+    // Who and when come from the server: a client cannot backdate a chatter entry or sign it as someone else.
+    .map((m) => ({ ...m, author: author ?? m.author, date: author ? new Date().toISOString() : m.date }));
   // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;
   const company = s && ('current_company_id' in s || 'allowed_company_ids' in s)
