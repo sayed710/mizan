@@ -383,6 +383,9 @@ const allApps = [
     menus: [
       { key: 'site', label: 'Site', type: 'website' },
       { key: 'pages', label: 'Pages', model: 'website.page' },
+      { key: 'menus', label: 'Menus', model: 'website.menu' },
+      { key: 'redirects', label: 'Redirects', model: 'website.redirect' },
+      { key: 'snippets', label: 'Building Blocks', model: 'website.snippet' },
       { label: 'eCommerce', children: [
         { key: 'shop_products', label: 'Products', model: 'product', view: 'kanban', domain: (r) => r.sale_ok !== false, defaults: { sale_ok: true, is_published: true } },
         { key: 'shop_categories', label: 'Product Categories', model: 'product.public.category' },

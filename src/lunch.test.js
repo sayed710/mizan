@@ -97,7 +97,8 @@ test('vendorSummary lists products and quantities per vendor', () => {
   const c = orderLunch(d, { employeeId: 2, productId: pepperoni, at: MON_9 });
   d = orderLunch(cancelOrder(c.db, c.id), { employeeId: 2, productId: pepperoni, at: MON_9 }).db;
   const summary = vendorSummary(d, DAY);
-  assert.deepEqual(summary.map((g) => [g.supplier_id, g.vendor, g.lines.map((l) => [l.product, l.quantity]), g.total]), [
+  // The seed has its own orders dated today; check only this test's suppliers.
+  assert.deepEqual(summary.filter((g) => [nile, pizza].includes(g.supplier_id)).map((g) => [g.supplier_id, g.vendor, g.lines.map((l) => [l.product, l.quantity]), g.total]), [
     [nile, 'Nile Grill', [['Kofta', 3]], 21],
     [pizza, 'Pizza Corner', [['Pepperoni', 1]], 10],
   ]);
