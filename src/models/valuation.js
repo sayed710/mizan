@@ -23,7 +23,8 @@ function prepare(db, id, date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) throw new Error('Enter a valid valuation date');
   const ls = layers(db, id);
   if (ls.some((l) => l.date > date)) throw new Error('Valuation date cannot precede an existing layer');
-  if (ls.length && Math.abs(quantity(ls) - Number(p.qty_available || 0)) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
+  const owned = Number(p.qty_available || 0) + Number(p.qty_rented || 0);
+  if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !p.qty_available) return db;
   if (p.qty_available < 0) throw new Error('Reconcile negative opening stock before valuation');
   return create(db, 'stock.valuation.layer', {
@@ -57,7 +58,8 @@ export function postValuation(db, layerId) {
 }
 
 function addLayer(db, vals) {
-  const result = create(db, 'stock.valuation.layer', vals);
+  // Unset options stay out of the record so saved data round-trips through JSON.
+  const result = create(db, 'stock.valuation.layer', Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== undefined)));
   return postValuation(result.db, result.id);
 }
 
@@ -197,6 +199,17 @@ export function startCount(db, { productIds, date = today() } = {}) {
 }
 
 /** Apply inventory gains/losses once; intervening stock movements require a fresh count. */
+/** Set a product's on-hand quantity as a one-line physical inventory, so the change is valued and posted. */
+export function adjustQuantity(db, productId, newQty, { date = today(), reference } = {}) {
+  const started = startCount(db, { productIds: [productId], date });
+  const count = read(started.db, 'stock.inventory.count', started.id);
+  const counted = write(started.db, 'stock.inventory.count', started.id, {
+    ...(reference ? { name: reference } : {}),
+    line_ids: count.line_ids.map((l) => ({ ...l, counted_qty: Number(newQty) })),
+  });
+  return applyCount(counted, started.id);
+}
+
 export function applyCount(db, countId) {
   const count = read(db, 'stock.inventory.count', countId);
   if (!count || count.state !== 'in_progress') throw new Error('Only an inventory in progress can be applied');

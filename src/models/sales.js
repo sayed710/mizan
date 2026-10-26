@@ -1,5 +1,5 @@
 import { create, read, search, write } from '../orm.js';
-import { moveValued } from './valuation.js';
+import { adjustQuantity, moveValued } from './valuation.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { checkCreditLimit } from './finance.js';
@@ -261,8 +261,9 @@ export const salesModels = {
           label: 'Update Quantity',
           run: (db, r) => {
             const qty = prompt('New on-hand quantity', String(r.qty_available ?? 0));
-            if (qty == null || Number.isNaN(Number(qty))) return { db };
-            return { db: write(db, 'product', r.id, { qty_available: Number(qty) }) };
+            if (qty == null || Number.isNaN(Number(qty)) || Number(qty) < 0) return { db };
+            // An inventory adjustment, so stock valuation follows the new quantity.
+            return { db: adjustQuantity(db, r.id, Number(qty), { reference: `Quantity update: ${r.name}` }) };
           },
           when: (r) => r.type === 'goods',
         },

@@ -54,7 +54,8 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
   lines.push({ account: retainedEarningsCode, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
   if (lines.length === 1) lines.push({ account: retainedEarningsCode, debit: 0, credit: 0 });
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, lines });
-  return updateSettings(write(entry.db, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null }), {
+  const marked = write(entry.db, 'account.move', entry.id, { is_closing: true });
+  return updateSettings(write(marked, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null }), {
     lock_date: [db.settings?.lock_date, year.date_to].filter(Boolean).sort().at(-1),
   });
 }
@@ -65,12 +66,14 @@ export function reopenFiscalYear(db, yearId) {
   if (year.state !== 'closed') throw new Error('This fiscal year is already open');
   const closing = read(db, 'account.move', year.closing_move_id);
   if (!closing || closing.state !== 'posted') throw new Error('The posted closing entry is missing');
-  const next = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: '' }) : db;
+  // Fall back to the latest other closed year rather than unlocking everything.
+  const previous = search(db, 'account.fiscal.year').filter((y) => y.id !== yearId && y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
+  const next = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: previous }) : db;
   const entry = postEntry(next, {
     journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`,
     lines: closing.line_ids.map((l) => ({ account: read(next, 'account.account', l.account_id).code, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
   });
-  return write(entry.db, 'account.fiscal.year', yearId, { state: 'open', opening_move_id: entry.id });
+  return write(write(entry.db, 'account.move', entry.id, { is_closing: true }), 'account.fiscal.year', yearId, { state: 'open', opening_move_id: entry.id });
 }
 
 const pnlRows = [['revenue', 'Revenue'], ['cost', 'Cost of Revenue'], ['gross', 'Gross Profit'], ['expense', 'Expenses'],

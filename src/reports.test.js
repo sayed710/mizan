@@ -42,7 +42,7 @@ test('trial balance lists per-account opening, movement and end, and the books b
   assert.equal(tb.totals.initial, 0);
   assert.equal(tb.totals.debit, tb.totals.credit);
   assert.equal(tb.totals.end, 0);
-  assert.deepEqual(tb.rows.map((r) => r.account.code), ['101401', '101501', '121000', '131000', '151000', '211000', '251000', '301000', '400000', '600000']);
+  assert.deepEqual(tb.rows.map((r) => r.account.code), ['101401', '101501', '110100', '110200', '121000', '131000', '151000', '211000', '251000', '301000', '400000']);
   assert.ok(tb.rows.every((r) => r.initial || r.debit || r.credit || r.end)); // all-zero rows are omitted
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '101401')), { initial: 0, debit: 208936, credit: 25000, end: 183936 });
   assert.deepEqual(pick(tb.rows.find((r) => r.account.code === '121000')), { initial: 0, debit: 10716, credit: 8936, end: 1780 });
@@ -103,12 +103,12 @@ test('cash flow splits every cash movement into operating, investing and financi
 test('executive summary reports margins, liquidity and days sales outstanding', () => {
   const { db } = books();
   const s = executiveSummary(db, whole);
-  assert.deepEqual([s.revenue, s.grossProfit, s.netProfit], [9400, 9400, 1300]);
+  assert.deepEqual([s.revenue, s.grossProfit, s.netProfit], [9400, 9400, 9400]); // purchases are stock, not expense
   assert.deepEqual([s.cash, s.receivables, s.payables], [188936, 1780, 9234]);
   assert.equal(s.grossMargin, 100);
-  assert.equal(s.netMargin, 13.83);
+  assert.equal(s.netMargin, 100);
   assert.equal(s.dso, 138); // 1780 / 9400 × 731 days
-  assert.ok(s.currentRatio > 18.18 && s.currentRatio < 18.19); // (1780 + 188936 + 1134) / (9234 + 1316)
+  assert.ok(s.currentRatio > 18.95 && s.currentRatio < 18.96); // (1780 + 188936 + 1134 + 8100 stock) / (9234 + 1316)
   const none = executiveSummary(db, { from: '2000-01-01', to: '2000-12-31' });
   assert.deepEqual([none.revenue, none.cash, none.receivables, none.payables], [0, 0, 0, 0]);
   assert.deepEqual([none.currentRatio, none.grossMargin, none.netMargin, none.dso], [null, null, null, null]);

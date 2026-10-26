@@ -202,7 +202,7 @@ test('seed loads with preserved product fields, defaults, opening quantities and
   assert.equal(valuationModels.product.defaults(1).cost_method, 'standard');
   assert.equal(valuationModels.product.defaults(1).valuation, 'real_time');
   for (const p of search(base, 'product').filter((p) => p.type === 'goods')) close(report(base, p.id).qty, p.qty_available);
-  const p = search(base, 'product').find((p) => p.type === 'goods' && p.qty_available > 0);
+  const p = search(base, 'product').find((p) => p.type === 'goods' && p.qty_available > 0 && !layers(base, p.id).length);
   const db = receive(base, p.id, 3, p.cost, { date });
   assert.equal(layers(db, p.id)[0].opening, true);
   assert.ok(!layers(db, p.id)[0].move_id);

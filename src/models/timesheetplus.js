@@ -101,8 +101,9 @@ export function weeklyGrid(db, employeeId, weekStart) {
   for (const r of search(db, model).filter((r) => isTimesheet(r) && r.employee_id === employeeId && dates.includes(r.date))) {
     const key = `${r.project_id ?? ''}:${r.task_id ?? ''}`;
     const row = rows.get(key) ?? { project_id: r.project_id ?? null, task_id: r.task_id ?? null, days: Array(7).fill(0), total: 0 };
-    const days = row.days.map((hours, i) => hours + (dates[i] === r.date ? Number(r.unit_amount) || 0 : 0));
-    rows.set(key, { ...row, days, total: days.reduce((sum, hours) => sum + hours, 0) });
+    const hundredths = (n) => Math.round(n * 100) / 100;
+    const days = row.days.map((hours, i) => hundredths(hours + (dates[i] === r.date ? Number(r.unit_amount) || 0 : 0)));
+    rows.set(key, { ...row, days, total: hundredths(days.reduce((sum, hours) => sum + hours, 0)) });
   }
   return [...rows.values()];
 }
@@ -178,7 +179,11 @@ export const timesheetPlusModels = {
           const user = prompt('Validating user', '');
           return { db: user === null ? db : validateTimesheets(db, [r.id], { user, date: today() }) };
         } },
-        { label: 'Reset to Draft', admin: true, when: (r) => isTimesheet(r) && r.validated, run: (db, r) => ({ db: write(db, model, r.id, { validated: false, validated_by: '', validated_on: null }) }) },
+        { label: 'Reset to Draft', admin: true, when: (r) => isTimesheet(r) && r.validated, run: (db, r) => {
+          // Un-validated hours stop counting as delivered on the sales order.
+          const reset = write(db, model, r.id, { validated: false, validated_by: '', validated_on: null });
+          return { db: r.so_id ? syncDelivered(reset, r.so_id) : reset };
+        } },
         { label: 'Start Timer', when: (r) => isTimesheet(r) && !r.validated && !r.timer_start, run: (db, r) => ({ db: write(db, model, r.id, { timer_start: new Date().toISOString(), amount: cost(db, r) }) }) },
         { label: 'Stop Timer', when: (r) => isTimesheet(r) && !!r.timer_start, run: (db, r) => ({ db: stopTimer(db, r.id, new Date().toISOString()) }) },
       ],

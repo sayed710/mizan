@@ -3,6 +3,7 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
+import { moveValued } from './models/valuation.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -164,7 +165,8 @@ export function seed() {
   // Purchases: received PO + its posted bill, open RFQ.
   const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]) });
   const po1rec = read(db, 'purchase.order', po1);
-  db = moveStock(db, po1rec.order_line, 1);
+  // Received through stock valuation at the PO price, so the bill clears the interim account.
+  db = moveValued(db, po1rec.order_line.map((l) => ({ ...l, unit_cost: l.price_unit })), 1, { reference: po1rec.name, date: addDays(today(), -11) });
   set('purchase.order', po1, { state: 'purchase', receipt_done: true });
   const bill = add('account.move', {
     move_type: 'in_invoice', partner_id: 7, purchase_id: po1, invoice_origin: po1rec.name,

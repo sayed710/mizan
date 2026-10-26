@@ -4,6 +4,7 @@ import { crmModels } from './crm.js';
 import { logisticsModels } from './logistics.js';
 import { pricelistModels } from './pricelist.js';
 import { salesModels } from './sales.js';
+import { valuationModels } from './valuation.js';
 
 const RIBBONS = [['', 'None'], ['sale', 'Sale'], ['new', 'New'], ['sold_out', 'Sold out']];
 
@@ -21,7 +22,8 @@ export function categoryPath(db, id) {
   return names.join(' / ');
 }
 
-const product = salesModels.product;
+// Built on the valuation product so costing method and valuation fields survive.
+const product = valuationModels.product;
 const order = salesModels['sale.order'];
 
 export const ecommerceModels = {

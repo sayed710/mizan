@@ -48,7 +48,8 @@ test('closing clears all five P&L types into retained earnings, balances, and pr
   assert.equal(retained.credit, 750);
   assert.equal(read(closed, 'account.account', retained.account_id).name, 'Retained Earnings');
   assert.ok(balances(closed, journalItems(closed, period)).filter((r) => /^(income|expense)/.test(r.account.account_type)).every((r) => r.balance === 0));
-  assert.equal(profitAndLoss(closed, period).net, 0);
+  assert.equal(profitAndLoss(closed, period, { includeClosing: true }).net, 0); // the closing entry clears the P&L accounts
+  assert.equal(profitAndLoss(closed, period).net, 750); // reports still show the year's result, as in Odoo
   const sheet = balanceSheet(closed, period.to);
   assert.equal(sheet.earnings, 0);
   assert.equal(sheet.totalAssets, sheet.totalLiabilities + sheet.totalEquity);
@@ -84,7 +85,7 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   assert.equal(reversal.invoice_date, period.to);
   assert.ok(isBalanced(reversal.line_ids));
   assert.throws(() => reopenFiscalYear(reopened, id), /already open/);
-  assert.equal(profitAndLoss(closeFiscalYear(reopened, id), period).net, 0);
+  assert.equal(profitAndLoss(closeFiscalYear(reopened, id), period, { includeClosing: true }).net, 0);
   assert.throws(() => reopenFiscalYear(updateSettings(closed, { lock_date: '2025-12-31' }), id), /locked/);
   assert.throws(() => reopenFiscalYear(updateSettings(closed, { hard_lock_date: period.to }), id), /locked/);
   const differentLock = reopenFiscalYear(updateSettings(closed, { lock_date: '2023-12-31' }), id);

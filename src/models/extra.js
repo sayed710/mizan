@@ -34,6 +34,13 @@ function signDocument(db, r) {
   return { db: name == null ? db : applySignature(db, r, name) };
 }
 
+/** Rented units leave the shelf but stay company stock (qty_rented), so valuation is unchanged. */
+const rentOut = (db, r, sign) => {
+  const p = read(db, 'product', r.product_id);
+  const moved = moveStock(db, [{ product_id: r.product_id, qty: r.qty }], -sign);
+  return p?.type === 'goods' ? write(moved, 'product', p.id, { qty_rented: Math.max(0, (Number(p.qty_rented) || 0) + sign * (Number(r.qty) || 0)) }) : moved;
+};
+
 /** Late days past the planned return (actual return date, or today while still out). */
 const lateDays = (r, at = today()) => (r.return_date ? Math.max(0, Math.round((new Date(r.actual_return_date ?? at) - new Date(r.return_date)) / 864e5)) : 0);
 const lateFee = (r, at) => Math.round(lateDays(r, at) * (Number(r.qty) || 0) * (Number(r.price_per_day) || 0) * (Number(r.late_fee_factor) || 0) * 100) / 100;
@@ -320,8 +327,8 @@ export const extraModels = {
       lockedWhen: (r) => ['returned', 'cancel'].includes(r.state),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'quotation', run: (db, r) => ({ db: confirmRental(db, r) }) },
-        { label: 'Pickup', primary: true, when: (r) => r.state === 'reserved', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], -1), 'sale.rental', r.id, { state: 'picked' }) }) },
-        { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(moveStock(db, [{ product_id: r.product_id, qty: r.qty }], 1), 'sale.rental', r.id, { state: 'returned', actual_return_date: today() }) }) },
+        { label: 'Pickup', primary: true, when: (r) => r.state === 'reserved', run: (db, r) => ({ db: write(rentOut(db, r, 1), 'sale.rental', r.id, { state: 'picked' }) }) },
+        { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(rentOut(db, r, -1), 'sale.rental', r.id, { state: 'returned', actual_return_date: today() }) }) },
         { label: 'Create Invoice', when: (r) => ['picked', 'returned'].includes(r.state) && !r.invoiced, run: rentalInvoice },
         { label: 'Invoice Late Fee', when: (r) => r.state === 'returned' && r.invoiced && lateFee(r) > (Number(r.late_fee_invoiced) || 0), run: lateFeeInvoice },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['quotation', 'reserved'].includes(r.state) },
