@@ -40,8 +40,40 @@ export function postMove(db, id) {
   checkBillMatch(db, r);
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
   const line_ids = [...invoiceLines(db, { ...r, name }), ...priceDifferenceLines(db, { ...r, name })];
+  if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
+  if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
+}
+
+/** Credit notes of an invoice that are not cancelled, other than `exceptId`. */
+const creditNotesOf = (db, invoiceId, exceptId = null) => (db.records['account.move'] ?? [])
+  .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state !== 'cancel');
+const round2 = (n) => Math.round(n * 100) / 100;
+
+/** An invoice is credited at most once in total: its posted credit notes together cannot exceed it. */
+function creditCheck(db, note) {
+  const invoice = read(db, 'account.move', note.reversed_entry_id);
+  if (!invoice || invoice.state !== 'posted') throw new Error('A credit note must reverse a posted invoice');
+  const credited = creditNotesOf(db, invoice.id, note.id).filter((m) => m.state === 'posted').reduce((s, m) => s + total(m), 0);
+  if (round2(credited + total(note)) > round2(total(invoice))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(round2(total(invoice) - credited))} is left to credit`);
+}
+
+/**
+ * A posted credit note settles what is still due on its invoice: both record the other in their payments and paid
+ * amount, as a reconciliation would. Their receivable/payable lines already offset in the ledger.
+ */
+function offsetCreditNote(db, noteId) {
+  const note = read(db, 'account.move', noteId);
+  const invoice = read(db, 'account.move', note.reversed_entry_id);
+  const value = Math.min(total(note), residual(invoice));
+  if (!(value > 0)) return db;
+  const date = note.invoice_date ?? today();
+  const settle = (next, r, other) => write(next, 'account.move', r.id, {
+    amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id }],
+  });
+  const next = settle(settle(db, invoice, note), note, invoice);
+  return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
 
 /** Bill lines booked on a fixed-asset account become draft assets (once per bill line). */
@@ -108,11 +140,13 @@ export function releaseCashBasis(db, r, share, date) {
   return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
 }
 
-/** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill. */
-function creditNote(db, r) {
+/** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill, while some of it is left to credit. */
+export function creditNote(db, r) {
   const purchase = isPurchase(r);
+  const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m), 0);
+  if (round2(credited) >= round2(total(r))) throw new Error(`${r.name} is already fully credited`);
   const { db: next, id } = create(db, 'account.move', {
-    move_type: purchase ? 'in_refund' : 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(),
+    move_type: purchase ? 'in_refund' : 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(), reversed_entry_id: r.id,
     invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null, fiscal_position_id: r.fiscal_position_id ?? null,
   });
   return { db: next, go: `#/accounting/${purchase ? 'refunds' : 'credit-notes'}/${id}` };
@@ -260,6 +294,7 @@ export const accountingModels = {
         options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid']],
       },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
+      reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
