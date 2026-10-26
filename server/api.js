@@ -291,7 +291,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, login: user.login }) });
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {

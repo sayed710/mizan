@@ -5,6 +5,7 @@ import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { setCompanies } from './models/company.js';
+import { authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
@@ -40,8 +41,11 @@ export const isEmptyDiff = (d) =>
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
-/** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
+/**
+ * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
+ * `author` (their name) by the approval rules in authority.js.
+ */
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
@@ -57,7 +61,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
-      const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
+      const before = current.get(rec.id) ?? null;
+      const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin }) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author });
       if (err) throw new Error(err);
       current.set(rec.id, rec);
     }

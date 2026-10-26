@@ -1,6 +1,7 @@
 // Expense reports preserve the standalone expense workflow while grouping accounting and approval.
 import { create, read, search, write, postNote } from '../orm.js';
 import { today, nextName } from './common.js';
+import { currentActor, employeeFor } from './authority.js';
 import { postEntry } from './ledger.js';
 import { moreModels } from './more.js';
 
@@ -189,7 +190,9 @@ export const expensePlusModels = {
       buttons: [
         { label: 'Submit', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: submitSheet(db, r.id) }) },
         { label: 'Approve', primary: true, when: (r) => r.state === 'submit', run: (db, r) => {
-          const answer = prompt('Approver employee ID', String(r.manager_id ?? ''));
+          // Signed in: approve as your own employee; the server checks you manage the requester.
+          const mine = employeeFor(db, currentActor()?.login)?.id;
+          const answer = mine ?? prompt('Approver employee ID', String(r.manager_id ?? ''));
           return { db: answer === null ? db : approveSheet(db, r.id, Number(answer)) };
         } },
         { label: 'Refuse', when: (r) => ['submit', 'approve'].includes(r.state), run: (db, r) => {

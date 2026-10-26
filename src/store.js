@@ -3,6 +3,7 @@ import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
+import { setActor } from './models/authority.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 
@@ -79,6 +80,7 @@ export async function initStore() {
       if (r.ok) {
         user = r.data;
         setAuthor(user.name);
+        setActor(user);
         await pull();
         setInterval(() => { if (document.visibilityState === 'visible') inflight = inflight.then(pull); }, POLL_MS);
       }
