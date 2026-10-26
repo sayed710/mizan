@@ -13,6 +13,7 @@ import { assignAllTeams, refreshProbabilities } from './crmteams.js';
 import { assignTicket, autoCloseStale } from './helpdesk.js';
 import { generateRecurringTasks } from './projectplus.js';
 import { appraisalJobs } from './appraisalplus.js';
+import { expireQuotes } from './quoteplus.js';
 import { autoCheckout } from './attendanceplus.js';
 import { syncFromApplicant } from './skillsplus.js';
 
@@ -37,7 +38,7 @@ export function runScheduledJobs(db, at = today()) {
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
   const ran = tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
-  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(ran);
+  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(tolerant(expireQuotes)(ran, at));
   // Referral stages follow their applicants (recruitment has no after-write hook).
   return (checkedOut.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), checkedOut);
 }
