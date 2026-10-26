@@ -123,6 +123,14 @@ export async function serverAction(path, body) {
   return r.data;
 }
 
+/** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */
+export async function restoreBackup(backup, confirm) {
+  const r = await api('/api/restore', { backup, confirm });
+  if (!r.ok) throw new Error(r.data?.error ?? 'Restore failed');
+  if (confirm) await pull();
+  return r.data;
+}
+
 export async function resetDemo() {
   if (mode === 'local') return commit(seed());
   const r = await api('/api/reset', {});

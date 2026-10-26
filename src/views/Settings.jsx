@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
+import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, setCompanyCurrency } from '../models/company.js';
@@ -117,15 +117,31 @@ export function Settings() {
     URL.revokeObjectURL(a.href);
   };
   const restore = async (file) => {
+    setStatus(null);
+    let data;
     try {
-      const data = JSON.parse(await file.text());
-      if (!isDb(data)) throw new Error('shape');
-      commit(data);
-      setStatus(t('Backup restored.'));
+      data = JSON.parse(await file.text());
     } catch {
       setStatus(t('Invalid backup file.'));
+      return;
+    }
+    if (!isServer()) {
+      if (!isDb(data)) { setStatus(t('Invalid backup file.')); return; }
+      if (confirm(t('Replace all data in this browser with the backup?'))) { commit(data); setStatus(t('Backup restored.')); }
+      return;
+    }
+    try {
+      // Ask the server what would change, then require a typed confirmation before anything is replaced.
+      const plan = await restoreBackup(data);
+      const typed = prompt(`${t('Restoring replaces all data for every user.')}\n${t('Now')}: ${plan.current} · ${t('Backup')}: ${plan.restored} (${t('removed')}: ${plan.removed}, ${t('added')}: ${plan.added})\n${t('Type RESTORE to continue.')}`);
+      if (typed !== 'RESTORE') return;
+      await restoreBackup(data, 'RESTORE');
+      setStatus(t('Backup restored.'));
+    } catch (e) {
+      setStatus(`${t('Backup not restored')}: ${e.message}`);
     }
   };
+  const canReplaceData = !isServer() || getUser()?.isAdmin;
 
   return (
     <main className="action settings">
@@ -218,10 +234,12 @@ export function Settings() {
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">
           <button type="button" className="btn" onClick={download}>⬇ {t('Download backup')}</button>
-          <label className="btn">
-            ⬆ {t('Restore backup')}
-            <input type="file" accept="application/json" hidden onChange={(e) => e.target.files[0] && restore(e.target.files[0])} />
-          </label>
+          {canReplaceData && (
+            <label className="btn">
+              ⬆ {t('Restore backup')}
+              <input type="file" accept="application/json" hidden onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; if (f) restore(f); }} />
+            </label>
+          )}
           <button type="button" className="btn danger" onClick={() => { if (confirm(t('Reset all data to the demo database?'))) resetDemo(); }}>
             {t('Reset demo')}
           </button>

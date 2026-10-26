@@ -9,6 +9,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
+import { backupSummary, checkBackup } from '../src/backup.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -47,6 +48,7 @@ const DIST = join(ROOT, 'dist');
 const PORT = Number(process.env.PORT ?? 8069);
 const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
+const MAX_BACKUP = 200 * 1024 * 1024; // matches the whole-db size cap in src/sync.js
 const COOKIE = 'mizan_session';
 
 const sql = new DatabaseSync(process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite'));
@@ -174,13 +176,13 @@ const send = (res, status, body, headers = {}) => {
   res.end(JSON.stringify(body));
 };
 
-function readJson(req) {
+function readJson(req, limit = MAX_BODY) {
   return new Promise((ok, fail) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { fail(new Error('Request too large')); req.destroy(); } else chunks.push(c);
+      if (size > limit) { fail(new Error('Request too large')); req.destroy(); } else chunks.push(c);
     });
     req.on('end', () => {
       try { ok(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { fail(new Error('Invalid JSON')); }
@@ -437,6 +439,21 @@ async function api(req, res, path) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
     return send(res, 200, visibleDb(user));
+  }
+  if (path === '/api/restore' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    try {
+      const body = await readJson(req, MAX_BACKUP);
+      const restored = checkBackup(body?.backup);
+      const summary = backupSummary(db, restored);
+      // A dry run only reports what would change; the real restore needs the typed confirmation.
+      if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
+      commitDb(restored, { full: true });
+      console.info(`Backup restored by ${user.login}: ${summary.restored} records (was ${summary.current})`);
+      return send(res, 200, { ok: true, ...summary });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
