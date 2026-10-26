@@ -1,7 +1,8 @@
 // Barcode scanning, Shop Floor and the cross-app Overview dashboard.
 import { useRef, useState } from 'react';
 import { models, today } from '../models/index.js';
-import { postNote, read, search, write } from '../orm.js';
+import { postNote, read, search } from '../orm.js';
+import { adjustQuantity } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
@@ -32,10 +33,15 @@ export function Barcode() {
   };
   const apply = () => {
     const before = product.qty_available;
-    const next = write(getDb(), 'product', product.id, { qty_available: counted });
-    commit(postNote(next, 'product', product.id, `Inventory adjustment: ${before} → ${counted}`));
-    setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
-    setProductId(null);
+    try {
+      // A count is a one-line physical inventory, so the difference gets a valuation layer and journal entry.
+      const next = adjustQuantity(getDb(), product.id, counted);
+      commit(postNote(next, 'product', product.id, `Inventory adjustment: ${before} → ${counted}`));
+      setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
+      setProductId(null);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    }
     input.current?.focus();
   };
 
