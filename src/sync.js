@@ -38,6 +38,40 @@ export function diffDb(prev, next) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
+/** Models whose `name` is a legal document number from `nextName`. */
+const SEQUENCED = ['account.move', 'account.payment', 'account.batch.payment', 'pos.session', 'stock.inventory.count', 'stock.picking.batch', 'hr.expense.sheet'];
+
+/**
+ * Two browsers numbering from the same snapshot pick the same next number. Keep the stored record's number and give
+ * an incoming record that collides with another one the next free number of its sequence.
+ */
+function uniqueNumbers(records, upserts = {}, stored = {}) {
+  let out = records;
+  for (const model of SEQUENCED.filter((m) => Array.isArray(upserts[m]))) {
+    const list = [...out[model] ?? []];
+    const was = new Map((stored[model] ?? []).map((r) => [r.id, r.name]));
+    // Only numbers this change set hands out can move; a record keeps the number it already had.
+    const incoming = new Set(upserts[model].map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
+    const owner = new Map();
+    // Records keeping their number claim it first.
+    for (const r of [...list.filter((r) => !incoming.has(r.id)), ...list.filter((r) => incoming.has(r.id))]) {
+      const m = /^(.*\D)(\d+)$/.exec(r.name ?? '');
+      if (!m || !owner.has(r.name) || !incoming.has(r.id)) {
+        if (!owner.has(r.name)) owner.set(r.name, r.id);
+        continue;
+      }
+      const [, prefix, digits] = m;
+      const top = Math.max(0, ...list.filter((x) => x.name?.startsWith(prefix)).map((x) => Number(x.name.slice(prefix.length))).filter(Number.isSafeInteger));
+      const name = prefix + String(top + 1).padStart(digits.length, '0');
+      const i = list.findIndex((x) => x.id === r.id);
+      list[i] = { ...r, name };
+      owner.set(name, r.id);
+    }
+    out = { ...out, [model]: list };
+  }
+  return out;
+}
+
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
@@ -63,6 +97,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     }
     records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
   }
+  records = uniqueNumbers(records, d.upserts, db.records);
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
