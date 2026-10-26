@@ -8,7 +8,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
-import { applyDiff, diffDb } from '../src/sync.js';
+import { applyDiff, assignIds, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -430,13 +430,16 @@ async function api(req, res, path) {
   }
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
   if (path === '/api/diff' && req.method === 'POST') {
-    const diff = await readJson(req);
+    const body = await readJson(req);
+    let remapped;
     try {
-      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
+      const assigned = assignIds(db, body);
+      remapped = assigned.remapped;
+      commitDb(applyDiff(db, assigned.diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
-    return send(res, 200, visibleDb(user));
+    return send(res, 200, Object.keys(remapped).length ? { ...visibleDb(user), remapped } : visibleDb(user));
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });

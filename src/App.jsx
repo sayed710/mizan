@@ -39,6 +39,18 @@ export function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  useEffect(() => {
+    const follow = (e) => {
+      const { app: appId, menu, id, query } = parseHash();
+      const app = apps.find((a) => a.id === appId);
+      const model = app && findLeaf(app, menu)?.model;
+      const moved = model && e.detail[model]?.[Number(id)];
+      if (moved) location.replace(`#/${appId}/${menu}/${moved}${query ? `?${query}` : ''}`);
+    };
+    window.addEventListener('mizan:remapped', follow);
+    return () => window.removeEventListener('mizan:remapped', follow);
+  }, []);
+
   if (route.app === 'print') return <PrintDoc model={route.menu} id={route.id} />;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.

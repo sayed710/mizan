@@ -11,16 +11,19 @@ const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
-/** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
+/** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, created: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
   const upserts = {};
   const deletes = {};
+  const created = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
     const before = byId(prev.records[model]);
     const after = byId(next.records[model]);
     const changed = [...after.values()].filter((r) => before.get(r.id) !== r);
     const removed = [...before.keys()].filter((id) => !after.has(id));
+    const added = changed.filter((r) => !before.has(r.id)).map((r) => r.id);
     if (changed.length) upserts[model] = changed;
+    if (added.length) created[model] = added;
     if (removed.length) deletes[model] = removed;
   }
   const prevMsg = new Set(prev.messages.map((m) => m.id));
@@ -28,6 +31,7 @@ export function diffDb(prev, next) {
   return {
     upserts,
     deletes,
+    created,
     messages: next.messages.filter((m) => !prevMsg.has(m.id)),
     removedMessages: [...prevMsg].filter((id) => !nextMsg.has(id)),
     seq: next.seq,
@@ -38,7 +42,64 @@ export function diffDb(prev, next) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
-const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
+/** Point many2one, line and res_model/res_id references in a record at remapped ids. */
+function remapRefs(model, rec, remapped) {
+  const to = (relation, v) => (Number.isInteger(v) && remapped[relation]?.[v]) || v;
+  const out = { ...rec };
+  for (const [key, f] of Object.entries(models[model]?.fields ?? {})) {
+    if (!(key in out)) continue;
+    if (f.type === 'many2one' && f.relation) out[key] = to(f.relation, out[key]);
+    else if (f.type === 'one2many' && Array.isArray(out[key])) {
+      out[key] = out[key].map((line) => {
+        if (f.relation && !f.fields) return to(f.relation, line);
+        if (!line || typeof line !== 'object') return line;
+        const subs = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'many2one' && s.relation && k in line);
+        return subs.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(s.relation, line[k])])) } : line;
+      });
+    }
+  }
+  if (typeof out.res_model === 'string') out.res_id = to(out.res_model, out.res_id);
+  return out;
+}
+
+/**
+ * The server owns record ids: a record the client marks as created, or one the store does not hold yet, gets the
+ * next free id for its model, so two users creating from the same snapshot cannot overwrite each
+ * other. References inside the same change set follow the new ids.
+ * @returns {{ diff: object, remapped: Record<string, Record<number, number>> }}
+ */
+export function assignIds(db, d) {
+  if (!d || typeof d !== 'object' || !d.upserts || typeof d.upserts !== 'object') return { diff: d, remapped: {} };
+  const remapped = {};
+  for (const [model, recs] of Object.entries(d.upserts)) {
+    if (!models[model] || !Array.isArray(recs)) continue;
+    const stored = new Set((db.records[model] ?? []).map((r) => r.id));
+    const flagged = new Set(Array.isArray(d.created?.[model]) ? d.created[model] : []);
+    const fresh = [...new Set(recs.filter((r) => Number.isSafeInteger(r?.id) && r.id > 0 && (flagged.has(r.id) || !stored.has(r.id))).map((r) => r.id))].sort((a, b) => a - b);
+    let next = Math.max(db.seq?.[model] ?? 0, ...stored, 0);
+    for (const id of fresh) {
+      next += 1;
+      if (next !== id) (remapped[model] ??= {})[id] = next;
+    }
+  }
+  return { diff: remapDiff(d, remapped), remapped };
+}
+
+/** Rewrite a change set's record ids and references through `remapped` ({ model: { oldId: newId } }). */
+export function remapDiff(d, remapped) {
+  if (!d || typeof d !== 'object' || !Object.keys(remapped ?? {}).length) return d;
+  const upserts = Object.fromEntries(Object.entries(d.upserts ?? {}).map(([model, recs]) => [model, !Array.isArray(recs) ? recs
+    : recs.map((r) => (r && typeof r === 'object' ? remapRefs(model, { ...r, id: remapped[model]?.[r.id] ?? r.id }, remapped) : r))]));
+  const deletes = Object.fromEntries(Object.entries(d.deletes ?? {}).map(([model, ids]) => [model,
+    Array.isArray(ids) ? ids.map((id) => remapped[model]?.[id] ?? id) : ids]));
+  const messages = Array.isArray(d.messages)
+    ? d.messages.map((m) => (m && remapped[m.model]?.[m.res_id] ? { ...m, res_id: remapped[m.model][m.res_id] } : m)) : d.messages;
+  const created = Object.fromEntries(Object.entries(d.created ?? {}).map(([model, ids]) => [model,
+    Array.isArray(ids) ? ids.map((id) => remapped[model]?.[id] ?? id) : ids]));
+  return { ...d, upserts, deletes, created, messages };
+}
+
+const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
 export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
