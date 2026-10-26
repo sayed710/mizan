@@ -9,7 +9,7 @@ const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records 
 
 function Users() {
   const [users, setUsers] = useState([]);
-  const [form, setForm] = useState({ login: '', name: '', password: '', apps: '' });
+  const [form, setForm] = useState({ login: '', name: '', password: '', apps: '', companies: '' });
   const [error, setError] = useState(null);
   const refresh = () => listUsers().then(setUsers);
   useEffect(() => { refresh(); }, []);
@@ -17,7 +17,7 @@ function Users() {
     e.preventDefault();
     try {
       await addUser(form);
-      setForm({ login: '', name: '', password: '', apps: '' });
+      setForm({ login: '', name: '', password: '', apps: '', companies: '' });
       setError(null);
       refresh();
     } catch (err) {
@@ -33,7 +33,7 @@ function Users() {
       <h3>{t('Users')}</h3>
       <table className="list">
         <tbody>
-          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td></tr>)}
+          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td><td className="muted">{u.companies || t('All companies')}</td></tr>)}
         </tbody>
       </table>
       <form className="row user-form" onSubmit={submit}>
@@ -41,6 +41,7 @@ function Users() {
         {input('login', { label: 'Login' })}
         {input('password', { label: 'Password', type: 'password' })}
         <input aria-label={t('Allowed apps')} placeholder={t('Allowed apps (e.g. crm,sales) — empty = all')} value={form.apps} onChange={(e) => setForm({ ...form, apps: e.target.value })} />
+        <input aria-label={t('Allowed companies')} placeholder={t('Allowed company ids (e.g. 1,2) — empty = all')} value={form.companies} onChange={(e) => setForm({ ...form, companies: e.target.value })} />
         <button type="submit" className="btn primary">{t('Add user')}</button>
       </form>
       {error && <div className="alert" role="alert">{error}</div>}

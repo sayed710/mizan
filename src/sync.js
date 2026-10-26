@@ -4,7 +4,7 @@ import { models } from './models/index.js';
 import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
-import { setCompanies } from './models/company.js';
+import { setCompanies, visibleTo } from './models/company.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
@@ -40,9 +40,14 @@ export const isEmptyDiff = (d) =>
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
-/** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
+/**
+ * Apply an untrusted diff to the authoritative db. Throws on invalid input. `companies` (a Set of ids, null = all)
+ * limits which companies' records the diff may create, change, delete or comment on.
+ */
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, companies = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r)) ? `No access to this company's ${model} records` : null);
+  const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
@@ -56,6 +61,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
+      const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
+      if (denied) throw new Error(denied);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
       if (err) throw new Error(err);
@@ -68,7 +75,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id))
+      .map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
@@ -78,10 +86,12 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   }
   const known = new Set(db.messages.map((m) => m.id));
   const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
-  const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : []).filter((id) => !kept.has(id)));
+  const onVisibleRecord = (m) => !companies || !companyError(m.model, storedRecord(m.model, m.res_id), (records[m.model] ?? []).find((r) => r.id === m.res_id));
+  const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m)).map((m) => m.id));
+  const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : []).filter((id) => !kept.has(id) && !hiddenMessages.has(id)));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
-    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
+    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)) && onVisibleRecord(m))
     .map((m) => ({ ...m, author: author ?? m.author }));
   // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;

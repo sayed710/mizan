@@ -8,6 +8,7 @@ import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/m
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
+import { visibleTo } from '../src/models/company.js';
 
 const MAX_LIMIT = 500;
 
@@ -282,7 +283,7 @@ const describe = (name) => ({
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req
  * @returns {{ status: number, body: unknown, db?: object }} db is set when the request changed data.
  */
-export function handleApi({ method, path, query, body, db, user, allowed = null }) {
+export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
   if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
@@ -291,7 +292,8 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, companies }) });
+  const visible = (r) => r && visibleTo(companies, model, r);
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {
@@ -299,7 +301,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
-      const all = search(db, model).filter((r) => matches(db, model, r, terms));
+      const all = search(db, model).filter((r) => visible(r) && matches(db, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }
     if (id === null && method === 'POST') {
@@ -309,7 +311,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
       return { status: 201, body: read(saved, model, res.id), db: saved };
     }
     const rec = read(db, model, id);
-    if (!rec) return { status: 404, body: { error: `${model} #${id} not found` } };
+    if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
     if (method === 'GET') return { status: 200, body: rec };
     if (method === 'PATCH') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };

@@ -25,6 +25,12 @@ export function setCompanies(db, { current, allowed }) {
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
 }
 
+/**
+ * Whether a user limited to the `companies` ids (null = every company) may see or change this record: companies by
+ * their own id, other records when they are shared (no company) or belong to one of those companies.
+ */
+export const visibleTo = (companies, model, r) => !companies || (model === 'res.company' ? companies.has(r?.id) : shared(r?.company_id) || companies.has(r?.company_id));
+
 /** Keep shared records and records belonging to an allowed company. */
 export function companyFilter(db, records) {
   const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];

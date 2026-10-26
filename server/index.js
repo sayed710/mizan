@@ -41,6 +41,7 @@ const ACTIONS = {
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
+import { setCompanies, visibleTo } from '../src/models/company.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -62,9 +63,21 @@ sql.exec(`
 `);
 
 try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
+// companies: the company ids a user may work in (null = all); selection: their own company switcher state (JSON).
+try { sql.exec('ALTER TABLE users ADD COLUMN companies TEXT'); } catch { /* column already exists */ }
+try { sql.exec('ALTER TABLE users ADD COLUMN selection TEXT'); } catch { /* column already exists */ }
 
 /** Comma-separated app ids a user may open; null/empty = all apps. */
 const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x)) : null);
+/** Comma-separated company ids a user may work in; null/empty = all companies. */
+const parseCompanies = (v) => {
+  const ids = v ? [...new Set(String(v).split(',').map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0))] : [];
+  return ids.length ? ids : null;
+};
+const userOf = (row) => ({
+  id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps),
+  companies: row.is_admin ? null : parseCompanies(row.companies), selection: row.selection ?? null,
+});
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
@@ -89,13 +102,15 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-function createUser({ login, name, password, isAdmin = false, apps = '' }) {
+function createUser({ login, name, password, isAdmin = false, apps = '', companies = '' }) {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
-  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
+  const granted = parseCompanies(companies);
+  if (granted?.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id))) throw new Error('Allowed companies: select existing companies');
+  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null, granted?.join(',') ?? null);
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
@@ -114,17 +129,17 @@ function checkPassword(login, password) {
 function sessionUser(req) {
   const token = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
   if (!token) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
+  const row = sql.prepare('SELECT u.*, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
   if (!row || row.expires < Date.now()) return null;
-  return { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) };
+  return userOf(row);
 }
 
 /** User owning a "Bearer mzn_…" API key, or null. Keys are stored only as SHA-256 hashes. */
 function apiKeyUser(req) {
   const key = /^Bearer (mzn_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
   if (!key) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
-  return row ? { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) } : null;
+  const row = sql.prepare('SELECT u.* FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
+  return row ? userOf(row) : null;
 }
 
 // Secure cookies by default in production; MIZAN_SECURE_COOKIE=0 to serve plain HTTP (e.g. LAN), =1 to force.
@@ -144,15 +159,51 @@ const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite
 
 /** Models a session/API user may touch (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
+/** Company ids a user may work in (null = all). */
+const companiesFor = (u) => (u.companies ? new Set(u.companies) : null);
+/**
+ * The user's own company switcher state, kept to the companies they may use: each user has their own current and
+ * selected companies instead of one setting shared by everyone.
+ */
+const selectionFor = (u) => {
+  const granted = companiesFor(u);
+  const usable = (db.records['res.company'] ?? []).filter((c) => c.active !== false && visibleTo(granted, 'res.company', c)).map((c) => c.id);
+  let saved = null;
+  try { saved = JSON.parse(u.selection ?? 'null'); } catch { /* ignore a damaged selection */ }
+  const allowed = (saved?.allowed ?? db.settings.allowed_company_ids ?? []).filter((id) => usable.includes(id));
+  const current = [saved?.current, db.settings.current_company_id].find((id) => allowed.includes(id)) ?? allowed[0] ?? usable[0] ?? 1;
+  return { current_company_id: current, allowed_company_ids: allowed.length ? allowed : [current] };
+};
+/** Validate and store a user's company switcher state; throws when it names a company they may not use. */
+const saveSelection = (u, { current_company_id: current, allowed_company_ids: allowed }) => {
+  const granted = companiesFor(u);
+  if (granted && (!granted.has(current) || !allowed?.every((id) => granted.has(id)))) throw new Error('No access to that company');
+  setCompanies(db, { current, allowed });
+  const selection = JSON.stringify({ current, allowed: [...new Set(allowed)] });
+  sql.prepare('UPDATE users SET selection = ? WHERE id = ?').run(selection, u.id);
+  u.selection = selection;
+};
+/** Records a user may read: their apps' models, only their companies' records, and their own company selection. */
 const visibleDb = (u) => {
   const allowed = allowedFor(u);
-  if (!allowed) return db;
+  const companies = companiesFor(u);
+  const hidden = new Set();
+  const records = {};
+  for (const [model, list] of Object.entries(db.records)) {
+    if (allowed && !allowed.has(model)) continue;
+    if (!companies) { records[model] = list; continue; }
+    records[model] = list.filter((r) => visibleTo(companies, model, r));
+    if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r)).forEach((r) => hidden.add(`${model}:${r.id}`));
+  }
   return {
     ...db,
-    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => allowed.has(m))),
-    messages: db.messages.filter((m) => allowed.has(m.model)),
+    records,
+    messages: db.messages.filter((m) => (!allowed || allowed.has(m.model)) && !hidden.has(`${m.model}:${m.res_id}`)),
+    settings: { ...db.settings, ...selectionFor(u) },
   };
 };
+/** Write options for a user: who they are, what they may change, and in which companies. */
+const writeOptions = (u, allowed = allowedFor(u)) => ({ author: u.name, isAdmin: u.isAdmin, allowed, companies: companiesFor(u) });
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
 const failures = new Map();
@@ -362,7 +413,7 @@ async function api(req, res, path) {
     const keyUser = apiKeyUser(req);
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser), companies: companiesFor(keyUser) });
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -384,7 +435,7 @@ async function api(req, res, path) {
   const user = sessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
 
-  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
+  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, selection: undefined, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
   const action = ACTIONS[path];
   if (action && req.method === 'POST') {
     if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
@@ -396,9 +447,9 @@ async function api(req, res, path) {
     try {
       const snapshot = db;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
+      const out = await action.run(body, user, storeFor(writeOptions(user, storeAllowed)));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -415,9 +466,9 @@ async function api(req, res, path) {
       mailBaseKnown = true;
       const snapshot = db;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }), body, lastBaseUrl)
+        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed)), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)));
       return send(res, out.status, out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -432,7 +483,16 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
+      // The company switcher is per user: store it with the user, never in the shared settings.
+      if (diff?.settings && typeof diff.settings === 'object') {
+        const { current_company_id: current, allowed_company_ids: chosen, ...rest } = diff.settings;
+        const mine = selectionFor(user);
+        if ((current !== undefined && current !== mine.current_company_id) || (chosen !== undefined && JSON.stringify(chosen) !== JSON.stringify(mine.allowed_company_ids))) {
+          saveSelection(user, { current_company_id: current ?? mine.current_company_id, allowed_company_ids: chosen ?? mine.allowed_company_ids });
+        }
+        diff.settings = rest;
+      }
+      commitDb(applyDiff(db, diff, writeOptions(user)));
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
@@ -459,7 +519,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/users') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
-    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps FROM users ORDER BY id').all());
+    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps, companies FROM users ORDER BY id').all());
     if (req.method === 'POST') {
       try {
         createUser(await readJson(req));
