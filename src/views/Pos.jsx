@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { read, search } from '../orm.js';
+import { read } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { relationCandidates, viewRecords } from '../companyView.js';
 
 /** No open session: count the opening cash and start one. */
 function OpenSession() {
@@ -30,7 +31,7 @@ export function Pos() {
   const [receipt, setReceipt] = useState(null);
 
   const session = openSession(db);
-  const products = search(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
+  const products = viewRecords(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
   const categories = [...new Set(products.map((p) => p.categ).filter(Boolean))];
   const shown = products.filter((p) => (!categ || p.categ === categ) && p.name.toLowerCase().includes(query.toLowerCase()));
   const lines = priceLines(db, cart);
@@ -99,7 +100,7 @@ export function Pos() {
         </div>
         <select aria-label={t('Customer')} value={partner} onChange={(e) => setPartner(e.target.value)}>
           <option value="">{t('Customer')}…</option>
-          {search(db, 'res.partner').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {relationCandidates(db, 'res.partner', partner).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
         <ul className="pos-lines">
           {lines.map((l) => (

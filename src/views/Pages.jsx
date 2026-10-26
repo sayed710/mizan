@@ -7,6 +7,7 @@ import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
+import { companyViewDb } from '../companyView.js';
 
 /** Scan (or type) a product reference/name, then count stock — mirrors a warehouse scanner flow. */
 export function Barcode() {
@@ -109,7 +110,7 @@ const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
 
 /** One page of headline numbers across apps; every tile links to the underlying list. */
 export function Overview() {
-  const db = useDb();
+  const db = companyViewDb(useDb());
   const month = today().slice(0, 7);
   const orders = search(db, 'sale.order').filter((o) => o.state === 'sale');
   const leads = search(db, 'crm.lead').filter((l) => l.stage_id !== 'won');

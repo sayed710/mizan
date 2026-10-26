@@ -4,6 +4,7 @@ import { models } from './models/index.js';
 import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
+import { setCompanies } from './models/company.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
@@ -82,10 +83,13 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     .map(cleanMessage)
     .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
     .map((m) => ({ ...m, author: author ?? m.author }));
-  // Company, installed apps and Studio fields are admin-only; any user may save favorites.
+  // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;
+  const company = s && ('current_company_id' in s || 'allowed_company_ids' in s)
+    ? setCompanies({ ...db, records }, { current: s.current_company_id, allowed: s.allowed_company_ids }).settings : null;
   const settings = !s ? db.settings : {
     ...db.settings,
+    ...(company ? { current_company_id: company.current_company_id, allowed_company_ids: company.allowed_company_ids } : {}),
     favorites: s.favorites === undefined ? db.settings.favorites : cleanFavorites(s.favorites, db.settings.favorites),
     ...(isAdmin ? {
       company: String(s.company ?? db.settings.company).slice(0, 200),

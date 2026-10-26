@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { companiesOf, currentCompany, switchCompany, useDb } from './store.js';
-import { search } from './orm.js';
+import { viewRecords as search } from './companyView.js';
 import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
 import { Avatar, Icon } from './ui.jsx';

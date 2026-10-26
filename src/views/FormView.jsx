@@ -7,6 +7,7 @@ import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
+import { viewRecords } from '../companyView.js';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -63,7 +64,7 @@ function SmartButtons({ db, rec, smart }) {
       {smart.map((s) => {
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];
-        const recs = value == null ? [] : search(db, s.model).filter((r) => r[s.field] === value);
+        const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
         return (
           <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${value}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, groupRecords, search, write } from '../orm.js';
+import { aggregate, create, groupRecords, write } from '../orm.js';
+import { viewRecords as search } from '../companyView.js';
 import { commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';

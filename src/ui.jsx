@@ -1,7 +1,8 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useState } from 'react';
 import { models } from './models/index.js';
-import { read, search } from './orm.js';
+import { read } from './orm.js';
+import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
@@ -182,7 +183,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       return (
         <select id={id} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
-          {search(db, field.relation).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;

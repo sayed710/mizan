@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
-import { setActiveCompany, setAuthor } from './orm.js';
+import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
+import { setCompanies } from './models/company.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 
@@ -23,16 +24,19 @@ export const companiesOf = (d) => {
   if (records.length) return records.map((c) => ({ id: c.id, name: c.name, currency: d.records['res.currency']?.find((x) => x.id === c.currency_id)?.name ?? d.settings?.currency ?? 'USD' }));
   return d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: d?.settings?.currency ?? 'USD' }];
 };
-export const currentCompany = (d = db) => companiesOf(d).find((c) => c.id === savedCompany()) ?? companiesOf(d)[0];
+export const currentCompany = (d = db) => companiesOf(d).find((c) => c.id === (d?.settings?.current_company_id ?? savedCompany())) ?? companiesOf(d)[0];
 export function switchCompany(id) {
-  try { localStorage.setItem(COMPANY_KEY, String(id)); } catch { /* storage blocked: switch lasts for this page only */ }
-  location.reload();
+  const current = Number(id);
+  if (!companiesOf(db).some((c) => c.id === current)) return;
+  commit(db.records['res.company']?.length ? setCompanies(db, { current, allowed: [current] })
+    : updateSettings(db, { current_company_id: current, allowed_company_ids: [current] }));
 }
 
 const applyContext = () => {
   installCustomFields(db?.settings?.customFields);
   const company = currentCompany();
-  setActiveCompany(companiesOf(db).length > 1 ? company.id : null);
+  if (db.settings?.current_company_id == null) db = updateSettings(db, { current_company_id: company.id, allowed_company_ids: db.settings?.allowed_company_ids ?? [company.id] });
+  setActiveCompany(null);
   setCurrency(company.currency ?? db?.settings?.currency);
 };
 

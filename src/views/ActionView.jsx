@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, create, matches, read, search as searchRecords, unlink } from '../orm.js';
 import { display } from '../ui.jsx';
@@ -12,6 +12,9 @@ import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
+import { actionRecords } from '../companyView.js';
+
+export { actionRecords } from '../companyView.js';
 
 /** `rel=field:id` narrows an action to records linked to one parent (smart buttons). */
 export function parseRel(db, model, raw) {
@@ -21,11 +24,6 @@ export function parseRel(db, model, raw) {
   if (!f || f.type !== 'many2one') return null;
   return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };
 }
-
-/** Records visible in an action before search-panel filtering. */
-export const actionRecords = (db, leaf, rel, archived = false) =>
-  searchRecords(db, leaf.model, { includeArchived: archived })
-    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r)) && (!rel || r[rel.field] === rel.id));
 
 const download = (name, text) => {
   const a = document.createElement('a');
@@ -71,6 +69,8 @@ export function ActionView({ leaf, base, params }) {
   const relRaw = params.get('rel');
   const [search, setSearch] = useState(() => ({ ...emptySearch(model, parseRel(db, model, relRaw)), groupBy: leaf.groupBy ?? [] }));
   const [selected, setSelected] = useState(() => new Set());
+  const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
+  useEffect(() => setSelected(new Set()), [companyScope]);
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
   const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)

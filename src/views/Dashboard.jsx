@@ -5,6 +5,7 @@ import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
+import { companyViewDb } from '../companyView.js';
 
 const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
 
@@ -32,7 +33,7 @@ const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
 
 /** Invoicing overview: KPI tiles (each links to the matching list) + monthly invoiced chart. */
 export function Dashboard() {
-  const db = useDb();
+  const db = companyViewDb(useDb());
   const posted = search(db, 'account.move').filter((m) => m.state === 'posted');
   const invoices = posted.filter((m) => m.move_type === 'out_invoice');
   const bills = posted.filter((m) => m.move_type === 'in_invoice');
