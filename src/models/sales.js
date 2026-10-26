@@ -67,7 +67,7 @@ function invoiceFrom(db, order, moveType, originField) {
   const lines = order.order_line
     .map((l) => ({ ...l, qty: invoiceable(l) - (Number(l.qty_invoiced) || 0) }))
     .filter((l) => l.qty > 0)
-    .map(({ qty_invoiced, qty_delivered, ...l }) => l);
+    .map(({ qty_invoiced, qty_delivered, purchase_method, ...l }) => l);
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {

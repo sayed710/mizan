@@ -10,7 +10,7 @@ const MAX_SLICES = SERIES.length - 1;
 
 export const measuresOf = (model) => [
   ['__count', 'Count'],
-  ...Object.entries(models[model].fields).filter(([, f]) => ['monetary', 'float'].includes(f.type)).map(([k, f]) => [k, f.label]),
+  ...Object.entries(models[model].fields).filter(([, f]) => ['monetary', 'float'].includes(f.type) && !f.hidden).map(([k, f]) => [k, f.label]),
 ];
 
 export const formatMeasure = (model, measure, v) =>

@@ -35,6 +35,12 @@ export function cleanValue(field, value, where) {
     case 'binary':
       if (!isPlain(value) || typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
       return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, data: value.data };
+    case 'json': {
+      // Structured workflow data (costs, applied programs, distributions): plain JSON, bounded in size.
+      const text = (isPlain(value) || Array.isArray(value)) && JSON.stringify(value);
+      if (!text || text.length > MAX_TEXT * 5) fail(where);
+      return JSON.parse(text);
+    }
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
       return value.map((line, i) => Object.fromEntries(

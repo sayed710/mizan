@@ -79,11 +79,13 @@ import { companyModels, withCompany } from './company.js';
 import { warehouseModels } from './warehouse.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { declareWorkflowFields } from './workflowFields.js';
 
 export { today } from './common.js';
 
 export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...documentsPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels, ...warehouseModels, ...consolidationModels });
 models['hr.leave'].guard = leaveGuard;
+declareWorkflowFields(models);
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
 

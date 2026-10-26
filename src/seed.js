@@ -249,8 +249,9 @@ export function seed() {
   add('sign.request', { name: 'Distributor Agreement — Gulf Interiors', partner_id: 4, state: 'sent', body: 'The parties agree on exclusive distribution in the UAE for 12 months.' });
   add('sign.request', { name: 'NDA — Atlas Workspace', partner_id: 6, state: 'signed', signature: 'Atlas Workspace', sign_date: addDays(today(), -3) });
 
+  const docTag = Object.fromEntries(['Tax', 'Policy', 'Contract'].map((name) => [name, add('documents.tag', { name, facet: '' })]));
   [['Q3 VAT return.pdf', 'finance', ['Tax']], ['Employee handbook.pdf', 'hr', ['Policy']], ['Brand guidelines.pdf', 'marketing', []], ['Lease contract.pdf', 'legal', ['Contract']]]
-    .forEach(([name, folder, tag_ids]) => add('documents.document', { name, folder, tag_ids }));
+    .forEach(([name, folder, tags]) => add('documents.document', { name, folder, tag_ids: tags.map((tag) => ({ tag_id: docTag[tag], name: tag })) }));
 
   [[2, 'sales', 0, 8], [3, 'sales', 1, 8], [5, 'support', 0, 6], [6, 'support', 2, 8], [null, 'install', 3, 4]]
     .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), end: addDays(today(), d + (role === 'install' ? 2 : 4)), allocated_hours, state: employee_id ? 'published' : 'draft' }));

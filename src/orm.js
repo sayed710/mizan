@@ -41,6 +41,28 @@ export function validate(model, vals) {
   return missing ? `${missing[1].label} is required` : null;
 }
 
+/**
+ * Field paths in `rec` that the server's sanitizer (validate.js cleanRecord) would silently drop: keys the model does
+ * not declare, top level or inside one2many lines. Logic must only write declared fields, or client and server diverge.
+ */
+export function undeclaredFields(model, rec) {
+  const fields = models[model].fields;
+  const out = Object.keys(rec).filter((k) => !['id', 'active', 'company_id'].includes(k) && !fields[k]);
+  for (const [k, f] of Object.entries(fields)) {
+    if (f.type !== 'one2many' || !Array.isArray(rec[k]) || !f.fields) continue;
+    for (const line of rec[k]) out.push(...Object.keys(line ?? {}).filter((sub) => !f.fields[sub]).map((sub) => `${k}.${sub}`));
+  }
+  return [...new Set(out)];
+}
+const STRICT_FIELDS = globalThis.process?.env?.MIZAN_STRICT_FIELDS;
+const checkDeclared = (model, rec) => {
+  if (!STRICT_FIELDS) return;
+  const bad = undeclaredFields(model, rec);
+  if (!bad.length) return;
+  if (STRICT_FIELDS === 'log') globalThis.process.stderr.write(`UNDECLARED ${model}: ${bad.join(',')} @ ${new Error().stack.split('\n').slice(3).find((l) => !l.includes('orm.js'))?.trim()}\n`);
+  else throw new Error(`Undeclared fields on ${model}: ${bad.join(', ')}`);
+};
+
 function stripComputed(model, vals) {
   const fields = models[model].fields;
   return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute));
@@ -70,6 +92,7 @@ export function create(db, model, vals) {
   };
   const err = validate(model, rec) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
+  checkDeclared(model, rec);
   return {
     db: {
       ...db,
@@ -102,6 +125,7 @@ export function write(db, model, id, vals) {
   const after = { ...before, ...clean };
   const err = validate(model, after) ?? models[model].guard?.(db, before, after);
   if (err) throw new Error(err);
+  checkDeclared(model, after);
   return {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
