@@ -48,7 +48,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
   };
   installCustomFields(db.settings?.customFields);
+  // Apply every upsert first, then validate each record against the complete result: a change spanning models
+  // (an expense and the report it joins) must not be judged against a half-applied diff.
   let records = { ...db.records };
+  const changed = [];
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
@@ -56,12 +59,16 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
-      const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
-      const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
-      if (err) throw new Error(err);
       current.set(rec.id, rec);
+      changed.push([model, rec]);
     }
     records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
+  }
+  const seen = { ...db, records };
+  const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
+  for (const [model, rec] of changed) {
+    const err = validate(model, rec) ?? models[model].guard?.(seen, stored(model, rec.id), rec, { isAdmin });
+    if (err) throw new Error(err);
   }
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
