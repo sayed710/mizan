@@ -1,8 +1,42 @@
 // SQLite persistence: one row per record and per message, plus a meta row (sequences, settings).
 // Saves are incremental (only the records that changed), inside one transaction.
+import { randomUUID } from 'node:crypto';
 import { diffDb } from '../src/sync.js';
 
-export function openStorage(sql) {
+const LEASE_MS = 30 * 1000;
+
+/**
+ * One server per database file: each keeps the whole database in memory, so a second process would silently
+ * overwrite the first one's saves. The running server holds a lease (kv 'writer') and renews it; a new server refuses
+ * to start while it is fresh, unless `force` (after a crash). `assert` throws when another server took the lease.
+ */
+export function claimWriter(sql, { force = false, now = Date.now, id = `${process.pid}@${randomUUID()}` } = {}) {
+  sql.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const get = sql.prepare("SELECT value FROM kv WHERE key = 'writer'");
+  const set = sql.prepare("INSERT INTO kv (key, value) VALUES ('writer', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  const drop = sql.prepare("DELETE FROM kv WHERE key = 'writer' AND json_extract(value, '$.id') = ?");
+  const holder = () => { try { return JSON.parse(get.get()?.value ?? 'null'); } catch { return null; } };
+  const mine = () => holder()?.id === id;
+  sql.exec('BEGIN IMMEDIATE');
+  try {
+    const current = holder();
+    if (current && current.id !== id && now() - current.at < LEASE_MS && !force) {
+      throw new Error(`Another Mizan server (pid ${current.id.split('@')[0]}) is using this database. Stop it first; if it crashed, wait ${LEASE_MS / 1000} seconds or start with MIZAN_FORCE_TAKEOVER=1.`);
+    }
+    set.run(JSON.stringify({ id, at: now() }));
+    sql.exec('COMMIT');
+  } catch (e) {
+    sql.exec('ROLLBACK');
+    throw e;
+  }
+  return {
+    renew: () => { if (mine()) set.run(JSON.stringify({ id, at: now() })); },
+    assert: () => { if (!mine()) throw new Error('Another Mizan server took over this database; this one stops writing'); },
+    release: () => drop.run(id),
+  };
+}
+
+export function openStorage(sql, { beforeWrite = () => {} } = {}) {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS records (model TEXT NOT NULL, id INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (model, id));
@@ -25,8 +59,9 @@ export function openStorage(sql) {
   };
 
   const transaction = (fn) => {
-    sql.exec('BEGIN');
+    sql.exec('BEGIN IMMEDIATE');
     try {
+      beforeWrite();
       fn();
       sql.exec('COMMIT');
     } catch (e) {

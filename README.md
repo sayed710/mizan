@@ -41,6 +41,8 @@ On first start the server creates user `admin` and prints a random password
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
 `MIZAN_SECURE_COOKIE=1` when served over HTTPS.
+One server per database file: a second one refuses to start while the first is running
+(after a crash, wait 30 seconds or start with `MIZAN_FORCE_TAKEOVER=1`).
 
 Development: `npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).
