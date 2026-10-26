@@ -35,7 +35,8 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
   const name = read(next, 'pos.order', id).name;
   const total = amounts(lines);
   const sign = refund_of ? -1 : 1;
-  const side = (amount, debit) => ((debit === (sign > 0)) ? { debit: round(amount) } : { credit: round(amount) });
+  // A negative amount (e.g. a gift card covering more than the taxed lines) books on the other side.
+  const side = (amount, debit) => (((debit === (sign > 0)) !== (amount < 0)) ? { debit: round(Math.abs(amount)) } : { credit: round(Math.abs(amount)) });
   let stocked = next;
   const costs = [];
   const original = refund_of ? read(db, 'pos.order', refund_of) : null;

@@ -92,8 +92,9 @@ test('sales and purchase lock dates only lock their side; the hard lock locks ev
   assert.equal(lockDateFor({ purchase_lock_date: '2026-02-28', lock_date: '2026-01-31' }, { move_type: 'in_refund' }), '2026-02-28');
   assert.equal(lockDateFor({ hard_lock_date: '2026-04-30', sale_lock_date: '2026-03-31' }, { move_type: 'entry' }), '2026-04-30');
   const db = { settings: { sale_lock_date: '2026-03-31' } };
-  assert.match(moveGuard(db, null, { move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
-  assert.equal(moveGuard(db, null, { move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
+  const entry = { name: 'BILL/2026/0001', line_ids: [{ debit: 10, credit: 0 }, { debit: 0, credit: 10 }] };
+  assert.match(moveGuard(db, null, { ...entry, move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
+  assert.equal(moveGuard(db, null, { ...entry, move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
 });
 
 test('journal cards count drafts, unpaid and late invoices, and bank balance with lines to reconcile', () => {

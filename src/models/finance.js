@@ -1,7 +1,7 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
-import { journalItems } from './ledger.js';
+import { isBalanced, journalItems } from './ledger.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -37,7 +37,59 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/** Archiving hides a record from every report, so `active` counts as changed only between kept and archived. */
+const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : r?.[k]);
+const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
+
+/** What a posted entry keeps until it is reset to draft. */
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'date', 'company_id', 'fiscal_position_id'];
+
+/** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
+function postedMoveRule(before, after) {
+  if (before?.state === 'posted' && after.state === 'posted' && changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+  if (before?.state === 'posted' && after.state !== 'posted') {
+    if (after.state !== 'draft') return 'Posted entries go back to draft before anything else';
+    if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
+  }
+  if (after.state === 'posted' && before?.state !== 'posted') {
+    const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
+    if (!isBalanced(lines) || lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'A posted entry needs balanced journal items';
+    if (!after.name || after.name === '/') return 'A posted entry needs a number';
+  }
+  return null;
+}
+
+/**
+ * Checked once the whole change set is applied: the paid amount of an entry only moves by appending payments that point
+ * at posted journal entries, by exactly their amount.
+ */
+export function moveInvariant(db, after, before) {
+  const was = Array.isArray(before?.payments) ? before.payments : [];
+  const now = Array.isArray(after.payments) ? after.payments : [];
+  const paidBefore = Number(before?.amount_paid) || 0;
+  const paidAfter = Number(after.amount_paid) || 0;
+  if (Math.abs(paidAfter - paidBefore) < 0.005 && JSON.stringify(was) === JSON.stringify(now)) return null;
+  if (now.length < was.length || JSON.stringify(now.slice(0, was.length)) !== JSON.stringify(was)) return 'Registered payments cannot be changed';
+  const added = now.slice(was.length);
+  const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  if (!added.every((p) => p && Number(p.amount) > 0 && entries.get(p.move_id)?.state === 'posted')) return 'Payments must point at a posted journal entry';
+  if (Math.abs(round(paidBefore + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
+  return null;
+}
+
+/** A posted payment must have its posted journal entry. */
+export function paymentInvariant(db, after) {
+  if (after.state !== 'posted') return null;
+  const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
+  return entry?.state === 'posted' ? null : 'A posted payment needs its posted journal entry';
+}
+
 export function moveGuard(db, before, after) {
+  return lockRule(db, before, after) ?? postedMoveRule(before, after);
+}
+
+
+function lockRule(db, before, after) {
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   const lock = [before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)).sort().at(-1);
   if (!lock) return null;
@@ -52,6 +104,7 @@ export function moveDeleteGuard(db, move) {
   const lock = lockDateFor(db.settings, move);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
+  if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
   return null;
 }
 

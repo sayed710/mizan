@@ -1,7 +1,7 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
-import { moveDeleteGuard, moveGuard } from './finance.js';
+import { moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
@@ -134,14 +134,14 @@ export function payWithDiscount(db, id, amount, date = today()) {
   if (!(gap > 0) || discount < gap - 0.005) return paid;
   const sale = isInbound(r);
   const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date);
-  const { db: booked } = postEntry(paid, {
+  const { db: booked, id: discountMove } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`,
     lines: sale
       ? [{ account: '690200', debit: value, partner_id: r.partner_id }, { account: '121000', credit: value, partner_id: r.partner_id }]
       : [{ account: '211000', debit: value, partner_id: r.partner_id }, { account: '450200', credit: value, partner_id: r.partner_id }],
   });
   const after = read(booked, 'account.move', id);
-  return postNote(write(booked, 'account.move', id, { amount_paid: (Number(after.amount_paid) || 0) + discount }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
+  return postNote(write(booked, 'account.move', id, { amount_paid: (Number(after.amount_paid) || 0) + discount, payments: [...(after.payments ?? []), { date, amount: discount, move_id: discountMove }] }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
 function registerPayment(db, r) {
@@ -214,6 +214,7 @@ export const accountingModels = {
   'account.move': {
     label: 'Invoices',
     guard: moveGuard,
+    invariant: moveInvariant,
     protectDelete: moveDeleteGuard,
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),

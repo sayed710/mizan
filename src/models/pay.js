@@ -3,6 +3,7 @@ import { postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
+import { paymentInvariant } from './finance.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 // Which open documents a payment settles, by direction and partner side.
@@ -48,6 +49,7 @@ const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'
 export const payModels = {
   'account.payment': {
     label: 'Payments',
+    invariant: paymentInvariant,
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       payment_type: { type: 'selection', label: 'Payment Type', options: [['inbound', 'Receive'], ['outbound', 'Send']] },
