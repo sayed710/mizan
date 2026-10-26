@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregate, applyFilters, create, groupRecords, matches, messagesOf, read, search, unlink, write } from './orm.js';
+import { today } from './models/common.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 
@@ -98,7 +99,9 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   assert.equal(inv.state, 'draft');
   db = runButton(db, 'account.move', inv.id, 'Confirm').db;
   const posted = read(db, 'account.move', inv.id);
-  assert.match(posted.name, /^INV\/\d{4}\/00003$/);
+  // Numbering restarts each year; the seed's invoices may belong to the previous one.
+  const numbered = search(db, 'account.move').filter((m) => m.id !== inv.id && m.name?.startsWith(`INV/${today().slice(0, 4)}/`)).length;
+  assert.equal(posted.name, `INV/${today().slice(0, 4)}/${String(numbered + 1).padStart(5, '0')}`);
   assert.equal(posted.payment_state, 'not_paid');
   db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');

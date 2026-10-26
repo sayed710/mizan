@@ -10,7 +10,10 @@ const visitor = { name: 'Hala Adel', email: 'hala@example.com', phone: '+20 100 
 
 /** A type available on Mondays 09:00-12:00 with the given extra values. */
 const makeType = (vals = {}) => {
-  const res = create(seed(), 'appointment.type', { name: 'Consult', duration: 60, slot_ids: [{ weekday: '1', start: '09:00', end: '12:00' }], staff_ids: [{ employee_id: 2 }], ...vals });
+  // The seed's leaves and meetings are dated relative to today; drop them so they never land on the fixed test dates.
+  const base = seed();
+  const quiet = { ...base, records: { ...base.records, 'hr.leave': [], 'calendar.event': [] } };
+  const res = create(quiet, 'appointment.type', { name: 'Consult', duration: 60, slot_ids: [{ weekday: '1', start: '09:00', end: '12:00' }], staff_ids: [{ employee_id: 2 }], ...vals });
   return { db: res.db, type: read(res.db, 'appointment.type', res.id) };
 };
 const startsOn = (db, type, date = MONDAY, opts = {}) => availableSlots(db, type, { from: date, days: 1, now: NOW, ...opts })[0].times.map((t) => t.start.slice(11));
@@ -30,7 +33,7 @@ test('slots respect the minimum notice and the maximum horizon', () => {
   const { db, type } = makeType({ min_schedule_hours: 2 });
   assert.deepEqual(startsOn(db, type), ['10:00', '11:00']);
   const near = makeType({ max_schedule_days: 7 });
-  assert.deepEqual(startsOn(near.db, near.type, '2027-03-08'), []);
+  assert.deepEqual(startsOn(near.db, near.type, '2027-03-08', { now: new Date('2027-01-04T07:30:00Z') }), []);
   assert.deepEqual(startsOn(near.db, near.type, '2027-03-08', { now: new Date('2027-03-01T07:30:00Z') }), ['09:00']);
 });
 

@@ -5,13 +5,14 @@ import { seed } from './seed.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { salesModels } from './models/sales.js';
 import { applyCount, costMethod, deliver, postValuation, receive, revalue, startCount, valuationModels, valuationReport } from './models/valuation.js';
+import { addDays, today } from './models/common.js';
 
 const date = '2026-10-01';
 const setup = (method = 'fifo', valuation = 'real_time') => create(seed(), 'product', {
   name: 'Valued widget', type: 'goods', cost: 10, qty_available: 0, cost_method: method, valuation,
 });
 const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
-const report = (db, id, at = '2026-12-31') => valuationReport(db, { at })[id];
+const report = (db, id, at = addDays(today(), 365)) => valuationReport(db, { at })[id];
 const entryFor = (db, layer) => read(db, 'account.move', layer.move_id);
 const balance = (db, entry, code) => entry.line_ids.filter((l) => l.account_id === accountId(db, code)).reduce((s, l) => s + l.debit - l.credit, 0);
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
