@@ -7,20 +7,39 @@ import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { setCompanies } from './models/company.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
+const same = (v) => JSON.stringify(v ?? null);
+
+/** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
+const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(models[model]?.fields[k] && !models[model].fields[k].compute);
+
+/** Thrown when an edit was made on top of a value someone else has changed since. */
+export class ConflictError extends Error {
+  conflict = true;
+}
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
 const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
-/** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
+/**
+ * `bases` holds, for each edited record, the values its changed fields had before the edit, so the server can
+ * keep other users' changes to other fields and refuse an edit made on top of an outdated value.
+ * @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, bases: Record<string, Record<number, object>>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
   const upserts = {};
   const deletes = {};
+  const bases = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
     const before = byId(prev.records[model]);
     const after = byId(next.records[model]);
     const changed = [...after.values()].filter((r) => before.get(r.id) !== r);
     const removed = [...before.keys()].filter((id) => !after.has(id));
     if (changed.length) upserts[model] = changed;
+    for (const r of changed) {
+      const b = before.get(r.id);
+      if (!b) continue;
+      const fields = [...new Set([...Object.keys(b), ...Object.keys(r)])].filter((k) => persisted(model, k) && same(b[k]) !== same(r[k]));
+      (bases[model] ??= {})[r.id] = Object.fromEntries(fields.map((k) => [k, b[k] ?? null]));
+    }
     if (removed.length) deletes[model] = removed;
   }
   const prevMsg = new Set(prev.messages.map((m) => m.id));
@@ -28,6 +47,7 @@ export function diffDb(prev, next) {
   return {
     upserts,
     deletes,
+    bases,
     messages: next.messages.filter((m) => !prevMsg.has(m.id)),
     removedMessages: [...prevMsg].filter((id) => !nextMsg.has(id)),
     seq: next.seq,
@@ -37,6 +57,24 @@ export function diffDb(prev, next) {
 
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
+
+/**
+ * Apply only the fields an edit changed onto the stored record, refusing it when one of them no longer has the value
+ * the edit started from. Without a base (a new record, or an older client) the record is taken as sent.
+ */
+function merge(model, stored, raw, base) {
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return raw;
+  const label = models[model].label ?? model;
+  if (!stored) throw new ConflictError(`${label} #${raw.id} was deleted by someone else; reload and try again`);
+  const stale = Object.keys(base).find((k) => same(stored[k]) !== same(base[k]));
+  if (stale) throw new ConflictError(`${label} #${raw.id} was changed by someone else (${stale}); your edit was not saved, reload and try again`);
+  const out = { ...stored };
+  for (const k of Object.keys(base)) {
+    if (k in raw) out[k] = raw[k];
+    else delete out[k];
+  }
+  return out;
+}
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
@@ -55,7 +93,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     const current = byId(records[model]);
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
-      const rec = cleanRecord(model, raw);
+      const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
       if (err) throw new Error(err);

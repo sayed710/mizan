@@ -434,7 +434,7 @@ async function api(req, res, path) {
     try {
       commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
     } catch (e) {
-      return send(res, 400, { error: e.message, db: visibleDb(user) });
+      return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) });
     }
     return send(res, 200, visibleDb(user));
   }
