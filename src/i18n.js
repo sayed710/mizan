@@ -35,7 +35,7 @@ const ar = {
   Forecast: 'التوقعات', Orders: 'الطلبات', 'To Invoice': 'للفوترة', Products: 'المنتجات', Dashboard: 'لوحة التحكم', Invoices: 'الفواتير',
   Vendors: 'الموردون', Bills: 'فواتير الموردين', 'Invoice Analysis': 'تحليل الفواتير', 'Requests for Quotation': 'طلبات عروض الأسعار',
   'Purchase Orders': 'أوامر الشراء', Stock: 'المخزون', Meetings: 'الاجتماعات', Projects: 'المشاريع', 'All Tasks': 'كل المهام',
-  Tickets: 'التذاكر', Departments: 'الأقسام', 'General Settings': 'الإعدادات العامة', Pipeline: 'الفرص', Tasks: 'المهام',
+  Tickets: 'التذاكر', Departments: 'الأقسام', 'General Settings': 'الإعدادات العامة', 'Menu': 'القائمة', Pipeline: 'الفرص', Tasks: 'المهام',
   // control panel / search
   New: 'جديد', 'Search...': 'بحث...', Search: 'بحث', Filters: 'عوامل التصفية', 'Group By': 'تجميع حسب', Favorites: 'المفضلة',
   'Save current search': 'حفظ البحث الحالي', 'Saved search name': 'اسم البحث المحفوظ', 'Remove filter': 'إزالة الفلتر', or: 'أو',

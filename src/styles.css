@@ -73,6 +73,8 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .nav-home:hover { background: var(--bg); color: var(--brand); }
 .nav-app { font-weight: 700; font-size: 16px; color: var(--text); }
 .nav-menus { display: flex; gap: 2px; overflow-x: auto; }
+.nav-toggle { display: none; border: 0; background: none; font-size: 20px; line-height: 1; padding: 4px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
+.nav-toggle:hover { background: var(--bg); }
 .nav-menus a { color: var(--text); padding: 6px 10px; border-radius: 6px; white-space: nowrap; }
 .nav-menus a:hover { background: var(--bg); }
 .nav-menus a.active { background: var(--brand-soft); color: var(--brand); }
@@ -200,9 +202,21 @@ input, select, textarea, button { font: inherit; color: inherit; }
   .field { grid-template-columns: 1fr; gap: 2px; }
 }
 @media (max-width: 640px) {
-  .nav-menus, .company { display: none; }
+  .company { display: none; }
+  .navbar { position: relative; }
+  .nav-toggle { display: inline-flex; }
+  /* Menus become a panel under the navbar instead of disappearing. */
+  .nav-menus { display: none; }
+  .nav-menus.open { display: flex; flex-direction: column; align-items: stretch; position: absolute; inset-inline: 0; top: 100%; z-index: 40;
+    background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px; max-block-size: 70vh; overflow-y: auto; }
+  .nav-menus.open .nav-dropdown { position: static; box-shadow: none; border: 0; padding-inline-start: 12px; }
   .column { flex-basis: 85vw; }
   .sheet { padding: 16px; }
+  /* Nothing in a form may push the page wider than the screen: wide parts scroll inside themselves. */
+  .form-layout { padding-inline: 8px; }
+  .form-layout > *, .form-main, .sheet, .chatter, .form-header { min-width: 0; max-width: 100%; }
+  .lines-wrap, .statusbar { overflow-x: auto; max-width: 100%; }
+  .statusbar button { white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

@@ -41,11 +41,20 @@ function ActivityCounter({ db }) {
 
 export function Navbar({ app, active }) {
   const db = useDb();
+  // On narrow screens the app's menus fold into a panel opened by a toggle; any navigation closes it.
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    const close = () => setMenuOpen(false);
+    window.addEventListener('hashchange', close);
+    return () => window.removeEventListener('hashchange', close);
+  }, []);
   return (
     <header className="navbar">
       <a href="#/" className="nav-home" aria-label={t('Home menu')}><Icon name="grid" size={18} /></a>
       <a href={`#/${app.id}`} className="nav-app">{t(app.name)}</a>
-      <nav className="nav-menus" aria-label={t(app.name)}>
+      <button type="button" className="nav-toggle" aria-expanded={menuOpen} aria-controls="nav-menus" aria-label={t('Menu')}
+        onClick={() => setMenuOpen(!menuOpen)}>☰</button>
+      <nav id="nav-menus" className={`nav-menus${menuOpen ? ' open' : ''}`} aria-label={t(app.name)}>
         {app.menus.map((m) => (m.children
           ? <MenuGroup key={m.label} app={app} menu={m} active={active} />
           : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}

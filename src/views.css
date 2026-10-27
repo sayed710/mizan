@@ -153,7 +153,7 @@
 .shopfloor .big-qty { font-size: 18px; font-weight: 700; margin: 6px 0; }
 .shopfloor .components { margin: 0 0 10px; padding-inline-start: 18px; color: var(--muted); font-size: 13px; }
 .shopfloor .components .short { color: var(--danger); font-weight: 600; }
-.dash-grid.two { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.dash-grid.two { grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
 .file-input { display: flex; flex-direction: column; gap: 4px; }
 .site { min-height: calc(100vh - 47px); display: flex; flex-direction: column; background: #fff; }
 .site-nav { display: flex; align-items: center; gap: 20px; padding: 14px 32px; border-bottom: 1px solid var(--border); }
