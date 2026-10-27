@@ -97,14 +97,19 @@ export function releaseCashBasis(db, r, share, date) {
   const sale = !isPurchase(r);
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
+  const cents = (n) => Math.round(n * 100) / 100;
   const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date))
-    .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
-    .filter(([, amount]) => amount > 0);
+    .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000'), amount: cents(g.amount * share), base: cents(g.base * share) }))
+    .filter((g) => g.amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
-  const lines = due.flatMap(([account, amount]) => (sale !== refund
-    ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { account, credit: amount, partner_id: r.partner_id }]
-    : [{ account, debit: amount, partner_id: r.partner_id }, { account: transition, credit: amount, partner_id: r.partner_id }]));
+  // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
+  const lines = due.flatMap(({ account, amount, base, tax_name }) => {
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base };
+    return sale !== refund
+      ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
+      : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
+  });
   return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
 }
 
@@ -169,6 +174,9 @@ const lineItem = {
     name: { type: 'char', label: 'Label' },
     debit: { type: 'monetary', label: 'Debit' },
     credit: { type: 'monetary', label: 'Credit' },
+    // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
+    tax_name: { type: 'char', label: 'Tax', hidden: true },
+    tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
   },
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };

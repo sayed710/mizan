@@ -3,6 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
 import { postEntry } from './ledger.js';
+import { taxGroups } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -27,6 +28,14 @@ export const priceLines = (db, cart) => cart.map((l) => {
 });
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
+/** Output tax per tax for an order; per-tax rounding gaps go to the largest tax so the lines add up to the order's tax. */
+function taxLines(lines, tax) {
+  const groups = taxGroups(lines, () => '251000').filter((g) => g.amount);
+  const gap = round(tax - groups.reduce((s, g) => s + g.amount, 0));
+  const largest = groups.reduce((m, g) => (!m || Math.abs(g.amount) > Math.abs(m.amount) ? g : m), null);
+  return groups.map((g) => (g === largest ? { ...g, amount: round(g.amount + gap) } : g));
+}
+
 export function payOrder(db, { lines, method, partner_id = null, refund_of = null }) {
   const session = openSession(db);
   if (!session) throw new Error('Open a session first');
@@ -58,7 +67,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
     lines: [
       { account: method === 'cash' ? CASH : BANK, ...side(total.total, true) },
       { account: '400000', ...side(total.untaxed, false) },
-      ...(total.tax ? [{ account: '251000', ...side(total.tax, false) }] : []),
+      ...taxLines(lines, total.tax).map((g) => ({ account: '251000', name: g.tax_name, tax_name: g.tax_name, tax_base: g.base, ...side(g.amount, false) })),
     ],
   });
   return { db: booked, id };

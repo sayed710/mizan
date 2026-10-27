@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { nextName, subtotal, today } from './common.js';
 import { rateAt } from './currency.js';
-import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
+import { TRANSITION, mapAccount, taxGroups } from './taxes.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -63,29 +63,27 @@ export function invoiceLines(db, move) {
   const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate)]);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
-  const byTax = new Map();
-  for (const l of move.invoice_line_ids ?? []) {
-    const account = l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc;
-    byTax.set(account, (byTax.get(account) ?? 0) + lineTaxOf(l));
-  }
-  const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
+  // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
+  const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc), rate);
   const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
-  const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
+  const total = round(untaxed + taxes.reduce((s, g) => s + g.amount, 0));
   const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
-    ...taxes.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: 'Taxes', ...side(amount, !sale) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, tax_name: g.tax_name, tax_base: g.base, ...side(g.amount, !sale) })),
   ].filter((l) => l.debit || l.credit);
 }
 
 /**
  * Create and post a miscellaneous entry.
- * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string}[]}} spec
+ * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
+ * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
 export function postEntry(db, { journal, date = today(), ref = '', lines }) {
   const line_ids = lines.map((l) => ({
     account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: round(l.debit ?? 0), credit: round(l.credit ?? 0),
+    ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0) } : {}),
   }));
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;
