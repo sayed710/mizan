@@ -35,7 +35,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
   };
 
   const row = (r, depth) => (
-    <tr key={r.id} onClick={() => open(r.id)} className={`${selected.has(r.id) ? 'selected' : ''} ${def.listDecoration?.(r) ?? ''}`}>
+    <tr key={r.id} tabIndex={0} onClick={() => open(r.id)} onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(r.id); }} className={`${selected.has(r.id) ? 'selected' : ''} ${def.listDecoration?.(r) ?? ''}`}>
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
       </td>
@@ -57,7 +57,8 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
           setExpanded(next);
         };
         return [
-          <tr key={id} className="group-row" onClick={toggle} aria-expanded={isOpen}>
+          <tr key={id} className="group-row" tabIndex={0} onClick={toggle} aria-expanded={isOpen}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}>
             <td colSpan={2} style={{ paddingInlineStart: 10 + depth * 18 }}>
               <span className="caret">{isOpen ? '▾' : '▸'}</span> {t(g.label)} <span className="count">({g.records.length})</span>
             </td>

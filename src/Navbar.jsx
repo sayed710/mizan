@@ -3,23 +3,20 @@ import { companiesOf, currentCompany, switchCompany, useDb } from './store.js';
 import { viewRecords as search } from './companyView.js';
 import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
-import { Avatar, Icon } from './ui.jsx';
+import { Avatar, Icon, menuKeys, useDismiss } from './ui.jsx';
 
 function MenuGroup({ app, menu, active }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return undefined;
-    const close = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
+  // Opening from the keyboard moves focus into the menu, as in other menu buttons.
+  useEffect(() => { if (open) ref.current?.querySelector('[role=menuitem]')?.focus({ preventScroll: true }); }, [open]);
   const isActive = menu.children.some((c) => c.key === active);
   return (
     <div className="nav-group" ref={ref}>
       <button type="button" className={isActive ? 'active' : ''} aria-expanded={open} onClick={() => setOpen(!open)}>{t(menu.label)}</button>
       {open && (
-        <div className="nav-dropdown" role="menu">
+        <div className="nav-dropdown" role="menu" onKeyDown={menuKeys}>
           {menu.children.map((c) => (
             <a key={c.key} role="menuitem" href={`#/${app.id}/${c.key}`} className={c.key === active ? 'active' : ''} onClick={() => setOpen(false)}>{t(c.label)}</a>
           ))}

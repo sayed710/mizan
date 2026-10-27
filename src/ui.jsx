@@ -1,5 +1,5 @@
 // Shared widgets: field display/input, icons, avatar, tags.
-import { Component, useState } from 'react';
+import { Component, useEffect, useState } from 'react';
 import { models } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
@@ -49,6 +49,35 @@ export const Avatar = ({ name = '?', size = 28 }) => (
   </span>
 );
 
+/** Closes a popup on an outside click, on Escape (focus returns to its toggle) and when focus leaves it. */
+export function useDismiss(open, close, ref) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!open || !el) return undefined;
+    const outside = (e) => { if (!el.contains(e.target)) close(); };
+    const escape = (e) => { if (e.key === 'Escape') { close(); el.querySelector('[aria-expanded]')?.focus(); } };
+    const leave = (e) => { if (e.relatedTarget && !el.contains(e.relatedTarget)) close(); };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    el.addEventListener('focusout', leave);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('keydown', escape);
+      el.removeEventListener('focusout', leave);
+    };
+  }, [open]);
+}
+
+/** Arrow-key movement between the items of a role="menu". */
+export function menuKeys(e) {
+  const items = [...e.currentTarget.querySelectorAll('[role=menuitem]')];
+  const i = items.indexOf(document.activeElement);
+  const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
+  if (to === undefined || !items.length) return;
+  e.preventDefault();
+  items[(to + items.length) % items.length].focus();
+}
+
 export function Stars({ value = 0, onChange }) {
   return (
     <span className="stars" aria-label={t('Priority')}>
@@ -67,7 +96,7 @@ export function Stars({ value = 0, onChange }) {
   );
 }
 
-function TagsInput({ value = [], onChange }) {
+function TagsInput({ id, value = [], onChange }) {
   const [text, setText] = useState('');
   const add = () => {
     const tag = text.trim();
@@ -78,6 +107,7 @@ function TagsInput({ value = [], onChange }) {
     <div className="tags-input">
       {value.map((tag) => <Tag key={tag} name={tag} onRemove={() => onChange(value.filter((x) => x !== tag))} />)}
       <input
+        id={id}
         value={text}
         placeholder={value.length ? '' : t('Add a tag…')}
         onChange={(e) => setText(e.target.value)}
@@ -136,7 +166,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
                     ? display(db, f, l[k])
-                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
               {priced && <td className="num">{money(lineSubtotal(l))}</td>}
@@ -160,35 +190,41 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
   );
 }
 
-export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
+/** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
+export const isLabelable = (field, readonly) =>
+  !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
+
+export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
+  // aria-required rather than required: saving is validated by the app, not by native form validation.
+  const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
   const text = (type = 'text', extra = {}) => (
-    <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
+    <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
-    case 'text': return <textarea id={id} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
+    case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return text('number', { step: '1', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
-    case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
+    case 'boolean': return <input {...a11y} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (
-        <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+        <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
           {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
     case 'many2one':
       return (
-        <select id={id} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
+        <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
           {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
-    case 'tags': return <TagsInput value={value} onChange={onChange} />;
+    case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;
     default: return text();
   }
 }

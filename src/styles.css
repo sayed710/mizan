@@ -5,11 +5,13 @@
   --bg: #f6f7fb;
   --surface: #ffffff;
   --border: #e2e5ee;
+  --border-input: #858c9e; /* form control edges need 3:1 against the surface (WCAG 1.4.11) */
   --text: #1f2430;
   --muted: #6b7280;
   --danger: #c0392b;
-  --success: #1f9d55;
-  --warn: #e3a008;
+  --success: #137a43;
+  --warn: #9a6300;
+  --on-brand: #fff;
   --radius: 8px;
   --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 8%);
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
@@ -34,7 +36,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
   transition: background .12s, border-color .12s;
 }
 .btn:hover { background: #f1f3f8; border-color: #cfd4e2; }
-.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
 .btn.primary:hover { background: var(--brand-dark); }
 .btn.primary:disabled { opacity: .5; cursor: default; }
 .btn.danger { color: var(--danger); border-color: #f1c4bf; }
@@ -85,7 +87,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .cp-title { margin: 0; font-size: 18px; font-weight: 600; }
 .search {
   flex: 1 1 320px; max-width: 520px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  padding: 4px 10px; border: 1px solid var(--border-input); border-radius: 8px; background: var(--surface);
 }
 .search:focus-within { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
 .search input { flex: 1; min-width: 80px; border: 0; outline: 0; padding: 4px 0; background: none; }
@@ -125,7 +127,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .badge { font-size: 12px; background: #eef0f4; padding: 1px 8px; border-radius: 999px; }
 .kanban-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; padding: 0 16px 24px; }
 .quick-create { cursor: default; gap: 8px; }
-.quick-create input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; }
+.quick-create input { padding: 6px 8px; border: 1px solid var(--border-input); border-radius: 6px; }
 
 .tag { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 8px; border-radius: 999px; color: #374151; }
 .tag button { border: 0; background: none; cursor: pointer; padding: 0; color: #6b7280; }
@@ -156,20 +158,20 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .statusbar { display: flex; list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .statusbar button { border: 0; background: none; padding: 6px 14px; cursor: pointer; color: var(--muted); font-weight: 500; }
 .statusbar button:hover { background: var(--bg); }
-.statusbar button[aria-current='step'] { background: var(--brand); color: #fff; }
+.statusbar button[aria-current='step'] { background: var(--brand); color: var(--on-brand); }
 .sheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px 28px; box-shadow: var(--shadow); }
 .title-field input, .title-field h2 { width: 100%; font-size: 28px; font-weight: 600; border: 0; border-bottom: 1px solid transparent; padding: 2px 0; margin: 0 0 16px; outline: 0; background: none; }
 .title-field input:hover, .title-field input:focus { border-bottom-color: var(--brand); }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 40px; }
 .field { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 10px; min-height: 36px; }
-.field label { font-weight: 600; }
+.field label, .field .field-label { font-weight: 600; }
 .req { color: var(--danger); margin-inline-start: 2px; }
 .field-value input:not([type='checkbox']), .field-value select, .tab-panel textarea, .lines input, .lines select {
-  width: 100%; border: 0; border-bottom: 1px solid var(--border); padding: 4px 2px; background: none; outline: 0;
+  width: 100%; border: 0; border-bottom: 1px solid var(--border-input); padding: 4px 2px; background: none; outline: 0;
 }
 .field-value input:focus, .field-value select:focus, .tab-panel textarea:focus, .lines input:focus, .lines select:focus { border-bottom-color: var(--brand); }
 .readonly { color: var(--muted); }
-.tags-input { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border-bottom: 1px solid var(--border); padding: 2px 0; }
+.tags-input { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border-bottom: 1px solid var(--border-input); padding: 2px 0; }
 .tags-input input { flex: 1; min-width: 60px; border: 0 !important; }
 .tabs { display: flex; gap: 2px; margin-top: 24px; border-bottom: 1px solid var(--border); }
 .tabs button { border: 1px solid transparent; border-bottom: 0; background: none; padding: 8px 16px; cursor: pointer; border-radius: 6px 6px 0 0; }
@@ -186,7 +188,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 /* Chatter */
 .chatter { display: flex; flex-direction: column; gap: 14px; }
 .chatter-compose { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
-.chatter-compose textarea { width: 100%; min-height: 64px; border: 1px solid var(--border); border-radius: 6px; padding: 8px; resize: vertical; background: var(--surface); }
+.chatter-compose textarea { width: 100%; min-height: 64px; border: 1px solid var(--border-input); border-radius: 6px; padding: 8px; resize: vertical; background: var(--surface); }
 .messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .messages li { display: flex; gap: 10px; }
 .msg-meta { font-size: 12px; color: var(--muted); }
