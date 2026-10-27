@@ -13,6 +13,7 @@ import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
 import { actionRecords } from '../companyView.js';
+import { pageWindow } from './paging.js';
 
 export { actionRecords } from '../companyView.js';
 
@@ -72,6 +73,12 @@ export function ActionView({ leaf, base, params }) {
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
 
+  // Back to the first page whenever the search, grouping or view changes.
+  const pageKey = JSON.stringify([search, view]);
+  const [page, setPage] = useState({ key: pageKey, offset: 0 });
+  const offset = page.key === pageKey ? page.offset : 0;
+  const goTo = (to) => setPage({ key: pageKey, offset: to });
+
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
   const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
     .filter((r) => matches(db, model, r, search.terms));
@@ -97,23 +104,33 @@ export function ActionView({ leaf, base, params }) {
       alert(e instanceof Error ? e.message : t('Import failed'));
     }
   };
-  const extra = view === 'list' && (
+  const groupBy = search.groupBy;
+  const kanbanGroup = groupBy[0] ?? def.kanban?.groupBy;
+  const win = pageWindow(records.length, offset);
+  const paged = (view === 'list' && !groupBy.length) || (view === 'kanban' && !kanbanGroup);
+  const pager = paged && (
+    <span className="pager" role="group" aria-label={t('Pager')}>
+      <span aria-live="polite">{win.label} / {win.total}</span>
+      <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={win.prev == null} onClick={() => goTo(win.prev)}>‹</button>
+      <button type="button" className="btn sm" aria-label={t('Next page')} disabled={win.next == null} onClick={() => goTo(win.next)}>›</button>
+    </span>
+  );
+  const extra = view === 'list' ? (
     <>
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
       <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
-      <span className="pager">{records.length ? `1-${records.length}` : '0'} / {records.length}</span>
+      {pager}
     </>
-  );
-  const groupBy = search.groupBy;
+  ) : pager;
   const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
 
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
         view={view} search={search} setSearch={setSearch} extra={extra} />
-      {view === 'kanban' && <Kanban db={db} model={model} records={records} open={open} groupBy={groupBy[0] ?? def.kanban?.groupBy} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} />}
+      {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
+      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView model={model} records={records} open={open} newHref={newHref} />}

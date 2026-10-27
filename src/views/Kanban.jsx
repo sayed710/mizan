@@ -5,6 +5,7 @@ import { viewRecords as search } from '../companyView.js';
 import { commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';
+import { COLUMN_SIZE } from './paging.js';
 
 function Card({ db, model, rec, open, draggable }) {
   const k = models[model].kanban;
@@ -71,6 +72,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
   const k = models[model].kanban;
   const [quick, setQuick] = useState(null);
   const [over, setOver] = useState(null);
+  const [shown, setShown] = useState(() => ({}));
   const field = groupBy && models[model].fields[groupBy];
   if (!field) {
     return (
@@ -87,6 +89,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
       {groups.map(({ key, label, records: recs }) => {
         const pr = k.priority ? [3, 2, 1, 0].map((p) => recs.filter((r) => (r[k.priority] ?? 0) === p).length) : null;
         const value = key === false ? null : key;
+        const limit = shown[String(key)] ?? COLUMN_SIZE;
         return (
           <section
             key={String(key)}
@@ -116,7 +119,12 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
               {k.sum && <b>{money(aggregate(recs, k.sum))}</b>}
             </div>
             {quick === key && <QuickCreate model={model} vals={{ ...defaults, [groupBy]: value }} onDone={() => setQuick(null)} />}
-            {recs.map((r) => <Card key={r.id} db={db} model={model} rec={r} open={() => open(r.id)} draggable={canDrop} />)}
+            {recs.slice(0, limit).map((r) => <Card key={r.id} db={db} model={model} rec={r} open={() => open(r.id)} draggable={canDrop} />)}
+            {recs.length > limit && (
+              <button type="button" className="btn sm load-more" onClick={() => setShown({ ...shown, [String(key)]: limit + COLUMN_SIZE })}>
+                {t('Load more ({n} remaining)', { n: recs.length - limit })}
+              </button>
+            )}
           </section>
         );
       })}

@@ -39,6 +39,7 @@ const ar = {
   // control panel / search
   New: 'جديد', 'Search...': 'بحث...', Search: 'بحث', Filters: 'عوامل التصفية', 'Group By': 'تجميع حسب', Favorites: 'المفضلة',
   'Save current search': 'حفظ البحث الحالي', 'Saved search name': 'اسم البحث المحفوظ', 'Remove filter': 'إزالة الفلتر', or: 'أو',
+  Pager: 'التنقل بين الصفحات', 'Previous page': 'الصفحة السابقة', 'Next page': 'الصفحة التالية', 'Load more ({n} remaining)': 'عرض المزيد ({n} متبقي)',
   'Toggle search panel': 'إظهار لوحة البحث', 'Switch view': 'تبديل العرض', kanban: 'كانبان', list: 'قائمة', graph: 'رسم بياني',
   pivot: 'جدول محوري', calendar: 'تقويم', 'Delete': 'حذف', 'Delete {n} record(s)?': 'حذف {n} سجل؟', Export: 'تصدير',
   'No record found. Create one with “New”.': 'لا توجد سجلات. أنشئ سجلاً جديداً بزر «جديد».', Total: 'الإجمالي', None: 'لا شيء',
