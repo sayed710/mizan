@@ -55,18 +55,21 @@ function loadLocal() {
   return seed();
 }
 
-async function api(path, body) {
+async function api(path, body, headers = {}) {
   const res = await fetch(path, body === undefined
-    ? { credentials: 'same-origin' }
+    ? { credentials: 'same-origin', headers }
     : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body) });
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const data = isJson ? await res.json() : null;
-  return { ok: res.ok, status: res.status, isJson, data };
+  return { ok: res.ok, status: res.status, isJson, data, etag: res.headers.get('etag') };
 }
 
+// The server's tag for the copy we hold; a poll with nothing new comes back 304 with no body.
+let dbTag = null;
 async function pull() {
-  const r = await api('/api/db');
-  if (r.ok) { db = r.data; notify(); }
+  const r = await api('/api/db', undefined, dbTag ? { 'If-None-Match': dbTag } : {});
+  if (r.status === 304) return;
+  if (r.ok) { db = r.data; dbTag = r.etag; notify(); }
   if (r.status === 401) location.reload();
 }
 
@@ -110,7 +113,7 @@ export function commit(next) {
   inflight = inflight.then(async () => {
     if (isEmptyDiff(diff)) return;
     const r = await api('/api/diff', diff);
-    if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; notify(); }
+    if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; dbTag = null; notify(); }
     if (!r.ok) alert(r.data?.error ?? 'Could not save changes');
   });
 }

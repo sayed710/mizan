@@ -2,6 +2,7 @@
 //   npm run build && npm start        → http://localhost:8069
 // Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS.
 import { createServer } from 'node:http';
+import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
@@ -70,7 +71,10 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 const storage = openStorage(sql);
 let db = migrateAppointments(storage.load());
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
-const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+// Bumped on every commit: a client that already has this revision gets 304 instead of the whole database.
+let revision = 0;
+const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; revision++; };
+const startedAt = Date.now().toString(36);
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
@@ -169,9 +173,20 @@ setInterval(() => { for (const k of failures.keys()) if (!recent(k).length) fail
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
 // ---- http helpers ----
+// Large JSON answers (the synced database) are gzipped for clients that accept it; level 1 keeps CPU low.
+const GZIP_MIN = 8 * 1024;
 const send = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
-  res.end(JSON.stringify(body));
+  const text = JSON.stringify(body);
+  const head = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding', ...headers };
+  if (!res.acceptsGzip || text.length < GZIP_MIN) {
+    res.writeHead(status, head);
+    return res.end(text);
+  }
+  gzip(text, { level: zlibConstants.Z_BEST_SPEED }, (err, zipped) => {
+    if (err) { res.writeHead(status, head); return res.end(text); }
+    res.writeHead(status, { ...head, 'Content-Encoding': 'gzip' });
+    res.end(zipped);
+  });
 };
 
 function readJson(req) {
@@ -428,7 +443,12 @@ async function api(req, res, path) {
     if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
-  if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
+  if (path === '/api/db' && req.method === 'GET') {
+    // The visible part depends on the user's apps, so the tag names the user as well as the revision.
+    const tag = `"${startedAt}-${revision}-${user.id}-${(user.apps ?? []).join('.')}-${user.isAdmin ? 1 : 0}"`;
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { ETag: tag, 'Cache-Control': 'no-store' }); return res.end(); }
+    return send(res, 200, visibleDb(user), { ETag: tag });
+  }
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
@@ -529,6 +549,7 @@ const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allow
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
+  res.acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
   try {
     if (await portal.handle(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
