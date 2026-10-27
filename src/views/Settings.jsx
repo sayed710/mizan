@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
+import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, setCompanyCurrency } from '../models/company.js';
@@ -24,6 +24,16 @@ function Users() {
       setError(err instanceof Error ? err.message : 'Error');
     }
   };
+  const revokeAccess = async (u) => {
+    const password = prompt(`${t('Sign out every session and API key of')} ${u.login}. ${t('New password (leave empty to keep it)')}`, '');
+    if (password === null) return;
+    try {
+      await revokeUser(u.id, password);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  };
   const input = (key, extra = {}) => (
     <input aria-label={t(extra.label)} placeholder={t(extra.label)} required value={form[key]} type={extra.type ?? 'text'}
       autoComplete="off" onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
@@ -33,7 +43,8 @@ function Users() {
       <h3>{t('Users')}</h3>
       <table className="list">
         <tbody>
-          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td></tr>)}
+          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td>
+            <td><button type="button" className="link danger" onClick={() => revokeAccess(u)}>{t('Revoke Access')}</button></td></tr>)}
         </tbody>
       </table>
       <form className="row user-form" onSubmit={submit}>
@@ -78,6 +89,37 @@ function Companies({ db }) {
         </tbody>
       </table>
       <button type="button" className="btn" onClick={add}>{t('Add Company')}</button>
+    </>
+  );
+}
+
+function Security() {
+  const [form, setForm] = useState({ current: '', password: '' });
+  const [status, setStatus] = useState(null);
+  const run = async (action, done) => {
+    try {
+      await action();
+      setStatus({ ok: true, text: t(done) });
+      return true;
+    } catch (err) {
+      setStatus({ ok: false, text: err instanceof Error ? err.message : 'Error' });
+      return false;
+    }
+  };
+  const submit = async (e) => {
+    e.preventDefault();
+    if (await run(() => changePassword(form.current, form.password), 'Password changed; other sessions were signed out')) setForm({ current: '', password: '' });
+  };
+  return (
+    <>
+      <h3>{t('Password & Sessions')}</h3>
+      <form className="row user-form" onSubmit={submit}>
+        <input aria-label={t('Current Password')} placeholder={t('Current Password')} type="password" required autoComplete="current-password" value={form.current} onChange={(e) => setForm({ ...form, current: e.target.value })} />
+        <input aria-label={t('New Password')} placeholder={t('New Password')} type="password" required minLength={8} autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+        <button className="btn">{t('Change Password')}</button>
+      </form>
+      <button type="button" className="btn" onClick={() => run(revokeOtherSessions, 'Other sessions were signed out')}>{t('Sign Out Other Sessions')}</button>
+      {status && <div className={`alert ${status.ok ? 'info-box' : ''}`} role={status.ok ? 'status' : 'alert'}>{status.text}</div>}
     </>
   );
 }
@@ -230,6 +272,7 @@ export function Settings() {
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
         {(!isServer() || getUser()?.isAdmin) && <Companies db={db} />}
         {isServer() && getUser()?.isAdmin && <Users />}
+        {isServer() && <Security />}
         {isServer() && <ApiKeys />}
         {isServer() && <p><button type="button" className="btn" onClick={logout}>{t('Log out')}</button></p>}
       </section>

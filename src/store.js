@@ -148,6 +148,13 @@ export async function createKey(name) {
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create key');
   return r.data.key;
 }
+const postOrThrow = async (path, body, fallback) => {
+  const r = await api(path, body);
+  if (!r.ok) throw new Error(r.data?.error ?? fallback);
+};
+export const changePassword = (current, password) => postOrThrow('/api/password', { current, password }, 'Could not change password');
+export const revokeOtherSessions = () => postOrThrow('/api/sessions/revoke', {}, 'Could not sign out other sessions');
+export const revokeUser = (id, password) => postOrThrow('/api/users/revoke', password ? { id, password } : { id }, 'Could not revoke access');
 export async function addUser(vals) {
   const r = await api('/api/users', vals);
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create user');

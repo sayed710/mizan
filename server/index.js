@@ -89,9 +89,21 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+}
+
+/** Store a new password hash and end every session of that user except `keepToken`'s. */
+function setPassword(userId, password, keepToken = '') {
+  validatePassword(password);
+  const { salt, hash } = hashPassword(password);
+  sql.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?').run(salt, hash, userId);
+  sql.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(userId, sha256(keepToken));
+}
+
 function createUser({ login, name, password, isAdmin = false, apps = '' }) {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
-  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+  validatePassword(password);
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
   sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
@@ -423,9 +435,21 @@ async function api(req, res, path) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
     }
   }
+  const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
+  if (path === '/api/password' && req.method === 'POST') {
+    const { current, password } = await readJson(req);
+    const limitKey = `password:${user.id}`;
+    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    if (!checkPassword(user.login, current)) { recordFailure(limitKey); return send(res, 403, { error: 'Current password is wrong' }); }
+    try { setPassword(user.id, password, sessionToken); } catch (e) { return send(res, 400, { error: e.message }); }
+    return send(res, 200, { ok: true });
+  }
+  if (path === '/api/sessions/revoke' && req.method === 'POST') {
+    sql.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha256(sessionToken));
+    return send(res, 200, { ok: true });
+  }
   if (path === '/api/logout' && req.method === 'POST') {
-    const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
-    if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+    if (sessionToken) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(sessionToken));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
@@ -468,6 +492,20 @@ async function api(req, res, path) {
       }
       return send(res, 201, { ok: true });
     }
+  }
+  if (path === '/api/users/revoke' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    const { id, password } = await readJson(req);
+    const target = sql.prepare('SELECT id FROM users WHERE id = ?').get(Number(id));
+    if (!target) return send(res, 404, { error: 'User not found' });
+    try {
+      if (password !== undefined) setPassword(target.id, password);
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+    sql.prepare('DELETE FROM sessions WHERE user_id = ?').run(target.id);
+    sql.prepare('DELETE FROM api_keys WHERE user_id = ?').run(target.id);
+    return send(res, 200, { ok: true });
   }
   return send(res, 404, { error: 'Not found' });
 }
