@@ -2,7 +2,8 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
-import { postEntry } from './ledger.js';
+import { invoiceLines, postEntry } from './ledger.js';
+import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -17,14 +18,35 @@ export function startSession(db, openingCash = 0) {
   return create(db, 'pos.session', { name: nextName(db, 'pos.session', 'POS/S/'), state: 'opened', start_at: today(), cash_start: round(Number(openingCash) || 0) });
 }
 
-/** Lines of a cart priced from the products (sales price and sales tax). */
-export const priceLines = (db, cart) => cart.map((l) => {
+/**
+ * Lines of a cart priced from the products: sales price and the product's sales tax record
+ * (price-included or not), mapped through the customer's fiscal position.
+ */
+export const priceLines = (db, cart, partnerId = null) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
+  const tax = productTax(db, p, 'sale', fiscalPositionFor(db, partnerId)) ?? { tax: p?.sale_tax ?? 14 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const price = p?.list_price ?? 0;
-  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, discount: Number(l.discount) || 0, tax: p?.sale_tax ?? 14 };
+  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, discount: Number(l.discount) || 0, ...tax };
 });
+
+/**
+ * The sale (or refund) entry of a POS order, booked like a customer invoice: income per product account and
+ * tax per tax account (both through the fiscal position), with the drawer or bank instead of the receivable.
+ * The customer pays on the spot, so cash-basis taxes are due at once.
+ */
+function saleEntry(db, lines, { method, partner_id, refund }) {
+  const move = {
+    move_type: refund ? 'out_refund' : 'out_invoice', partner_id, fiscal_position_id: fiscalPositionFor(db, partner_id), name: 'POS',
+    invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
+  };
+  const receivable = (db.records['account.account'] ?? []).find((a) => a.code === '121000')?.id;
+  const code = (id) => read(db, 'account.account', id)?.code;
+  return invoiceLines(db, move).map((l) => ({
+    account: l.account_id === receivable ? (method === 'cash' ? CASH : BANK) : code(l.account_id), debit: l.debit, credit: l.credit, partner_id, name: l.name,
+  }));
+}
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
 export function payOrder(db, { lines, method, partner_id = null, refund_of = null }) {
@@ -33,9 +55,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
   if (!lines.length) throw new Error('The order is empty');
   const { db: next, id } = create(db, 'pos.order', { partner_id, payment_method: method, lines, session_id: session.id, state: refund_of ? 'refund' : 'paid', refund_of });
   const name = read(next, 'pos.order', id).name;
-  const total = amounts(lines);
   const sign = refund_of ? -1 : 1;
-  const side = (amount, debit) => ((debit === (sign > 0)) ? { debit: round(amount) } : { credit: round(amount) });
   let stocked = next;
   const costs = [];
   const original = refund_of ? read(db, 'pos.order', refund_of) : null;
@@ -53,14 +73,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
-  const { db: booked } = postEntry(stocked, {
-    journal: 'POSS', ref: name,
-    lines: [
-      { account: method === 'cash' ? CASH : BANK, ...side(total.total, true) },
-      { account: '400000', ...side(total.untaxed, false) },
-      ...(total.tax ? [{ account: '251000', ...side(total.tax, false) }] : []),
-    ],
-  });
+  const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: saleEntry(stocked, lines, { method, partner_id, refund: !!refund_of }) });
   return { db: booked, id };
 }
 
