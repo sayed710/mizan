@@ -41,6 +41,7 @@ const ACTIONS = {
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
+import { scheduleSnapshots } from './backup.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -438,6 +439,11 @@ async function api(req, res, path) {
     }
     return send(res, 200, visibleDb(user));
   }
+  // The full business database as JSON (not the caller's filtered copy); /api/restore takes it back.
+  if (path === '/api/backup' && req.method === 'GET') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    return send(res, 200, db, { 'Content-Disposition': `attachment; filename="mizan-backup-${new Date().toISOString().slice(0, 10)}.json"` });
+  }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     commitDb(seed(), { full: true });
@@ -551,6 +557,7 @@ const runJobs = () => {
 };
 runJobs();
 setInterval(runJobs, JOB_INTERVAL_MS).unref();
+scheduleSnapshots(sql);
 
 // Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
 const MAIL_JOB_INTERVAL_MS = 10 * 60 * 1000;

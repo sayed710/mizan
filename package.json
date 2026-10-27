@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server/index.js",
+    "backup": "node server/backup.js",
     "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\""
   },
   "dependencies": {
