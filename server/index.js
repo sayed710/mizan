@@ -155,16 +155,18 @@ const visibleDb = (u) => {
 };
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
-const failures = new Map();
+// Stored in SQLite so a restart does not reset an attacker's counter.
+sql.exec('CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS rate_events_key_at ON rate_events (key, at);');
 const WINDOW = 15 * 60 * 1000;
 const CHAT_MESSAGES_PER_WINDOW = 30;
 const TRACKING_HITS_PER_WINDOW = 300;
 const CART_PRICINGS_PER_WINDOW = 120;
 const WHATSAPP_HOOKS_PER_WINDOW = 600;
-const recent = (k) => (failures.get(k) ?? []).filter((t) => Date.now() - t < WINDOW);
-const tooMany = (k) => recent(k).length >= 10;
-const recordFailure = (k) => failures.set(k, [...recent(k), Date.now()]);
-setInterval(() => { for (const k of failures.keys()) if (!recent(k).length) failures.delete(k); }, WINDOW).unref();
+const ACCOUNT_FAILURES_PER_WINDOW = 50;
+const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
+const tooMany = (k) => hits(k) >= 10;
+const recordFailure = (k) => sql.prepare('INSERT INTO rate_events (key, at) VALUES (?, ?)').run(k, Date.now());
+setInterval(() => sql.prepare('DELETE FROM rate_events WHERE at <= ?').run(Date.now() - WINDOW), WINDOW).unref();
 // Behind a reverse proxy set MIZAN_TRUST_PROXY=1 so limits apply per client, not per proxy.
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
@@ -235,7 +237,7 @@ let mailBaseKnown = false;
 async function api(req, res, path) {
   const ip = clientIp(req);
   if (path.startsWith('/api/public/mail/') && ['GET', 'POST'].includes(req.method)) {
-    if (recent(`track:${ip}`).length >= TRACKING_HITS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    if (hits(`track:${ip}`) >= TRACKING_HITS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
     recordFailure(`track:${ip}`);
     const out = trackingResponse(db, path, undefined, req.method);
     if (!out) return send(res, 404, { error: 'Not found' });
@@ -245,7 +247,7 @@ async function api(req, res, path) {
   }
   // WhatsApp Cloud API webhook: verification token on GET, HMAC-signed raw body on POST; Meta retries on non-2xx.
   if (path === '/api/public/whatsapp/webhook' && ['GET', 'POST'].includes(req.method)) {
-    if (recent(`whatsapp:${ip}`).length >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    if (hits(`whatsapp:${ip}`) >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
     recordFailure(`whatsapp:${ip}`);
     if (req.method === 'GET') {
       const out = verifyWebhook(ENV, new URL(req.url, 'http://x').searchParams);
@@ -319,7 +321,7 @@ async function api(req, res, path) {
     const input = req.method === 'GET' ? new URL(req.url, 'http://x').searchParams : await readJson(req);
     if (path.endsWith('/message')) {
       const key = `chatmsg:${Number(input?.sessionId) || 0}`;
-      if (recent(key).length >= CHAT_MESSAGES_PER_WINDOW) return send(res, 429, { error: 'You are sending messages too fast, please wait a moment' });
+      if (hits(key) >= CHAT_MESSAGES_PER_WINDOW) return send(res, 429, { error: 'You are sending messages too fast, please wait a moment' });
       recordFailure(key);
     }
     const out = chatRoute(db, input);
@@ -338,14 +340,14 @@ async function api(req, res, path) {
   // Cart prices are read-only (computed server-side); order status is limited on wrong tokens like live chat.
   if (path === '/api/public/cart' && req.method === 'POST') {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
-    if (recent(`cart:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
+    if (hits(`cart:${ip}`) >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`cart:${ip}`);
     const out = publicCart(db, await readJson(req));
     return send(res, out.status, out.body);
   }
   const slotsRoute = /^\/api\/public\/appointment\/(\d+)\/slots$/.exec(path);
   if (slotsRoute && req.method === 'GET') {
-    if (recent(`slots:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
+    if (hits(`slots:${ip}`) >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`slots:${ip}`);
     const out = publicSlots(db, slotsRoute[1], new URL(req.url, 'http://x').searchParams);
     return send(res, out.status, out.body);
@@ -372,10 +374,13 @@ async function api(req, res, path) {
   }
   if (path === '/api/login' && req.method === 'POST') {
     const { login, password } = await readJson(req);
-    const limitKey = `login:${ip}:${String(login ?? '').toLowerCase().slice(0, 64)}`;
-    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    const account = String(login ?? '').toLowerCase().slice(0, 64);
+    const limitKey = `login:${ip}:${account}`;
+    // A per-account ceiling also slows attacks spread over many IPs; it is higher so one attacker cannot lock the user out quickly.
+    const accountKey = `login-account:${account}`;
+    if (tooMany(limitKey) || hits(accountKey) >= ACCOUNT_FAILURES_PER_WINDOW) return send(res, 429, { error: 'Too many attempts, try again later' });
     const user = checkPassword(login, password);
-    if (!user) { recordFailure(limitKey); return send(res, 401, { error: 'Wrong login or password' }); }
+    if (!user) { recordFailure(limitKey); recordFailure(accountKey); return send(res, 401, { error: 'Wrong login or password' }); }
     const token = randomBytes(32).toString('base64url');
     sql.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').run(sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
     return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin, apps: parseApps(user.apps) }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
