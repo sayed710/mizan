@@ -207,3 +207,12 @@ input, select, textarea, button { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Button wizards (in-app dialogs replacing prompt()). */
+.wizard-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 35%); display: grid; place-items: center; z-index: 50; }
+.wizard { background: var(--surface, #fff); color: var(--text, inherit); border-radius: 8px; padding: 20px 24px; inline-size: min(480px, calc(100vw - 32px)); max-block-size: 85vh; overflow: auto; box-shadow: 0 12px 40px rgb(0 0 0 / 25%); }
+.wizard h2 { margin-block: 0 12px; font-size: 1.15rem; }
+.wizard .row { display: flex; gap: 8px; margin-block-start: 16px; }
+.wizard-choices { border: 0; padding: 0; margin: 0; display: grid; gap: 4px; max-block-size: 220px; overflow: auto; }
+.wizard-choices .check { display: flex; gap: 6px; align-items: center; }
+.wizard .sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

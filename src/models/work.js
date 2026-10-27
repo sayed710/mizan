@@ -254,16 +254,26 @@ export const workModels = {
       }, {
         // Merge duplicates into this ticket: their descriptions and messages move here and they are cancelled.
         label: 'Merge Tickets', when: (r) => !['solved', 'cancelled'].includes(r.stage_id),
-        run: (db, r) => {
-          const refs = prompt('Ticket ids to merge into this one (comma separated)', '');
-          const ids = String(refs ?? '').split(',').map((x) => Number(x.trim())).filter((x) => Number.isInteger(x) && x > 0);
-          return { db: ids.length ? mergeTickets(db, r.id, ids) : db };
+        wizard: (db, r) => ({ title: 'Merge Tickets', fields: [
+          { name: 'ticket_ids', type: 'many2many', relation: 'helpdesk.ticket', label: 'Tickets to merge into this one', required: true,
+            // Only tickets that can be merged: open ones of the same customer.
+            domain: (x) => x.id !== r.id && x.partner_id === r.partner_id && !['solved', 'cancelled'].includes(x.stage_id) },
+        ] }),
+        run: (db, r, v = {}) => {
+          const ids = (v.ticket_ids ?? []).map(Number).filter((x) => Number.isInteger(x) && x > 0);
+          if (!ids.length) throw new Error('Choose the tickets to merge');
+          return { db: mergeTickets(db, r.id, ids) };
         },
       }, {
         label: 'Record Rating', when: (r) => r.stage_id === 'solved' && !r.rating,
-        run: (db, r) => {
-          const rating = Number(prompt('Customer rating (1-5)', '5'));
-          return { db: Number.isInteger(rating) && rating > 0 ? rateTicket(db, r.id, rating, prompt('Comment', '') ?? '') : db };
+        wizard: () => ({ title: 'Record Rating', fields: [
+          { name: 'rating', type: 'selection', label: 'Rating', required: true, default: '5', options: [['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5']] },
+          { name: 'comment', type: 'text', label: 'Comment' },
+        ] }),
+        run: (db, r, v = {}) => {
+          const rating = Number(v.rating);
+          if (!(Number.isInteger(rating) && rating >= 1 && rating <= 5)) throw new Error('Choose a rating from 1 to 5');
+          return { db: rateTicket(db, r.id, rating, v.comment ?? '') };
         },
       }, {
         label: 'Plan Intervention', when: (r) => !r.fsm_task_id && r.stage_id !== 'solved',

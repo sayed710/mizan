@@ -8,6 +8,7 @@ import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
+import { Wizard } from './Wizard.jsx';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -204,6 +205,7 @@ export function FormView({ leaf, id, base, params }) {
   const rec = isNew ? null : read(db, model, Number(id));
   const [changes, setChanges] = useState({});
   const [error, setError] = useState(null);
+  const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
 
@@ -282,11 +284,25 @@ export function FormView({ leaf, id, base, params }) {
     const savedId = save();
     if (savedId == null) return;
     try {
+      // Buttons that need input open an in-app dialog; the button runs with what was entered.
+      const spec = b.wizard?.(getDb(), read(getDb(), model, savedId));
+      if (spec) { setWizard({ b, id: savedId, spec, error: null }); return; }
       const res = b.run(getDb(), read(getDb(), model, savedId));
       commit(res.db);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
+    }
+  };
+  const confirmWizard = (values) => {
+    try {
+      const res = wizard.b.run(getDb(), read(getDb(), model, wizard.id), values);
+      commit(res.db);
+      setWizard(null);
+      setError(null);
+      if (res.go) location.hash = res.go;
+    } catch (e) {
+      setWizard((w) => ({ ...w, error: t(e.message) }));
     }
   };
 
@@ -359,6 +375,7 @@ export function FormView({ leaf, id, base, params }) {
           )}
 
           {error && <div className="alert" role="alert">{error}</div>}
+          {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
