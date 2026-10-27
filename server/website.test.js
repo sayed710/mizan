@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -30,7 +30,11 @@ before(async () => {
   }
   openStorage(sql).save(null, db);
   sql.close();
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_PUBLIC_URL: 'https://website.example', MIZAN_TRUST_PROXY: '1', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // A minimal built client, so these tests never depend on (or test a stale) `vite build` output.
+  await mkdir(join(directory, 'dist', 'assets'), { recursive: true });
+  await writeFile(join(directory, 'dist', 'index.html'), '<!doctype html><html><head><script type="module" src="/assets/app.js"></script></head><body><div id="root"></div></body></html>');
+  await writeFile(join(directory, 'dist', 'assets', 'app.js'), 'export {};');
+  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_DIST: join(directory, 'dist'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_PUBLIC_URL: 'https://website.example', MIZAN_TRUST_PROXY: '1', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
   origin = await new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
@@ -113,7 +117,7 @@ test('crawler endpoints use configured origin, content types, exclusions and fiv
 });
 
 test('unknown slugs return the actual SPA body with HTTP 404; known pages and assets stay available', async () => {
-  const html = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8');
+  const html = await readFile(join(directory, 'dist', 'index.html'), 'utf8');
   const missing = await get('/not-a-page');
   assert.equal(missing.status, 404);
   assert.match(await missing.text(), /id="root"/);

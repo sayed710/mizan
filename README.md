@@ -40,13 +40,13 @@ On first start the server creates user `admin` and prints a random password
 (or set `MIZAN_ADMIN_PASSWORD`). Admins add users in **Settings**.
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
-`MIZAN_SECURE_COOKIE=1` when served over HTTPS.
+`MIZAN_DIST` (built client folder, default `dist`), `MIZAN_SECURE_COOKIE=1` when served over HTTPS.
 
 Development: `npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).
 
 ```bash
-npm test           # ORM, business-flow and sync tests
+npm test           # ORM, business-flow, sync and server tests (no build needed)
 ```
 
 ### Email
