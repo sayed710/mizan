@@ -196,14 +196,22 @@ function Chatter({ db, model, id, name }) {
   );
 }
 
+// A new record the server refused: its values (and the reason) come back to the "new" form instead of being lost.
+let refusedNew = null;
+
 export function FormView({ leaf, id, base, params }) {
   const db = useDb();
   const model = leaf.model;
   const def = models[model];
   const isNew = id === 'new';
   const rec = isNew ? null : read(db, model, Number(id));
-  const [changes, setChanges] = useState({});
-  const [error, setError] = useState(null);
+  const [restored] = useState(() => {
+    const draft = isNew && refusedNew?.base === base ? refusedNew : null;
+    if (draft) refusedNew = null;
+    return draft;
+  });
+  const [changes, setChanges] = useState(() => restored?.values ?? {});
+  const [error, setError] = useState(() => restored?.error ?? null);
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
 
@@ -226,20 +234,34 @@ export function FormView({ leaf, id, base, params }) {
     });
     setError(null);
   };
-  const fail = (e) => setError(e instanceof Error ? e.message : t('Could not save'));
+  const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
 
-  /** Persist pending changes (+ extra vals). Returns the record id, or null on validation error. */
+  /**
+   * Persist pending changes (+ extra vals). Returns the record id, or null on validation error. The save is shown
+   * at once; if the server then refuses it, the typed values come back and its reason is shown on the form.
+   */
   const save = (extra = {}) => {
     try {
       if (isNew) {
+        const values = { ...changes, ...extra };
         const res = create(getDb(), model, { ...current, ...extra });
-        commit(res.db);
+        commit(res.db, { quiet: true }).then((r) => {
+          if (r.ok) return;
+          refusedNew = { base, values, error: r.error };
+          location.hash = `${base}/new${query}`;
+        });
         setChanges({});
         location.hash = `${base}/${res.id}${query}`;
         return res.id;
       }
       const vals = { ...changes, ...extra };
-      if (Object.keys(vals).length) commit(write(getDb(), model, rec.id, vals));
+      if (Object.keys(vals).length) {
+        commit(write(getDb(), model, rec.id, vals), { quiet: true }).then((r) => {
+          if (r.ok) return;
+          setChanges((c) => ({ ...vals, ...c }));
+          setError(r.error);
+        });
+      }
       setChanges({});
       return rec.id;
     } catch (e) {

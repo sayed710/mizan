@@ -5,6 +5,7 @@ import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
+import { t } from './i18n.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v32';
@@ -96,8 +97,13 @@ export const getDb = () => db;
 export const getUser = () => user;
 export const isServer = () => mode === 'server';
 
-/** Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local). */
-export function commit(next) {
+/**
+ * Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local).
+ * Returns a promise of { ok, error } that settles once the server has accepted or refused the change, so callers
+ * can confirm success (or keep the user's input) only then. With `quiet`, a refusal is left to the caller to show;
+ * otherwise it is shown in a translated alert.
+ */
+export function commit(next, { quiet = false } = {}) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
@@ -105,14 +111,21 @@ export function commit(next) {
   notify();
   if (mode === 'local') {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
-    return;
+    return Promise.resolve({ ok: true });
   }
-  inflight = inflight.then(async () => {
-    if (isEmptyDiff(diff)) return;
+  const done = inflight.then(async () => {
+    if (isEmptyDiff(diff)) return { ok: true };
     const r = await api('/api/diff', diff);
     if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; notify(); }
-    if (!r.ok) alert(r.data?.error ?? 'Could not save changes');
+    if (r.ok) return { ok: true };
+    // A refusal without the server's copy (proxy error, payload too large): reload it so the optimistic edit is undone.
+    if (!r.data?.db) await pull().catch(() => {});
+    const error = t(r.data?.error ?? 'Could not save changes');
+    if (!quiet) alert(error);
+    return { ok: false, error };
   });
+  inflight = done.catch(() => {});
+  return done;
 }
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
