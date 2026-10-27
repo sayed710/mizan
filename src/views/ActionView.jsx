@@ -67,7 +67,12 @@ export function ActionView({ leaf, base, params }) {
   const views = viewsOf(model);
   const view = views.includes(params.get('view')) ? params.get('view') : views.includes(leaf.view) ? leaf.view : views[0];
   const relRaw = params.get('rel');
-  const [search, setSearch] = useState(() => ({ ...emptySearch(model, parseRel(db, model, relRaw)), groupBy: leaf.groupBy ?? [] }));
+  // ?filter=<id> (repeatable) preselects the model's named filters, e.g. links from dashboard tiles.
+  const urlFilters = params.getAll('filter').filter((id) => (models[model].filters ?? []).flat().some((f) => f.id === id));
+  const [search, setSearch] = useState(() => {
+    const initial = emptySearch(model, parseRel(db, model, relRaw));
+    return { ...initial, ...(urlFilters.length ? { filters: urlFilters } : {}), groupBy: leaf.groupBy ?? [] };
+  });
   const [selected, setSelected] = useState(() => new Set());
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);

@@ -54,7 +54,7 @@ export function App() {
   let content;
   if (Page) content = <Page key={leaf.key} leaf={leaf} />;
   else if (route.id) content = <FormView key={`${leaf.model}:${route.id}`} leaf={leaf} id={route.id} base={base} params={route.params} />;
-  else content = <ActionView key={`${base}?${route.params.get('rel') ?? ''}`} leaf={leaf} base={base} params={route.params} />;
+  else content = <ActionView key={`${base}?${route.params.get('rel') ?? ''}&${route.params.getAll('filter').join(',')}`} leaf={leaf} base={base} params={route.params} />;
 
   return (
     <div className="shell">
