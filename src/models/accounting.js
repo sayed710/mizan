@@ -260,6 +260,10 @@ export const accountingModels = {
         options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid']],
       },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
+      // Set by fiscal closing and exchange revaluation only.
+      is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true },
+      revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
+      reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },

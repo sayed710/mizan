@@ -37,9 +37,21 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/** Whether a fiscal year names this entry as its closing or reopening entry. */
+const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some((y) => y.closing_move_id === id || y.opening_move_id === id);
+
+/** A closed fiscal year locks its period whoever closed it. */
+export function closedYearLock(db) {
+  return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
+}
+
 export function moveGuard(db, before, after) {
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
-  const lock = [before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)).sort().at(-1);
+  // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
+  if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
+  // A year's own closing or reopening entry is booked into it once, as it is created.
+  const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
+  const lock = [...[before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)), yearLock].sort().at(-1);
   if (!lock) return null;
   const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
   if (!touchesLocked) return null;
@@ -49,7 +61,8 @@ export function moveGuard(db, before, after) {
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move) {
-  const lock = lockDateFor(db.settings, move);
+  if (isYearEntry(db, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
+  const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   return null;

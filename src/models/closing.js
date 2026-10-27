@@ -20,6 +20,13 @@ function ensureAccount(db, code, name, type) {
 function yearGuard(db, before, after) {
   if (!validDate(after.date_from) || !validDate(after.date_to) || after.date_from > after.date_to) return 'Enter a valid fiscal year date range';
   if (before?.state === 'closed' && (before.date_from !== after.date_from || before.date_to !== after.date_to)) return 'Reopen the fiscal year before changing its dates';
+  // Closing and reopening entries leave the P&L, so a year names them only as it closes or reopens, on its end date.
+  const entryOff = (id) => { const m = id && read(db, 'account.move', id); return m && (m.invoice_date ?? m.date) !== after.date_to; };
+  const closes = after.state === 'closed' && before?.state !== 'closed';
+  if ((before?.closing_move_id ?? null) !== (after.closing_move_id ?? null) && !(closes && after.closing_move_id)) return 'The closing entry is set by closing the fiscal year';
+  if (closes && !after.closing_move_id) return 'Close the fiscal year with its closing entry';
+  if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && (before?.opening_move_id || after.state !== 'open')) return 'The reopening entry is set by reopening the fiscal year';
+  if (entryOff(after.closing_move_id) || entryOff(after.opening_move_id)) return 'Closing entries are dated on the fiscal year end';
   return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && y.date_from <= after.date_to && y.date_to >= after.date_from)
     ? 'Fiscal years must not overlap' : null;
 }
@@ -54,8 +61,9 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
   lines.push({ account: retainedEarningsCode, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
   if (lines.length === 1) lines.push({ account: retainedEarningsCode, debit: 0, credit: 0 });
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, lines });
-  const marked = write(entry.db, 'account.move', entry.id, { is_closing: true });
-  return updateSettings(write(marked, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null }), {
+  // The year references its closing entry first: only such an entry may carry the closing flag.
+  const closed = write(entry.db, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null });
+  return updateSettings(write(closed, 'account.move', entry.id, { is_closing: true }), {
     lock_date: [db.settings?.lock_date, year.date_to].filter(Boolean).sort().at(-1),
   });
 }
@@ -68,12 +76,14 @@ export function reopenFiscalYear(db, yearId) {
   if (!closing || closing.state !== 'posted') throw new Error('The posted closing entry is missing');
   // Fall back to the latest other closed year rather than unlocking everything.
   const previous = search(db, 'account.fiscal.year').filter((y) => y.id !== yearId && y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
-  const next = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: previous }) : db;
+  const unlocked = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: previous }) : db;
+  // Open the year before booking into it: a closed year locks its period.
+  const next = write(unlocked, 'account.fiscal.year', yearId, { state: 'open' });
   const entry = postEntry(next, {
     journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`,
     lines: closing.line_ids.map((l) => ({ account: read(next, 'account.account', l.account_id).code, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
   });
-  return write(write(entry.db, 'account.move', entry.id, { is_closing: true }), 'account.fiscal.year', yearId, { state: 'open', opening_move_id: entry.id });
+  return write(write(entry.db, 'account.fiscal.year', yearId, { opening_move_id: entry.id }), 'account.move', entry.id, { is_closing: true });
 }
 
 const pnlRows = [['revenue', 'Revenue'], ['cost', 'Cost of Revenue'], ['gross', 'Gross Profit'], ['expense', 'Expenses'],
