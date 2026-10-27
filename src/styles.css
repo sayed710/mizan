@@ -207,3 +207,10 @@ input, select, textarea, button { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+.record-analysis { margin-top: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; }
+.record-analysis h2 { font-size: 15px; margin: 0 0 8px; }
+.record-analysis details { border-top: 1px solid var(--border); padding: 8px 0; }
+.record-analysis summary { cursor: pointer; font-weight: 600; }
+.analysis-dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 16px; margin: 8px 0; }
+.analysis-dl dt { color: var(--muted); font-size: 12px; }
+.analysis-dl dd { margin: 0; font-weight: 600; }

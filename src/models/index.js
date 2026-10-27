@@ -79,6 +79,7 @@ import { companyModels, withCompany } from './company.js';
 import { warehouseModels } from './warehouse.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { appAnalyses } from './analysis.js';
 
 export { today } from './common.js';
 
@@ -554,7 +555,13 @@ export const APP_INFO = {
   automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],
   referral: ['Human Resources', 'Employees refer candidates'], skills: ['Human Resources', 'Employee skills and levels'], esg: ['ESG', 'Measure your carbon footprint'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
 };
-export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+// Read-only analyses get an "Analysis" menu in their app (see analysis.js).
+const withAnalyses = (app) => {
+  const own = appAnalyses.filter((a) => a.app === app.id);
+  if (!own.length) return app;
+  return { ...app, menus: [...app.menus, { label: 'Analysis', children: own.map((a) => ({ key: a.key, label: a.label, type: 'analysis', analysis: a.key })) }] };
+};
+export const apps = [...allApps].map(withAnalyses).sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 

@@ -778,6 +778,20 @@ const ar = {
   'Download backup': 'تنزيل نسخة احتياطية', 'Restore backup': 'استعادة نسخة احتياطية', 'Backup restored.': 'تمت استعادة النسخة الاحتياطية.',
   'Invalid backup file.': 'ملف النسخة الاحتياطية غير صالح.', 'Records stored': 'السجلات المخزنة', 'Payment amount': 'مبلغ الدفعة',
   'New on-hand quantity': 'الكمية الجديدة المتاحة', 'record created': 'تم إنشاء السجل', 'Payment of {amount} registered': 'تم تسجيل دفعة بقيمة {amount}',
+  // analyses (MOD-007)
+  'Goal Progress': 'تقدم الأهداف', 'Approvals Waiting': 'موافقات بانتظاره', 'Worked Days This Month': 'أيام العمل هذا الشهر',
+  'Timesheet This Week': 'سجل الوقت هذا الأسبوع', 'Utilization This Month': 'نسبة الاستغلال هذا الشهر', 'Field Service Hours Today': 'ساعات الخدمة الميدانية اليوم',
+  'Maintenance Load This Month': 'حمل الصيانة هذا الشهر', 'Activity Statistics': 'إحصائيات الأنشطة', 'Package Contents': 'محتويات الطرد',
+  'Event Dashboard': 'لوحة الفعالية', 'Costs This Year': 'التكاليف هذا العام', 'Fuel Efficiency': 'كفاءة الوقود', 'Team Statistics': 'إحصائيات الفريق',
+  'Equipment Statistics': 'إحصائيات المعدة', 'Recruitment Pipeline': 'مسار التوظيف', 'Applicant Score': 'تقييم المتقدم',
+  'Repair Total': 'إجمالي الإصلاح', 'Customer Statement This Year': 'كشف حساب العميل هذا العام', 'Skill Matrix': 'مصفوفة المهارات',
+  'Load This Month': 'الحمل هذا الشهر', 'Z Report': 'تقرير Z', 'Balance This Year': 'الرصيد هذا العام', 'Purchase Order Matching': 'مطابقة أمر الشراء',
+  'Stock per Warehouse': 'المخزون لكل مستودع', 'Appraisal Analysis': 'تحليل التقييمات', 'Expense Analysis': 'تحليل المصروفات',
+  'Visitor Report': 'تقرير الزوار', 'Quality Statistics': 'إحصائيات الجودة', 'Repair Analysis': 'تحليل الإصلاحات',
+  'Rental Schedule': 'جدول التأجير', 'Duplicate Applicants': 'متقدمون مكررون', 'Orders per Vendor Today': 'الطلبات لكل مورد اليوم',
+  'Active Alerts': 'التنبيهات النشطة', 'Dispatch Board Today': 'لوحة التوزيع اليوم', 'Contracts to Renew (30 days)': 'عقود للتجديد (30 يومًا)',
+  'Services Due': 'صيانات مستحقة', 'Certifications Expiring (90 days)': 'شهادات تنتهي (90 يومًا)', 'Overdue Document Requests': 'طلبات مستندات متأخرة',
+  Analysis: 'التحليل', 'No data for this period.': 'لا توجد بيانات لهذه الفترة.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

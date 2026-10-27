@@ -11,7 +11,7 @@ import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
-const PERIODS = {
+export const PERIODS = {
   month: () => {
     const d = new Date();
     return { from: today().slice(0, 7) + '-01', to: monthEnd(d.getFullYear(), d.getMonth() + 1) };

@@ -8,6 +8,7 @@ import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
+import { RecordAnalysis } from './Analysis.jsx';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -406,6 +407,7 @@ export function FormView({ leaf, id, base, params }) {
               </>
             )}
           </section>
+          {!isNew && <RecordAnalysis db={db} model={model} rec={current} />}
         </div>
         {def.form.chatter && !isNew && <Chatter db={db} model={model} id={rec.id} name={rec[def.form.title]} />}
       </div>
