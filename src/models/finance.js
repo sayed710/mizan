@@ -1,5 +1,5 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
-import { postNote, read, search, write } from '../orm.js';
+import { postNotes, read, search, writeMany } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
@@ -131,7 +131,7 @@ export function journalCards(db, at = today()) {
 export function followUps(db, at = today()) {
   const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.amount_residual > 0 && m.invoice_date_due < at);
   const by = new Map();
-  for (const m of overdue) by.set(m.partner_id, [...(by.get(m.partner_id) ?? []), m]);
+  for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push(m);
   return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
@@ -144,17 +144,22 @@ export function runFollowUps(db, at = today()) {
   if (!levels.length) return db;
   const overdue = followUps(db, at);
   // Customers who caught up start again from the first level next time.
-  const settled = search(db, 'res.partner').filter((p) => p.followup_level_delay != null && !overdue.some((f) => f.partner_id === p.id))
-    .reduce((acc, p) => write(acc, 'res.partner', p.id, { followup_level_delay: null }), db);
-  return overdue.reduce((acc, f) => {
-    const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
-    const level = [...levels].reverse().find((l) => late >= (Number(l.delay) || 0));
-    const partner = read(acc, 'res.partner', f.partner_id);
-    if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) return acc;
+  const late = new Set(overdue.map((f) => f.partner_id));
+  const partners = new Map((db.records['res.partner'] ?? []).map((p) => [p.id, p]));
+  const updates = new Map(search(db, 'res.partner').filter((p) => p.followup_level_delay != null && !late.has(p.id))
+    .map((p) => [p.id, { followup_level_delay: null }]));
+  // Notes and level changes are collected, then written in one batch so the job stays linear in the data.
+  const notes = [];
+  for (const f of overdue) {
+    const days = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
+    const level = [...levels].reverse().find((l) => days >= (Number(l.delay) || 0));
+    const partner = partners.get(f.partner_id);
+    if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) continue;
     const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    const noted = postNote(acc, 'res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim());
-    return write(noted, 'res.partner', partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
-  }, settled);
+    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim()]);
+    updates.set(partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
+  }
+  return writeMany(postNotes(db, notes), 'res.partner', updates);
 }
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
