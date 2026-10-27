@@ -35,6 +35,12 @@ export function cleanValue(field, value, where) {
     case 'binary':
       if (!isPlain(value) || typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
       return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, data: value.data };
+    case 'distribution': {
+      // { [analytic account id]: percentage }
+      const entries = isPlain(value) ? Object.entries(value) : null;
+      if (!entries || entries.length > 50 || !entries.every(([k, n]) => /^[1-9]\d*$/.test(k) && typeof n === 'number' && n >= 0 && n <= 100)) fail(where);
+      return Object.fromEntries(entries);
+    }
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
       return value.map((line, i) => Object.fromEntries(

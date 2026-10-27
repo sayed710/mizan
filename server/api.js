@@ -4,6 +4,7 @@ import { models } from '../src/models/index.js';
 import { create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
+import { payQuote } from '../src/models/quoteplus.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
@@ -238,8 +239,8 @@ export function publicOrder(db, body) {
     });
     let next = postNote(order.db, 'sale.order', order.id, `Payment method: ${provider.name}`);
     if (provider.code === 'demo') {
-      const confirm = models['sale.order'].form.buttons.find((x) => x.label === 'Confirm');
-      next = confirm.run(next, read(next, 'sale.order', order.id)).db;
+      // Book the simulated payment as a real customer credit, so 'paid' is backed by a journal entry.
+      next = payQuote(next, order.id, totals.total);
       next = postNote(write(next, 'sale.order', order.id, { payment_state: 'paid' }), 'sale.order', order.id, `Paid online (${provider.name}): ${totals.total}`);
     }
     const saved = applyDiff(db, diffDb(db, next), { author: 'Website', isAdmin: false });

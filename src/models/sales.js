@@ -78,6 +78,7 @@ function invoiceFrom(db, order, moveType, originField) {
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     fiscal_position_id: order.fiscal_position_id ?? null,
+    ...(order.currency_id ? { currency_id: order.currency_id } : {}),
     [originField]: order.id,
     invoice_line_ids: lines,
   });
