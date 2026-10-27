@@ -85,7 +85,7 @@ export function createCompany(db, vals) {
   const values = { ...vals, ...(parent ? { currency_id: parent.currency_id } : {}) };
   let next = db;
   if (!values.partner_id) {
-    const partner = create(next, 'res.partner', { name: values.name, is_company: true, company_id: null,
+    const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
     return create(next, 'res.company', { ...values, partner_id: partner.id });

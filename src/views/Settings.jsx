@@ -4,6 +4,7 @@ import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, list
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, setCompanyCurrency } from '../models/company.js';
+import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -120,7 +121,7 @@ export function Settings() {
     try {
       const data = JSON.parse(await file.text());
       if (!isDb(data)) throw new Error('shape');
-      commit(data);
+      commit(migrate(data));
       setStatus(t('Backup restored.'));
     } catch {
       setStatus(t('Invalid backup file.'));

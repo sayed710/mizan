@@ -7,6 +7,7 @@ import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { moveValued } from './models/valuation.js';
+import { SCHEMA_VERSION } from './migrations.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -249,8 +250,9 @@ export function seed() {
   add('sign.request', { name: 'Distributor Agreement — Gulf Interiors', partner_id: 4, state: 'sent', body: 'The parties agree on exclusive distribution in the UAE for 12 months.' });
   add('sign.request', { name: 'NDA — Atlas Workspace', partner_id: 6, state: 'signed', signature: 'Atlas Workspace', sign_date: addDays(today(), -3) });
 
+  const docTag = Object.fromEntries(['Tax', 'Policy', 'Contract'].map((name) => [name, add('documents.tag', { name })]));
   [['Q3 VAT return.pdf', 'finance', ['Tax']], ['Employee handbook.pdf', 'hr', ['Policy']], ['Brand guidelines.pdf', 'marketing', []], ['Lease contract.pdf', 'legal', ['Contract']]]
-    .forEach(([name, folder, tag_ids]) => add('documents.document', { name, folder, tag_ids }));
+    .forEach(([name, folder, tags]) => add('documents.document', { name, folder, tag_ids: tags.map((tag) => ({ tag_id: docTag[tag] })) }));
 
   [[2, 'sales', 0, 8], [3, 'sales', 1, 8], [5, 'support', 0, 6], [6, 'support', 2, 8], [null, 'install', 3, 4]]
     .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), end: addDays(today(), d + (role === 'install' ? 2 : 4)), allocated_hours, state: employee_id ? 'published' : 'draft' }));
@@ -418,5 +420,6 @@ export function seed() {
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
 
   const seeded = { ...db, messages: [] };
-  return postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(seeded))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(seeded))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  return { ...ready, schema_version: SCHEMA_VERSION };
 }
