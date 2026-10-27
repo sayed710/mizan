@@ -100,7 +100,7 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   const posted = read(db, 'account.move', inv.id);
   assert.match(posted.name, /^INV\/\d{4}\/00003$/);
   assert.equal(posted.payment_state, 'not_paid');
-  db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total });
+  db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: '2026-01-01', amount: posted.amount_total, move_id: null }] });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
 });
