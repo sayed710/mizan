@@ -157,6 +157,21 @@ export function runFollowUps(db, at = today()) {
   }, settled);
 }
 
+const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.name ?? db.settings?.currency ?? '';
+
+/** Reminder text for one customer's overdue invoices, each amount with its currency. */
+export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
+
+/** Record a reminder sent by hand: a note on the contact, the date, and the follow-up level it reached. */
+export function logManualFollowUp(db, partnerId, at = today()) {
+  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+  if (!f) throw new Error('This customer has no overdue invoices');
+  const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
+  const level = search(db, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0)).find((l) => late >= (Number(l.delay) || 0));
+  const noted = postNote(db, 'res.partner', partnerId, `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(db, f)}`);
+  return write(noted, 'res.partner', partnerId, { followup_date: at, ...(level ? { followup_level_delay: Number(level.delay) } : {}) });
+}
+
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();

@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
-import { useDb } from '../store.js';
+import { agedBalance, analyticActuals, followUps, followUpText, logManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { commit, getDb, useDb } from '../store.js';
 import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -180,13 +180,16 @@ function FollowUps({ db }) {
     <tbody>
       {followUps(db).map((f) => {
         const email = read(db, 'res.partner', f.partner_id)?.email;
-        const body = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${Number(m.amount_residual).toFixed(2)}`).join('\n');
+        const body = followUpText(db, f);
         return (
           <tr key={f.partner_id} className="rep-detail">
             <td>
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              {email && <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}>{t('Send Reminder')}</a>}
+              {email && (
+                <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                  onClick={() => commit(logManualFollowUp(getDb(), f.partner_id))}>{t('Open Reminder in Mail App')}</a>
+              )}
             </td>
             <td className="num">{f.oldest}</td>
             <td className="num">{money(f.total)}</td>

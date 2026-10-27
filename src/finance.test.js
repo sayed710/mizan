@@ -108,3 +108,16 @@ test('journal cards count drafts, unpaid and late invoices, and bank balance wit
   assert.ok(bank.balance > 0);
   assert.equal(bank.toReconcile, search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length);
 });
+
+test('a reminder opened in the mail app is logged on the customer with each amount in its currency', async () => {
+  const { followUpText, logManualFollowUp } = await import('./models/finance.js');
+  const { messagesOf } = await import('./orm.js');
+  const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
+  const f = followUps(db).find((x) => x.partner_id === 5);
+  assert.match(followUpText(db, f), /\d \S+$/m);
+  const next = logManualFollowUp(db, 5);
+  assert.equal(read(next, 'res.partner', 5).followup_date, today());
+  assert.equal(read(next, 'res.partner', 5).followup_level_delay, 15);
+  assert.ok(messagesOf(next, 'res.partner', 5).some((m) => /Payment reminder sent by email/.test(m.body)));
+  assert.throws(() => logManualFollowUp(seed(), 5), /no overdue/);
+});

@@ -441,7 +441,7 @@ const ar = {
   'Aged Payable': 'أعمار الذمم الدائنة', 'Follow-up Reports': 'تقارير المتابعة', 'Budget vs Actual': 'الموازنة مقابل الفعلي', 'Analytic Report': 'التقرير التحليلي',
   'Analytic Accounts': 'الحسابات التحليلية', Budgets: 'الموازنات', Analytic: 'تحليلي', 'Output Tax': 'ضريبة المخرجات', 'Input Tax': 'ضريبة المدخلات',
   'Tax Payable': 'الضريبة المستحقة', 'Not due': 'غير مستحق', Older: 'أقدم', Actual: 'الفعلي', Achievement: 'نسبة التحقيق',
-  'Send Reminder': 'إرسال تذكير', 'Oldest Due': 'أقدم استحقاق',
+  'Send Reminder': 'إرسال تذكير', 'Open Reminder in Mail App': 'فتح التذكير في تطبيق البريد', 'Oldest Due': 'أقدم استحقاق',
   Currencies: 'العملات', Symbol: 'الرمز', Rates: 'الأسعار', 'Current Rate': 'السعر الحالي', 'Unit per Company Currency': 'الوحدة لكل عملة الشركة',
   'Foreign Exchange Gain': 'أرباح فروق العملة', 'Foreign Exchange Loss': 'خسائر فروق العملة',
   'Batch Transfers': 'التحويلات المجمعة', 'Batch Transfer': 'تحويل مجمع', Packages: 'الطرود', 'Package Reference': 'مرجع الطرد', 'Package Type': 'نوع الطرد',
