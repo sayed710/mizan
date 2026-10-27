@@ -108,6 +108,12 @@ export function ensureMainCompany(db) {
   return createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
 }
 
+/** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
+export function renameCompany(db, companyId, name) {
+  const next = write(db, 'res.company', companyId, { name });
+  return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
+}
+
 /** Set a company's currency by code, creating the currency record when missing. */
 export function setCompanyCurrency(db, companyId, code) {
   const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);

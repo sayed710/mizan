@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
+import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
-import { createCompany, setCompanyCurrency } from '../models/company.js';
+import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -107,6 +107,7 @@ function ApiKeys() {
 export function Settings() {
   const db = useDb();
   const [status, setStatus] = useState(null);
+  const company = (db.records['res.company'] ?? []).find((c) => c.id === currentCompany(db).id);
   const total = Object.values(db.records).reduce((s, recs) => s + recs.length, 0);
 
   const download = () => {
@@ -134,15 +135,28 @@ export function Settings() {
         <div className="field">
           <label htmlFor="company">{t('Company Name')}</label>
           <div className="field-value">
-            <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />
+            {/* One source of truth: the current company record, which the navbar, documents and QR codes all read. */}
+            {company
+              ? <input id="company" key={`${company.id}:${company.name}`} defaultValue={company.name}
+                  onBlur={(e) => { const name = e.target.value.trim(); if (!name) e.target.value = company.name; else if (name !== company.name) commit(renameCompany(getDb(), company.id, name)); }} />
+              : <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />}
           </div>
         </div>
         <div className="field">
           <label htmlFor="currency">{t('Currency')}</label>
           <div className="field-value">
-            <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
-              {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            {company
+              ? (
+                <>
+                  <span id="currency" className="readonly">{currentCompany(db).currency}</span>
+                  <p className="muted">{t('The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.')} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></p>
+                </>
+              )
+              : (
+                <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
+                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
           </div>
         </div>
         <div className="field">
