@@ -27,9 +27,25 @@ export function search(db, model, { includeArchived = false } = {}) {
     .map((r) => withComputed(fields, r));
 }
 
+// id -> position per records array. Arrays are never mutated (writes copy them), so an index stays valid for the
+// array it was built from; it is built on the second lookup so one-off reads after a write stay a plain scan.
+const positions = new WeakMap();
+function locate(list, id) {
+  const seen = positions.get(list);
+  if (seen instanceof Map) {
+    const at = seen.get(id);
+    // The position is checked against the array, so even an in-place change can only cost a scan, never a wrong record.
+    if (at !== undefined && list[at]?.id === id) return list[at];
+    return seen.size === list.length && at === undefined ? undefined : list.find((x) => x.id === id);
+  }
+  if (seen) positions.set(list, new Map(list.map((x, i) => [x.id, i])));
+  else positions.set(list, true);
+  return list.find((x) => x.id === id);
+}
+
 /** One record by id regardless of company (cross-company links still display). */
 export function read(db, model, id) {
-  const r = (db.records[model] ?? []).find((x) => x.id === id);
+  const r = locate(db.records[model] ?? [], id);
   return r && withComputed(models[model].fields, r);
 }
 
