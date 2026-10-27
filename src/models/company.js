@@ -1,4 +1,5 @@
 import { create, read, updateSettings, write } from '../orm.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -115,6 +116,24 @@ export function setCompanyCurrency(db, companyId, code) {
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 
+const TAX_KEYS = Object.keys(taxSnapshot(null));
+
+/**
+ * The buyer's purchase line for a sold line: same product, quantity, discount and net price,
+ * but the buyer's purchase tax (through the seller's fiscal position) instead of the seller's output VAT.
+ */
+function purchaseLine(db, line, fpId) {
+  const { qty_delivered, qty_invoiced, ...rest } = line;
+  const kept = Object.fromEntries(Object.entries(rest).filter(([k]) => !TAX_KEYS.includes(k)));
+  const qty = Number(line.qty) || 0;
+  const factor = qty * (1 - (Number(line.discount) || 0) / 100);
+  const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
+  const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
+  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId) ?? taxSnapshot(null);
+  const price_unit = tax.tax_include && tax.tax_type !== 'fixed' ? Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6 : net;
+  return { ...kept, price_unit, ...tax };
+}
+
 /** Draft one linked purchase in the enabled customer company after sale confirmation. */
 export function interCompanyRules(db, saleOrderId) {
   const sale = read(db, 'sale.order', saleOrderId);
@@ -127,9 +146,10 @@ export function interCompanyRules(db, saleOrderId) {
   if (!seller?.partner_id) throw new Error('Set the selling company and its contact first');
   const existing = (db.records['purchase.order'] ?? []).find((p) => p.auto_sale_id === sale.id);
   if (existing) return write(db, 'sale.order', sale.id, { auto_purchase_id: existing.id });
+  const fpId = fiscalPositionFor(db, seller.partner_id);
   const purchase = create(db, 'purchase.order', {
     company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name,
-    order_line: (sale.order_line ?? []).map(({ qty_delivered, qty_invoiced, ...line }) => ({ ...line })),
+    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId)),
     ...(sale.currency_id ? { currency_id: sale.currency_id } : {}),
   });
   return write(purchase.db, 'sale.order', sale.id, { auto_purchase_id: purchase.id });
