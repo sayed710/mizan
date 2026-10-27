@@ -1,6 +1,6 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
-import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { moveDeleteGuard, moveGuard } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -30,11 +30,13 @@ export function postMove(db, id) {
   const year = (r.invoice_date ?? today()).slice(0, 4);
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
   if (!isInvoice(r)) {
+    if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids)) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     return write(db, 'account.move', id, { state: 'posted', name });
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
+  if (!(total(r) > 0)) throw new Error('The total must be positive; use a credit note or refund instead');
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
@@ -213,7 +215,8 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
-    guard: moveGuard,
+    // Posted journal items keep non-negative debits and credits, whoever sends them.
+    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     protectDelete: moveDeleteGuard,
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
