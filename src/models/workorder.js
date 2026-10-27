@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { moreModels, explode } from './more.js';
 import { accountId, postEntry } from './ledger.js';
-import { capitalizeStock } from './valuation.js';
+import { capitalizeStock, costMethod } from './valuation.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const get = (db, model, id) => {
@@ -115,6 +115,8 @@ export function postOperationCost(db, productionId) {
   const cost = productionCost(db, productionId).operations;
   if (!cost) return db;
   if (read(db, 'product', mo.product_id)?.valuation === 'manual_periodic') return db;
+  // A standard-cost product is stocked at its standard: operation costs stay in expenses as part of the variance.
+  if (costMethod(db, mo.product_id) === 'standard') return db;
   if (cost < 0 || !accountId(db, '110100') || !accountId(db, '600000')) throw new Error('Operation costs require stock valuation and expense accounts');
   const entry = postEntry(db, { journal: 'MISC', ref: `Operation costs ${mo.name}`, lines: [{ account: '110100', debit: cost }, { account: '600000', credit: cost }] });
   const next = mo.state === 'done' ? capitalizeStock(entry.db, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: entry.id }) : entry.db;

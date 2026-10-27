@@ -152,7 +152,7 @@ test('split POS tenders deliver exactly the original quantity and preserve the t
 
 test('production transfers actual FIFO component value into finished stock with no interim debt', () => {
   const component = product();
-  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99, cost_method: 'standard' });
+  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99 });
   const bom = create(finished.db, 'mrp.bom', { name: 'Wiring BOM', product_id: finished.id, product_qty: 1, components: [{ product_id: component.id, qty: 2 }] });
   const mo = create(bom.db, 'mrp.production', { product_id: finished.id, bom_id: bom.id, product_qty: 2 });
   const confirmed = confirmMo(mo.db, read(mo.db, 'mrp.production', mo.id));

@@ -201,7 +201,7 @@ export const salesModels = {
                 }
                 const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
                   : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200', actualCost: true } : {} };
+                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
               });
               return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id });
             } });

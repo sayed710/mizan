@@ -103,8 +103,11 @@ test('actual component and operation costs produce one balanced posted MISC entr
   assert.equal(productionCost(unrecorded, f.id).components, read(unrecorded, 'product', 7).cost * 2);
   const fractional = write(f.db, 'mrp.workorder', f.b, { time_ids: [{ employee_id: 1, date_start: at('09:15'), date_end: '2026-10-19T09:16:01Z', minutes: 61 / 60, loss: 'productive' }] });
   assert.equal(workorderCost(fractional, f.b), 0.51);
-  const booked = postOperationCost(f.db, f.id);
-  assert.equal(search(booked, 'account.move').length, search(f.db, 'account.move').length + 1);
+  // The seeded product is standard-cost: its operation costs stay in expenses as variance, nothing is capitalized.
+  assert.strictEqual(postOperationCost(f.db, f.id), f.db);
+  const fifo = write(f.db, 'product', f.bom.product_id, { cost_method: 'fifo' });
+  const booked = postOperationCost(fifo, f.id);
+  assert.equal(search(booked, 'account.move').length, search(fifo, 'account.move').length + 1);
   const entry = read(booked, 'account.move', read(booked, 'mrp.production', f.id).operation_cost_move_id);
   assert.equal(entry.state, 'posted');
   assert.equal(entry.journal_id, journalId(booked, 'MISC'));

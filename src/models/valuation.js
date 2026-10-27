@@ -63,24 +63,28 @@ function addLayer(db, vals) {
   return postValuation(result.db, result.id);
 }
 
-/** Receive and increase stock; standard costing expenses the purchase price difference. */
-export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, actualCost = false, pickingId } = {}) {
+/**
+ * Receive and increase stock. Standard costing always values at the standard price and books the gap to the
+ * actual cost (purchase price, production cost, refund cost) as a variance, so the standard never drifts.
+ */
+export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, pickingId } = {}) {
   nonnegative(qty, 'Quantity');
   nonnegative(unitCost, 'Unit cost');
   if (!qty) throw new Error('Receive a positive quantity');
   let next = prepare(db, productId, date);
   const p = product(next, productId);
   const method = costMethod(next, productId);
-  const cost = method === 'standard' && !actualCost ? Number(p.cost) || 0 : unitCost;
+  const standard = method === 'standard';
+  const cost = standard ? Number(p.cost) || 0 : unitCost;
   const value = round(qty * cost);
   const onHand = Number(p.qty_available) || 0;
-  if (method !== 'standard' || actualCost) next = write(next, 'product', productId, {
-    cost: method === 'average' || method === 'standard' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
+  if (!standard) next = write(next, 'product', productId, {
+    cost: method === 'average' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
   });
   next = moveStock(next, [{ product_id: productId, qty }], 1);
   return addLayer(next, { product_id: productId, date, reference, description: reference || 'Receipt',
     quantity: qty, unit_cost: cost, value, remaining_qty: qty, remaining_value: value,
-    price_difference: method === 'standard' && !actualCost ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
+    price_difference: standard ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
 }
 
 function consume(db, productId, qty, method) {

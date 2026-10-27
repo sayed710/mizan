@@ -63,14 +63,34 @@ export function confirmMo(db, mo) {
  * Produce: consume what was recorded (to-consume by default, scaled to the quantity producing), stock the finished
  * product (with its lot), close work orders. Producing less than planned leaves a backorder MO for the rest.
  */
-export function produce(db, mo) {
-  if (['done', 'cancel'].includes(mo.state)) throw new Error('This manufacturing order is already processed');
+/** Quantities an MO will consume: what was recorded, else the BoM share for the quantity being produced. */
+function consumption(db, mo) {
   const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
   const planned = Number(mo.product_qty) || 0;
   const producing = Number(mo.qty_producing) > 0 ? Math.min(Number(mo.qty_producing), planned) : planned;
   const ratio = planned ? producing / planned : 1;
   const recorded = (m) => m.consumed !== null && m.consumed !== undefined && m.consumed !== '';
-  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : round2((Number(m.to_consume) || 0) * ratio) }));
+  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : round2((Number(m.to_consume) || 0) * ratio), expected: round2((Number(m.to_consume) || 0) * ratio) }));
+  return { moves, planned, producing, ratio, used };
+}
+
+/** Components consumed below the bill of materials (goods only), e.g. a 0 typed on a line. */
+export const underConsumed = (db, mo) => consumption(db, mo).used
+  .filter((c) => read(db, 'product', c.product_id)?.type === 'goods' && c.qty < c.expected - 1e-6);
+
+/** Produce button: consuming less than the BoM needs an explicit confirmation. */
+const produceButton = (db, mo) => {
+  const short = underConsumed(db, mo);
+  const allow = short.length > 0 && typeof confirm === 'function'
+    && confirm(`Less than the bill of materials is consumed for ${short.map((c) => read(db, 'product', c.product_id)?.name).join(', ')}. Produce anyway?`);
+  return produce(db, mo, { allowUnderConsumption: allow });
+};
+
+export function produce(db, mo, { allowUnderConsumption = false } = {}) {
+  if (['done', 'cancel'].includes(mo.state)) throw new Error('This manufacturing order is already processed');
+  const { moves, planned, producing, ratio, used } = consumption(db, mo);
+  const short = underConsumed(db, mo);
+  if (short.length && !allowUnderConsumption) throw new Error(`Less than the bill of materials is consumed for ${short.map((c) => read(db, 'product', c.product_id)?.name).join(', ')}; confirm to produce anyway`);
   const missing = used.find((c) => {
     const p = read(db, 'product', c.product_id);
     return p?.type === 'goods' && p.qty_available < c.qty;
@@ -94,7 +114,7 @@ export function produce(db, mo) {
       value += out.value;
     }
   }
-  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000', actualCost: true });
+  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000' });
   if (mo.operation_cost_move_id && product?.valuation !== 'manual_periodic') {
     const operation = read(stocked, 'account.move', mo.operation_cost_move_id);
     const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
@@ -281,7 +301,7 @@ export const moreModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmMo(db, r) }) },
         { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? []) }) }) },
         { label: 'Start', when: (r) => r.state === 'confirmed', vals: { state: 'progress' } },
-        { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produce },
+        { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produceButton },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) },
       ],
       title: 'name',
