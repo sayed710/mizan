@@ -36,8 +36,8 @@ export function postPayment(db, p) {
   const { db: applied, left } = open.reduce((acc, m) => {
     const take = round(Math.min(acc.left, m.amount_residual));
     if (!(take > 0)) return acc;
-    const released = releaseCashBasis(acc.db, m, take / m.amount_total, date);
-    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId }] });
+    const released = releaseCashBasis(acc.db, m, take / m.amount_total, date, { final: take >= m.amount_residual });
+    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: take }] });
     return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - take) };
   }, { db: booked, left: amount });
   return write(applied, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: left });

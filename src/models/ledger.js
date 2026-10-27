@@ -1,6 +1,6 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
-import { nextName, subtotal, today } from './common.js';
+import { amounts, nextName, subtotal, today } from './common.js';
 import { rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
 
@@ -69,8 +69,13 @@ export function invoiceLines(db, move) {
     byTax.set(account, (byTax.get(account) ?? 0) + lineTaxOf(l));
   }
   const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
-  const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
-  const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
+  // The receivable/payable is the document total; cents lost rounding each account go to the largest base line.
+  const total = round(amounts(move.invoice_line_ids).total / rate);
+  const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, [, a]) => s + a, 0));
+  if (gap && bases.length) {
+    const largest = bases.reduce((best, b, i) => (Math.abs(b[1]) > Math.abs(bases[best][1]) ? i : best), 0);
+    bases[largest] = [bases[largest][0], round(bases[largest][1] + gap)];
+  }
   const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
