@@ -1,6 +1,7 @@
 // Event talks, sponsors, booths, questions, and attendee operations.
 import { create, read, search, write } from '../orm.js';
 import { pad, today } from './common.js';
+import { moreModels } from './more.js';
 
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const eventField = { type: 'many2one', relation: 'event.event', label: 'Event', required: true };
@@ -37,15 +38,6 @@ function makeInvoice(db, { partner_id, origin, name, price }) {
     invoice_origin: origin,
     invoice_line_ids: [{ product_id: null, name, qty: 1, price_unit: Number(price) || 0, tax: 14 }],
   });
-}
-
-/** A deterministic event badge with a decimal checksum digit. */
-export function generateBadge(registration) {
-  const event = String(registration.event_id ?? '0');
-  const id = String(registration.id ?? '0').padStart(5, '0');
-  const body = `EV${event}-${id}`;
-  const checksum = [...body].filter((char) => /\d/.test(char)).reduce((sum, char) => sum + Number(char), 0) % 10;
-  return `${body}${checksum}`;
 }
 
 /** Check in one attendee by badge, returning a new database or refusing an invalid scan. */
@@ -189,7 +181,20 @@ export function eventDashboard(db, eventId) {
   };
 }
 
+const baseEvent = moreModels['event.event'];
+
 export const eventsPlusModels = {
+  'event.event': {
+    ...baseEvent,
+    form: {
+      ...baseEvent.form,
+      buttons: [...(baseEvent.form.buttons ?? []), { label: 'Invoice Registrations', when: (r) => (r.ticket_ids ?? []).some((t) => Number(t.price) > 0), run: (db, r) => {
+        const out = invoiceRegistrations(db, r.id);
+        if (!out.invoices.length) throw new Error('Every priced registration is already invoiced');
+        return { db: out.db };
+      } }],
+    },
+  },
   'event.registration': {
     label: 'Attendees',
     fields: {

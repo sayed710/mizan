@@ -179,7 +179,11 @@ export const frontdeskPlusModels = {
     defaults: () => ({ host_selection: true, ask_phone: 'optional', ask_email: 'optional', ask_company: 'optional', drink_offer: false, drink_ids: [], self_check_in: true, notify_host: 'chat', theme_color: '#714B67' }),
     list: ['name', 'self_check_in', 'notify_host'],
     kanban: { title: 'name', lines: ['notify_host'] },
-    form: { title: 'name', groups: [['host_selection', 'self_check_in'], ['ask_phone', 'ask_email', 'ask_company'], ['notify_host', 'theme_color', 'drink_offer']], tabs: [{ label: 'Drinks', fields: ['drink_ids'] }] },
+    form: {
+      title: 'name', groups: [['host_selection', 'self_check_in'], ['ask_phone', 'ask_email', 'ask_company'], ['notify_host', 'theme_color', 'drink_offer']], tabs: [{ label: 'Drinks', fields: ['drink_ids'] }],
+      // End of day: everyone still on site is checked out now.
+      buttons: [{ label: 'Check Out All Visitors', run: (db) => ({ db: checkOutAll(db, now()) }) }],
+    },
   },
   [MODEL]: {
     ...base,

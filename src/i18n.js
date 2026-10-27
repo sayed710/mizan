@@ -778,6 +778,9 @@ const ar = {
   'Download backup': 'تنزيل نسخة احتياطية', 'Restore backup': 'استعادة نسخة احتياطية', 'Backup restored.': 'تمت استعادة النسخة الاحتياطية.',
   'Invalid backup file.': 'ملف النسخة الاحتياطية غير صالح.', 'Records stored': 'السجلات المخزنة', 'Payment amount': 'مبلغ الدفعة',
   'New on-hand quantity': 'الكمية الجديدة المتاحة', 'record created': 'تم إنشاء السجل', 'Payment of {amount} registered': 'تم تسجيل دفعة بقيمة {amount}',
+  // buttons for previously unreachable functions (MOD-007)
+  'Invoice Registrations': 'فوترة التسجيلات', 'Check Out All Visitors': 'تسجيل خروج كل الزوار', 'Apply Vendor Prices': 'تطبيق أسعار المورد',
+  'Re-invoice to Sales Orders': 'إعادة الفوترة على أوامر البيع', 'Every priced registration is already invoiced': 'كل التسجيلات المدفوعة مفوترة بالفعل',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

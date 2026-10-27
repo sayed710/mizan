@@ -197,6 +197,7 @@ export const expensePlusModels = {
           return { db: reason === null ? db : refuseSheet(db, r.id, reason) };
         } },
         { label: 'Post Journal Entries', primary: true, when: (r) => r.state === 'approve', run: (db, r) => ({ db: postSheet(db, r.id, r.accounting_date) }) },
+        { label: 'Re-invoice to Sales Orders', when: (r) => ['post', 'done'].includes(r.state), run: (db, r) => ({ db: reinvoiceExpenses(db, r.id) }) },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'post', run: (db, r) => {
           const amount = prompt('Reimbursement amount', String(round(r.total_amount - r.amount_paid)));
           return { db: amount === null ? db : registerPayment(db, r.id, amount) };
