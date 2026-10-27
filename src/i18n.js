@@ -48,7 +48,7 @@ const ar = {
   // form
   'Record not found.': 'السجل غير موجود.', 'Back to': 'العودة إلى', 'Previous record': 'السجل السابق', 'Next record': 'السجل التالي',
   'Log an internal note…': 'سجّل ملاحظة داخلية…', 'Log note': 'تسجيل ملاحظة', 'No messages yet.': 'لا توجد رسائل بعد.',
-  'Add a description…': 'أضف وصفاً…', 'Add a tag…': 'أضف وسماً…', 'Add a line': 'إضافة بند', 'Select a product…': 'اختر منتجاً…',
+  'Add a description…': 'أضف وصفاً…', 'Enter a number': 'أدخل رقماً', 'Add a tag…': 'أضف وسماً…', 'Add a line': 'إضافة بند', 'Select a product…': 'اختر منتجاً…',
   Subtotal: 'المجموع الفرعي', Archived: 'مؤرشف', 'Could not save': 'تعذّر الحفظ', 'is required': 'مطلوب',
   // buttons
   Won: 'مكسوبة', Lost: 'خاسرة', Restore: 'استعادة', 'Send by Email': 'إرسال بالبريد', Confirm: 'تأكيد', 'Create Invoice': 'إنشاء فاتورة',

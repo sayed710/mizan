@@ -1,6 +1,6 @@
 // Quotation templates, optional products, validity, online signature and prepayment.
 import { create, postNote, read, search, write } from '../orm.js';
-import { addDays, amounts, nextName, productLines, today } from './common.js';
+import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
 import { paymentJournal, postEntry } from './ledger.js';
@@ -193,8 +193,8 @@ export const quotePlusModels = {
           return signature == null ? { db } : { db: signQuote(db, r.id, { name, signature }) };
         } },
         { label: 'Register Prepayment', when: (r) => editable(r) && r.require_payment, run: (db, r) => {
-          const amount = prompt('Prepayment amount', String(prepaymentAmount(r)));
-          return amount == null || amount === '' ? { db } : { db: payQuote(db, r.id, Number(amount)) };
+          const amount = promptedAmount(prompt('Prepayment amount', String(prepaymentAmount(r))));
+          return amount == null ? { db } : { db: payQuote(db, r.id, amount) };
         } },
       ],
     },

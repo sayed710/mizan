@@ -1,6 +1,6 @@
 // Expense reports preserve the standalone expense workflow while grouping accounting and approval.
 import { create, read, search, write, postNote } from '../orm.js';
-import { today, nextName } from './common.js';
+import { nextName, promptedAmount, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { moreModels } from './more.js';
 
@@ -198,8 +198,8 @@ export const expensePlusModels = {
         } },
         { label: 'Post Journal Entries', primary: true, when: (r) => r.state === 'approve', run: (db, r) => ({ db: postSheet(db, r.id, r.accounting_date) }) },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'post', run: (db, r) => {
-          const amount = prompt('Reimbursement amount', String(round(r.total_amount - r.amount_paid)));
-          return { db: amount === null ? db : registerPayment(db, r.id, amount) };
+          const amount = promptedAmount(prompt('Reimbursement amount', String(round(r.total_amount - r.amount_paid))));
+          return { db: amount == null ? db : registerPayment(db, r.id, amount) };
         } },
         { label: 'Reset to Draft', when: (r) => ['submit', 'approve', 'cancel'].includes(r.state), run: (db, r) => ({ db: resetSheet(db, r.id) }) },
       ],

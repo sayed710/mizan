@@ -10,7 +10,7 @@ import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } 
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { fiscalPositionFor } from './taxes.js';
-import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
+import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
 export function moveStock(db, lines = [], sign) {
@@ -284,10 +284,12 @@ export const salesModels = {
         {
           label: 'Update Quantity',
           run: (db, r) => {
-            const qty = prompt('New on-hand quantity', String(r.qty_available ?? 0));
-            if (qty == null || Number.isNaN(Number(qty)) || Number(qty) < 0) return { db };
+            const input = prompt('New on-hand quantity', String(r.qty_available ?? 0));
+            if (input == null || String(input).trim() === '') return { db };
+            const qty = parseAmount(input);
+            if (!(qty >= 0)) throw new Error(`"${input}" is not a valid quantity`);
             // An inventory adjustment, so stock valuation follows the new quantity.
-            return { db: adjustQuantity(db, r.id, Number(qty), { reference: `Quantity update: ${r.name}` }) };
+            return { db: adjustQuantity(db, r.id, qty, { reference: `Quantity update: ${r.name}` }) };
           },
           when: (r) => r.type === 'goods',
         },

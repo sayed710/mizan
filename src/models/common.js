@@ -18,6 +18,30 @@ export const pad = (n, size = 5) => String(n).padStart(size, '0');
 /** Line subtotal before tax, after the line discount (%); a price-included tax is taken out. */
 export const subtotal = lineUntaxed;
 
+/**
+ * A number typed by a person: Arabic-Indic digits, the Arabic decimal and thousands separators, spaces and
+ * well-formed thousands commas are accepted. NaN for anything else (a lone "1,5" is ambiguous, so it is refused).
+ */
+export function parseAmount(text) {
+  if (text == null) return NaN;
+  const s = String(text).trim()
+    .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x06F0))
+    .replace(/\u066B/g, '.').replace(/\u066C/g, ',').replace(/\u2212/g, '-')
+    .replace(/[\s\u00A0\u200E\u200F\u2066-\u2069]/g, '');
+  if (s.includes(',') && !/^[-+]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) return NaN;
+  const plain = s.replace(/,/g, '');
+  return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(plain) ? Number(plain) : NaN;
+}
+
+/** Amount answered in a prompt: null when cancelled or left empty, otherwise a positive number or an error. */
+export function promptedAmount(input) {
+  if (input == null || String(input).trim() === '') return null;
+  const amount = parseAmount(input);
+  if (!(amount > 0)) throw new Error(`"${input}" is not a valid amount`);
+  return amount;
+}
+
 /** @returns {{untaxed:number, tax:number, total:number}} */
 export function amounts(lines = []) {
   const untaxed = lines.reduce((s, l) => s + subtotal(l), 0);
