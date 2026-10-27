@@ -160,3 +160,52 @@ test('overridden rates, date onchange, validation and seed remain usable', () =>
   assert.throws(() => consolidate(db, 99999), /not found/);
   assert.ok(search(seed(), 'account.move').length > 0);
 });
+
+const sumOf = (result) => Math.round(result.lines.reduce((s, l) => s + l.total, 0) * 100) / 100;
+// Last year's sale, this period's sale and capital, booked on days with different rates.
+const history = (f) => {
+  let db = entry(f.db, f.child, '2089-12-31', sale(80));
+  db = entry(db, f.child, '2090-01-01', [{ account: '101401', debit: 200 }, { account: '301000', credit: 200 }]);
+  db = entry(db, f.child, '2090-01-02', sale(100));
+  return entry(db, f.parent, '2090-01-01', sale(20));
+};
+const fullChart = (f) => {
+  const chart = read(f.db, 'consolidation.chart', f.chart);
+  return write(f.db, 'consolidation.chart', f.chart, { account_ids: [...chart.account_ids, { code: 'EQ', name: 'Capital', account_type: 'equity', source_codes: '301000' }] });
+};
+
+test('every method gives balances that add up to zero, with translation difference and prior results', () => {
+  for (const [method, ownership] of [['full', 100], ['full', 60], ['proportional', 60], ['equity', 30]]) {
+    const f = fixture({ method, ownership });
+    const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+    assert.equal(sumOf(result), 0, `${method} ${ownership}%`);
+    assert.deepEqual(result.unmapped, []);
+  }
+});
+
+test('full consolidation below 100% gives the minority its share of equity and result', () => {
+  const f = fixture({ method: 'full', ownership: 60 });
+  const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+  const all = consolidate(history({ ...fixture(), db: fullChart(fixture()) }), f.id);
+  // Assets and the P&L stay at 100%.
+  assert.equal(row(result, 'CASH').by_company[f.child], row(all, 'CASH').by_company[f.child]);
+  assert.equal(row(result, 'SALES').by_company[f.child], row(all, 'SALES').by_company[f.child]);
+  const childEquity = ['EQ', 'EQUITY:RE', 'EQUITY:CTA'].reduce((s, code) => s + (row(all, code)?.by_company[f.child] ?? 0), 0);
+  const childResult = row(all, 'SALES').by_company[f.child];
+  assert.equal(row(result, 'EQUITY:NCI').by_company[f.child], Math.round(0.4 * (childEquity + childResult) * 100) / 100);
+  assert.equal(row(result, 'EQUITY:NCI_RESULT').by_company[f.child], Math.round(-0.4 * childResult * 100) / 100);
+});
+
+test('the equity method books the investment against the share of result and reserves', () => {
+  const f = fixture({ method: 'equity', ownership: 30 });
+  const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+  const investment = row(result, `EQUITY:${f.child}`).total;
+  assert.ok(investment > 0);
+  assert.equal(Math.round((investment + row(result, `EQUITY:${f.child}:RESULT`).total + row(result, `EQUITY:${f.child}:RESERVE`).total) * 100) / 100, 0);
+});
+
+test('a period that does not add up or has unmapped accounts cannot be closed', () => {
+  const f = fixture();
+  const db = entry(f.db, f.child, '2090-01-01', [{ account: '101401', debit: 200 }, { account: '301000', credit: 200 }]);
+  assert.throws(() => closePeriod(db, f.id), /Map these accounts before closing: 301000/);
+});
