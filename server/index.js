@@ -11,6 +11,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
+import { openBlobs, RASTER } from './blobs.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -68,9 +69,14 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
+const blobs = openBlobs(sql);
 let db = migrateAppointments(storage.load());
+{
+  const moved = blobs.externalize(db); // files saved inline before blobs existed
+  if (moved !== db) { storage.save(db, moved); db = moved; }
+}
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
-const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+const commitDb = (raw, { full = false } = {}) => { const next = blobs.externalize(raw); storage.save(full ? null : db, next); db = next; };
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
@@ -169,6 +175,17 @@ setInterval(() => { for (const k of failures.keys()) if (!recent(k).length) fail
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
 // ---- http helpers ----
+/** A stored file: raster images inline, anything else as a download so it never renders as a page on this origin. */
+function sendBlob(res, row, publicImage) {
+  if (!row || (publicImage && !RASTER.test(row.type))) return send(res, 404, { error: 'Not found' });
+  const inline = RASTER.test(row.type);
+  res.writeHead(200, {
+    ...SECURITY_HEADERS, 'Content-Type': inline ? row.type : 'application/octet-stream',
+    'Cache-Control': 'private, max-age=31536000, immutable', ...(inline ? {} : { 'Content-Disposition': 'attachment' }),
+  });
+  res.end(Buffer.from(row.data));
+}
+
 const send = (res, status, body, headers = {}) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(JSON.stringify(body));
@@ -259,6 +276,9 @@ async function api(req, res, path) {
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, siteOf(req));
+  // Website images by their random id (the id is only shown where the image is shown).
+  const imagePath = /^\/api\/public\/image\/([0-9a-f]{32})$/.exec(path);
+  if (imagePath && req.method === 'GET') return sendBlob(res, blobs.get(imagePath[1]), true);
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
@@ -429,6 +449,8 @@ async function api(req, res, path) {
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
+  const blobPath = /^\/api\/blob\/([0-9a-f]{32})$/.exec(path);
+  if (blobPath && req.method === 'GET') return sendBlob(res, blobs.get(blobPath[1]), false);
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {

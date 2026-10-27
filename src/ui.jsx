@@ -91,6 +91,9 @@ function TagsInput({ value = [], onChange }) {
 const MAX_FILE = 2 * 1024 * 1024;
 
 /** File field stored inline as { name, type, size, data(URL) }; capped so the shared database stays small. */
+/** Link to an uploaded file: inline data URL, or the server's stored copy. */
+const fileUrl = (v) => (/^data:/.test(v?.data ?? '') ? v.data : /^[0-9a-f]{32}$/.test(v?.blob ?? '') ? `/api/blob/${v.blob}` : null);
+
 function FileInput({ id, value, onChange }) {
   const [error, setError] = useState(null);
   const pick = (file) => {
@@ -102,7 +105,7 @@ function FileInput({ id, value, onChange }) {
   };
   return (
     <div className="file-input">
-      {/^data:/.test(value?.data ?? '') && <a href={value.data} download={value.name}>⬇ {value.name}</a>}
+      {fileUrl(value) && <a href={fileUrl(value)} download={value.name}>⬇ {value.name}</a>}
       <input id={id} type="file" onChange={(e) => pick(e.target.files[0])} />
       {error && <span className="req">{error}</span>}
     </div>

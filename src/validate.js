@@ -33,7 +33,10 @@ export function cleanValue(field, value, where) {
       if (!Array.isArray(value) || value.length > 50 || !value.every((x) => typeof x === 'string')) fail(where);
       return value.map((x) => x.slice(0, 50));
     case 'binary':
-      if (!isPlain(value) || typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
+      // Inline upload (data URL) or a file the server already stored ({ blob: id }).
+      if (!isPlain(value)) fail(where);
+      if (typeof value.blob === 'string' && /^[0-9a-f]{32}$/.test(value.blob)) return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, blob: value.blob };
+      if (typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
       return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, data: value.data };
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
