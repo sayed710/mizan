@@ -574,7 +574,8 @@ export const moreModels = {
     pivot: { row: 'plan', col: 'stage', measure: 'recurring_monthly' },
     form: {
       statusbar: 'stage',
-      statusbarClickable: true,
+      // Stage changes go through Start / Close / Reopen so their bookkeeping runs.
+      statusbarClickable: false,
       buttons: [
         { label: 'Start', primary: true, vals: { stage: 'progress' }, when: (r) => r.stage === 'draft' },
         { label: 'Generate Invoice', primary: true, when: (r) => r.stage === 'progress', run: invoiceSubscription },
