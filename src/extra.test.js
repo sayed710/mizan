@@ -35,9 +35,13 @@ test('sending to an empty list fails clearly', () => {
 });
 
 test('signing requires the typed signature (prompt) and locks the document', () => {
-  const db = seed();
-  const req = search(db, 'sign.request').find((r) => r.state === 'sent');
+  const base = seed();
+  const sent = search(base, 'sign.request').find((r) => r.state === 'sent');
   globalThis.prompt = () => 'Gulf Interiors';
+  // Staff never sign for the customer; only a company signer signs in the app.
+  assert.throws(() => run(base, 'sign.request', sent.id, 'Sign Now'), /own signing link|not available/);
+  const db = write(base, 'sign.request', sent.id, { signer_ids: [{ partner_id: sent.partner_id, role: 'company', signed: false, token: 'a'.repeat(64) }] });
+  const req = read(db, 'sign.request', sent.id);
   const signed = read(run(db, 'sign.request', req.id, 'Sign Now').db, 'sign.request', req.id);
   assert.equal(signed.state, 'signed');
   assert.equal(signed.signature, 'Gulf Interiors');

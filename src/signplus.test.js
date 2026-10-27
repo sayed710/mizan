@@ -201,8 +201,11 @@ test('seed and legacy Sign Now prompt, document conversion and form metadata rem
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'prompt');
   globalThis.prompt = () => 'Legacy Signer';
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'prompt', previous); else delete globalThis.prompt; });
-  const signed = button(db, 'sign.request', r.id, 'Sign Now');
+  assert.throws(() => button(db, 'sign.request', r.id, 'Sign Now'), /own signing link/);
+  const company = write(db, 'sign.request', r.id, { signer_ids: [{ partner_id: r.partner_id, role: 'company', signed: false, token: r.token }] });
+  const signed = button(company, 'sign.request', r.id, 'Sign Now');
   assert.equal(get(signed, r.id).state, 'signed');
+  assert.equal(get(signed, r.id).signature, 'Legacy Signer');
   const file = create(db, 'documents.document', { name: 'Contract', partner_id: 1, file: 'contract.pdf' });
   const linked = button(file.db, 'documents.document', file.id, 'Request Signature');
   const d = read(linked, 'documents.document', file.id);
@@ -213,7 +216,16 @@ test('seed and legacy Sign Now prompt, document conversion and form metadata rem
 });
 
 test('template prompts gather typed fields; cancellation and refusal preserve their expected state', (t) => {
-  const { db, id } = fixture();
+  const customer = fixture();
+  globalThis.prompt = () => 'x';
+  assert.throws(() => button(customer.db, 'sign.request', customer.id, 'Sign'), /own signing link/);
+  assert.throws(() => button(customer.db, 'sign.request', customer.id, 'Refuse'), /own signing link/);
+  // A company signer signs in the app.
+  const base = seed();
+  const template = create(base, 'sign.template', { name: 'Agreement', item_ids: templateItems.map((i) => ({ ...i, role: i.role === 'customer' ? 'company' : i.role })) });
+  const draft = requestFromTemplate(template.db, template.id, { signers: [{ role: 'company', partner_id: 1 }, { role: 'employee', partner_id: 2 }], deadline: addDays(today(), 30) });
+  const { id } = draft;
+  const db = button(draft.db, 'sign.request', id, 'Send');
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'prompt');
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'prompt', previous); else delete globalThis.prompt; });
   globalThis.prompt = () => null;

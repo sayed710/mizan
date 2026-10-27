@@ -24,6 +24,7 @@ import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quo
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { search } from '../src/orm.js';
 import { createPortal } from './portal.js';
+import { createSigning, remindSigners, sendSignRequest } from './signing.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -36,6 +37,9 @@ const ACTIONS = {
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
+  // E-signature: email each signer their private link (server/signing.js serves the link).
+  '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store, baseUrl) => sendSignRequest(SMTP, db, b, baseUrl) },
+  '/api/sign/remind': { need: 'smtp', model: () => 'sign.request', run: (b, u, store, baseUrl) => remindSigners(SMTP, db, b, baseUrl) },
 };
 
 const SMTP = smtpConfig();
@@ -387,7 +391,7 @@ async function api(req, res, path) {
   if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
   const action = ACTIONS[path];
   if (action && req.method === 'POST') {
-    if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
+    if (action.need && !{ ...integrationStatus(), smtp: !!SMTP }[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
     if (action.admin && !user.isAdmin) return send(res, 403, { error: 'Admins only' });
     const body = await readJson(req);
     const model = action.model(body);
@@ -396,7 +400,7 @@ async function api(req, res, path) {
     try {
       const snapshot = db;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }), baseUrlOf(req));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
@@ -526,11 +530,13 @@ async function website(req, res, path) {
 }
 
 const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const signing = createSigning({ getDb: () => db, commitDb, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   try {
     if (await portal.handle(req, res)) return;
+    if (await signing(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {
