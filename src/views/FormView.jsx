@@ -6,6 +6,7 @@ import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
+import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 
@@ -47,13 +48,13 @@ function newDefaults(db, model, leaf, params) {
   return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
 }
 
-function Field({ db, model, name, value, onChange, readonly }) {
+function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
   return (
     <div className="field">
       <label htmlFor={id}>{t(field.label)}{field.required && <span className="req" aria-hidden="true">*</span>}</label>
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} /></div>
+      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} record={record} /></div>
     </div>
   );
 }
@@ -373,7 +374,7 @@ export function FormView({ leaf, id, base, params }) {
             <div className="groups">
               {def.form.groups.map((g, i) => (
                 <div key={i} className="group">
-                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} />)}
+                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
                 </div>
               ))}
             </div>
@@ -391,13 +392,13 @@ export function FormView({ leaf, id, base, params }) {
                         readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
                     )
                     // Plain fields in a tab get a label, like fields in the header groups.
-                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} />))}
+                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}
                   {footer.length > 0 && tab === 0 && (
                     <dl className="totals">
                       {footer.map((f) => (
                         <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
                           <dt>{t(def.fields[f].label)}</dt>
-                          <dd>{display(db, def.fields[f], current[f]) || money(0)}</dd>
+                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
                         </div>
                       ))}
                     </dl>
