@@ -71,8 +71,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const via = paymentJournal(db, payJournal);
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
-  const bank = toCompany(db, r.currency_id, value, date);
-  const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date);
+  const bank = toCompany(db, r.currency_id, value, date, r.company_id);
+  const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date, r.company_id);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
@@ -97,7 +97,7 @@ export function releaseCashBasis(db, r, share, date) {
   const sale = !isPurchase(r);
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
-  const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date))
+  const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id))
     .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
     .filter(([, amount]) => amount > 0);
   if (!due.length) return db;
@@ -133,7 +133,7 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap - 0.005) return paid;
   const sale = isInbound(r);
-  const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date);
+  const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date, r.company_id);
   const { db: booked } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`,
     lines: sale
@@ -169,6 +169,8 @@ const lineItem = {
     name: { type: 'char', label: 'Label' },
     debit: { type: 'monetary', label: 'Debit' },
     credit: { type: 'monetary', label: 'Credit' },
+    currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+    amount_currency: { type: 'monetary', label: 'Amount in Currency' },
   },
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };

@@ -46,7 +46,7 @@ export function invoiceLines(db, move) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
-  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today());
+  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
   const counterpart = accountId(db, sale ? '121000' : '211000');
   const base = accountId(db, sale ? '400000' : '600000');
   // Each line may override the income/expense account; amounts are grouped per account.
@@ -71,7 +71,12 @@ export function invoiceLines(db, move) {
   const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
   const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
   const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
-  const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
+  // Foreign lines also keep their amount in the document currency (signed like debit − credit).
+  const foreign = rate !== 1 && move.currency_id;
+  const side = (amount, debit) => {
+    const sign = debit !== refund ? 1 : -1;
+    return { debit: sign > 0 ? round(amount) : 0, credit: sign > 0 ? 0 : round(amount), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * amount * rate) } : {}) };
+  };
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
