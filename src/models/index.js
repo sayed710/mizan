@@ -85,7 +85,13 @@ export { today } from './common.js';
 export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...documentsPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels, ...warehouseModels, ...consolidationModels });
 models['hr.leave'].guard = leaveGuard;
 
-export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
+// Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
+const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
+export const viewsOf = (model) => {
+  const def = models[model];
+  const views = (def.views ?? ['kanban', 'list']).filter((v) => !SPEC_VIEWS.includes(v) || def[v]);
+  return views.length ? views : ['list'];
+};
 
 const customers = { key: 'customers', label: 'Customers', model: 'res.partner' };
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };

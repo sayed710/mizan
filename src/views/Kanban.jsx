@@ -6,8 +6,11 @@ import { commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';
 
+/** The model's kanban spec, or a generic title-only card when it has none. */
+const kanbanOf = (model) => models[model].kanban ?? { title: typeof models[model].form?.title === 'string' ? models[model].form.title : 'name', lines: [] };
+
 function Card({ db, model, rec, open, draggable }) {
-  const k = models[model].kanban;
+  const k = kanbanOf(model);
   const fields = models[model].fields;
   const counter = k.counter && search(db, k.counter.model).filter((r) => r[k.counter.field] === rec.id).length;
   return (
@@ -68,7 +71,7 @@ function QuickCreate({ model, vals, onDone }) {
 const DROPPABLE = ['selection', 'many2one', 'char', 'boolean'];
 
 export function Kanban({ db, model, records, open, groupBy, defaults }) {
-  const k = models[model].kanban;
+  const k = kanbanOf(model);
   const [quick, setQuick] = useState(null);
   const [over, setOver] = useState(null);
   const field = groupBy && models[model].fields[groupBy];
