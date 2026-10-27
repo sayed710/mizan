@@ -778,6 +778,14 @@ const ar = {
   'Download backup': 'تنزيل نسخة احتياطية', 'Restore backup': 'استعادة نسخة احتياطية', 'Backup restored.': 'تمت استعادة النسخة الاحتياطية.',
   'Invalid backup file.': 'ملف النسخة الاحتياطية غير صالح.', 'Records stored': 'السجلات المخزنة', 'Payment amount': 'مبلغ الدفعة',
   'New on-hand quantity': 'الكمية الجديدة المتاحة', 'record created': 'تم إنشاء السجل', 'Payment of {amount} registered': 'تم تسجيل دفعة بقيمة {amount}',
+  // simulated features (MOD-006)
+  Simulation: 'محاكاة', SMS: 'رسائل SMS',
+  '{channel} is not configured, so nothing will be sent. Mark it as sent anyway?': '{channel} غير مُعد، لذلك لن يتم إرسال أي شيء. هل تريد تسجيله كمُرسل على أي حال؟',
+  'Not sent: {channel} is not configured.': 'لم يُرسل: {channel} غير مُعد.',
+  'Accounts are not connected to any network. Mizan stores them but cannot sign in to or post on them.': 'الحسابات غير متصلة بأي شبكة. ميزان يحفظها فقط ولا يمكنه تسجيل الدخول إليها أو النشر عليها.',
+  'Posting only records the post in Mizan. Nothing is published on any network, and engagement numbers are entered by hand.': 'النشر يسجل المنشور داخل ميزان فقط. لا يُنشر أي شيء على أي شبكة، وأرقام التفاعل تُدخل يدويًا.',
+  'Email and SMS activities are marked as processed on schedule, but no email or SMS is sent.': 'أنشطة البريد والرسائل تُسجل كمنفذة في موعدها، لكن لا يُرسل أي بريد أو رسالة.',
+  'Share links are not served yet: there is no public page that opens them.': 'روابط المشاركة لا تعمل بعد: لا توجد صفحة عامة تفتحها.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

@@ -181,6 +181,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .lines .num { text-align: end; white-space: nowrap; }
 .total { display: flex; justify-content: flex-end; gap: 12px; font-size: 16px; margin-top: 14px; }
 .alert { background: #fdecea; color: var(--danger); border: 1px solid #f5c2bd; padding: 8px 12px; border-radius: 6px; margin-bottom: 10px; }
+.simulated { background: var(--brand-soft); border: 1px solid var(--border); border-inline-start: 4px solid var(--warn); padding: 8px 12px; border-radius: 6px; margin: 0 0 10px; }
 .ribbon { display: inline-block; background: var(--danger); color: #fff; padding: 2px 10px; border-radius: 4px; margin-bottom: 8px; font-weight: 600; }
 
 /* Chatter */
