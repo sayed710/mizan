@@ -36,8 +36,9 @@ npm run build
 npm start          # server + app on http://localhost:8069 (login required)
 ```
 
-On first start the server creates user `admin` and prints a random password
-(or set `MIZAN_ADMIN_PASSWORD`). Admins add users in **Settings**.
+On first start the server creates user `admin` with a random password, written to
+`<database>.admin-password` (readable only by the server's user; delete it after
+signing in), or set `MIZAN_ADMIN_PASSWORD`. Admins add users in **Settings**.
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
 `MIZAN_SECURE_COOKIE=1` when served over HTTPS.

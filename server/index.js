@@ -4,6 +4,7 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +50,8 @@ const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
 const COOKIE = 'mizan_session';
 
-const sql = new DatabaseSync(process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite'));
+const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
+const sql = new DatabaseSync(DB_PATH);
 sql.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -101,7 +103,14 @@ function createUser({ login, name, password, isAdmin = false, apps = '' }) {
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
   const password = process.env.MIZAN_ADMIN_PASSWORD ?? randomBytes(9).toString('base64url');
   createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
-  console.info(`Created user "admin". Password: ${process.env.MIZAN_ADMIN_PASSWORD ? '(from MIZAN_ADMIN_PASSWORD)' : password}`);
+  if (process.env.MIZAN_ADMIN_PASSWORD) console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
+  else {
+    // Logs are often shipped elsewhere; keep the generated secret in an owner-only file instead.
+    const file = `${DB_PATH}.admin-password`;
+    writeFileSync(file, `${password}
+`, { mode: 0o600 });
+    console.info(`Created user "admin". Its generated password is in ${file}; delete that file after signing in.`);
+  }
 }
 
 function checkPassword(login, password) {
