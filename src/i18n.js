@@ -792,6 +792,9 @@ const ar = {
   'Active Alerts': 'التنبيهات النشطة', 'Dispatch Board Today': 'لوحة التوزيع اليوم', 'Contracts to Renew (30 days)': 'عقود للتجديد (30 يومًا)',
   'Services Due': 'صيانات مستحقة', 'Certifications Expiring (90 days)': 'شهادات تنتهي (90 يومًا)', 'Overdue Document Requests': 'طلبات مستندات متأخرة',
   Analysis: 'التحليل', 'No data for this period.': 'لا توجد بيانات لهذه الفترة.',
+  // buttons for previously unreachable functions (MOD-007)
+  'Invoice Registrations': 'فوترة التسجيلات', 'Check Out All Visitors': 'تسجيل خروج كل الزوار', 'Apply Vendor Prices': 'تطبيق أسعار المورد',
+  'Re-invoice to Sales Orders': 'إعادة الفوترة على أوامر البيع', 'Every priced registration is already invoiced': 'كل التسجيلات المدفوعة مفوترة بالفعل',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
