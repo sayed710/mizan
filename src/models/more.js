@@ -55,6 +55,7 @@ const availability = (db, moves) => (moves.every((m) => {
 
 /** Confirm: lay out components and work orders and report whether components are in stock. */
 export function confirmMo(db, mo) {
+  if (read(db, 'mrp.production', mo.id)?.state !== 'draft') throw new Error('Only draft manufacturing orders can be confirmed');
   const { move_raw, workorders } = explode(db, mo);
   return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw) });
 }

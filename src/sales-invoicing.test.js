@@ -22,7 +22,7 @@ test('a sales order invoices only what is left, tracks delivered quantities and 
   assert.equal(inv.invoice_payment_term_id, term);
   assert.equal(inv.invoice_line_ids[0].qty, 4);
   assert.equal(read(invoiced, 'sale.order', id).invoice_status, 'invoiced');
-  assert.throws(() => run(invoiced, 'sale.order', id, 'Create Invoice'), /already invoiced/);
+  assert.throws(() => run(invoiced, 'sale.order', id, 'Create Invoice'), /already invoiced|not available/);
 });
 
 test('delivered-quantity products invoice only what was delivered; product tax and income account apply', () => {

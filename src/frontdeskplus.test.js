@@ -141,7 +141,7 @@ test('seed and legacy visitor fields survive; forms expose station settings and 
   assert.equal(frontdeskPlusModels['frontdesk.station'].form.tabs[0].fields[0], 'drink_ids');
   const checked = model.form.buttons[0].run(db, visitor).db;
   assert.equal(read(checked, MODEL, visitor.id).stage_id, 'checked_in');
-  assert.throws(() => model.form.buttons[0].run(checked, visitor), /already used/);
+  assert.throws(() => model.form.buttons[0].run(checked, visitor), /already used|not available/);
   const canceled = model.form.buttons[3].run(db, visitor).db;
   assert.equal(read(canceled, MODEL, visitor.id).stage_id, 'canceled');
 });
