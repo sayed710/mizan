@@ -128,7 +128,11 @@ export function moveValued(db, lines, sign, options = {}) {
     const p = read(next, 'product', l.product_id);
     const qty = Number(l.qty) || 0;
     if (!p || p.type !== 'goods' || !qty || !sign) return next;
-    if (p.valuation === 'manual_periodic') return moveStock(next, [l], sign);
+    if (p.valuation === 'manual_periodic') {
+      // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
+      if (sign < 0 && qty * -sign > (Number(p.qty_available) || 0) + 1e-8) throw new Error('Not enough stock to deliver');
+      return moveStock(next, [l], sign);
+    }
     const spec = { ...options, ...l.valuation_options };
     return sign > 0 ? receive(next, p.id, qty, l.unit_cost ?? p.cost ?? 0, spec) : deliver(next, p.id, qty, spec).db;
   }, db);
