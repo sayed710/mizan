@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
+import { appOpen } from './access.js';
+import { getDb, getUser } from './store.js';
 import { Navbar } from './Navbar.jsx';
 import { ActionView } from './views/ActionView.jsx';
 import { FormView } from './views/FormView.jsx';
@@ -46,7 +48,8 @@ export function App() {
     return null;
   }
   const app = apps.find((a) => a.id === route.app);
-  if (!app) return <Home />;
+  // Uninstalled apps and apps outside the user's allow-list are not reachable by URL either.
+  if (!app || !appOpen(getDb(), getUser(), app.id)) return <Home />;
   const leaf = findLeaf(app, route.menu);
   const base = `#/${app.id}/${leaf.key}`;
   const Page = PAGES[leaf.type];

@@ -4,6 +4,7 @@ import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, 
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
+import { myEmployeeId } from '../access.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { actionRecords, parseRel } from './ActionView.jsx';
@@ -103,13 +104,17 @@ function Activities({ db, model, id, name }) {
           </select>
           <input aria-label={t('Summary')} placeholder={t('Summary')} value={form.summary} onChange={(e) => setForm({ ...form, summary: e.target.value })} />
           <input aria-label={t('Due Date')} type="date" value={form.date_deadline} onChange={(e) => setForm({ ...form, date_deadline: e.target.value })} />
+          <select aria-label={t('Assigned to')} value={form.user_id ?? ''} onChange={(e) => setForm({ ...form, user_id: e.target.value ? Number(e.target.value) : null })}>
+            <option value="">—</option>
+            {search(db, 'hr.employee').map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
           <div className="row">
             <button type="button" className="btn primary sm" onClick={save}>{t('Schedule')}</button>
             <button type="button" className="btn sm" onClick={() => setForm(null)}>{t('Discard')}</button>
           </div>
         </div>
       ) : (
-        <button type="button" className="btn sm" onClick={() => setForm({ activity_type: 'todo', summary: '', date_deadline: today(), user_id: 1 })}>
+        <button type="button" className="btn sm" onClick={() => setForm({ activity_type: 'todo', summary: '', date_deadline: today(), user_id: myEmployeeId(db, getUser()) })}>
           🕓 {t('Schedule Activity')}
         </button>
       )}
@@ -212,7 +217,8 @@ export function FormView({ leaf, id, base, params }) {
   const query = `?view=${view}${relRaw ? `&rel=${relRaw}` : ''}`;
   const backHash = `${base}${query}`;
 
-  if (!isNew && !rec) {
+  // A record outside this menu's domain (e.g. a journal entry id under Invoices) is not shown under the wrong breadcrumb.
+  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec)))) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 

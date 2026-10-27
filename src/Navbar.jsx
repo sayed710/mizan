@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { companiesOf, currentCompany, switchCompany, useDb } from './store.js';
+import { companiesOf, currentCompany, getUser, isServer, logout, switchCompany, useDb } from './store.js';
+import { myEmployeeId } from './access.js';
 import { viewRecords as search } from './companyView.js';
 import { activityState } from './models/mail.js';
 import { t } from './i18n.js';
@@ -29,8 +30,36 @@ function MenuGroup({ app, menu, active }) {
   );
 }
 
+/** Avatar of the signed-in user, opening a menu with Settings and Log out. */
+export function UserMenu() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const user = getUser();
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const name = user?.name ?? 'Admin';
+  return (
+    <div className="nav-group user-menu" ref={ref}>
+      <button type="button" aria-expanded={open} aria-label={`${t('User menu')}: ${name}`} onClick={() => setOpen(!open)}><Avatar name={name} /></button>
+      {open && (
+        <div className="nav-dropdown" role="menu">
+          <span className="muted user-menu-name">{name}{user?.login ? ` (${user.login})` : ''}</span>
+          <a role="menuitem" href="#/settings/general" onClick={() => setOpen(false)}>{t('Settings')}</a>
+          {isServer() && <button type="button" role="menuitem" onClick={logout}>{t('Log out')}</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ActivityCounter({ db }) {
-  const due = search(db, 'mail.activity').filter((a) => ['overdue', 'today'].includes(activityState(a))).length;
+  // Only the signed-in user's activities once their login is linked to an employee; everyone's otherwise.
+  const mine = myEmployeeId(db, getUser());
+  const due = search(db, 'mail.activity').filter((a) => (!mine || a.user_id === mine) && ['overdue', 'today'].includes(activityState(a))).length;
   return (
     <a className="systray" href="#/discuss/activities" aria-label={`${t('Activities')}: ${due}`} title={t('Activities')}>
       <Icon name="timesheets" size={18} />
@@ -60,7 +89,7 @@ export function Navbar({ app, active }) {
           </select>
         )
         : <a className="company" href="#/settings/general">{db.settings?.company}</a>}
-      <Avatar name="Admin" />
+      <UserMenu />
     </header>
   );
 }
