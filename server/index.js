@@ -71,6 +71,15 @@ const storage = openStorage(sql);
 let db = migrateAppointments(storage.load());
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+const VISIT_WINDOW = 3600 * 1000;
+const visits = new Map();
+/** True the first time a visitor key is seen within the window. */
+const firstVisit = (key, now = Date.now()) => {
+  if (visits.get(key) > now - VISIT_WINDOW) return false;
+  if (visits.size > 100000) for (const [k, at] of visits) if (at <= now - VISIT_WINDOW) visits.delete(k);
+  visits.set(key, now);
+  return true;
+};
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
@@ -263,7 +272,8 @@ async function api(req, res, path) {
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
     const out = (blogRead[1] === 'blog' ? publicBlogPost : publicForumThread)(db, blogRead[2]);
-    if (out.db) commitDb(out.db);
+    // A visitor counts once per post per hour, so reloads and bots cannot turn reads into a stream of saves.
+    if (out.db && firstVisit(`${ip}:${path}`)) commitDb(out.db);
     return send(res, out.status, out.body);
   }
   const forumRoutes = { '/api/public/forum/ask': publicAsk, '/api/public/forum/answer': publicAnswer, '/api/public/forum/vote': publicVote };

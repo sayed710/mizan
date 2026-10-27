@@ -16,6 +16,8 @@ export function diffDb(prev, next) {
   const upserts = {};
   const deletes = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
+    // Untouched models keep the same array, so a save costs what changed rather than the whole database.
+    if (prev.records[model] === next.records[model]) continue;
     const before = byId(prev.records[model]);
     const after = byId(next.records[model]);
     const changed = [...after.values()].filter((r) => before.get(r.id) !== r);
@@ -39,6 +41,13 @@ export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
+// Serialized size per db snapshot, measured once and then carried forward by what each diff adds or removes.
+const sizes = new WeakMap();
+const json = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
+export const dbSize = (db) => {
+  if (!sizes.has(db)) sizes.set(db, json(db));
+  return sizes.get(db);
+};
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
 export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
@@ -49,19 +58,27 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   };
   installCustomFields(db.settings?.customFields);
   let records = { ...db.records };
+  let growth = 0;
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
+    // One working list per model, updated in place, instead of a copy of the model for every record.
+    const list = [...current.values()];
+    const position = new Map(list.map((r, i) => [r.id, i]));
+    const seen = { ...db, records: { ...records, [model]: list } };
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
-      const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
-      const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
+      const old = current.get(rec.id) ?? null;
+      const err = validate(model, rec) ?? models[model].guard?.(seen, old, rec, { isAdmin });
       if (err) throw new Error(err);
+      growth += json(rec) - json(old ?? undefined) + (old ? 0 : 1);
       current.set(rec.id, rec);
+      if (position.has(rec.id)) list[position.get(rec.id)] = rec;
+      else position.set(rec.id, list.push(rec) - 1);
     }
-    records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
+    records = { ...records, [model]: list.sort((a, b) => a.id - b.id) };
   }
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
@@ -70,6 +87,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
     const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
+    growth -= (records[model] ?? []).filter((r) => drop.has(r.id)).reduce((n, r) => n + json(r) + 1, 0);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
   const seq = { ...db.seq };
@@ -113,6 +131,11 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   };
   installCustomFields(settings.customFields);
   const next = { ...db, records, seq, settings, messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
-  if (JSON.stringify(next).length > MAX_DB_CHARS) throw new Error('Database size limit reached');
+  growth += incoming.reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
+  if (settings !== db.settings) growth += json(settings) - json(db.settings);
+  if (seq !== db.seq) growth += json(seq) - json(db.seq);
+  const size = dbSize(db) + growth;
+  if (size > MAX_DB_CHARS) throw new Error('Database size limit reached');
+  sizes.set(next, size);
   return next;
 }
