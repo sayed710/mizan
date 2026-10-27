@@ -1,4 +1,4 @@
-// Scheduled actions the server runs periodically (Odoo's cron jobs): recurring invoices, time-off accruals, preventive maintenance, replenishment, follow-ups, asset depreciation, bank auto-reconciliation, marketing automation, scheduled social posts, lead assignment and scoring, helpdesk assignment and auto-close, recurring project tasks.
+// Scheduled actions the server runs periodically (Odoo's cron jobs): recurring invoices, time-off accruals, preventive maintenance, replenishment, follow-ups, asset depreciation, bank auto-reconciliation, marketing automation, scheduled social posts, lead assignment and scoring, helpdesk assignment and auto-close, recurring project tasks, signature request expiry and blanket order expiry.
 import { today } from './common.js';
 import { subscriptionJobs } from './subscriptionplus.js';
 import { accrue } from './timeoff.js';
@@ -16,6 +16,8 @@ import { appraisalJobs } from './appraisalplus.js';
 import { expireQuotes } from './quoteplus.js';
 import { autoCheckout } from './attendanceplus.js';
 import { syncFromApplicant } from './skillsplus.js';
+import { expireRequests } from './signplus.js';
+import { blanketExpiryCheck } from './purchaseplus.js';
 
 /** New helpdesk tickets of teams that assign automatically get an owner; stale solved/waiting tickets close. */
 const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?? []).filter((t) => !t.user_id && t.team_id && t.stage_id === 'new')
@@ -38,7 +40,8 @@ export function runScheduledJobs(db, at = today()) {
   const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
     .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
   const ran = tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
-  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(tolerant(expireQuotes)(ran, at));
+  const expired = tolerant(blanketExpiryCheck)(tolerant(expireRequests)(tolerant(expireQuotes)(ran, at), at), at);
+  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(expired);
   // Referral stages follow their applicants (recruitment has no after-write hook).
   return (checkedOut.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), checkedOut);
 }
