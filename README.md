@@ -89,6 +89,7 @@ curl -H "Authorization: Bearer mzn_..." -H "Content-Type: application/json" -X P
 ```
 
 `GET/POST /api/v1/<model>`, `GET/PATCH/DELETE /api/v1/<model>/<id>` (search with `q`, paging with `limit`/`offset`).
+Send an `Idempotency-Key` header on POST to make retries safe: the same key returns the record created the first time (kept 24 hours).
 Writes go through the same validation as the web client.
 
 ## Architecture
