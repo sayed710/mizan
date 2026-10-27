@@ -527,7 +527,7 @@ const allApps = [
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
-  'pos', 'kitchen', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
+  'pos', 'kitchen', 'accounting', 'documents', 'spreadsheet', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
   'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'whatsapp', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
 
@@ -537,7 +537,7 @@ export const APP_INFO = {
   todo: ['Productivity', 'Organize your work'], knowledge: ['Productivity', 'Centralize your knowledge'], contacts: ['Sales', 'Centralize your address book'],
   crm: ['Sales', 'Track leads and close opportunities'], sales: ['Sales', 'From quotations to invoices'], dashboards: ['Productivity', 'Key figures across apps'],
   subscriptions: ['Sales', 'Recurring revenue and renewals'], rental: ['Sales', 'Rental contracts, pickups and returns'], pos: ['Sales', 'Shop checkout and payments'], kitchen: ['Sales', 'Send POS orders to the kitchen screen'],
-  accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'],
+  accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'], spreadsheet: ['Productivity', 'Spreadsheets on live business data'],
   project: ['Services', 'Tasks and projects'], timesheets: ['Services', 'Track time on tasks'], planning: ['Services', 'Employee schedules'],
   helpdesk: ['Services', 'Solve customer tickets'], website: ['Website', 'Website builder and online shop'], marketing: ['Marketing', 'Design, send and track emails'],
   events: ['Marketing', 'Organize events and registrations'], purchase: ['Supply Chain', 'Purchase orders and vendor bills'], inventory: ['Supply Chain', 'Stock and logistics'],
