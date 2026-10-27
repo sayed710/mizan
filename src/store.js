@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from 'react';
-import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
@@ -45,14 +44,17 @@ const notify = () => {
   listeners.forEach((l) => l());
 };
 
-function loadLocal() {
+// The demo seed is only needed in browser-only mode, so it is loaded on demand.
+const demoData = async () => (await import('./seed.js')).seed();
+
+async function loadLocal() {
   try {
     const saved = localStorage.getItem(KEY);
     if (saved) return JSON.parse(saved);
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
-  return seed();
+  return demoData();
 }
 
 async function api(path, body) {
@@ -72,22 +74,25 @@ async function pull() {
 
 /** Detect the backend; resolves to { mode, user }. A non-JSON answer means no backend (static/dev hosting). */
 export async function initStore() {
+  let r = null;
   try {
-    const r = await api('/api/session');
-    if (r.isJson) {
-      mode = 'server';
-      if (r.ok) {
-        user = r.data;
-        setAuthor(user.name);
-        await pull();
-        setInterval(() => { if (document.visibilityState === 'visible') inflight = inflight.then(pull); }, POLL_MS);
-      }
-      return { mode, user };
-    }
+    r = await api('/api/session');
   } catch {
     // no backend reachable: local mode
   }
-  db = loadLocal();
+  if (r?.isJson) {
+    mode = 'server';
+    if (r.ok) {
+      user = r.data;
+      setAuthor(user.name);
+      // A backend that answers but cannot serve the database is an error, not a reason to fall back to demo data.
+      await pull();
+      if (!db) throw new Error('The server did not return the database');
+      setInterval(() => { if (document.visibilityState === 'visible') inflight = inflight.then(pull); }, POLL_MS);
+    }
+    return { mode, user };
+  }
+  db = await loadLocal();
   applyContext();
   return { mode, user };
 }
@@ -124,7 +129,7 @@ export async function serverAction(path, body) {
 }
 
 export async function resetDemo() {
-  if (mode === 'local') return commit(seed());
+  if (mode === 'local') return commit(await demoData());
   const r = await api('/api/reset', {});
   if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }

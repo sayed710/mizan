@@ -207,3 +207,6 @@ input, select, textarea, button { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Startup and lazy-screen placeholder */
+.boot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 40vh; padding: 24px; color: var(--muted, #666); text-align: center; }

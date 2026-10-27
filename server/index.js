@@ -11,6 +11,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
+import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -208,15 +209,18 @@ async function serveStatic(req, res, status = 200, routeHash) {
   }
   try {
     let body = await readFile(file);
-    const headers = { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS };
+    const fallback = file === join(DIST, 'index.html');
+    const headers = { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS, 'Cache-Control': fallback ? 'no-cache' : cacheControl(path), Vary: 'Accept-Encoding' };
     if (extname(file) === '.html' && routeHash) {
       const script = `if (!location.hash) location.hash = ${JSON.stringify(routeHash).replace(/</g, '\\u003c')};`;
       body = body.toString().replace('</head>', `<script>${script}</script></head>`);
       headers['Content-Security-Policy'] += `; script-src 'self' 'sha256-${createHash('sha256').update(script).digest('base64')}'`;
       headers['Cache-Control'] = 'no-store';
     }
+    const encoded = encodeBody(file, body, req.headers['accept-encoding'], !fallback && isImmutable(path) && !routeHash);
+    if (encoded.encoding) headers['Content-Encoding'] = encoded.encoding;
     res.writeHead(status, headers);
-    res.end(body);
+    res.end(encoded.body);
   } catch {
     send(res, 404, { error: 'Run "npm run build" first' });
   }

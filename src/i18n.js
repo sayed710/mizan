@@ -572,7 +572,7 @@ const ar = {
   'An article cannot be moved under its own sub-article': 'لا يمكن نقل المقالة تحت إحدى مقالاتها الفرعية',
   'An article cannot be moved under itself or its sub-articles': 'لا يمكن نقل المقالة تحت نفسها أو تحت مقالاتها الفرعية',
   'Only articles in the trash can be deleted': 'لا يمكن حذف إلا المقالات الموجودة في المهملات', 'Version not found': 'النسخة غير موجودة',
-  'This screen could not be displayed': 'تعذر عرض هذه الشاشة', 'Try again': 'حاول مرة أخرى',
+  'This screen could not be displayed': 'تعذر عرض هذه الشاشة', 'Try again': 'حاول مرة أخرى', 'Loading…': 'جارٍ التحميل…', 'Mizan could not start': 'تعذر تشغيل ميزان',
   // lunch
   'Order Deadline (HH:MM)': 'آخر موعد للطلب (س:د)', 'Send Order By': 'إرسال الطلب عبر', 'No Delivery': 'بدون توصيل', 'Send Orders': 'إرسال الطلبات',
   'Vendor Name': 'اسم المورد', Available: 'متاح', 'Favorite of': 'مفضل لدى', Extras: 'الإضافات', 'Mark Received': 'تأكيد الاستلام',
