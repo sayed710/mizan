@@ -314,6 +314,9 @@ export const Icon = ({ name, size = 18 }) => (
 );
 
 /** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
+/** Placeholder while the data or a screen's code is loading. */
+export const Loading = () => <div className="boot" role="status" aria-live="polite">{t('Loading…')}</div>;
+
 export class ErrorBoundary extends Component {
   constructor(props) {
     super(props);

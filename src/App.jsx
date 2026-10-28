@@ -1,26 +1,34 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useDb } from './store.js';
 import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
 import { Navbar } from './Navbar.jsx';
 import { ActionView } from './views/ActionView.jsx';
 import { FormView } from './views/FormView.jsx';
-import { Dashboard } from './views/Dashboard.jsx';
-import { Settings } from './views/Settings.jsx';
-import { Pos } from './views/Pos.jsx';
-import { Discuss } from './views/Discuss.jsx';
-import { Reports } from './views/Reports.jsx';
-import { Barcode, Overview, ShopFloor } from './views/Pages.jsx';
-import { Website } from './views/Website.jsx';
-import { AppStore, CapTable, Kiosk } from './views/AppStore.jsx';
-import { SurveyResults, SurveyTake } from './views/Survey.jsx';
-import { ErrorBoundary } from './ui.jsx';
-import { Spreadsheet } from './views/Spreadsheet.jsx';
-import { Studio } from './views/Studio.jsx';
-import { Kitchen } from './views/Kitchen.jsx';
-import { Knowledge } from './views/Knowledge.jsx';
-import { PrintDoc } from './views/PrintDoc.jsx';
-import { AnalysisPage } from './views/Analysis.jsx';
+import { ErrorBoundary, Loading } from './ui.jsx';
+
+// Screens outside the list/form views load on first visit.
+const view = (load, name) => lazy(() => load().then((m) => ({ default: m[name] })));
+const Dashboard = view(() => import('./views/Dashboard.jsx'), 'Dashboard');
+const Settings = view(() => import('./views/Settings.jsx'), 'Settings');
+const Pos = view(() => import('./views/Pos.jsx'), 'Pos');
+const Discuss = view(() => import('./views/Discuss.jsx'), 'Discuss');
+const Reports = view(() => import('./views/Reports.jsx'), 'Reports');
+const Barcode = view(() => import('./views/Pages.jsx'), 'Barcode');
+const Overview = view(() => import('./views/Pages.jsx'), 'Overview');
+const ShopFloor = view(() => import('./views/Pages.jsx'), 'ShopFloor');
+const Website = view(() => import('./views/Website.jsx'), 'Website');
+const AppStore = view(() => import('./views/AppStore.jsx'), 'AppStore');
+const CapTable = view(() => import('./views/AppStore.jsx'), 'CapTable');
+const Kiosk = view(() => import('./views/AppStore.jsx'), 'Kiosk');
+const SurveyResults = view(() => import('./views/Survey.jsx'), 'SurveyResults');
+const SurveyTake = view(() => import('./views/Survey.jsx'), 'SurveyTake');
+const Spreadsheet = view(() => import('./views/Spreadsheet.jsx'), 'Spreadsheet');
+const Studio = view(() => import('./views/Studio.jsx'), 'Studio');
+const Kitchen = view(() => import('./views/Kitchen.jsx'), 'Kitchen');
+const Knowledge = view(() => import('./views/Knowledge.jsx'), 'Knowledge');
+const PrintDoc = view(() => import('./views/PrintDoc.jsx'), 'PrintDoc');
+const AnalysisPage = view(() => import('./views/Analysis.jsx'), 'AnalysisPage');
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -54,7 +62,7 @@ export function App() {
     return () => window.removeEventListener('mizan:remapped', follow);
   }, []);
 
-  if (route.app === 'print') return <PrintDoc model={route.menu} id={route.id} />;
+  if (route.app === 'print') return <Suspense fallback={<Loading />}><PrintDoc model={route.menu} id={route.id} /></Suspense>;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
     location.replace(`${targetOf(route.menu, db.settings?.uninstalled)}/${route.id}`);
@@ -75,7 +83,7 @@ export function App() {
   return (
     <div className="shell">
       <Navbar app={app} active={leaf.key} />
-      <ErrorBoundary key={location.hash.split('?')[0]}>{content}</ErrorBoundary>
+      <ErrorBoundary key={location.hash.split('?')[0]}><Suspense fallback={<Loading />}>{content}</Suspense></ErrorBoundary>
     </div>
   );
 }

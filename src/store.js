@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from 'react';
-import { seed } from './seed.js';
 import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
 import { createQueue } from './queue.js';
 import { migrate } from './migrations.js';
@@ -53,14 +52,17 @@ const notify = () => {
   listeners.forEach((l) => l());
 };
 
-function loadLocal() {
+// The demo seed is only needed in browser-only mode, so it is loaded on demand.
+const demoData = async () => (await import('./seed.js')).seed();
+
+async function loadLocal() {
   try {
     const saved = localStorage.getItem(KEY);
     if (saved) return migrate(JSON.parse(saved));
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
-  return seed();
+  return demoData();
 }
 
 async function api(path, body, headers = {}) {
@@ -103,13 +105,14 @@ export async function initStore() {
       user = session.data;
       setAuthor(user.name);
       setActor(user);
-      // Never fall back to demo data here: the next save would write it over the real records.
+      // A backend that answers but cannot serve the database is an error, not a reason to fall back to demo data.
       await pull();
+      if (!db) throw new Error('The server did not return the database');
       setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
     }
     return { mode, user };
   }
-  db = loadLocal();
+  db = await loadLocal();
   applyContext();
   return { mode, user };
 }
@@ -195,7 +198,7 @@ export async function restoreBackup(backup, confirm) {
 }
 
 export async function resetDemo() {
-  if (mode === 'local') return commit(seed());
+  if (mode === 'local') return commit(await demoData());
   const r = await api('/api/reset', { confirm: 'RESET' });
   if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }

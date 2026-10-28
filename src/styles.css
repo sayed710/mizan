@@ -239,3 +239,6 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .wizard-choices { border: 0; padding: 0; margin: 0; display: grid; gap: 4px; max-block-size: 220px; overflow: auto; }
 .wizard-choices .check { display: flex; gap: 6px; align-items: center; }
 .wizard .sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Startup and lazy-screen placeholder */
+.boot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 40vh; padding: 24px; color: var(--muted, #666); text-align: center; }
