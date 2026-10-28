@@ -1,4 +1,5 @@
 // Model registry + application menus. Every view is rendered from these definitions.
+import { read } from '../orm.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
@@ -83,6 +84,21 @@ import { documentsPlusModels } from './documentsplus.js';
 export { today } from './common.js';
 
 export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...documentsPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels, ...warehouseModels, ...consolidationModels });
+
+// A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
+// a server action) runs through this check, so a hidden transition cannot run.
+// The record is judged as stored, so a stale copy cannot pass for its old state.
+for (const [name, model] of Object.entries(models)) {
+  for (const b of model.form?.buttons ?? []) {
+    if (!b.when || !b.run || b.run.checked) continue;
+    const run = b.run;
+    b.run = Object.assign((db, rec, ...rest) => {
+      const current = (rec?.id && read(db, name, rec.id)) || rec;
+      if (!b.when(current, db)) throw new Error(`${b.label} is not available for this record in its current state`);
+      return run(db, current, ...rest);
+    }, { checked: true });
+  }
+}
 models['hr.leave'].guard = leaveGuard;
 
 export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];

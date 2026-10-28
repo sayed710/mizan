@@ -202,7 +202,7 @@ test('every inherited document field, filter, view and button survives, includin
   assert.equal(doc(button(locked, 'Unlock').db, made.id).locked, false);
   const linked = button(made.db, 'Create Vendor Bill').db;
   assert.equal(doc(linked, made.id).res_model, 'account.move');
-  assert.throws(() => button(linked, 'Create Vendor Bill'), /already linked/);
+  assert.throws(() => button(linked, 'Create Vendor Bill'), /already linked|not available/);
   assert.match(button(made.db, 'Share').go, /^#\/open\/documents.share\//);
 });
 

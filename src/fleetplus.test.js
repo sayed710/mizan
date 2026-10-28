@@ -157,7 +157,7 @@ test('service buttons enforce transitions and synchronize legacy writable fields
   assert.equal(read(running, 'fleet.service', log.id).stage_id, 'running');
   const done = run(running, log.id, 'Done');
   assert.equal(read(done, 'fleet.service', log.id).state, 'done');
-  assert.throws(() => run(done, log.id, 'Cancel'), /status change/);
+  assert.throws(() => run(done, log.id, 'Cancel'), /status change|not available/);
   assert.equal(read(run(log.db, log.id, 'Cancel'), 'fleet.service', log.id).state, 'cancelled');
   const changed = write(log.db, 'fleet.service', log.id, { amount: 75, stage_id: 'running' });
   assert.equal(read(changed, 'fleet.service', log.id).cost, 75);

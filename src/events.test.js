@@ -58,7 +58,7 @@ test('a document becomes a vendor bill once, and a request is fulfilled by uploa
   const doc = read(out.db, 'documents.document', id);
   assert.equal(doc.res_model, 'account.move');
   assert.equal(read(out.db, 'account.move', doc.res_id).move_type, 'in_invoice');
-  assert.throws(() => btn('Create Task').run(out.db, doc), /already linked/);
+  assert.throws(() => btn('Create Task').run(out.db, doc), /already linked|not available/);
   const req = create(seed(), 'documents.document', { name: 'Passport copy', is_request: true });
   assert.equal(read(write(req.db, 'documents.document', req.id, { file: 'data:image/png;base64,AA' }), 'documents.document', req.id).is_request, false);
 });

@@ -120,6 +120,7 @@ function draftAssetsFromBill(db, bill) {
  */
 export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal } = {}) {
   const r = read(db, 'account.move', id);
+  if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
   const sale = isInbound(r);

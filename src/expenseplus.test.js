@@ -63,7 +63,7 @@ test('refusal records a reason and note, resets lines, permits resubmission; res
   const reset = expensePlusModels['hr.expense.sheet'].form.buttons.find((b) => b.label === 'Reset to Draft');
   assert.equal(read(reset.run(submitted, read(submitted, 'hr.expense.sheet', id)).db, 'hr.expense.sheet', id).state, 'draft');
   const posted = postSheet(accepted, id, date);
-  assert.throws(() => reset.run(posted, read(posted, 'hr.expense.sheet', id)), /status/);
+  assert.throws(() => reset.run(posted, read(posted, 'hr.expense.sheet', id)), /status|not available/);
   assert.throws(() => refuseSheet(posted, id, 'Too late'), /status/);
 });
 
