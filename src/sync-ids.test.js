@@ -102,3 +102,24 @@ test('invoice lines keep pointing at a tax account created in the same save', ()
   const out = remapDiff({ upserts: { 'account.move': [{ id: 1, invoice_line_ids: [{ id: 1, tax_account_id: 50, product_id: null }] }] } }, { 'account.account': { 50: 60 } });
   assert.equal(out.upserts['account.move'][0].invoice_line_ids[0].tax_account_id, 60);
 });
+
+test('queued edits carry field bases through a server id remap', () => {
+  const base = seed();
+  const rival = save(base, base, create(base, 'hr.department', { name: 'Rival' }).db).db;
+  const first = create(base, 'hr.department', { name: 'Mine' });
+  const one = save(rival, base, first.db);
+  const renamed = { ...first.db, records: { ...first.db.records, 'hr.department': first.db.records['hr.department'].map((r) => r.id === first.id ? { ...r, name: 'Renamed' } : r) } };
+  const queued = rebaseDiff(diffDb(first.db, renamed), one.remapped);
+  const { diff } = assignIds(one.db, queued);
+  const db = applyDiff(one.db, diff);
+  assert.equal(db.records['hr.department'].find((r) => r.id === one.remapped['hr.department'][first.id]).name, 'Renamed');
+  assert.equal(db.records['hr.department'].find((r) => r.name === 'Rival').id, first.id);
+});
+
+test('assigning ids does not resurrect a concurrently deleted edited record', () => {
+  const base = seed();
+  const first = create(base, 'hr.department', { name: 'Mine' });
+  const deleted = { ...first.db, records: { ...first.db.records, 'hr.department': first.db.records['hr.department'].filter((r) => r.id !== first.id) } };
+  const edited = { ...first.db, records: { ...first.db.records, 'hr.department': first.db.records['hr.department'].map((r) => r.id === first.id ? { ...r, name: 'Renamed' } : r) } };
+  assert.throws(() => save(deleted, first.db, edited), /deleted by someone else/);
+});

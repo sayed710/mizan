@@ -8,14 +8,27 @@ import { setCompanies } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
+const same = (v) => JSON.stringify(v ?? null);
+
+/** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
+const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(models[model]?.fields[k] && !models[model].fields[k].compute);
+
+/** Thrown when an edit was made on top of a value someone else has changed since. */
+export class ConflictError extends Error {
+  conflict = true;
+}
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
 const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
 const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
-/** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, created: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
+/**
+ * `bases` holds, for each edited record, the values its changed fields had before the edit, so the server can
+ * keep other users' changes to other fields and refuse an edit made on top of an outdated value.
+ * @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, bases: Record<string, Record<number, object>>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
   const upserts = {};
   const deletes = {};
+  const bases = {};
   const created = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
     const before = byId(prev.records[model]);
@@ -25,6 +38,12 @@ export function diffDb(prev, next) {
     const added = changed.filter((r) => !before.has(r.id)).map((r) => r.id);
     if (changed.length) upserts[model] = changed;
     if (added.length) created[model] = added;
+    for (const r of changed) {
+      const b = before.get(r.id);
+      if (!b) continue;
+      const fields = [...new Set([...Object.keys(b), ...Object.keys(r)])].filter((k) => persisted(model, k) && same(b[k]) !== same(r[k]));
+      (bases[model] ??= {})[r.id] = Object.fromEntries(fields.map((k) => [k, b[k] ?? null]));
+    }
     if (removed.length) deletes[model] = removed;
   }
   const prevMsg = new Set(prev.messages.map((m) => m.id));
@@ -33,6 +52,7 @@ export function diffDb(prev, next) {
     upserts,
     deletes,
     created,
+    bases,
     messages: next.messages.filter((m) => !prevMsg.has(m.id)),
     removedMessages: [...prevMsg].filter((id) => !nextMsg.has(id)),
     seq: next.seq,
@@ -47,6 +67,24 @@ export const isEmptyDiff = (d) =>
 export const MAX_ID = 2 ** 40;
 /** How far past a model's counter a client may pick a new id (queued offline creates), so one record can't burn the id space. */
 export const ID_WINDOW = 1_000_000;
+/**
+ * Apply only the fields an edit changed onto the stored record, refusing it when one of them no longer has the value
+ * the edit started from. Without a base (a new record, or an older client) the record is taken as sent.
+ */
+function merge(model, stored, raw, base) {
+  if (!base || typeof base !== 'object' || Array.isArray(base)) return raw;
+  const label = models[model].label ?? model;
+  if (!stored) throw new ConflictError(`${label} #${raw.id} was deleted by someone else; reload and try again`);
+  const stale = Object.keys(base).find((k) => same(stored[k]) !== same(base[k]));
+  if (stale) throw new ConflictError(`${label} #${raw.id} was changed by someone else (${stale}); your edit was not saved, reload and try again`);
+  const out = { ...stored };
+  for (const k of Object.keys(base)) {
+    if (k in raw) out[k] = raw[k];
+    else delete out[k];
+  }
+  return out;
+}
+
 
 /** Highest id in a list of records, without spreading the list into Math.max (argument limits on large models). */
 export const maxId = (recs = []) => { let top = 0; for (const r of recs) if (r.id > top) top = r.id; return top; };
@@ -97,7 +135,7 @@ export function assignIds(db, d) {
     if (!models[model] || !Array.isArray(recs)) continue;
     const stored = new Set((db.records[model] ?? []).map((r) => r.id));
     const flagged = new Set(Array.isArray(d.created?.[model]) ? d.created[model] : []);
-    const fresh = [...new Set(recs.filter((r) => Number.isSafeInteger(r?.id) && r.id > 0 && (flagged.has(r.id) || !stored.has(r.id))).map((r) => r.id))].sort((a, b) => a - b);
+    const fresh = [...new Set(recs.filter((r) => Number.isSafeInteger(r?.id) && r.id > 0 && (flagged.has(r.id) || (!stored.has(r.id) && !d.bases?.[model]?.[r.id]))).map((r) => r.id))].sort((a, b) => a - b);
     let next = db.seq?.[model] ?? 0;
     for (const id of stored) if (id > next) next = id;
     for (const id of fresh) {
@@ -126,7 +164,9 @@ export function remapDiff(d, remapped) {
     ...('current_company_id' in s ? { current_company_id: company(s.current_company_id) } : {}),
     ...(Array.isArray(s.allowed_company_ids) ? { allowed_company_ids: s.allowed_company_ids.map(company) } : {}),
   } : s;
-  return { ...d, upserts, deletes, created, messages, settings };
+  const bases = Object.fromEntries(Object.entries(d.bases ?? {}).map(([model, rows]) => [model,
+    Object.fromEntries(Object.entries(rows).map(([id, base]) => [remapped[model]?.[id] ?? id, remapRefs(model, base, remapped)]))]));
+  return { ...d, upserts, deletes, created, bases, messages, settings };
 }
 
 /**
@@ -168,7 +208,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     for (const raw of recs) {
       if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
-      const rec = cleanRecord(model, raw);
+      const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const before = current.get(rec.id) ?? null;
       // Authority rules judge the stored record, not one an earlier step of this same change set already rewrote.

@@ -1,7 +1,7 @@
 // Email actions: send a business document to its partner, or a mailing to its list.
 import { models } from '../src/models/index.js';
 import { postNote, read, write } from '../src/orm.js';
-import { applyDiff, diffDb } from '../src/sync.js';
+import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 
@@ -39,6 +39,21 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+}
+
+/**
+ * Store the result of a delivered email. The message is already out, so a concurrent edit of the document must not
+ * turn the send into a failure: on a conflict only the "sent" note is recorded and the newer state is kept.
+ * @returns {{db: object, notice?: string}}
+ */
+export function recordSent(current, snapshot, sent, opts) {
+  try {
+    return { db: applyDiff(current, diffDb(snapshot, sent), opts) };
+  } catch (e) {
+    if (!(e instanceof ConflictError)) throw e;
+    const notesOnly = { ...snapshot, messages: sent.messages };
+    return { db: applyDiff(current, diffDb(snapshot, notesOnly), opts), notice: 'The email was sent, but the document changed meanwhile, so its status was left as it is.' };
+  }
 }
 
 /** Send a mailing now: one tracked email per recipient (see mailtrack.js); `store` commits through normal validation. */
