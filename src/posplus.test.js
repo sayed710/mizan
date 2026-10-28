@@ -99,7 +99,11 @@ test('cash plus card returns cash change, books each method and moves total stoc
   const balance = (code) => journalItems(paid.db).filter((l) => l.account_id === accountId(paid.db, code)).reduce((s, l) => s + l.debit - l.credit, 0);
   assert.equal(round(balance('101501') - cashBefore), 60);
   assert.equal(round(balance('101401') - bankBefore), 50);
-  assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 2, cash: 60, card: 50, expected: 160 });
+  // One settlement carries the whole bill with whole quantities; only the money is split (FLOW-017).
+  assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 1, cash: 60, card: 50, expected: 160 });
+  const settlements = search(paid.db, 'pos.order').filter((o) => o.settlement_of === id);
+  assert.deepEqual(settlements.map((o) => o.lines.map((l) => l.qty)), [order.lines.map((l) => l.qty)]);
+  assert.deepEqual(settlements[0].payment_ids, [{ method: 'cash', amount: 60 }, { method: 'bank', amount: 50 }]);
   assert.ok(search(paid.db, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
   assert.throws(() => payWithMethods(paid.db, id, [{ method: 'cash', amount: 110 }]), /draft/);
   assert.deepEqual(db, before);
@@ -152,7 +156,7 @@ test('Z report reconciles session totals, taxes, tips and full split-tender refu
   assert.equal(report.discounts, 0);
   const refunded = posPlusModels['pos.order'].form.buttons.find((b) => b.label === 'Refund').run(paid, read(paid, 'pos.order', id)).db;
   const after = zReport(refunded, session.id);
-  assert.equal(after.refunds, 2);
+  assert.equal(after.refunds, 1);
   assert.equal(after.orders, sessionTotals(refunded, session).orders);
   assert.deepEqual(after.byMethod, { cash: 0, bank: 0 });
   assert.equal(after.total, 0);

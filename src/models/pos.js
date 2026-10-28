@@ -27,13 +27,24 @@ export const priceLines = (db, cart) => cart.map((l) => {
 });
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
-export function payOrder(db, { lines, method, partner_id = null, refund_of = null }) {
+/** How an order was paid, per method ('cash' or 'card'): its split tender when it has one, else the whole total. */
+export const tendersOf = (order) => (order.payment_ids?.length
+  ? order.payment_ids.map((p) => ({ method: p.method === 'cash' ? 'cash' : 'card', amount: Number(p.amount) || 0 }))
+  : [{ method: order.payment_method, amount: amounts(order.lines).total }]);
+
+/**
+ * Book a paid (or refunded) order: stock out (in), one entry with the money per method, the revenue and the tax.
+ * `payments` splits the money between methods ([{method, amount}] summing to the total); otherwise all goes to `method`.
+ */
+export function payOrder(db, { lines, method, payments = null, partner_id = null, refund_of = null }) {
   const session = openSession(db);
   if (!session) throw new Error('Open a session first');
   if (!lines.length) throw new Error('The order is empty');
-  const { db: next, id } = create(db, 'pos.order', { partner_id, payment_method: method, lines, session_id: session.id, state: refund_of ? 'refund' : 'paid', refund_of });
-  const name = read(next, 'pos.order', id).name;
   const total = amounts(lines);
+  const split = (payments ?? []).filter((p) => Number(p.amount) > 0).map((p) => ({ method: p.method === 'cash' ? 'cash' : 'bank', amount: round(Number(p.amount)) }));
+  if (split.length && round(split.reduce((s, p) => s + p.amount, 0)) !== round(total.total)) throw new Error('The payments must add up to the order total');
+  const { db: next, id } = create(db, 'pos.order', { partner_id, payment_method: method, lines, session_id: session.id, state: refund_of ? 'refund' : 'paid', refund_of, ...(split.length ? { payment_ids: split } : {}) });
+  const name = read(next, 'pos.order', id).name;
   const sign = refund_of ? -1 : 1;
   const side = (amount, debit) => ((debit === (sign > 0)) ? { debit: round(amount) } : { credit: round(amount) });
   let stocked = next;
@@ -56,7 +67,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
   const { db: booked } = postEntry(stocked, {
     journal: 'POSS', ref: name,
     lines: [
-      { account: method === 'cash' ? CASH : BANK, ...side(total.total, true) },
+      ...(split.length ? split : [{ method, amount: total.total }]).map((p) => ({ account: p.method === 'cash' ? CASH : BANK, ...side(p.amount, true) })),
       { account: '400000', ...side(total.untaxed, false) },
       ...(total.tax ? [{ account: '251000', ...side(total.tax, false) }] : []),
     ],
@@ -68,14 +79,14 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
 export function refundOrder(db, order) {
   if (order.state !== 'paid') throw new Error('Only paid orders can be refunded');
   if (search(db, 'pos.order').some((o) => o.refund_of === order.id)) throw new Error('This order was already refunded');
-  const { db: next, id } = payOrder(db, { lines: order.lines, method: order.payment_method, partner_id: order.partner_id, refund_of: order.id });
+  const { db: next, id } = payOrder(db, { lines: order.lines, method: order.payment_method, payments: order.payment_ids?.length ? order.payment_ids : null, partner_id: order.partner_id, refund_of: order.id });
   return { db: write(next, 'pos.order', order.id, { state: 'refunded' }), id };
 }
 
 /** Session totals by payment method (refunds negative) and the cash expected in the drawer. */
 export function sessionTotals(db, session) {
   const orders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
-  const sum = (method) => round(orders.filter((o) => o.payment_method === method).reduce((s, o) => s + (o.state === 'refund' ? -1 : 1) * amounts(o.lines).total, 0));
+  const sum = (method) => round(orders.reduce((s, o) => s + (o.state === 'refund' ? -1 : 1) * tendersOf(o).filter((t) => t.method === method).reduce((a, t) => a + t.amount, 0), 0));
   const cash = sum('cash');
   return { orders: orders.length, cash, card: sum('card'), expected: round((Number(session.cash_start) || 0) + cash) };
 }
