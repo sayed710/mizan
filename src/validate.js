@@ -4,6 +4,8 @@ import { models } from './models/index.js';
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
 const MAX_FILE = 3 * 1024 * 1024; // data URL of a ≤ 2 MB file
+/** The calendar day exists (Date.parse would roll 2026-02-30 over into March). */
+const realDay = (day) => new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 const fail = (where) => { throw new Error(`Invalid value for ${where}`); };
 
@@ -30,7 +32,7 @@ export function cleanValue(field, value, where) {
       if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(where);
       return value;
     case 'datetime':
-      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.test(value) || !Number.isFinite(Date.parse(value))) fail(where);
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.test(value) || !Number.isFinite(Date.parse(value)) || !realDay(value.slice(0, 10))) fail(where);
       return value;
     case 'tags':
       if (!Array.isArray(value) || value.length > 50 || !value.every((x) => typeof x === 'string')) fail(where);

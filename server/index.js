@@ -13,6 +13,7 @@ import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrateAppointments } from '../src/models/appointments.js';
+import { migrateWorkorderTimes } from '../src/models/workorder.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
@@ -68,7 +69,9 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
-let db = migrateAppointments(storage.load());
+const loadedDb = storage.load();
+let db = migrateWorkorderTimes(migrateAppointments(loadedDb));
+if (loadedDb && db !== loadedDb) storage.save(loadedDb, db); // later saves diff against db, so persist the migration now
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
 /**

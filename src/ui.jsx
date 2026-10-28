@@ -112,7 +112,7 @@ function FileInput({ id, value, onChange }) {
   );
 }
 
-import { subtotal as lineSubtotal } from './models/common.js';
+import { subtotal as lineSubtotal, pickedInstant } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly, record }) {
@@ -175,7 +175,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
-    case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(e.target.value ? new Date(e.target.value).toISOString() : null) });
+    case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (

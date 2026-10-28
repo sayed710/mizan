@@ -4,9 +4,10 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { cleanValue } from './validate.js';
+import { dayOf, shiftDay, pickedInstant } from './models/common.js';
 import { moreModels } from './models/more.js';
 import { accountId, isBalanced, journalId } from './models/ledger.js';
-import { generateWorkorders, startWorkorder, pauseWorkorder, finishWorkorder, blockWorkcenter, unblockWorkcenter, workorderCost, productionCost, postOperationCost, workcenterLoad, oee, workorderModels } from './models/workorder.js';
+import { generateWorkorders, startWorkorder, pauseWorkorder, finishWorkorder, blockWorkcenter, unblockWorkcenter, workorderCost, productionCost, postOperationCost, workcenterLoad, oee, workorderModels, migrateWorkorderTimes } from './models/workorder.js';
 
 const at = (time) => `2026-10-19T${time}:00.000Z`;
 const range = { from: '2026-10-19', to: '2026-10-25' };
@@ -187,4 +188,45 @@ test('work order start, pause and finish times survive the server, so MOs with o
   assert.deepEqual(wo.time_ids.map((l) => l.minutes), [15, 40]);
   assert.throws(() => cleanValue({ type: 'datetime' }, '2026-10-19', 'x'), /Invalid value/);
   assert.throws(() => cleanValue({ type: 'datetime' }, '2026-13-45T99:00', 'x'), /Invalid value/);
+});
+
+test('a calendar day that does not exist is refused, not rolled into the next month', () => {
+  assert.throws(() => cleanValue({ type: 'datetime' }, '2026-02-29T08:00Z', 'x'), /Invalid value/);
+  assert.throws(() => cleanValue({ type: 'datetime' }, '2026-04-31T08:00:00.000Z', 'x'), /Invalid value/);
+  assert.equal(cleanValue({ type: 'datetime' }, '2028-02-29T08:00Z', 'x'), '2028-02-29T08:00Z');
+});
+
+test('date-only work order times from older data become datetimes and the order can be edited again', () => {
+  const f = fixture();
+  let db = generateWorkorders(f.db, f.id);
+  const [a] = linked(db, f.id);
+  const legacy = { ...db, records: { ...db.records, 'mrp.workorder': db.records['mrp.workorder'].map((w) => (w.id === a.id
+    ? { ...w, date_start: '2026-10-19', date_finished: '2026-10-20', time_ids: [{ employee_id: 1, date_start: '2026-10-19', date_end: '2026-10-20', minutes: 60, loss: 'productive' }] } : w)) } };
+  assert.throws(() => applyDiff(legacy, diffDb(legacy, write(legacy, 'mrp.workorder', a.id, { blocked_reason: 'x' })), { isAdmin: false, author: 'Op' }), /Invalid value/);
+  const migrated = migrateWorkorderTimes(legacy);
+  const wo = read(migrated, 'mrp.workorder', a.id);
+  assert.deepEqual([wo.date_start, wo.date_finished, wo.time_ids[0].date_start, wo.time_ids[0].date_end], ['2026-10-19T00:00:00.000Z', '2026-10-20T00:00:00.000Z', '2026-10-19T00:00:00.000Z', '2026-10-20T00:00:00.000Z']);
+  assert.doesNotThrow(() => applyDiff(migrated, diffDb(migrated, write(migrated, 'mrp.workorder', a.id, { blocked_reason: 'x' })), { isAdmin: false, author: 'Op' }));
+  assert.equal(migrateWorkorderTimes(migrated), migrated);
+});
+
+test('gantt helpers keep datetimes valid when a bar moves and place them on the viewer calendar day', () => {
+  const local = new Date(2026, 0, 5, 23, 30).toISOString(); // 23:30 local, whatever the timezone
+  assert.equal(dayOf(local), '2026-01-05');
+  assert.equal(dayOf('2026-01-05'), '2026-01-05');
+  const moved = shiftDay(local, 2);
+  assert.equal(dayOf(moved), '2026-01-07');
+  assert.equal(new Date(moved).getHours(), 23);
+  assert.doesNotThrow(() => cleanValue({ type: 'datetime' }, moved, 'x'));
+  assert.equal(shiftDay('2026-01-31', 1), '2026-02-01');
+});
+
+test('editing a datetime keeps its recorded seconds', () => {
+  const old = new Date(2026, 5, 1, 8, 30, 45, 123).toISOString();
+  const input = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  assert.equal(pickedInstant(input(new Date(old)), old), old);
+  const later = pickedInstant(input(new Date(2026, 5, 1, 9, 0)), old);
+  assert.equal(new Date(later).getSeconds(), 45);
+  assert.equal(new Date(later).getMilliseconds(), 123);
+  assert.equal(pickedInstant('', old), null);
 });
