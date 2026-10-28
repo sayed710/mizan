@@ -47,6 +47,7 @@ Without a server the frontend runs as a browser-only demo (data in `localStorage
 
 ```bash
 npm test           # ORM, business-flow and sync tests
+npm run coverage   # source-only coverage, files no test loads, fails below the minimums
 ```
 
 ### Email
