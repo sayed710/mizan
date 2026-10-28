@@ -5,8 +5,8 @@ import { deliver, moveValued } from './valuation.js';
 import { invoiceLines, journalId, postEntry } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const CASH = '101501';
 const BANK = '101401';
 

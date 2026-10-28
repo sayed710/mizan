@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
 import { amounts, today } from './common.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const numeric = (value) => Number(value) || 0;
 const linesOf = (order, lines) => lines ?? order?.order_line ?? order?.lines ?? [];
 const dateOf = (value) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? today()).slice(0, 10);
@@ -85,7 +85,7 @@ export function generateCoupons(db, programId, { count, partnerIds = [], points 
 }
 
 /** Return the active programs whose context and at least one rule match this order. */
-export function applicablePrograms(db, order, { lines, partnerId, code, date, channel = 'sale' } = {}) {
+export function applicablePrograms(db, order, { lines, code, date, channel = 'sale' } = {}) {
   const orderLines = linesOf(order, lines);
   const on = date ?? order?.date_order ?? today();
   return programsOf(db).filter((program) => {

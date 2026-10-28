@@ -3,8 +3,8 @@ import { read, write } from '../orm.js';
 import { pad, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
 import { explode } from './more.js';
+import { round as round2 } from '../money.js';
 
-const round2 = (n) => Math.round(n * 100) / 100;
 
 /** Write off a quantity: stock goes down and its value (at cost) is booked as a loss against stock valuation. */
 export function validateScrap(db, scrap, date = today()) {

@@ -1,7 +1,7 @@
 // Barcode scanning, Shop Floor and the cross-app Overview dashboard.
 import { useRef, useState } from 'react';
 import { models, today } from '../models/index.js';
-import { postNote, read, search } from '../orm.js';
+import { read, search } from '../orm.js';
 import { countProduct } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
 import { commit, currentCompany, getDb, isServer, serverAction, useDb } from '../store.js';

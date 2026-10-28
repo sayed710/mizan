@@ -1,23 +1,23 @@
 import { useState } from 'react';
 import { apps } from './models/index.js';
 import { currentCompany, getUser, useDb } from './store.js';
+import { appOpen } from './access.js';
+import { UserMenu } from './Navbar.jsx';
 import { t } from './i18n.js';
-import { Avatar, Icon } from './ui.jsx';
+import { Icon } from './ui.jsx';
 
 export function Home() {
   const db = useDb();
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
-  const hidden = new Set(db.settings?.uninstalled ?? []);
-  const allowed = getUser()?.apps;
-  const shown = apps.filter((a) => !hidden.has(a.id) && (!allowed || allowed.includes(a.id) || a.id === 'settings') && (!q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q)));
+  const shown = apps.filter((a) => appOpen(db, getUser(), a.id) && (!q || a.name.toLowerCase().includes(q) || t(a.name).toLowerCase().includes(q)));
   return (
     <main className="home">
       <header className="home-top">
         <span className="brand">Mizan</span>
         <span className="spacer" />
         <a className="company" href="#/settings/general">{currentCompany(db).name}</a>
-        <Avatar name="Admin" />
+        <UserMenu />
       </header>
       <input
         className="menu-search"

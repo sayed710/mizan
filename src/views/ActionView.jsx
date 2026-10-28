@@ -13,6 +13,7 @@ import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
 import { actionRecords } from '../companyView.js';
+import { pageWindow } from './paging.js';
 
 export { actionRecords } from '../companyView.js';
 
@@ -67,10 +68,21 @@ export function ActionView({ leaf, base, params }) {
   const views = viewsOf(model);
   const view = views.includes(params.get('view')) ? params.get('view') : views.includes(leaf.view) ? leaf.view : views[0];
   const relRaw = params.get('rel');
-  const [search, setSearch] = useState(() => ({ ...emptySearch(model, parseRel(db, model, relRaw)), groupBy: leaf.groupBy ?? [] }));
+  // ?filter=<id> (repeatable) preselects the model's named filters, e.g. links from dashboard tiles.
+  const urlFilters = params.getAll('filter').filter((id) => (models[model].filters ?? []).flat().some((f) => f.id === id));
+  const [search, setSearch] = useState(() => {
+    const initial = emptySearch(model, parseRel(db, model, relRaw));
+    return { ...initial, ...(urlFilters.length ? { filters: urlFilters } : {}), groupBy: leaf.groupBy ?? [] };
+  });
   const [selected, setSelected] = useState(() => new Set());
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
+
+  // Back to the first page whenever the search, grouping or view changes.
+  const pageKey = JSON.stringify([search, view]);
+  const [page, setPage] = useState({ key: pageKey, offset: 0 });
+  const offset = page.key === pageKey ? page.offset : 0;
+  const goTo = (to) => setPage({ key: pageKey, offset: to });
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
   const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
@@ -91,21 +103,48 @@ export function ActionView({ leaf, base, params }) {
     try {
       const text = await file.text();
       const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text) : importRows(getDb(), model, defaults, fromCsv(text));
-      commit(res.db);
-      alert(t('{n} record(s) imported.', { n: res.count }));
+      // Report the import only once the server has accepted it (a refusal shows its own message).
+      if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
       alert(e instanceof Error ? e.message : t('Import failed'));
     }
   };
-  const extra = view === 'list' && (
+  const groupBy = search.groupBy;
+  const kanbanGroup = groupBy[0] ?? def.kanban?.groupBy;
+  const win = pageWindow(records.length, offset);
+  const paged = (view === 'list' && !groupBy.length) || (view === 'kanban' && !kanbanGroup);
+  const pager = paged && (
+    <span className="pager" role="group" aria-label={t('Pager')}>
+      <span aria-live="polite">{win.label} / {win.total}</span>
+      <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={win.prev == null} onClick={() => goTo(win.prev)}>‹</button>
+      <button type="button" className="btn sm" aria-label={t('Next page')} disabled={win.next == null} onClick={() => goTo(win.next)}>›</button>
+    </span>
+  );
+  const extra = view === 'list' ? (
     <>
+      {(def.listActions ?? []).map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
+        try {
+          const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
+          if (!ids.length) return;
+          let options;
+          if (action.label === 'Request a count') {
+            const date = prompt(t('Scheduled Count Date'), new Date().toISOString().slice(0, 10));
+            if (date == null) return;
+            const name = prompt(t('Counter (name, optional)'), '');
+            if (name == null) return;
+            const user = name ? searchRecords(getDb(), 'hr.employee').find((u) => u.name === name) : null;
+            if (name && !user) throw new Error(t('Select an existing counter'));
+            options = { date, user_id: user?.id ?? null };
+          }
+          commit(action.run(getDb(), ids, options));
+        } catch (e) { alert(t(e.message)); }
+      }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
       <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
-      <span className="pager">{records.length ? `1-${records.length}` : '0'} / {records.length}</span>
+      {pager}
     </>
-  );
-  const groupBy = search.groupBy;
+  ) : pager;
   const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
 
   return (
@@ -113,8 +152,8 @@ export function ActionView({ leaf, base, params }) {
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
         view={view} search={search} setSearch={setSearch} extra={extra} />
       <SimulatedNote text={def.simulated} />
-      {view === 'kanban' && <Kanban db={db} model={model} records={records} open={open} groupBy={groupBy[0] ?? def.kanban?.groupBy} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} />}
+      {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
+      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView model={model} records={records} open={open} newHref={newHref} />}

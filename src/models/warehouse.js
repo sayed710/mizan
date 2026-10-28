@@ -6,6 +6,7 @@ import { canValidatePicking } from './qualityplus.js';
 import { locationStock } from './routes.js';
 import { lineToStockQty } from './uom.js';
 import { pad } from './common.js';
+import { transferQuants } from './quant.js';
 
 const locations = [
   ['lot_stock_id', 'Stock'], ['wh_input_stock_loc_id', 'Input'],
@@ -155,7 +156,7 @@ export function validateWarehousePicking(db, picking) {
   const before = new Set(search(db, 'stock.picking').map((p) => p.id));
   const baseValidate = salesModels['stock.picking'].form.buttons.find((b) => b.label === 'Validate');
   let next = r.picking_type === 'internal'
-    ? validatePicking(db, r, { apply: (d) => d }).db
+    ? validatePicking(db, r, { apply: (d, p) => transferQuants(d, p) }).db
     : baseValidate.run(db, r).db;
   const done = read(next, 'stock.picking', r.id).move_ids;
   if (suffix.length) next = write(next, 'stock.picking', suffix[0].id, { state: 'ready', move_ids: done.map((l) => ({ ...l })) });
@@ -214,7 +215,20 @@ export const warehouseModels = {
         : !['one_step', 'two_steps', 'three_steps'].includes(r.reception_steps) || !['ship_only', 'pick_ship', 'pick_pack_ship'].includes(r.delivery_steps) ? 'Select valid warehouse steps' : null,
     list: ['name', 'code', 'partner_id', 'reception_steps', 'delivery_steps', 'active'],
     form: { title: 'name', groups: [['code', 'partner_id', 'active'], ['reception_steps', 'delivery_steps'], locations.map(([field]) => field)],
-      buttons: [{ label: 'Initialize Locations', primary: true, run: (db, r) => ({ db: ensureWarehouseLocations(db, r.id) }) }], chatter: true },
+      buttons: [
+        { label: 'Initialize Locations', primary: true, run: (db, r) => ({ db: ensureWarehouseLocations(db, r.id) }) },
+        {
+          label: 'Resupply From Warehouse',
+          ask: [{ label: 'Source warehouse (name or code)' }, { label: 'Product (name or internal reference)' }, { label: 'Quantity', type: 'number' }],
+          run: (db, r, [source, productName, qty]) => {
+            const from = search(db, 'stock.warehouse').find((w) => [w.name, w.code].some((v) => v && v.toLowerCase() === source.toLowerCase()));
+            const product = search(db, 'product').find((p) => [p.name, p.default_code].some((v) => v && v.toLowerCase() === productName.toLowerCase()));
+            if (!from) throw new Error('No warehouse with that name or code');
+            if (!product) throw new Error('No product with that name or reference');
+            return { db: resupplyTransfer(db, from.id, r.id, [{ product_id: product.id, qty }]) };
+          },
+        },
+      ], chatter: true },
   },
   get 'stock.picking'() {
     const base = salesModels['stock.picking'];

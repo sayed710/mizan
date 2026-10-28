@@ -1,11 +1,11 @@
 // Expense reports preserve the standalone expense workflow while grouping accounting and approval.
 import { create, read, search, write, postNote } from '../orm.js';
-import { today, nextName } from './common.js';
+import { nextName, promptedAmount, today } from './common.js';
 import { currentActor, employeeFor } from './authority.js';
 import { postEntry } from './ledger.js';
 import { moreModels } from './more.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const expense = moreModels['hr.expense'];
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 const sheetLines = (db, id) => search(db, 'hr.expense').filter((r) => r.sheet_id === id);
@@ -200,9 +200,10 @@ export const expensePlusModels = {
           return { db: reason === null ? db : refuseSheet(db, r.id, reason) };
         } },
         { label: 'Post Journal Entries', primary: true, when: (r) => r.state === 'approve', run: (db, r) => ({ db: postSheet(db, r.id, r.accounting_date) }) },
+        { label: 'Re-invoice to Sales Orders', when: (r) => ['post', 'done'].includes(r.state), run: (db, r) => ({ db: reinvoiceExpenses(db, r.id) }) },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'post', run: (db, r) => {
-          const amount = prompt('Reimbursement amount', String(round(r.total_amount - r.amount_paid)));
-          return { db: amount === null ? db : registerPayment(db, r.id, amount) };
+          const amount = promptedAmount(prompt('Reimbursement amount', String(round(r.total_amount - r.amount_paid))));
+          return { db: amount == null ? db : registerPayment(db, r.id, amount) };
         } },
         { label: 'Reset to Draft', when: (r) => ['submit', 'approve', 'cancel'].includes(r.state), run: (db, r) => ({ db: resetSheet(db, r.id) }) },
       ],
@@ -220,13 +221,13 @@ export const expensePlusModels = {
       reinvoiced: { type: 'boolean', label: 'Re-invoiced', readonly: true },
     },
     defaults: () => ({ ...expense.defaults(), reinvoice: 'no', reinvoiced: false }),
-    guard: (db, before, after) => {
+    guard: (db, before, after, ctx) => {
       if (after.sheet_id && !before?.sheet_id) {
         const report = read(db, 'hr.expense.sheet', after.sheet_id);
         if (!report || report.state !== 'draft' || report.employee_id !== after.employee_id || !report.expense_line_ids.some((l) => l.expense_id === after.id)) return 'Use Create Report to group draft expenses';
       }
       if (before?.sheet_id && ['employee_id', 'date', 'product_id', 'category', 'quantity', 'unit_amount', 'tax', 'total_amount', 'payment_mode', 'sheet_id'].some((key) => before[key] !== after[key])) return 'Reported expense amounts and ownership cannot be changed';
-      return expense.guard?.(db, before, after);
+      return expense.guard?.(db, before, after, ctx);
     },
     protectDelete: (db, r) => r.sheet_id ? 'Reported expenses cannot be deleted' : expense.protectDelete?.(db, r),
     onchange: (r, key, db) => {

@@ -3,11 +3,11 @@ import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { currentActor } from './authority.js';
 import { analyticPlusModels } from './analyticplus.js';
+import { round } from '../money.js';
 
 const model = 'account.analytic.line';
 const base = analyticPlusModels[model];
 const isTimesheet = (r) => !r.move_id && (!r.category || r.category === 'timesheet');
-const round = (n) => Math.round(n * 100) / 100 || 0;
 const cost = (db, r) => {
   const employee = read(db, 'hr.employee', r.employee_id);
   return -Number(r.unit_amount || 0) * Number(employee?.timesheet_cost ?? employee?.hourly_cost ?? 0) || 0;
@@ -29,8 +29,8 @@ const getTimesheet = (db, id) => {
 };
 
 /** Enforce validation locks, valid hours, sales links and one running timer per employee. */
-export function timesheetGuard(db, before, after) {
-  const inherited = base.guard?.(db, before, after);
+export function timesheetGuard(db, before, after, ctx) {
+  const inherited = base.guard?.(db, before, after, ctx);
   if (inherited) return inherited;
   if (before && isTimesheet(before) && before.validated) {
     const changed = Object.keys({ ...before, ...after }).filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));

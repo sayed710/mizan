@@ -3,10 +3,9 @@ import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
 import { accountId, isBalanced, journalItems } from './ledger.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, lineUntaxed } from './taxes.js';
 import { companySum } from './money.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
 
 /** Open receivable (posted, unpaid invoices) of a partner. */
@@ -205,7 +204,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && lockDateFor(db.settings, before);
+  const lock = before && [lockDateFor(db.settings, before), closedYearLock(db)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -446,7 +445,7 @@ export const financeModels = {
     form: {
       statusbar: 'state',
       statusbarClickable: true,
-      buttons: [{ label: 'Budget vs Actual', run: (db, r) => ({ db, go: '#/accounting/budget-report' }) }],
+      buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
       groups: [['date_from'], ['date_to']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],

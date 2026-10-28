@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, useDb } from '../store.js';
+import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
@@ -12,6 +12,7 @@ function Users() {
   const [users, setUsers] = useState([]);
   const [form, setForm] = useState({ login: '', name: '', password: '', apps: '', companies: '' });
   const [error, setError] = useState(null);
+  const [revoking, setRevoking] = useState(null);
   const refresh = () => listUsers().then(setUsers);
   useEffect(() => { refresh(); }, []);
   const submit = async (e) => {
@@ -25,6 +26,17 @@ function Users() {
       setError(err instanceof Error ? err.message : 'Error');
     }
   };
+  const revokeAccess = async (e) => {
+    e.preventDefault();
+    try {
+      await revokeUser(revoking.id, revoking.password);
+      setError(null);
+      if (revoking.id === getUser()?.id) return logout(); // the admin's own session is gone: leave no data on screen
+      setRevoking(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error');
+    }
+  };
   const input = (key, extra = {}) => (
     <input aria-label={t(extra.label)} placeholder={t(extra.label)} required value={form[key]} type={extra.type ?? 'text'}
       autoComplete="off" onChange={(e) => setForm({ ...form, [key]: e.target.value })} />
@@ -34,7 +46,14 @@ function Users() {
       <h3>{t('Users')}</h3>
       <table className="list">
         <tbody>
-          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td><td className="muted">{u.companies || t('All companies')}</td></tr>)}
+          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td><td className="muted">{u.companies || t('All companies')}</td>
+            <td>{revoking?.id === u.id
+              ? <form className="row" onSubmit={revokeAccess}>
+                <input aria-label={t('New Password')} placeholder={t('New password (leave empty to keep it)')} type="password" minLength={8} autoComplete="new-password" autoFocus
+                  value={revoking.password} onChange={(e) => setRevoking({ ...revoking, password: e.target.value })} />
+                <button className="btn danger">{t('Revoke Access')}</button>
+              </form>
+              : <button type="button" className="link danger" onClick={() => setRevoking({ id: u.id, password: '' })}>{t('Revoke Access')}</button>}</td></tr>)}
         </tbody>
       </table>
       <form className="row user-form" onSubmit={submit}>
@@ -84,6 +103,37 @@ function Companies({ db }) {
   );
 }
 
+function Security() {
+  const [form, setForm] = useState({ current: '', password: '' });
+  const [status, setStatus] = useState(null);
+  const run = async (action, done) => {
+    try {
+      await action();
+      setStatus({ ok: true, text: t(done) });
+      return true;
+    } catch (err) {
+      setStatus({ ok: false, text: err instanceof Error ? err.message : 'Error' });
+      return false;
+    }
+  };
+  const submit = async (e) => {
+    e.preventDefault();
+    if (await run(() => changePassword(form.current, form.password), 'Password changed; other sessions were signed out')) setForm({ current: '', password: '' });
+  };
+  return (
+    <>
+      <h3>{t('Password & Sessions')}</h3>
+      <form className="row user-form" onSubmit={submit}>
+        <input aria-label={t('Current Password')} placeholder={t('Current Password')} type="password" required autoComplete="current-password" value={form.current} onChange={(e) => setForm({ ...form, current: e.target.value })} />
+        <input aria-label={t('New Password')} placeholder={t('New Password')} type="password" required minLength={8} autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+        <button className="btn">{t('Change Password')}</button>
+      </form>
+      <button type="button" className="btn" onClick={() => run(revokeOtherSessions, 'Other sessions were signed out')}>{t('Sign Out Other Sessions')}</button>
+      {status && <div className={`alert ${status.ok ? 'info-box' : ''}`} role={status.ok ? 'status' : 'alert'}>{status.text}</div>}
+    </>
+  );
+}
+
 function ApiKeys() {
   const [keys, setKeys] = useState([]);
   const [fresh, setFresh] = useState(null);
@@ -111,6 +161,8 @@ export function Settings() {
   const [status, setStatus] = useState(null);
   const company = (db.records['res.company'] ?? []).find((c) => c.id === currentCompany(db).id);
   const total = Object.values(db.records).reduce((s, recs) => s + recs.length, 0);
+  // The server keeps company-wide settings for administrators; others see them read-only instead of edits that vanish.
+  const readOnly = isServer() && !getUser()?.isAdmin;
 
   // On a server the backup is the server's full database (admins only); the browser copy may be filtered.
   const download = () => {
@@ -151,14 +203,15 @@ export function Settings() {
     <main className="action settings">
       <div className="control-panel"><h1 className="cp-title">{t('General Settings')}</h1></div>
       <section className="sheet settings-sheet">
+        {readOnly && <p className="muted">{t('Only administrators can change company settings.')}</p>}
         <div className="field">
           <label htmlFor="company">{t('Company Name')}</label>
           <div className="field-value">
             {/* One source of truth: the current company record, which the navbar, documents and QR codes all read. */}
             {company
-              ? <input id="company" key={`${company.id}:${company.name}`} defaultValue={company.name}
+              ? <input id="company" disabled={readOnly} key={`${company.id}:${company.name}`} defaultValue={company.name}
                   onBlur={(e) => { const name = e.target.value.trim(); if (!name) e.target.value = company.name; else if (name !== company.name) commit(renameCompany(getDb(), company.id, name)); }} />
-              : <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />}
+              : <input id="company" disabled={readOnly} value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />}
           </div>
         </div>
         <div className="field">
@@ -172,7 +225,7 @@ export function Settings() {
                 </>
               )
               : (
-                <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
+                <select id="currency" disabled={readOnly} value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
                   {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               )}
@@ -200,28 +253,28 @@ export function Settings() {
         <div className="field">
           <label htmlFor="lock_date">{t('Lock Date')}</label>
           <div className="field-value">
-            <input id="lock_date" type="date" value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
+            <input id="lock_date" type="date" disabled={readOnly} value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
           </div>
         </div>
         {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date']].map(([key, label]) => (
           <div className="field" key={key}>
             <label htmlFor={key}>{t(label)}</label>
             <div className="field-value">
-              <input id={key} type="date" value={db.settings?.[key] ?? ''} onChange={(e) => commit(updateSettings(getDb(), { [key]: e.target.value || null }))} />
+              <input id={key} type="date" disabled={readOnly} value={db.settings?.[key] ?? ''} onChange={(e) => commit(updateSettings(getDb(), { [key]: e.target.value || null }))} />
             </div>
           </div>
         ))}
         <div className="field">
           <label htmlFor="hard_lock_date">{t('Hard Lock Date')}</label>
           <div className="field-value">
-            <input id="hard_lock_date" type="date" min={db.settings?.hard_lock_date ?? undefined} value={db.settings?.hard_lock_date ?? ''}
+            <input id="hard_lock_date" type="date" disabled={readOnly} min={db.settings?.hard_lock_date ?? undefined} value={db.settings?.hard_lock_date ?? ''}
               onChange={(e) => e.target.value && e.target.value > (db.settings?.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && commit(updateSettings(getDb(), { hard_lock_date: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="invoice_qr">{t('Payment QR Codes')}</label>
           <div className="field-value">
-            <select id="invoice_qr" value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
+            <select id="invoice_qr" disabled={readOnly} value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
               <option value="">{t('None')}</option>
               <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
               <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
@@ -232,19 +285,19 @@ export function Settings() {
         <div className="field">
           <label htmlFor="company_vat">{t('Company Tax ID')}</label>
           <div className="field-value">
-            <input id="company_vat" value={db.settings?.company_vat ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_vat: e.target.value }))} />
+            <input id="company_vat" disabled={readOnly} value={db.settings?.company_vat ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_vat: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="company_iban">{t('Bank Account (IBAN)')}</label>
           <div className="field-value">
-            <input id="company_iban" value={db.settings?.company_iban ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_iban: e.target.value }))} />
+            <input id="company_iban" disabled={readOnly} value={db.settings?.company_iban ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_iban: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
           <div className="field-value">
-            <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={!!db.settings?.audit_trail}
+            <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={readOnly || !!db.settings?.audit_trail}
               onChange={(e) => e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && commit(updateSettings(getDb(), { audit_trail: true }))} />
           </div>
         </div>
@@ -266,6 +319,7 @@ export function Settings() {
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}
         {(!isServer() || getUser()?.isAdmin) && <Companies db={db} />}
         {isServer() && getUser()?.isAdmin && <Users />}
+        {isServer() && <Security />}
         {isServer() && <ApiKeys />}
         {isServer() && <p><button type="button" className="btn" onClick={logout}>{t('Log out')}</button></p>}
       </section>

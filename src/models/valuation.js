@@ -1,13 +1,19 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
-import { create, postNote, read, search, setActiveCompany, write } from '../orm.js';
+import { create, getActiveCompany, postNote, read, search, setActiveCompany, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100 || 0;
 const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
 const quantity = (ls) => ls.reduce((s, l) => s + l.quantity, 0);
 const valueOf = (ls) => round(ls.reduce((s, l) => s + l.value, 0));
+// Product totals are shared across companies; scoped valuation must consume only that company's stock.
+const stockQuantity = (db, p) => {
+  const company = getActiveCompany();
+  const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
+  return company && qs.length ? qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0) : Number(p.qty_available) || 0;
+};
 const product = (db, id) => {
   const p = read(db, 'product', id);
   if (!p || p.type !== 'goods') throw new Error('Select a stockable product');
@@ -23,10 +29,10 @@ function prepare(db, id, date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) throw new Error('Enter a valid valuation date');
   const ls = layers(db, id);
   if (ls.some((l) => l.date > date)) throw new Error('Valuation date cannot precede an existing layer');
-  const owned = Number(p.qty_available || 0) + Number(p.qty_rented || 0);
+  const owned = stockQuantity(db, p) + Number(p.qty_rented || 0);
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
-  if (ls.length || !p.qty_available) return db;
-  if (p.qty_available < 0) throw new Error('Reconcile negative opening stock before valuation');
+  if (ls.length || !stockQuantity(db, p)) return db;
+  if (stockQuantity(db, p) < 0) throw new Error('Reconcile negative opening stock before valuation');
   return openingStock(db, [id], date);
 }
 
@@ -41,10 +47,11 @@ function openingStock(db, ids, date) {
   const opened = [];
   for (const id of ids) {
     const p = product(next, id);
-    const value = round(p.qty_available * (Number(p.cost) || 0));
+    const qty = stockQuantity(next, p);
+    const value = round(qty * (Number(p.cost) || 0));
     const res = create(next, 'stock.valuation.layer', {
-      product_id: id, date: '0001-01-01', quantity: p.qty_available, unit_cost: Number(p.cost) || 0,
-      value, remaining_qty: p.qty_available, remaining_value: value, kind: 'adjustment',
+      product_id: id, date: '0001-01-01', quantity: qty, unit_cost: Number(p.cost) || 0,
+      value, remaining_qty: qty, remaining_value: value, kind: 'adjustment',
       description: 'Opening stock', reference: 'Opening stock', opening: true,
     });
     next = res.db;
@@ -94,7 +101,7 @@ function addLayer(db, vals) {
  * Receive and increase stock. Standard costing always values at the standard price and books the gap to the
  * actual cost (purchase price, production cost, refund cost) as a variance, so the standard never drifts.
  */
-export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, pickingId } = {}) {
+export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, pickingId, stockLine } = {}) {
   nonnegative(qty, 'Quantity');
   nonnegative(unitCost, 'Unit cost');
   if (!qty) throw new Error('Receive a positive quantity');
@@ -104,11 +111,11 @@ export function receive(db, productId, qty, unitCost, { date = today(), referenc
   const standard = method === 'standard';
   const cost = standard ? Number(p.cost) || 0 : unitCost;
   const value = round(qty * cost);
-  const onHand = Number(p.qty_available) || 0;
+  const onHand = stockQuantity(next, p);
   if (!standard) next = write(next, 'product', productId, {
     cost: method === 'average' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
   });
-  next = moveStock(next, [{ product_id: productId, qty }], 1);
+  next = moveStock(next, [{ ...stockLine, product_id: productId, qty }], 1);
   return addLayer(next, { product_id: productId, date, reference, description: reference || 'Receipt',
     quantity: qty, unit_cost: cost, value, remaining_qty: qty, remaining_value: value,
     price_difference: standard ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
@@ -116,14 +123,14 @@ export function receive(db, productId, qty, unitCost, { date = today(), referenc
 
 function consume(db, productId, qty, method) {
   const p = product(db, productId);
-  if (qty > Number(p.qty_available) + 1e-8) throw new Error('Not enough stock to deliver');
+  if (qty > stockQuantity(db, p) + 1e-8) throw new Error('Not enough stock to deliver');
   const available = layers(db, productId).filter((l) => l.remaining_qty > 0)
     .sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
   let next = db;
   let left = qty;
   let value = 0;
   let weight = 0;
-  const onHand = Number(p.qty_available);
+  const onHand = stockQuantity(db, p);
   const remainingValue = round(available.reduce((s, l) => s + l.remaining_value, 0));
   const target = Math.abs(qty - onHand) < 1e-8 ? remainingValue : round(qty * (Number(p.cost) || 0));
   for (const [i, l] of available.entries()) {
@@ -141,14 +148,14 @@ function consume(db, productId, qty, method) {
 }
 
 /** Deliver at FIFO/average/standard cost; insufficient stock is refused, including negative stock. */
-export function deliver(db, productId, qty, { date = today(), reference = '', counterpart, pickingId } = {}) {
+export function deliver(db, productId, qty, { date = today(), reference = '', counterpart, pickingId, stockLine } = {}) {
   nonnegative(qty, 'Quantity');
   if (!qty) throw new Error('Deliver a positive quantity');
   const next = prepare(db, productId, date);
   const method = costMethod(next, productId);
   const used = consume(next, productId, qty, method);
   const value = used.value;
-  const stocked = moveStock(used.db, [{ product_id: productId, qty }], -1);
+  const stocked = moveStock(used.db, [{ ...stockLine, product_id: productId, qty }], -1);
   return { db: addLayer(stocked, { product_id: productId, date, reference, description: reference || 'Delivery',
     quantity: -qty, unit_cost: value / qty, value: -value, kind: 'out', counterpart, picking_id: pickingId }), value };
 }
@@ -162,9 +169,9 @@ export function moveValued(db, lines, sign, options = {}) {
     if (p.valuation === 'manual_periodic') {
       // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
       if (sign < 0 && qty * -sign > (Number(p.qty_available) || 0) + 1e-8) throw new Error('Not enough stock to deliver');
-      return moveStock(next, [l], sign);
+      return moveStock(next, [{ ...l, ...options.stockLine }], sign);
     }
-    const spec = { ...options, ...l.valuation_options };
+    const spec = { ...options, ...l.valuation_options, stockLine: { ...l, ...options.stockLine } };
     return sign > 0 ? receive(next, p.id, qty, l.unit_cost ?? p.cost ?? 0, spec) : deliver(next, p.id, qty, spec).db;
   }, db);
 }
@@ -261,7 +268,7 @@ export function countProduct(db, { productId, counted, observed, company }) {
   }
 }
 
-export function applyCount(db, countId) {
+export function applyCount(db, countId, { stockLine, pickingId } = {}) {
   const count = read(db, 'stock.inventory.count', countId);
   if (!count || count.state !== 'in_progress') throw new Error('Only an inventory in progress can be applied');
   if (!count.line_ids.length || new Set(count.line_ids.map((l) => l.product_id)).size !== count.line_ids.length) throw new Error('Select distinct stockable products');
@@ -279,9 +286,9 @@ export function applyCount(db, countId) {
       next = used.db;
       value = -used.value;
     }
-    next = moveStock(next, [{ product_id: p.id, qty: difference }], 1);
+    next = moveStock(next, [{ ...stockLine, product_id: p.id, qty: difference }], 1);
     next = addLayer(next, { product_id: p.id, date: count.date, reference: count.name, description: 'Physical inventory',
-      quantity: difference, unit_cost: value / difference, value, kind: 'adjustment',
+      quantity: difference, unit_cost: value / difference, value, kind: 'adjustment', picking_id: pickingId,
       remaining_qty: Math.max(0, difference), remaining_value: difference > 0 ? value : 0 });
   }
   return write(next, 'stock.inventory.count', countId, { state: 'done' });

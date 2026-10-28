@@ -1,10 +1,11 @@
 // Shared widgets: field display/input, icons, avatar, tags.
-import { Component, useState } from 'react';
+import { Component, useEffect, useState } from 'react';
 import { models } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
+import { parseAmount } from './models/common.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -15,12 +16,15 @@ export function setCurrency(code) {
   if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
 }
 const docFmts = new Map();
+// In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
+// number and the run does not reorder the surrounding right-to-left text.
+const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null) => {
   const fmt = code && code !== moneyFmt.resolvedOptions().currency
     ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
     : moneyFmt;
-  return fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+  return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
 };
 function safeFormat(code) {
   try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return moneyFmt; }
@@ -36,7 +40,7 @@ export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
     case 'monetary': return money(value, currencyCode(db, rec));
-    case 'float': return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
     case 'boolean': return value ? t('Yes') : '';
@@ -67,6 +71,35 @@ export const Avatar = ({ name = '?', size = 28 }) => (
 /** Honest notice for a model whose effects stay inside Mizan (no real network call); see `simulated` in the model. */
 export const SimulatedNote = ({ text }) => (text ? <p className="simulated" role="note"><b>{t('Simulation')}:</b> {t(text)}</p> : null);
 
+/** Closes a popup on an outside click, on Escape (focus returns to its toggle) and when focus leaves it. */
+export function useDismiss(open, close, ref) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!open || !el) return undefined;
+    const outside = (e) => { if (!el.contains(e.target)) close(); };
+    const escape = (e) => { if (e.key === 'Escape') { close(); el.querySelector('[aria-expanded]')?.focus(); } };
+    const leave = (e) => { if (e.relatedTarget && !el.contains(e.relatedTarget)) close(); };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    el.addEventListener('focusout', leave);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('keydown', escape);
+      el.removeEventListener('focusout', leave);
+    };
+  }, [open, close, ref]);
+}
+
+/** Arrow-key movement between the items of a role="menu". */
+export function menuKeys(e) {
+  const items = [...e.currentTarget.querySelectorAll('[role=menuitem]')];
+  const i = items.indexOf(document.activeElement);
+  const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
+  if (to === undefined || !items.length) return;
+  e.preventDefault();
+  items[(to + items.length) % items.length].focus();
+}
+
 export function Stars({ value = 0, onChange }) {
   return (
     <span className="stars" aria-label={t('Priority')}>
@@ -85,7 +118,7 @@ export function Stars({ value = 0, onChange }) {
   );
 }
 
-function TagsInput({ value = [], onChange }) {
+function TagsInput({ id, value = [], onChange }) {
   const [text, setText] = useState('');
   const add = () => {
     const tag = text.trim();
@@ -96,6 +129,7 @@ function TagsInput({ value = [], onChange }) {
     <div className="tags-input">
       {value.map((tag) => <Tag key={tag} name={tag} onRemove={() => onChange(value.filter((x) => x !== tag))} />)}
       <input
+        id={id}
         value={text}
         placeholder={value.length ? '' : t('Add a tag…')}
         onChange={(e) => setText(e.target.value)}
@@ -157,7 +191,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
                     ? display(db, f, l[k], record)
-                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
               {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
@@ -181,36 +215,64 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
   );
 }
 
-export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
+/**
+ * Numeric input that accepts Arabic-Indic digits and separators (a type="number" input silently drops them).
+ * The typed text is kept while it is being edited; an entry that is not a number is flagged instead of ignored.
+ */
+function NumberInput({ id, value, onChange, integer, ...rest }) {
+  const [draft, setDraft] = useState(null);
+  const parsed = draft == null ? null : parseAmount(draft);
+  const invalid = draft != null && draft.trim() !== '' && (Number.isNaN(parsed) || (integer && !Number.isInteger(parsed)));
+  return (
+    <input id={id} {...rest} type="text" inputMode="decimal" dir="ltr" value={draft ?? (value ?? '')} aria-invalid={invalid || undefined}
+      title={invalid ? t('Enter a number') : undefined} className={invalid ? 'invalid' : undefined}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        const n = parseAmount(raw);
+        if (raw.trim() === '') onChange(null);
+        else if (!Number.isNaN(n) && (!integer || Number.isInteger(n))) onChange(n);
+      }}
+      onBlur={() => { if (!invalid) setDraft(null); }} />
+  );
+}
+
+/** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
+export const isLabelable = (field, readonly) =>
+  !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
+
+export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
+  // aria-required rather than required: saving is validated by the app, not by native form validation.
+  const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
   const text = (type = 'text', extra = {}) => (
-    <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
+    <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
-    case 'text': return <textarea id={id} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
-    case 'integer': return text('number', { step: '1', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
+    case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
+    case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':
-    case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
+    case 'float': return <NumberInput {...a11y} value={value} onChange={onChange} />;
     case 'date': return text('date');
     case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
-    case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
+    case 'boolean': return <input {...a11y} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (
-        <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+        <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
           {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
     case 'many2one':
       return (
-        <select id={id} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
+        <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
           {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
-    case 'tags': return <TagsInput value={value} onChange={onChange} />;
+    case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;
     default: return text();
   }
 }
@@ -288,6 +350,9 @@ export const Icon = ({ name, size = 18 }) => (
 );
 
 /** Keeps one broken screen from blanking the whole app; resets when the route (key) changes. React needs a class for this. */
+/** Placeholder while the data or a screen's code is loading. */
+export const Loading = () => <div className="boot" role="status" aria-live="polite">{t('Loading…')}</div>;
+
 export class ErrorBoundary extends Component {
   constructor(props) {
     super(props);

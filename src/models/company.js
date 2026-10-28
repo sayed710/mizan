@@ -8,7 +8,7 @@ import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.j
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'stock.quant', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };
@@ -90,7 +90,7 @@ export function withCompany(models) {
       ...model,
       fields: { ...model.fields, ...link, company_id: { ...companyField, ...model.fields.company_id, ...(sharedScoped.has(name) ? {} : { default: currentCompany }) } },
       defaults: sharedScoped.has(name) ? model.defaults : (id, db) => ({ ...model.defaults?.(id, db), company_id: db ? currentCompany(db) : 1 }),
-      guard: (db, before, r, opts) => model.guard?.(db, before, r, opts) ?? checkCompany(db, model.fields, r, r.company_id),
+      guard: (db, before, r, ctx) => model.guard?.(db, before, r, ctx) ?? checkCompany(db, model.fields, r, r.company_id),
     }];
   }));
 }

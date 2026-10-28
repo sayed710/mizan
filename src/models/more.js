@@ -7,6 +7,7 @@ import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty } from './picking.js';
+import { round as round2 } from '../money.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -136,7 +137,6 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
   return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
 }
 
-const round2 = (n) => Math.round(n * 100) / 100;
 const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
 
 /**
@@ -202,12 +202,6 @@ function invoiceSubscription(db, sub) {
   const nextDate = nextPeriod(sub.next_invoice_date ?? today(), sub.plan);
   const ended = sub.end_date && nextDate > sub.end_date;
   return { db: write(next, 'sale.subscription', sub.id, { next_invoice_date: nextDate, ...(ended ? { stage: 'closed', close_reason: null } : {}) }), go: `#/accounting/invoices/${id}` };
-}
-
-/** Recurring invoicing: one invoice for every running subscription due on or before `at`. */
-export function runRecurring(db, at = today()) {
-  return (db.records['sale.subscription'] ?? []).filter((s) => s.stage === 'progress' && s.next_invoice_date && s.next_invoice_date <= at)
-    .reduce((acc, s) => invoiceSubscription(acc, s).db, db);
 }
 
 function closeSubscription(db, r) {

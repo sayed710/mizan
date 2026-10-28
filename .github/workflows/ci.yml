@@ -19,5 +19,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run lint
       # `npm test` builds first (pretest): the server tests serve dist/.
       - run: npm test

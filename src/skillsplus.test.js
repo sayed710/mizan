@@ -1,7 +1,10 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
+// Referral links point at the public jobs page: /#/shop/jobs?job=<id>&ref=<token>.
+const refOf = (link) => new URLSearchParams(link.split('?')[1]).get('ref');
 import { skillsPlusModels, setSkill, skillMatrix, employeesWithSkill, certificationsExpiring, referralLink, referFromLink, syncFromApplicant, points, buyReward, leaderboard } from './models/skillsplus.js';
 import { acceptOffer, scheduleInterview, sendOffer } from './models/recruitplus.js';
 
@@ -10,7 +13,7 @@ const type = (db) => create(db, 'hr.skill.type', {
   level_ids: [{ name: 'Learning', level_progress: 25, default_level: true }, { name: 'Expert', level_progress: 100, default_level: false }],
 });
 const referred = (db, employeeId = 1, email = 'candidate@example.test', jobId = 1) => {
-  const token = new URL(referralLink(db, employeeId, jobId), 'https://mizan.test').searchParams.get('ref');
+  const token = refOf(referralLink(db, employeeId, jobId));
   return referFromLink(db, { token, jobId, name: 'New Candidate', email });
 };
 const reward = (db, vals = {}) => create(db, 'hr.referral.reward', { name: 'Gift', cost: 30, quantity: 2, ...vals });
@@ -73,7 +76,7 @@ test('referral links round-trip with stable per-employee attribution and normali
   const before = structuredClone(db);
   const link = referralLink(db, 1, 1);
   assert.equal(referralLink(db, 1, 1), link);
-  assert.equal(new URL(link, 'https://mizan.test').search, new URL(referralLink(db, 1, 2), 'https://mizan.test').search);
+  assert.equal(refOf(link), refOf(referralLink(db, 1, 2)));
   assert.notEqual(link, referralLink(db, 2, 1));
   const result = referred(db, 1, '  Candidate@Example.Test ');
   const referral = read(result.db, 'hr.referral', result.referralId);
@@ -162,7 +165,7 @@ test('seed keeps legacy skills, referrals, stages and views intact', () => {
   assert.equal(legacy.points, 30);
   assert.equal(legacy.stage_id, 'interview');
   assert.equal(legacy.reward_points_spent, 0);
-  assert.ok(legacy.link.startsWith('/jobs/1?ref='));
+  assert.ok(legacy.link.startsWith('/#/shop/jobs?job=1&ref='));
   assert.deepEqual(skillsPlusModels['hr.referral'].views, ['kanban', 'list', 'graph']);
   assert.deepEqual(skillsPlusModels['hr.skill'].views, ['list', 'kanban', 'pivot']);
   assert.deepEqual(skillsPlusModels['hr.referral'].fields.stage_id.options.map(([id]) => id), ['new', 'interview', 'hired', 'refused']);

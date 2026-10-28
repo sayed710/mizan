@@ -109,7 +109,8 @@ function signPage(db, r, index, base, message) {
       <label>Reason for refusing<br><input name="reason" maxlength="500" required></label>
       <button type="submit">Refuse to sign</button>
     </form>` : '';
-  const attachment = (r.attachment ?? read(db, 'sign.template', r.template_id)?.attachment)?.data ? `<p><a href="${escape(base)}/document" target="_blank" rel="noopener">View the attached document (${escape((r.attachment ?? read(db, 'sign.template', r.template_id)?.attachment).name)})</a></p>` : '';
+  const file = r.attachment ?? read(db, 'sign.template', r.template_id)?.attachment;
+  const attachment = file?.data ? `<p><a href="${escape(base)}/document" target="_blank" rel="noopener">View the attached document (${escape(file.name)})</a></p>` : '';
   const content = r.body ? `<div style="white-space:pre-wrap;border:1px solid #ccc;padding:12px;margin:12px 0">${escape(r.body)}</div>` : '';
   return page(r.name, `<h1>${escape(r.name)}</h1><p>Signer: ${escape(partnerOf(db, signer)?.name ?? '')}</p>${content}${attachment}${message ? `<p role="status">${escape(message)}</p>` : ''}${status}${forms}`);
 }

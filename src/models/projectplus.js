@@ -37,13 +37,20 @@ export function projectStatus(db, projectId, at = today()) {
 /** Create a dated status snapshot and publish its status on the project. */
 export function postUpdate(db, projectId, { name, status, progress, author, description, date = today() }) {
   if (!read(db, 'project.project', projectId)) throw new Error('Select an existing project');
-  if (!Number.isInteger(progress) || progress < 0 || progress > 100) throw new Error('Progress must be an integer from 0 to 100');
-  if (!statuses.some(([value]) => value === status)) throw new Error('Select a valid project status');
-  const s = projectStatus(db, projectId, date);
+  const created = create(db, 'project.update', { project_id: projectId, name, status, progress, author, description, date });
+  return publishUpdate(created.db, created.id);
+}
+
+/** Fill an update's task summary and publish its status on the project (the Publish button of updates made in the form). */
+export function publishUpdate(db, updateId) {
+  const u = read(db, 'project.update', updateId);
+  if (!u || !read(db, 'project.project', u.project_id)) throw new Error('Select an existing project');
+  if (!Number.isInteger(u.progress) || u.progress < 0 || u.progress > 100) throw new Error('Progress must be an integer from 0 to 100');
+  if (!statuses.some(([value]) => value === u.status)) throw new Error('Select a valid project status');
+  const s = projectStatus(db, u.project_id, u.date ?? today());
   const milestone = s.nextMilestone;
   const summary = `${s.open + s.done} tasks, ${s.done} done (${s.percentDone}%), ${s.late} late; next milestone: ${milestone ? `${milestone.name}${milestone.deadline ? ` (${milestone.deadline})` : ''}` : 'None'}`;
-  const next = create(db, 'project.update', { project_id: projectId, name, status, progress, author, description, date, summary }).db;
-  return write(next, 'project.project', projectId, { last_update_status: status });
+  return write(write(db, 'project.update', updateId, { summary }), 'project.project', u.project_id, { last_update_status: u.status });
 }
 
 function validDate(value) {
@@ -143,6 +150,7 @@ export const projectPlusModels = {
     form: {
       title: 'name', groups: [['project_id', 'status', 'progress'], ['date', 'author']],
       tabs: [{ label: 'Description', fields: ['description'] }, { label: 'Summary', fields: ['summary'] }], chatter: true,
+      buttons: [{ label: 'Publish', primary: true, when: (r) => !r.summary, run: (db, r) => ({ db: publishUpdate(db, r.id) }) }],
     },
   },
   'project.recurrence': {

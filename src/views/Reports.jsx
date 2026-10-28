@@ -5,6 +5,7 @@ import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { agedBalance, analyticActuals, followUps, followUpText, logManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
 import { commit, getDb, isServer, listAudit, useDb } from '../store.js';
 import { auditSummary } from '../audit.js';
+import { valuationReport } from '../models/valuation.js';
 import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -12,7 +13,7 @@ import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
-const PERIODS = {
+export const PERIODS = {
   month: () => {
     const d = new Date();
     return { from: today().slice(0, 7) + '-01', to: monthEnd(d.getFullYear(), d.getMonth() + 1) };
@@ -269,10 +270,11 @@ function AuditRows({ db, rows }) {
   );
 }
 
-/** Current stock value per product (on hand × cost), largest first. */
+/** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
 function Valuation({ db }) {
-  const rows = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available))
-    .map((p) => ({ p, value: (Number(p.qty_available) || 0) * (Number(p.cost) || 0) })).sort((a, b) => b.value - a.value);
+  const report = valuationReport(db);
+  const rows = Object.entries(report).filter(([, v]) => v.qty)
+    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
       {rows.map(({ p, value }) => (

@@ -6,7 +6,8 @@ import { addDays, today } from './common.js';
 const relation = (model, label) => ({ type: 'many2one', relation: model, label, required: true });
 const char = (label) => ({ type: 'char', label, required: true });
 const referral = apps3Models['hr.referral'];
-const scale = (r) => ({ new: 10, interview: 30, hired: 100 })[r.stage_id] ?? 0;
+// Anonymous applications earn points only after recruitment advances them beyond the new stage.
+const scale = (r) => r.website_submission && r.stage_id === 'new' ? 0 : ({ new: 10, interview: 30, hired: 100 })[r.stage_id] ?? 0;
 const normalize = (s) => String(s ?? '').trim().toLowerCase();
 const all = (db, model) => search(db, model, { includeArchived: true });
 const get = (db, model, id) => {
@@ -20,7 +21,8 @@ const tokenFor = (id) => {
   for (const c of `mizan-referral-v1:${id}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
   return `${id}-${hash.toString(16).padStart(8, '0')}`;
 };
-const linkFor = (employeeId, jobId) => `/jobs/${jobId}?ref=${tokenFor(employeeId)}`;
+// The public jobs page (PublicSite.jsx) reads job and ref from the hash and sends ref with the application.
+const linkFor = (employeeId, jobId) => `/#/shop/jobs?job=${jobId}&ref=${tokenFor(employeeId)}`;
 const skillLevel = (db, typeId, skill, level) => {
   const type = get(db, 'hr.skill.type', typeId);
   if (!(type.skill_ids ?? []).some((s) => s.name === skill)) throw new Error('Select a skill belonging to this skill type');
@@ -74,7 +76,7 @@ export function referralLink(db, employeeId, jobId) {
 }
 
 /** Resolve attribution and create a referral plus its recruitment application. */
-export function referFromLink(db, { token, jobId, name, email }) {
+export function referFromLink(db, { token, jobId, name, email, fromWebsite = false }) {
   const employee = search(db, 'hr.employee').find((e) => tokenFor(e.id) === token);
   if (!employee) throw new Error('Unknown referral token');
   get(db, 'hr.job', jobId);
@@ -84,7 +86,7 @@ export function referFromLink(db, { token, jobId, name, email }) {
   if (all(db, 'hr.applicant').some((r) => r.job_id === jobId && normalize(r.email) === address)
     || all(db, 'hr.referral').some((r) => r.job_id === jobId && normalize(r.email) === address)) throw new Error('This email has already applied for this job');
   const applicant = create(db, 'hr.applicant', { name: candidate, email: address, job_id: jobId, source: 'referral' });
-  const result = create(applicant.db, 'hr.referral', { name: candidate, email: address, job_id: jobId, referrer_id: employee.id, applicant_id: applicant.id, source_token: token });
+  const result = create(applicant.db, 'hr.referral', { name: candidate, email: address, job_id: jobId, referrer_id: employee.id, applicant_id: applicant.id, source_token: token, website_submission: fromWebsite });
   return { db: result.db, referralId: result.id, applicantId: applicant.id };
 }
 
@@ -201,6 +203,8 @@ export const skillsPlusModels = {
     ...referral,
     fields: {
       ...referral.fields,
+      points: { ...referral.fields.points, compute: scale },
+      website_submission: { type: 'boolean', label: 'Website Application', readonly: true },
       applicant_id: { type: 'many2one', relation: 'hr.applicant', label: 'Application' },
       source_token: { type: 'char', label: 'Source Token', readonly: true, compute: (r) => r.referrer_id ? tokenFor(r.referrer_id) : '' },
       link: { type: 'char', label: 'Referral Link', readonly: true, compute: (r) => r.referrer_id && r.job_id ? linkFor(r.referrer_id, r.job_id) : '' },
@@ -217,6 +221,17 @@ export const skillsPlusModels = {
     defaults: () => ({ cost: 10, quantity: 1, active: true }),
     guard: (db, before, r) => !Number.isInteger(r.cost) || r.cost <= 0 || !Number.isInteger(r.quantity) || r.quantity < 0 ? 'Reward cost must be a positive integer and stock a non-negative integer' : null,
     list: ['name', 'cost', 'quantity', 'active'],
-    form: { title: 'name', groups: [['cost', 'quantity'], ['active']] },
+    form: {
+      title: 'name', groups: [['cost', 'quantity'], ['active']],
+      buttons: [{
+        label: 'Redeem', primary: true, when: (r) => r.active !== false && r.quantity > 0,
+        ask: [{ label: 'Employee name' }],
+        run: (db, r, [name]) => {
+          const employee = search(db, 'hr.employee').find((e) => e.name.toLowerCase() === name.toLowerCase());
+          if (!employee) throw new Error('No employee with that name');
+          return { db: buyReward(db, employee.id, r.id) };
+        },
+      }],
+    },
   },
 };

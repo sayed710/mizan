@@ -1,5 +1,5 @@
 import { create, postNote, read, write } from '../orm.js';
-import { amounts, nextName, productLines, subtotal, today } from './common.js';
+import { amounts, nextName, productLines, promptedAmount, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, accountId, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
@@ -8,6 +8,7 @@ import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
+import { round as round2 } from '../money.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -21,7 +22,6 @@ const paymentState = (r) => {
   if (residual(r) === 0) return 'paid';
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
-const round2 = (n) => Math.round(n * 100) / 100;
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', in_refund: 'RBILL', entry: 'MISC' };
 
@@ -300,9 +300,8 @@ export function payWithDiscount(db, id, amount, date = today()) {
 
 function registerPayment(db, r) {
   const due = Math.round((residual(r) - discountAvailable(db, r)) * 100) / 100;
-  const input = prompt(`Payment amount (due ${money(due)})`, String(due));
-  const amount = Number(input);
-  if (input == null || !(amount > 0)) return { db };
+  const amount = promptedAmount(prompt(`Payment amount (due ${money(due)})`, String(due)));
+  if (amount == null) return { db };
   return { db: payWithDiscount(db, r.id, amount) };
 }
 

@@ -3,8 +3,8 @@ import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { capitalizeStock } from './valuation.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /**
  * On sale confirmation, apply each product's route:
@@ -145,7 +145,7 @@ export const routeModels = {
     fields: {
       name: { type: 'char', label: 'Location Name', required: true },
       parent_id: { type: 'many2one', relation: 'stock.location', label: 'Parent Location' },
-      usage: { type: 'selection', label: 'Location Type', options: [['internal', 'Internal'], ['view', 'View'], ['transit', 'Transit']] },
+      usage: { type: 'selection', label: 'Location Type', options: [['internal', 'Internal'], ['view', 'View'], ['transit', 'Transit'], ['inventory', 'Inventory Adjustment']] },
       barcode: { type: 'char', label: 'Barcode' },
     },
     defaults: () => ({ usage: 'internal' }),

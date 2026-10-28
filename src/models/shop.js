@@ -4,9 +4,9 @@ import { amounts, subtotal } from './common.js';
 import { shippingPrice } from './logistics.js';
 import { priceFor } from './pricelist.js';
 import { lineTaxOf, productTax } from './taxes.js';
+import { round } from '../money.js';
 
 export const SORTS = ['featured', 'newest', 'name', 'price_asc', 'price_desc'];
-const cents = (n) => Math.round(n * 100) / 100;
 
 /** Visible on the website: published (new flag and the older "Sold Online" one), sellable and priced. */
 export const isSellable = (p) => !!p && p.active !== false && p.sale_ok !== false && p.is_published !== false && p.website_published !== false && Number(p.list_price) > 0;
@@ -93,7 +93,7 @@ export function shopLine(db, productId, qty, { pricelistId = null, fiscalPositio
 /** Delivery line on the shipping service product (reference SHIP) when it exists. */
 export function deliveryLine(db, price, fiscalPositionId = null) {
   const ship = search(db, 'product', { includeArchived: true }).find((p) => p.default_code === 'SHIP');
-  return { product_id: ship?.id ?? null, qty: 1, price_unit: cents(price), discount: 0, ...(productTax(db, ship, 'sale', fiscalPositionId) ?? { tax: 0 }) };
+  return { product_id: ship?.id ?? null, qty: 1, price_unit: round(price), discount: 0, ...(productTax(db, ship, 'sale', fiscalPositionId) ?? { tax: 0 }) };
 }
 
 /** Carriers offered on the website: published and priced locally (API carriers need the server integration). */
@@ -108,11 +108,11 @@ export function cartTotals(db, lines, { pricelistId = null, carrierId = null, pa
   const productLines = (lines ?? []).map((l) => shopLine(db, l.product_id, l.qty, { pricelistId, fiscalPositionId }));
   const untaxed = amounts(productLines).untaxed;
   const carrier = carrierId ? read(db, 'delivery.carrier', carrierId) : null;
-  const delivery = carrier ? cents(shippingPrice(db, carrier, { amount_untaxed: untaxed, order_line: productLines })) : 0;
+  const delivery = carrier ? round(shippingPrice(db, carrier, { amount_untaxed: untaxed, order_line: productLines })) : 0;
   const orderLines = carrier ? [...productLines, deliveryLine(db, delivery, fiscalPositionId)] : productLines;
   const all = amounts(orderLines);
   return {
-    lines: productLines.map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: l.price_unit, subtotal: cents(subtotal(l)), tax: cents(lineTaxOf(l)) })),
+    lines: productLines.map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: l.price_unit, subtotal: round(subtotal(l)), tax: round(lineTaxOf(l)) })),
     untaxed, tax: all.tax, delivery, total: all.total, orderLines,
   };
 }

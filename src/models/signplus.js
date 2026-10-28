@@ -289,7 +289,22 @@ export const signPlusModels = {
     label: 'Templates',
     fields: { name: { type: 'char', label: 'Name', required: true }, attachment: { type: 'binary', label: 'Attachment' }, item_ids: items, active: { type: 'boolean', label: 'Active' }, tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag') }, () => ({ tag_id: null })) },
     defaults: () => ({ active: true, item_ids: [], tag_ids: [] }), kanban: { title: 'name', lines: ['active'] }, list: ['name', 'active'],
-    form: { title: 'name', groups: [['attachment', 'active', 'tag_ids']], tabs: [{ label: 'Items', fields: ['item_ids'] }] },
+    form: {
+      title: 'name', groups: [['attachment', 'active', 'tag_ids']], tabs: [{ label: 'Items', fields: ['item_ids'] }],
+      buttons: [{
+        label: 'Request Signature', primary: true, when: (r) => r.active !== false && r.item_ids?.length,
+        ask: [{ label: 'Signers, as role=contact name separated by ;', default: (r) => [...new Set(r.item_ids.map((i) => i.role))].map((role) => `${role}=`).join('; ') }],
+        run: (db, r, [text]) => {
+          const signers = String(text).split(';').map((pair) => pair.split('=').map((v) => v.trim())).filter(([role]) => role).map(([role, name = '']) => {
+            const partner = search(db, 'res.partner').find((p) => p.name.toLowerCase() === name.toLowerCase());
+            if (!partner) throw new Error(`No contact named "${name}" for role ${role}`);
+            return { role, partner_id: partner.id };
+          });
+          const res = requestFromTemplate(db, r.id, { signers });
+          return { db: res.db, go: `#/sign/documents/${res.id}` };
+        },
+      }],
+    },
   },
   'sign.request': {
     ...baseSign,
@@ -348,9 +363,12 @@ export const signPlusModels = {
     form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b) },
   },
   'documents.share': {
-    simulated: 'Share links are not served yet: there is no public page that opens them.',
     label: 'Shares', fields: { name: { type: 'char', label: 'Name', required: true }, folder_id: relation('documents.folder', 'Folder'), document_ids: lines('Documents', { document_id: relation('documents.document', 'Document') }, () => ({ document_id: null })), token: { type: 'char', label: 'Token', readonly: true }, expiration: { type: 'date', label: 'Expiration' }, can_upload: { type: 'boolean', label: 'Allow Upload' } },
     defaults: () => ({ name: 'Shared Documents', token: token(), document_ids: [], can_upload: false }), list: ['name', 'folder_id', 'expiration', 'can_upload'],
-    form: { title: 'name', groups: [['folder_id', 'expiration', 'can_upload', 'token']], tabs: [{ label: 'Documents', fields: ['document_ids'] }], chatter: true },
+    form: {
+      title: 'name', groups: [['folder_id', 'expiration', 'can_upload', 'token']], tabs: [{ label: 'Documents', fields: ['document_ids'] }], chatter: true,
+      // The server serves /share/<token> (server/inbound.js): a read-only list with downloads.
+      buttons: [{ label: 'Share Link', when: (r) => !!r.token, run: (db, r) => ({ db, message: `${globalThis.location?.origin ?? ''}/share/${r.token}` }) }],
+    },
   },
 };

@@ -136,6 +136,16 @@ export const socialModels = {
         { label: 'Post', primary: true, when: (r) => r.stage_id !== 'posted', run: (db, r) => ({ db: publishPost(db, r) }) },
         { label: 'Schedule', when: (r) => r.stage_id === 'draft', run: (db, r) => ({ db: schedulePost(db, r, r.scheduled_date) }) },
         { label: 'Back to Draft', when: (r) => r.stage_id === 'scheduled', vals: { stage_id: 'draft' } },
+        {
+          // Networks are not connected (simulated), so reported counts are entered by hand.
+          label: 'Record Engagement', when: (r) => r.stage_id === 'posted' && r.live_post_ids?.length,
+          ask: [{ label: 'Account name', default: (r) => r.live_post_ids.length === 1 ? String(r.live_post_ids[0].account_id ?? '') : '' }, { label: 'Likes', type: 'number' }, { label: 'Comments', type: 'number' }, { label: 'Shares', type: 'number' }, { label: 'Clicks', type: 'number' }],
+          run: (db, r, [account, likes, comments, shares, clicks]) => {
+            const found = search(db, 'social.account').find((a) => String(a.id) === account || a.name.toLowerCase() === account.toLowerCase());
+            if (!found || !r.live_post_ids.some((l) => l.account_id === found.id)) throw new Error('This post is not live on that account');
+            return { db: recordEngagement(db, r.id, found.id, { likes, comments, shares, clicks }) };
+          },
+        },
       ],
       title: 'name',
       groups: [['scheduled_date', 'characters'], ['published_date', 'likes', 'comments', 'shares', 'clicks']],

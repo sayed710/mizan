@@ -1,6 +1,7 @@
 // Segregation of duties: who may approve. A user is linked to an employee through hr.employee.user_login; approving
 // time off, allocations, expenses, timesheets and approval requests then needs that employee to be a manager of the
 // requester (never the requester themselves), checked on the server for every non-admin change.
+import { leaveAuthorization } from './timeoff.js';
 
 let actor = null;
 /** The signed-in user ({ login, name }) on the client; null in local mode. */
@@ -155,7 +156,7 @@ function employeeRule(db, before, r, ctx) {
 
 /** Server-side authorization rules per model: (db, stored, after, { isAdmin, login, name }) => error or null. */
 export const authorityRules = {
-  'hr.leave': leaveRule,
+  'hr.leave': leaveAuthorization,
   'hr.leave.allocation': leaveRule,
   'hr.expense.sheet': sheetRule,
   'hr.expense': expenseRule,

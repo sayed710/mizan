@@ -5,9 +5,9 @@ import { accountId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
+import { round } from '../money.js';
 
 const number = (n) => Number(n) || 0;
-const round = (n) => Math.round(n * 100) / 100;
 // Services never get a receipt, so they are always billed on ordered quantities.
 const method = (p) => (p?.type === 'service' ? 'purchase' : p?.purchase_method ?? 'receive');
 const quantities = (l, policy) => {

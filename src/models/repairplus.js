@@ -4,8 +4,8 @@ import { apps2Models } from './apps2.js';
 import { addDays, amounts, today } from './common.js';
 import { createPicking } from './sales.js';
 import { moveValued } from './valuation.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const warranty = (r) => !!r.under_warranty && (!r.guarantee_limit || (r.repair_date || r.schedule_date) <= r.guarantee_limit);
 const free = (r, l) => warranty(r) || (!!l.warranty_free && !l.warranty_applied);
 const repair = (db, id) => {

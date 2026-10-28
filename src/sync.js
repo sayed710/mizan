@@ -1,6 +1,7 @@
+// @ts-check
 // Record-level diff between two db snapshots, applied server-side so concurrent edits
 // to different records don't overwrite each other.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 import { postTracking, referenceTo, validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
@@ -24,11 +25,15 @@ const lockValue = (value, current) => (value === null || isRealDate(value) ? val
 /**
  * `bases` holds, for each edited record, the values its changed fields had before the edit, so the server can
  * keep other users' changes to other fields and refuse an edit made on top of an outdated value.
- * @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, bases: Record<string, Record<number, object>>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
+ * @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, created: Record<string, number[]>, bases: Record<string, Record<number, object>>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
+  /** @type {Record<string, object[]>} */
   const upserts = {};
+  /** @type {Record<string, number[]>} */
   const deletes = {};
+  /** @type {Record<string, Record<number, object>>} */
   const bases = {};
+  /** @type {Record<string, number[]>} */
   const created = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
     // Untouched models keep the same array, so a save costs what changed rather than the whole database.
@@ -106,10 +111,13 @@ export const MAX_ID = 2 ** 40;
 export const ID_WINDOW = 1_000_000;
 /**
  * Apply only the fields an edit changed onto the stored record, refusing it when one of them no longer has the value
- * the edit started from. Without a base (a new record, or an older client) the record is taken as sent.
+ * the edit started from. Without a base the record is taken as sent, preserving omitted fields on locked records.
  */
 function merge(model, stored, raw, base) {
-  if (!base || typeof base !== 'object' || Array.isArray(base)) return raw;
+  if (!base || typeof base !== 'object' || Array.isArray(base)) {
+    // Legacy partial updates must not erase the state or content of a locked record.
+    return stored && models[model].form?.lockedWhen?.(stored) ? { ...stored, ...raw } : raw;
+  }
   const label = models[model].label ?? model;
   if (!stored) throw new ConflictError(`${label} #${raw.id} was deleted by someone else; reload and try again`);
   const stale = Object.keys(base).find((k) => same(stored[k]) !== same(base[k]));
@@ -211,7 +219,11 @@ function remapRefs(model, rec, remapped) {
         if (!line || typeof line !== 'object') return line;
         const target = (s) => (s.type === 'many2one' ? s.relation : s.ref);
         const subs = Object.entries(f.fields ?? {}).filter(([k, s]) => target(s) && k in line);
-        return subs.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(target(s), line[k])])) } : line;
+        const distribution = line.analytic_distribution;
+        const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
+          ? { analytic_distribution: Object.fromEntries(Object.entries(distribution).map(([id, share]) => [to('account.analytic.account', Number(id)), share])) }
+          : null;
+        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(target(s), line[k])])), ...analytic } : line;
       });
     }
   }
@@ -226,7 +238,8 @@ function remapRefs(model, rec, remapped) {
  * @returns {{ diff: object, remapped: Record<string, Record<number, number>> }}
  */
 export function assignIds(db, d) {
-  if (!d || typeof d !== 'object' || !d.upserts || typeof d.upserts !== 'object') return { diff: d, remapped: {} };
+  if (!d || typeof d !== 'object' || !d.upserts || typeof d.upserts !== 'object') return { diff: d, remapped: /** @type {Record<string, Record<number, number>>} */ ({}) };
+  /** @type {Record<string, Record<number, number>>} */
   const remapped = {};
   for (const [model, recs] of Object.entries(d.upserts)) {
     if (!models[model] || !Array.isArray(recs)) continue;
@@ -288,8 +301,12 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
 /**
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
+ * @param {object} db
+ * @param {any} d
+ * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null, login?: string | null, companies?: any, readOnly?: Set<string> | null }} [options]
  */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null, companies = null, readOnly = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
+  isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
@@ -303,6 +320,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   // (an expense and the report it joins) must not be judged against a half-applied diff.
   let records = { ...db.records };
   let growth = 0;
+  /** @type {[string, any][]} */
   const changed = [];
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
@@ -336,8 +354,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
-    const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin })
-      ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author });
+    // Keep specific authorization failures ahead of the generic locked-form error.
+    const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);

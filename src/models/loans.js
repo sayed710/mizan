@@ -1,9 +1,9 @@
 // Loans: borrowings repaid by monthly instalments (annuity or fixed principal), posted as they fall due.
 import { read, write } from '../orm.js';
-import { today } from './common.js';
+import { promptedAmount, today } from './common.js';
 import { postEntry } from './ledger.js';
+import { cents } from '../money.js';
 
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 
 /** @throws a user-readable message when the loan cannot be scheduled. */
@@ -161,9 +161,8 @@ export const loanModels = {
         { label: 'Post Due Lines', primary: true, when: (r) => r.state === 'running', run: (db, r) => ({ db: postDueLines(db, read(db, 'account.loan', r.id)) }) },
         {
           label: 'Early Repayment', when: (r) => r.state === 'running', run: (db, r) => {
-            const input = prompt(`Early repayment amount (outstanding ${r.outstanding_balance})`, String(r.outstanding_balance));
-            const amount = Number(input);
-            if (input == null || !(amount > 0)) return { db };
+            const amount = promptedAmount(prompt(`Early repayment amount (outstanding ${r.outstanding_balance})`, String(r.outstanding_balance)));
+            if (amount == null) return { db };
             return { db: earlyRepayment(db, r, { date: today(), amount }) };
           },
         },

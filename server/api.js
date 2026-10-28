@@ -1,7 +1,7 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
 import { RASTER } from './blobs.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { models } from '../src/models/index.js';
+import { models, uninstalledModels } from '../src/models/index.js';
 import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
@@ -11,6 +11,7 @@ import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
 import { restrictRecords, visibleTo } from '../src/models/company.js';
+import { referFromLink } from '../src/models/skillsplus.js';
 
 const MAX_LIMIT = 500;
 
@@ -149,8 +150,20 @@ export function publicApply(db, body) {
   const email = String(b.email ?? '').trim().slice(0, 254);
   if (!job) return { status: 400, body: { error: 'This position is not open' } };
   if (!name || !EMAIL.test(email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
-  const res = create(db, 'hr.applicant', { name, email, phone: String(b.phone ?? '').slice(0, 40), job_id: job.id, description: String(b.motivation ?? '').slice(0, 5000), tag_ids: ['Website'] });
-  return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, res.db), { author: 'Website', isAdmin: false }) };
+  const extra = { phone: String(b.phone ?? '').slice(0, 40), description: String(b.motivation ?? '').slice(0, 5000), tag_ids: ['Website'] };
+  let next;
+  if (b.ref) {
+    // An employee's referral link: the applicant is attributed to them (the token only attributes, it grants nothing).
+    try {
+      const referred = referFromLink(db, { token: String(b.ref).slice(0, 40), jobId: job.id, name, email, fromWebsite: true });
+      next = write(referred.db, 'hr.applicant', referred.applicantId, extra);
+    } catch (e) {
+      return { status: 400, body: { error: e.message } };
+    }
+  } else {
+    next = create(db, 'hr.applicant', { name, email, job_id: job.id, ...extra }).db;
+  }
+  return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: 'Website', isAdmin: false }) };
 }
 
 export const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
@@ -289,9 +302,11 @@ const describe = (name) => ({
  */
 export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null, readOnly = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
-  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
+  const unavailable = uninstalledModels(db.settings?.uninstalled);
+  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !unavailable.has(m) && (!allowed || allowed.has(m))).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
   if (allowed && !allowed.has(model)) return { status: 403, body: { error: `No access to ${model}` } };
+  if (unavailable.has(model)) return { status: 404, body: { error: `The app for ${model} is not installed` } };
   const id = rawId === undefined ? null : Number(rawId);
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 

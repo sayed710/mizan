@@ -1,5 +1,6 @@
 // Model registry + application menus. Every view is rendered from these definitions.
 import { read } from '../orm.js';
+import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
@@ -77,14 +78,20 @@ import { appointmentModels } from './appointments.js';
 import { whatsappModels } from './whatsapp.js';
 import { today } from './common.js';
 import { companyModels, withCompany } from './company.js';
+import { withLocks } from './locks.js';
+import { composeModels } from './compose.js';
 import { warehouseModels } from './warehouse.js';
+import { quantModels } from './quant.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
 import { declareWorkflowFields } from './workflowFields.js';
+import { appAnalyses } from './analysis.js';
 
 export { today } from './common.js';
 
-export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...documentsPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels, ...warehouseModels, ...consolidationModels });
+/** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
+export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels };
+export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
 // a server action) runs through this check, so a hidden transition cannot run.
@@ -244,7 +251,8 @@ const allApps = [
         { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
         { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },
         { key: 'internal', label: 'Internal', model: 'stock.picking', domain: (r) => r.picking_type === 'internal', defaults: { picking_type: 'internal' } },
-        { key: 'physical-inventory', label: 'Physical Inventory', model: 'stock.inventory.count' },
+        { key: 'physical-inventory', label: 'Physical Inventory', model: 'stock.quant' },
+        { key: 'inventory-counts', label: 'Inventory Counts', model: 'stock.inventory.count' },
       ] },
       { key: 'products', label: 'Products', model: 'product' },
       { key: 'stock', label: 'Stock', model: 'product', view: 'list', domain: (r) => r.type === 'goods' },
@@ -327,6 +335,7 @@ const allApps = [
       { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
       { key: 'allocations', label: 'Allocations', model: 'hr.leave.allocation' },
+      { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
       { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
     ],
   },
@@ -578,7 +587,13 @@ export const APP_INFO = {
   automation: ['Marketing', 'Automated multi-step campaigns'], plm: ['Supply Chain', 'Engineering change orders'], rooms: ['Productivity', 'Book meeting rooms'],
   referral: ['Human Resources', 'Employees refer candidates'], skills: ['Human Resources', 'Employee skills and levels'], esg: ['ESG', 'Measure your carbon footprint'], surveys: ['Marketing', 'Create and run surveys'], elearning: ['Website', 'Online courses'],
 };
-export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+// Read-only analyses get an "Analysis" menu in their app (see analysis.js).
+const withAnalyses = (app) => {
+  const own = appAnalyses.filter((a) => a.app === app.id);
+  if (!own.length) return app;
+  return { ...app, menus: [...app.menus, { label: 'Analysis', children: own.map((a) => ({ key: a.key, label: a.label, type: 'analysis', analysis: a.key })) }] };
+};
+export const apps = [...allApps].map(withAnalyses).sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 
@@ -636,6 +651,8 @@ export function redactForApps(db, appIds) {
 export function modelsForApps(appIds) {
   const base = menuModelsForApps(appIds);
   const out = new Set(base);
+  // Barcode counts update located stock through the same quantity path as inventory operations.
+  if (appIds.includes('barcode')) out.add('stock.quant');
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
       if (f.relation) out.add(f.relation);
@@ -645,9 +662,17 @@ export function modelsForApps(appIds) {
   return out;
 }
 
+/** Models only uninstalled apps use (none of the installed apps reaches them); the REST API refuses them. */
+export function uninstalledModels(uninstalled = []) {
+  if (!uninstalled.length) return new Set();
+  const reachable = modelsForApps(apps.map((a) => a.id).filter((id) => !uninstalled.includes(id)));
+  return new Set(Object.keys(models).filter((m) => !reachable.has(m)));
+}
+
 /** "#/app/menu" of the first unfiltered menu showing `model` (used to open any record from anywhere). */
-export function targetOf(model) {
+export function targetOf(model, uninstalled = []) {
   for (const app of apps) {
+    if (uninstalled.includes(app.id)) continue;
     const leaf = leavesOf(app).find((l) => l.model === model && !l.domain);
     if (leaf) return `#/${app.id}/${leaf.key}`;
   }

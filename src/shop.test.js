@@ -1,3 +1,4 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';

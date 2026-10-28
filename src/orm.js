@@ -1,6 +1,7 @@
+// @ts-check
 // Pure ORM over a plain db object: { records: {model: [rec]}, seq: {model: n}, messages: [] }.
 // Every function returns a new db; nothing is mutated.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD' } });
 
@@ -12,6 +13,7 @@ export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
+export const getActiveCompany = () => activeCompany;
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
 const withComputed = (fields, r, db) => {

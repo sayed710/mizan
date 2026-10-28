@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from 'react';
-import { seed } from './seed.js';
 import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
 import { createQueue } from './queue.js';
 import { migrate } from './migrations.js';
@@ -8,6 +7,7 @@ import { setCompanies } from './models/company.js';
 import { setActor } from './models/authority.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
+import { t } from './i18n.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v32';
@@ -52,14 +52,17 @@ const notify = () => {
   listeners.forEach((l) => l());
 };
 
-function loadLocal() {
+// The demo seed is only needed in browser-only mode, so it is loaded on demand.
+const demoData = async () => (await import('./seed.js')).seed();
+
+async function loadLocal() {
   try {
     const saved = localStorage.getItem(KEY);
     if (saved) return migrate(JSON.parse(saved));
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
-  return seed();
+  return demoData();
 }
 
 async function api(path, body, headers = {}) {
@@ -102,13 +105,14 @@ export async function initStore() {
       user = session.data;
       setAuthor(user.name);
       setActor(user);
-      // Never fall back to demo data here: the next save would write it over the real records.
+      // A backend that answers but cannot serve the database is an error, not a reason to fall back to demo data.
       await pull();
+      if (!db) throw new Error('The server did not return the database');
       setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
     }
     return { mode, user };
   }
-  db = loadLocal();
+  db = await loadLocal();
   applyContext();
   return { mode, user };
 }
@@ -120,8 +124,13 @@ export const isServer = () => mode === 'server';
 /** Id reassignments from the server, in arrival order. */
 const remaps = [];
 
-/** Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local). */
-export function commit(next) {
+/**
+ * Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local).
+ * Returns a promise of { ok, error } that settles once the server has accepted or refused the change, so callers
+ * can confirm success (or keep the user's input) only then. With `quiet`, a refusal is left to the caller to show;
+ * otherwise it is shown in a translated alert.
+ */
+export function commit(next, { quiet = false } = {}) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
@@ -130,7 +139,7 @@ export function commit(next) {
   notify();
   if (mode === 'local') {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
-    return;
+    return Promise.resolve({ ok: true });
   }
   dbTag = null;
   const gen = generation;
@@ -138,10 +147,13 @@ export function commit(next) {
     generation++;
     db = confirmed ?? db;
     notify();
-    alert(`${message} Showing the last saved data; please redo any edits made since.`);
+    const error = t(message);
+    if (!quiet) alert(`${error} ${t('Showing the last saved data; please redo any edits made since.')}`);
+    return { ok: false, error };
   };
-  enqueue(async () => {
-    if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
+  return enqueue(async () => {
+    if (isEmptyDiff(diff)) return { ok: true };
+    if (gen !== generation) return { ok: false, error: t('Could not save changes') }; // built on top of a failed save
     const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
     dbTag = null;
     if (r.ok) {
@@ -152,22 +164,39 @@ export function commit(next) {
         window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: remapped }));
       }
       notify();
-      return;
+      return { ok: true };
     }
     if (r.data?.db) confirmed = r.data.db;
-    failed(r.data?.error ?? 'Could not save changes.');
-  }, (e) => {
-    failed(`Could not save changes: ${e.message}.`);
-    return pull().catch(pollFailed);
+    return failed(r.data?.error ?? 'Could not save changes');
+  }, async (e) => {
+    const result = failed(`${t('Could not save changes')}: ${e.message}.`);
+    await pull().catch(pollFailed);
+    return result;
   });
 }
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
+  const gen = generation;
+  const known = remaps.length;
   // Queued behind pending saves, so the server sees the record as the user just saved it.
-  const request = inflight.then(() => api(path, body));
-  inflight = request.catch(() => {});
-  const r = await request;
+  const r = await enqueue(async () => {
+    if (gen !== generation) return { ok: false, error: t('Could not save changes') };
+    let id = body?.id;
+    if (id != null) {
+      for (const m of remaps.slice(known)) {
+        if (body.model && m[body.model]?.[id] != null) id = m[body.model][id];
+        else if (!body.model) {
+          for (const map of Object.values(m)) {
+            if (map[id] != null) { id = map[id]; break; }
+          }
+        }
+      }
+    }
+    const payload = body && typeof body === 'object' && 'id' in body && id !== body.id ? { ...body, id } : body;
+    return api(path, payload);
+  }, (e) => { throw e; });
+  if (r?.ok === false && 'error' in r) return r;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
   await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
@@ -187,7 +216,7 @@ export async function restoreBackup(backup, confirm) {
 }
 
 export async function resetDemo() {
-  if (mode === 'local') return commit(seed());
+  if (mode === 'local') return commit(await demoData());
   const r = await api('/api/reset', { confirm: 'RESET' });
   if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }
@@ -216,6 +245,13 @@ export async function createKey(name) {
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create key');
   return r.data.key;
 }
+const postOrThrow = async (path, body, fallback) => {
+  const r = await api(path, body);
+  if (!r.ok) throw new Error(r.data?.error ?? fallback);
+};
+export const changePassword = (current, password) => postOrThrow('/api/password', { current, password }, 'Could not change password');
+export const revokeOtherSessions = () => postOrThrow('/api/sessions/revoke', {}, 'Could not sign out other sessions');
+export const revokeUser = (id, password) => postOrThrow('/api/users/revoke', password ? { id, password } : { id }, 'Could not revoke access');
 export async function addUser(vals) {
   const r = await api('/api/users', vals);
   if (!r.ok) throw new Error(r.data?.error ?? 'Could not create user');
@@ -226,7 +262,7 @@ const subscribe = (l) => {
   return () => listeners.delete(l);
 };
 
-export const useDb = () => useSyncExternalStore(subscribe, getDb);
+export const useDb = () => useSyncExternalStore(subscribe, getDb, getDb);
 
 // The store holds the loaded database; hot-swapping this module would drop it, so reload the page instead.
 if (import.meta.hot) import.meta.hot.decline();

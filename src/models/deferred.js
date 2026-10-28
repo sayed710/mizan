@@ -2,8 +2,8 @@
 import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
+import { cents } from '../money.js';
 
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
 

@@ -1,7 +1,7 @@
 // Equity (cap table), Data Recycle (archive stale records).
 import { search, write } from '../orm.js';
 import { addDays, today } from './common.js';
-import { models } from './index.js';
+import { models } from '../registry.js';
 
 /** Shares held per shareholder from the transaction log (issuances add, transfers move, buy-backs remove). */
 export function capTable(db) {

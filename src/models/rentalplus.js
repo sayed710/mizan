@@ -1,8 +1,11 @@
 import { create, read, search, write } from '../orm.js';
 import { postEntry } from './ledger.js';
+import { extraModels } from './extra.js';
+import { round } from '../money.js';
+
+const baseRental = extraModels['sale.rental'];
 
 const periods = { hour: 1, day: 24, week: 168, month: 720 };
-const round = (n) => Math.round(n * 100) / 100;
 const timestamp = (value) => {
   const time = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
   if (!Number.isFinite(time)) throw new Error('Enter a valid pickup and return date');
@@ -160,8 +163,29 @@ export const rentalPlusModels = {
     list: ['rental_id', 'amount', 'state', 'withheld_amount', 'move_id'],
     form: {
       title: 'rental_id', statusbar: 'state', lockedWhen: (r) => r.state !== 'held',
-      buttons: [{ label: 'Refund', primary: true, when: (r) => r.state === 'held', run: (db, r) => ({ db: settleDeposit(db, r.id) }) }],
+      buttons: [
+        { label: 'Refund', primary: true, when: (r) => r.state === 'held', run: (db, r) => ({ db: settleDeposit(db, r.id) }) },
+        {
+          label: 'Withhold for Damage', when: (r) => r.state === 'held',
+          ask: [{ label: 'Damage amount to keep', type: 'number' }, { label: 'Note' }],
+          run: (db, r, [damage, note]) => ({ db: settleDeposit(db, r.id, { damage, note: note || undefined }) }),
+        },
+      ],
       groups: [['rental_id', 'amount', 'withheld_amount'], ['move_id', 'settlement_move_id']], tabs: [{ label: 'Note', fields: ['note'] }], chatter: true,
+    },
+  },
+  'sale.rental': {
+    ...baseRental,
+    form: {
+      ...baseRental.form,
+      buttons: [
+        ...baseRental.form.buttons,
+        {
+          label: 'Hold Deposit', when: (r) => ['reserved', 'picked'].includes(r.state),
+          ask: [{ label: 'Deposit amount', type: 'number' }],
+          run: (db, r, [amount]) => { const res = holdDeposit(db, r.id, amount); return { db: res.db, go: `#/rental/deposits/${res.id}` }; },
+        },
+      ],
     },
   },
 };

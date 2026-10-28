@@ -1,12 +1,10 @@
-// Mizan server: auth + shared database + static frontend. Node 24 built-ins only.
+// Mizan server: auth + shared database + static frontend.
 //   npm run build && npm start        → http://localhost:8069
-// Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS,
-// MIZAN_ALLOW_RESET=1 to allow resetting to demo data when NODE_ENV=production.
-// MIZAN_FORCE_TAKEOVER=1 to take the database over from a crashed server.
+// Environment variables: server/config.js and docs/CONFIGURATION.md.
 import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -20,6 +18,7 @@ import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
 import { openBlobs, RASTER, referencesBlob } from './blobs.js';
+import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -35,6 +34,7 @@ import { read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
+import { sharePage, smsInbound, SMS_PATH, SMS_WRITE } from './inbound.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -59,6 +59,14 @@ import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps,
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
+import { checkConfig } from './config.js';
+import { log, redactPath } from './log.js';
+
+const configProblems = checkConfig();
+if (configProblems.length) {
+  for (const problem of configProblems) log('error', 'Invalid configuration', { problem });
+  process.exit(1);
+}
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // Built client; MIZAN_DIST points elsewhere (tests use a small fixture so they do not depend on a prior build).
@@ -71,7 +79,7 @@ const COOKIE = 'mizan_session';
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_KEY_MAX = 200;
 
-const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
+const DB_PATH = process.env.MIZAN_DB || join(ROOT, 'mizan.sqlite');
 const sql = new DatabaseSync(DB_PATH);
 // Wiping everything back to demo data is off unless MIZAN_ALLOW_RESET=1, or NODE_ENV=development (and not MIZAN_ALLOW_RESET=0).
 const RESET_ALLOWED = process.env.MIZAN_ALLOW_RESET === '1' || (process.env.NODE_ENV === 'development' && process.env.MIZAN_ALLOW_RESET !== '0');
@@ -84,7 +92,7 @@ sql.exec(`
   );
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (user_id, key));
+  CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, response TEXT, PRIMARY KEY (user_id, key));
   CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, res_id INTEGER NOT NULL, action TEXT NOT NULL, changes TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS audit_log_record ON audit_log (model, res_id);
 `);
@@ -136,6 +144,8 @@ const ownLease = () => {
 };
 /** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
 const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+ownLease();
+if (!sql.prepare('PRAGMA table_info(idempotency)').all().some((c) => c.name === 'response')) sql.exec('ALTER TABLE idempotency ADD COLUMN response TEXT');
 const storage = openStorage(sql, { beforeWrite: ownLease });
 const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
@@ -151,12 +161,12 @@ const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, 
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
  * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
  */
-const commitDb = (raw, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
+const commitDb = (raw, { full = false, actor = 'system', action = 'replace', audit = true, alongside = () => {} } = {}) => {
   const next = blobs.externalize(raw);
   const at = new Date().toISOString();
   const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
-  storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  storage.save(full ? null : db, next, () => { alongside(); for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
   db = next;
   revision++;
 };
@@ -199,9 +209,23 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+}
+
+/** Store a new password hash and end every session of that user except `keepToken`'s, in one audited transaction. */
+function setPassword(userId, password, keepToken = '', actor = 'system') {
+  validatePassword(password);
+  const { salt, hash } = hashPassword(password);
+  withAudit(actor, 'auth.user', userId, 'password', { password: ['***', '***'] }, () => {
+    writeSql('UPDATE users SET salt = ?, hash = ? WHERE id = ?', salt, hash, userId);
+    writeSql('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', userId, sha256(keepToken));
+  });
+}
+
 function createUser({ login, name, password, isAdmin = false, apps = '', companies = '' }, actor = 'system') {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
-  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+  validatePassword(password);
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
   const granted = parseCompanies(companies);
@@ -214,7 +238,7 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
-  const password = process.env.MIZAN_ADMIN_PASSWORD ?? randomBytes(9).toString('base64url');
+  const password = process.env.MIZAN_ADMIN_PASSWORD || randomBytes(9).toString('base64url');
   createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
   if (process.env.MIZAN_ADMIN_PASSWORD) console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
   else {
@@ -401,15 +425,18 @@ async function serveStatic(req, res, status = 200, routeHash) {
   }
   try {
     let body = await readFile(file);
-    const headers = { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS };
+    const fallback = file === join(DIST, 'index.html');
+    const headers = { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream', ...SECURITY_HEADERS, 'Cache-Control': fallback ? 'no-cache' : cacheControl(path), Vary: 'Accept-Encoding' };
     if (extname(file) === '.html' && routeHash) {
       const script = `if (!location.hash) location.hash = ${JSON.stringify(routeHash).replace(/</g, '\\u003c')};`;
       body = body.toString().replace('</head>', `<script>${script}</script></head>`);
       headers['Content-Security-Policy'] += `; script-src 'self' 'sha256-${createHash('sha256').update(script).digest('base64')}'`;
       headers['Cache-Control'] = 'no-store';
     }
+    const encoded = encodeBody(file, body, req.headers['accept-encoding'], !fallback && isImmutable(path) && !routeHash);
+    if (encoded.encoding) headers['Content-Encoding'] = encoded.encoding;
     res.writeHead(status, headers);
-    res.end(body);
+    res.end(encoded.body);
   } catch {
     send(res, 404, { error: 'Run "npm run build" first' });
   }
@@ -417,12 +444,14 @@ async function serveStatic(req, res, status = 200, routeHash) {
 
 // ---- routes ----
 /** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
-const baseUrlOf = (req) => (process.env.MIZAN_PUBLIC_URL ?? `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`).replace(/\/$/, '');
+// A configured address is cut to origin + path, so a query or fragment in it cannot break the links built on it.
+const configuredBase = () => { try { const u = new URL(process.env.MIZAN_PUBLIC_URL); return `${u.origin}${u.pathname.replace(/\/$/, '')}`; } catch { return ''; } };
+const baseUrlOf = (req) => configuredBase() || `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`;
 // No Host allow-list exists: crawler URLs are relative unless the operator configured MIZAN_PUBLIC_URL.
 const websiteOrigin = () => {
   try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
 };
-let lastBaseUrl = process.env.MIZAN_PUBLIC_URL ?? `http://localhost:${PORT}`;
+let lastBaseUrl = configuredBase() || `http://localhost:${PORT}`;
 let mailBaseKnown = false;
 
 async function api(req, res, path) {
@@ -434,6 +463,17 @@ async function api(req, res, path) {
     if (!out) return send(res, 404, { error: 'Not found' });
     if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }), { actor: 'public' });
     res.writeHead(out.status, out.headers);
+    return res.end(out.body);
+  }
+  // Twilio inbound SMS: signed form POST; a STOP reply blacklists the sender.
+  if (path === SMS_PATH && req.method === 'POST') {
+    if (hits(`sms:${ip}`) >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    recordFailure(`sms:${ip}`);
+    let raw;
+    try { raw = await readRaw(req, MAX_WEBHOOK_BODY); } catch { return send(res, 413, { error: 'Request too large' }); }
+    const out = smsInbound(ENV, db, raw, req.headers['x-twilio-signature']);
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), SMS_WRITE));
+    res.writeHead(out.status, { ...SECURITY_HEADERS, ...out.headers });
     return res.end(out.body);
   }
   // WhatsApp Cloud API webhook: verification token on GET, HMAC-signed raw body on POST; Meta retries on non-2xx.
@@ -572,18 +612,27 @@ async function api(req, res, path) {
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
     // A retried create with the same Idempotency-Key returns the record made the first time.
-    const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '').slice(0, IDEMPOTENCY_KEY_MAX) : '';
+    const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '') : '';
+    if (idemKey.length > IDEMPOTENCY_KEY_MAX) return send(res, 400, { error: 'Idempotency-Key is too long' });
+    if (idemKey && !/^\/api\/v1\/[^/]+$/.test(path)) return send(res, 404, { error: 'Idempotency-Key requires a collection create route' });
     if (idemKey) {
       writeSql('DELETE FROM idempotency WHERE created < ?', Date.now() - IDEMPOTENCY_TTL_MS);
-      const prior = sql.prepare('SELECT model, record_id FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
+      const prior = sql.prepare('SELECT model, record_id, response FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
       if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
-      if (prior) return send(res, 200, read(visibleDb(keyUser), prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
+      if (prior) {
+        const access = handleApi({ method: 'GET', path, query: new URLSearchParams('limit=1'), db: visibleDb(keyUser), user: keyUser, allowed: allowedFor(keyUser) });
+        if (access.status !== 200) return send(res, access.status, access.body);
+        const original = prior.response ? JSON.parse(prior.response) : read(visibleDb(keyUser), prior.model, prior.record_id);
+        if (!original || !visibleTo(companiesFor(keyUser), prior.model, original, db)) return send(res, 404, { error: 'Not found' });
+        return send(res, 200, original);
+      }
     }
     // Reads see what the web client sees; writes are checked against the stricter write set.
     const reading = req.method === 'GET';
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), readOnly: readOnlyFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
-    if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
-    if (idemKey && out.status === 201) writeSql('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)', keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
+    if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}`, alongside: () => {
+      if (idemKey && out.status === 201) writeSql('INSERT INTO idempotency (user_id, key, model, record_id, created, response) VALUES (?, ?, ?, ?, ?, ?)', keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now(), JSON.stringify(out.body));
+    } });
     return send(res, out.status, out.body);
   }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
@@ -652,9 +701,22 @@ async function api(req, res, path) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
     }
   }
+  const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
+  if (path === '/api/password' && req.method === 'POST') {
+    const { current, password } = await readJson(req);
+    const limitKey = `password:${user.id}`;
+    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    if (!checkPassword(user.login, current)) { recordFailure(limitKey); return send(res, 403, { error: 'Current password is wrong' }); }
+    try { setPassword(user.id, password, sessionToken, user.login); } catch (e) { return send(res, 400, { error: e.message }); }
+    return send(res, 200, { ok: true });
+  }
+  if (path === '/api/sessions/revoke' && req.method === 'POST') {
+    withAudit(user.login, 'auth.user', user.id, 'revoke_sessions', { sessions: ['others', null] },
+      () => writeSql('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', user.id, sha256(sessionToken)));
+    return send(res, 200, { ok: true });
+  }
   if (path === '/api/logout' && req.method === 'POST') {
-    const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
-    if (token) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
+    if (sessionToken) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(sessionToken));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   const blobPath = /^\/api\/blob\/([0-9a-f]{32})$/.exec(path);
@@ -805,6 +867,21 @@ async function api(req, res, path) {
       return send(res, 201, { ok: true });
     }
   }
+  if (path === '/api/users/revoke' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    const { id, password } = await readJson(req);
+    const target = sql.prepare('SELECT id FROM users WHERE id = ?').get(Number(id));
+    if (!target) return send(res, 404, { error: 'User not found' });
+    if (password) { try { validatePassword(password); } catch (e) { return send(res, 400, { error: e.message }); } }
+    const creds = password ? hashPassword(password) : null;
+    // Password, sessions and API keys change together: a revoked user never keeps a usable key.
+    withAudit(user.login, 'auth.user', target.id, 'revoke_access', { sessions: ['all', null], api_keys: ['all', null], ...(creds && { password: ['***', '***'] }) }, () => {
+      if (creds) writeSql('UPDATE users SET salt = ?, hash = ? WHERE id = ?', creds.salt, creds.hash, target.id);
+      writeSql('DELETE FROM sessions WHERE user_id = ?', target.id);
+      writeSql('DELETE FROM api_keys WHERE user_id = ?', target.id);
+    });
+    return send(res, 200, { ok: true });
+  }
   return send(res, 404, { error: 'Not found' });
 }
 
@@ -820,6 +897,16 @@ async function website(req, res, path) {
     const xml = path === '/sitemap.xml';
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': `${xml ? 'application/xml' : 'text/plain'}; charset=utf-8`, 'Cache-Control': 'public, max-age=300' });
     return res.end((xml ? sitemap : robots)(db, websiteOrigin()));
+  }
+  if (req.method === 'GET' && path.startsWith('/share/')) {
+    const key = `share:${clientIp(req)}`;
+    if (tooMany(key)) return send(res, 429, { error: 'Too many requests' });
+    const out = sharePage(db, path, new Date().toISOString().slice(0, 10), blobs.get);
+    if (out) {
+      if (out.status === 404) recordFailure(key);
+      res.writeHead(out.status, { ...SECURITY_HEADERS, ...out.headers });
+      return res.end(out.body);
+    }
   }
   if (!['GET', 'POST'].includes(req.method) || path.startsWith('/assets/') || extname(path)) return serveStatic(req, res);
   let decoded;
@@ -864,28 +951,42 @@ async function website(req, res, path) {
 const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, canSee: (u, model, rec) => visibleTo(companiesFor(u), model, rec, db), clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 const signing = createSigning({ getDb: () => db, commitDb, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
+const LOG_REQUESTS = process.env.MIZAN_LOG_REQUESTS !== '0';
+
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   res.acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
+  const requestId = randomUUID();
+  const started = process.hrtime.bigint();
+  res.setHeader('X-Request-Id', requestId);
+  if (LOG_REQUESTS) {
+    res.on('close', () => log('info', 'request', {
+      requestId, method: req.method, path: redactPath(path), status: res.statusCode, ms: Number((process.hrtime.bigint() - started) / 1000000n),
+    }));
+  }
   try {
     if (await portal.handle(req, res)) return;
     if (await signing(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {
-    console.error(`${req.method} ${path} failed:`, e);
-    if (!res.headersSent) send(res, 500, { error: 'Server error' });
+    log('error', 'request failed', { requestId, method: req.method, path: redactPath(path), error: e });
+    if (!res.headersSent) send(res, 500, { error: 'Server error', requestId });
   }
-}).listen(PORT, () => console.info(`Mizan listening on http://localhost:${server.address().port}`));
+}).listen(PORT, () => {
+  const url = `http://localhost:${server.address().port}`;
+  console.info(`Mizan listening on ${url}`);
+  if (process.send) process.send({ type: 'ready', port: server.address().port, url });
+});
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;
 const runJobs = () => {
   try {
-    const next = runScheduledJobs(db, undefined, { onError: (job, e) => console.error(`Scheduled job ${job} failed:`, e) });
-    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }), { actor: 'scheduler' });
+    const next = runScheduledJobs(db, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }) });
+    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
-    console.error('Scheduled job failed:', e);
+    log('error', 'scheduled job failed', { error: e });
   }
 };
 // The first run waits until the server is listening, so a restart answers requests before the jobs finish.
@@ -909,9 +1010,9 @@ const runMailJobs = async () => {
   ];
   for (const job of jobs) {
     try {
-      await job(storeFor({ author: 'Scheduler' }));
+      await job(storeFor({ author: 'Scheduler', isAdmin: true }));
     } catch (e) {
-      console.error('Scheduled mailing failed:', e.message);
+      log('error', 'scheduled mailing failed', { error: e });
     }
   }
 };

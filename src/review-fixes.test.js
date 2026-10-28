@@ -16,7 +16,7 @@ const bill = (db, vals = {}) => {
 };
 
 test('the server stores a lock date sent by an admin', () => {
-  assert.equal(applyDiff(seed(), { upserts: {}, deletes: {}, settings: { lock_date: '2026-03-31' } }).settings.lock_date, '2026-03-31');
+  assert.equal(applyDiff(seed(), { upserts: {}, deletes: {}, settings: { lock_date: '2026-03-31' } }, { isAdmin: true }).settings.lock_date, '2026-03-31');
 });
 
 test('a diff cannot renumber a posted entry and delete it under the audit trail', () => {
