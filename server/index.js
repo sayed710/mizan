@@ -5,8 +5,8 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
@@ -167,7 +167,14 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
   const password = process.env.MIZAN_ADMIN_PASSWORD ?? randomBytes(9).toString('base64url');
   createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
-  console.info(`Created user "admin". Password: ${process.env.MIZAN_ADMIN_PASSWORD ? '(from MIZAN_ADMIN_PASSWORD)' : password}`);
+  if (process.env.MIZAN_ADMIN_PASSWORD) console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
+  else {
+    // Logs are often shipped elsewhere; keep the generated secret in an owner-only file instead.
+    const file = `${DB_PATH}.admin-password`;
+    writeFileSync(file, `${password}
+`, { mode: 0o600 });
+    console.info(`Created user "admin". Its generated password is in ${file}; delete that file after signing in.`);
+  }
 }
 
 function checkPassword(login, password) {
