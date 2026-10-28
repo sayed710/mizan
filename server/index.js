@@ -18,6 +18,7 @@ import { backupSummary, checkBackup } from '../src/backup.js';
 import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
+import { runPosting } from './posting.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -648,6 +649,18 @@ async function api(req, res, path) {
       WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
       .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit, before);
     return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
+  }
+  // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
+  if (['/api/button', '/api/pos/pay', '/api/pos/close'].includes(path) && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      const snapshot = scopeFor(user);
+      const out = runPosting(snapshot, allowedFor(user), path, body);
+      commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, null)), { actor: user.login });
+      return send(res, 200, out.body);
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
   }
   if (path === '/api/diff' && req.method === 'POST') {
     const body = await readJson(req);

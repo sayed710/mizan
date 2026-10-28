@@ -164,7 +164,10 @@ export function commit(next) {
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
-  const r = await api(path, body);
+  // Queued behind pending saves, so the server sees the record as the user just saved it.
+  const request = inflight.then(() => api(path, body));
+  inflight = request.catch(() => {});
+  const r = await request;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
   await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });

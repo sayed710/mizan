@@ -298,8 +298,8 @@ export const payrollModels = {
       lockedWhen: (r) => r.state !== 'draft',
       buttons: [
         { label: 'Compute Sheet', when: (r) => r.state === 'draft', run: (db, r) => ({ db: compute(db, r) }) },
-        { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirm(db, r) }) },
-        { label: 'Mark as Paid', primary: true, when: (r) => r.state === 'done', run: (db, r) => ({ db: pay(db, r) }) },
+        { label: 'Confirm', primary: true, posts: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirm(db, r) }) },
+        { label: 'Mark as Paid', primary: true, posts: true, when: (r) => r.state === 'done', run: (db, r) => ({ db: pay(db, r) }) },
         { label: 'Print', when: (r) => r.line_ids?.length, run: (db, r) => ({ db, go: `#/print/hr.payslip/${r.id}` }) },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => r.state === 'draft' },
       ],
@@ -327,11 +327,11 @@ export const payrollModels = {
       buttons: [
         { label: 'Generate Payslips', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: generateSlips(db, r) }) },
         {
-          label: 'Confirm All', when: (r) => r.state === 'draft',
+          label: 'Confirm All', posts: true, when: (r) => r.state === 'draft',
           run: (db, r) => ({ db: write(slipsOf(db, r).filter((p) => p.state === 'draft').reduce((acc, p) => confirm(acc, read(acc, 'hr.payslip', p.id)), db), 'hr.payslip.run', r.id, { state: 'done' }) }),
         },
         {
-          label: 'Pay All', primary: true, when: (r) => r.state === 'done',
+          label: 'Pay All', primary: true, posts: true, when: (r) => r.state === 'done',
           run: (db, r) => ({ db: write(slipsOf(db, r).filter((p) => p.state === 'done').reduce((acc, p) => pay(acc, read(acc, 'hr.payslip', p.id)), db), 'hr.payslip.run', r.id, { state: 'paid' }) }),
         },
       ],
