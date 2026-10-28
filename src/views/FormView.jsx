@@ -14,6 +14,7 @@ import { RecordAnalysis } from './Analysis.jsx';
 
 /** Integrations whose buttons fall back to only recording a send when not configured. */
 const SENDING = { smtp: 'Email', sms: 'SMS' };
+import { Wizard } from './Wizard.jsx';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -216,6 +217,7 @@ export function FormView({ leaf, id, base, params }) {
   });
   const [changes, setChanges] = useState(() => restored?.values ?? {});
   const [error, setError] = useState(() => restored?.error ?? null);
+  const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
 
@@ -289,6 +291,9 @@ export function FormView({ leaf, id, base, params }) {
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
         .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
       if (b.prompt) {
+        // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
+        const spec = b.wizard?.(getDb(), read(getDb(), model, savedId));
+        if (spec) { setWizard({ b, id: savedId, spec, error: null, live: (values) => send({ text: String(values[spec.fields[0].name] ?? '').trim() }) }); return; }
         const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
         if (text != null && text.trim()) send({ text });
         return;
@@ -326,6 +331,9 @@ export function FormView({ leaf, id, base, params }) {
         if (out.go) location.hash = out.go;
         return;
       }
+      // Buttons that need input open an in-app dialog; the button runs with what was entered.
+      const spec = b.wizard?.(getDb(), read(getDb(), model, savedId));
+      if (spec) { setWizard({ b, id: savedId, spec, error: null }); return; }
       const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
       noteUnsent(savedId);
@@ -333,6 +341,18 @@ export function FormView({ leaf, id, base, params }) {
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
+    }
+  };
+  const confirmWizard = (values) => {
+    if (wizard.live) { setWizard(null); wizard.live(values); return; }
+    try {
+      const res = wizard.b.run(getDb(), read(getDb(), model, wizard.id), values);
+      commit(res.db);
+      setWizard(null);
+      setError(null);
+      if (res.go) location.hash = res.go;
+    } catch (e) {
+      setWizard((w) => ({ ...w, error: t(e.message) }));
     }
   };
 
@@ -406,6 +426,7 @@ export function FormView({ leaf, id, base, params }) {
 
           {error && <div className="alert" role="alert">{error}</div>}
           <SimulatedNote text={def.simulated} />
+          {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
