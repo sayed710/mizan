@@ -61,7 +61,8 @@ import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.
 import { scheduleSnapshots } from './backup.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const DIST = join(ROOT, 'dist');
+// Built client; MIZAN_DIST points elsewhere (tests use a small fixture so they do not depend on a prior build).
+const DIST = resolve(process.env.MIZAN_DIST || join(ROOT, 'dist'));
 const PORT = Number(process.env.PORT ?? 8069);
 const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;

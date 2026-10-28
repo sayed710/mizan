@@ -43,7 +43,7 @@ On first start the server creates user `admin` with a random password, written t
 signing in), or set `MIZAN_ADMIN_PASSWORD`. Admins add users in **Settings**.
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
-`MIZAN_SECURE_COOKIE=1` when served over HTTPS. "Reset demo" (wipe everything back to demo data) is off by default,
+`MIZAN_DIST` (built client folder, default `dist`), `MIZAN_SECURE_COOKIE=1` when served over HTTPS. "Reset demo" (wipe everything back to demo data) is off by default,
 including a plain `npm start` and the Docker image; turn it on with `MIZAN_ALLOW_RESET=1`, or run with
 `NODE_ENV=development` (then `MIZAN_ALLOW_RESET=0` switches it off again). It needs RESET typed and saves the
 previous data, readable by the server's user only, to `<MIZAN_DB>.before-reset-<time>.json` first.
@@ -67,7 +67,7 @@ Development: `NODE_ENV=development npm start` in one terminal and `npm run dev` 
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).
 
 ```bash
-npm test           # ORM, business-flow and sync tests
+npm test           # ORM, business-flow, sync and server tests (no build needed)
 ```
 
 ### Email
