@@ -133,7 +133,7 @@ export function Settings() {
     try {
       // Ask the server what would change, then require a typed confirmation before anything is replaced.
       const plan = await restoreBackup(data);
-      const typed = prompt(`${t('Restoring replaces all data for every user.')}\n${t('Now')}: ${plan.current} · ${t('Backup')}: ${plan.restored} (${t('removed')}: ${plan.removed}, ${t('added')}: ${plan.added})\n${t('Type RESTORE to continue.')}`);
+      const typed = prompt(`${t('Restoring replaces all data for every user.')}\n${t('Now')}: ${plan.current} · ${t('Backup')}: ${plan.restored} (${t('removed')}: ${plan.removed}, ${t('added')}: ${plan.added}, ${t('changed')}: ${plan.changed})\n${t('Messages')}: ${plan.messages.current} → ${plan.messages.restored} · ${t('Settings')}: ${plan.settingsChanged ? t('replaced') : t('unchanged')}\n${t('Type RESTORE to continue.')}`);
       if (typed !== 'RESTORE') return;
       await restoreBackup(data, 'RESTORE');
       setStatus(t('Backup restored.'));

@@ -47,7 +47,7 @@ test('only an admin can restore, a dry run changes nothing, and an unmodified ba
 
   const older = { ...backup, records: { ...backup.records, 'crm.lead': backup.records['crm.lead'].slice(1) } };
   const dry = await (await post('/api/restore', admin, { backup: older })).json();
-  assert.deepEqual(dry, { dryRun: true, current: total, restored: total - 1, removed: 1, added: 0 });
+  assert.deepEqual(dry, { dryRun: true, current: total, restored: total - 1, removed: 1, added: 0, changed: 0, messages: { current: backup.messages.length, restored: backup.messages.length }, settingsChanged: false });
   assert.equal((await (await fetch(`${origin}/api/db`, { headers: admin })).json()).records['crm.lead'].length, backup.records['crm.lead'].length);
 
   const done = await (await post('/api/restore', admin, { backup, confirm: 'RESTORE' })).json();
@@ -57,4 +57,18 @@ test('only an admin can restore, a dry run changes nothing, and an unmodified ba
   assert.deepEqual(after.records, backup.records);
 
   assert.match((await (await post('/api/restore', admin, { backup: { records: { nope: [] }, messages: [] }, confirm: 'RESTORE' })).json()).error, /Unknown model nope/);
+});
+
+test('a browser that synced before a restore cannot replay its edits afterwards', async () => {
+  const admin = await login('admin', 'test-admin-password');
+  const first = await fetch(`${origin}/api/db`, { headers: admin });
+  const backup = await first.json();
+  const epoch = first.headers.get('x-mizan-epoch');
+  const edit = { upserts: { 'crm.lead': [{ ...backup.records['crm.lead'][0], name: 'Edited before restore' }] }, deletes: {}, messages: [], removedMessages: [] };
+  assert.equal((await post('/api/diff', { ...admin, 'X-Mizan-Epoch': epoch }, { ...edit, upserts: { 'crm.lead': [{ ...edit.upserts['crm.lead'][0], name: backup.records['crm.lead'][0].name }] } })).status, 200);
+  assert.equal((await post('/api/restore', admin, { backup, confirm: 'RESTORE' })).status, 200);
+  const late = await post('/api/diff', { ...admin, 'X-Mizan-Epoch': epoch }, edit);
+  assert.equal(late.status, 409);
+  const now = await (await fetch(`${origin}/api/db`, { headers: admin })).json();
+  assert.equal(now.records['crm.lead'][0].name, backup.records['crm.lead'][0].name);
 });

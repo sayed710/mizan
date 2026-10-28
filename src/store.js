@@ -14,6 +14,8 @@ let mode = 'local';
 let user = null;
 let db = null;
 let inflight = Promise.resolve();
+// Which database generation this browser last synced with; the server refuses edits made before a restore.
+let epoch = null;
 
 const COMPANY_KEY = 'mizan-company';
 const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
@@ -58,7 +60,8 @@ function loadLocal() {
 async function api(path, body) {
   const res = await fetch(path, body === undefined
     ? { credentials: 'same-origin' }
-    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body) });
+    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', ...(path === '/api/diff' && epoch ? { 'X-Mizan-Epoch': epoch } : {}) }, body: JSON.stringify(body) });
+  epoch = res.headers.get('x-mizan-epoch') ?? epoch;
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const data = isJson ? await res.json() : null;
   return { ok: res.ok, status: res.status, isJson, data };
@@ -125,6 +128,8 @@ export async function serverAction(path, body) {
 
 /** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */
 export async function restoreBackup(backup, confirm) {
+  // Let this browser's queued edits reach the server first, so none is replayed after the replacement.
+  if (confirm) await inflight;
   const r = await api('/api/restore', { backup, confirm });
   if (!r.ok) throw new Error(r.data?.error ?? 'Restore failed');
   if (confirm) await pull();
