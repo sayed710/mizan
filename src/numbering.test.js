@@ -41,3 +41,41 @@ test('existing duplicates in stored data are left alone', () => {
   assert.equal(read(out, 'account.move', dup.id).ref, 'edited');
   assert.equal(out.records['account.move'].filter((m) => m.name === dup.name).length, 2);
 });
+
+const posted = (db, id) => postMove(db, id);
+const savedPair = () => {
+  let base = seed();
+  const a = draft(base, 100);
+  const b = draft(a.db, 200);
+  base = applyDiff(base, diffDb(base, b.db), {});
+  return { base, a, b, alice: posted(base, a.id), bob: posted(base, b.id) };
+};
+
+test('deleting the latest numbered record on the server never frees its number', () => {
+  const prefix = 'DEL/2026/';
+  let db = { ...seed(), records: { ...seed().records, 'account.payment': [{ id: 1, name: `${prefix}00001`, state: 'draft' }, { id: 2, name: `${prefix}00002`, state: 'draft' }] } };
+  db = applyDiff(db, { upserts: {}, deletes: { 'account.payment': [2] } }, {});
+  assert.equal(nextName(db, 'account.payment', prefix), `${prefix}00003`);
+  const late = applyDiff(db, { upserts: { 'account.payment': [{ id: 3, name: `${prefix}00001`, state: 'draft' }] } }, {});
+  assert.equal(read(late, 'account.payment', 3).name, `${prefix}00003`);
+});
+
+test('custom expense report references are kept as typed', () => {
+  const db = seed();
+  const employee_id = db.records['hr.employee'][0].id;
+  const sheets = [{ id: 1, name: 'Travel 2026', employee_id }, { id: 2, name: 'Travel 2026', employee_id }];
+  const out = applyDiff(db, { upserts: { 'hr.expense.sheet': sheets } }, {});
+  assert.deepEqual(out.records['hr.expense.sheet'].map((s) => s.name), ['Travel 2026', 'Travel 2026']);
+});
+
+test('a renumbered invoice carries the final number on its booked journal item and in the audit trail', () => {
+  const { base, a, b, alice, bob } = savedPair();
+  const audited = { ...base, settings: { ...base.settings, audit_trail: true } };
+  let server = applyDiff(audited, diffDb(base, alice), {});
+  server = applyDiff(server, diffDb(base, bob), {});
+  const second = read(server, 'account.move', b.id);
+  assert.notEqual(second.name, read(server, 'account.move', a.id).name);
+  assert.ok(second.line_ids.some((l) => l.name === second.name), 'counterpart item shows the final number');
+  assert.ok(second.line_ids.every((l) => l.name !== read(server, 'account.move', a.id).name));
+  assert.ok(server.messages.some((m) => m.model === 'account.move' && m.res_id === b.id && m.body.includes(`→ ${second.name}`)));
+});
