@@ -82,6 +82,18 @@ test('a settlement books exactly the tender collected after account-bucket round
   assert.equal(sum(back, refund.db, '101401', 'credit'), 1.01);
 });
 
+test('distinct sub-cent tax buckets already produce a balanced POS booking', () => {
+  const db = startSession(seed(), 0).db;
+  const lines = [
+    { product_id: 1, qty: 1, price_unit: 0.03, tax: 10, tax_name: 'Small A' },
+    { product_id: 2, qty: 1, price_unit: 0.03, tax: 10, tax_name: 'Small B' },
+  ];
+  assert.equal(amounts(lines).tax, 0.01);
+  const paid = payOrder(db, { lines, method: 'cash' });
+  assert.ok(isBalanced(entryOf(paid.db, paid.id).line_ids));
+  assert.equal(sum(entryOf(paid.db, paid.id), paid.db, '101501', 'debit'), 0.07);
+});
+
 test('a refund reverses the accounts the sale used even if the product account changed since', () => {
   const { db: db0 } = withIncludedTax();
   const other = search(db0, 'account.account').find((a) => a.code === '450000');

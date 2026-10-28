@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, mapAccount, taxGroups } from './taxes.js';
+import { TRANSITION, lineTaxOf, mapAccount, taxGroups } from './taxes.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -60,11 +60,14 @@ export function invoiceLines(db, move) {
   };
   for (const l of move.invoice_line_ids ?? []) {
     const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
-    byAccount.set(account, (byAccount.get(account) ?? 0) + subtotal(l));
+    const zero = !lineTaxOf(l) && l.tax_name ? l.tax_name : '';
+    const key = `${account}:${zero}`;
+    const group = byAccount.get(key) ?? { account, zero, amount: 0 };
+    byAccount.set(key, { ...group, amount: group.amount + subtotal(l) });
   }
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate), round(amount)]);
+  const bases = [...byAccount.values()].map(({ account, amount, zero }) => [account, round(amount / rate), round(amount), zero]);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
@@ -75,7 +78,7 @@ export function invoiceLines(db, move) {
   const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, g) => s + g.amount, 0));
   if (gap && bases.length) {
     const largest = bases.reduce((best, b, i) => (Math.abs(b[1]) > Math.abs(bases[best][1]) ? i : best), 0);
-    bases[largest] = [bases[largest][0], round(bases[largest][1] + gap), bases[largest][2]];
+    bases[largest] = [bases[largest][0], round(bases[largest][1] + gap), bases[largest][2], bases[largest][3]];
   }
 
   // A document is foreign when its currency is not the company's (an equal rate on the day does not change that).
@@ -87,8 +90,8 @@ export function invoiceLines(db, move) {
   };
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
-    ...bases.map(([account_id, amount, doc]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base })),
+    ...bases.map(([account_id, amount, doc, zero]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
   ].filter((l) => l.debit || l.credit);
 }
 
@@ -101,7 +104,7 @@ export function postEntry(db, { journal, date = today(), ref = '', lines, compan
   const line_ids = lines.map((l) => {
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0) } : {}) };
+    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;

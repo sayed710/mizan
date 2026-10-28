@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, search } from './orm.js';
+import { create, search, read, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { taxReport, taxesByTax } from './models/finance.js';
@@ -40,6 +40,44 @@ test('the per-tax rows add up to the return totals: foreign invoices, cash basis
   assert.equal(sumRows(rows, 'purchase'), taxReport(db, period).input);
   const cashRow = row(rows, 'VAT 14% (Cash Basis)');
   assert.deepEqual([cashRow.base, cashRow.tax], [500, 70]);
+});
+
+test('historical tax items retain their side after editing and archiving the tax', () => {
+  const db = seed();
+  const custom = create(db, 'account.account', { code: '259999', name: 'Custom VAT', account_type: 'liability_current' });
+  const tax = create(custom.db, 'account.tax', { name: 'Custom historical tax', amount: 10, type_tax_use: 'sale', account_id: custom.id });
+  const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }]);
+  const before = taxReport(tax.db, {});
+  const changed = write(posted.db, 'account.tax', tax.id, { account_id: null, active: false });
+  assert.equal(taxReport(changed, {}).output - before.output, 10);
+  assert.deepEqual(row(taxesByTax(changed), 'Custom historical tax'), { side: 'sale', name: 'Custom historical tax', base: 100, tax: 10 });
+});
+
+test('sales and purchases using the same tax account remain on their own sides', () => {
+  const db = seed();
+  const account = db.records['account.account'].find((a) => a.code === '251000').id;
+  const tax = create(db, 'account.tax', { name: 'Shared input', amount: 10, type_tax_use: 'purchase', account_id: account });
+  const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }], { move_type: 'in_invoice' });
+  const before = taxReport(tax.db, {});
+  const after = taxReport(posted.db, {});
+  assert.equal(after.input - before.input, 10);
+  assert.equal(after.output, before.output);
+});
+
+test('the final cash-basis release clears the taxable base rounding remainder', () => {
+  const db = seed();
+  const posted = invoice(db, [line(db, 'VAT 14% (Cash Basis)', { price_unit: 100 })]);
+  let paid = posted.db;
+  for (let i = 0; i < 3; i++) paid = payMove(paid, posted.id, 38, today());
+  assert.deepEqual(row(taxesByTax(paid), 'VAT 14% (Cash Basis)'), { side: 'sale', name: 'VAT 14% (Cash Basis)', base: 100, tax: 14 });
+});
+
+test('zero-rated exports keep a durable taxable base without changing return totals', () => {
+  const db = seed();
+  const tax = create(db, 'account.tax', { name: 'Zero export', amount: 0, type_tax_use: 'sale' });
+  const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }]);
+  assert.deepEqual(taxReport(posted.db, {}), taxReport(tax.db, {}));
+  assert.deepEqual(row(taxesByTax(posted.db), 'Zero export'), { side: 'sale', name: 'Zero export', base: 100, tax: 0 });
 });
 
 test('without new documents the return and its rows still reconcile on the seeded data', () => {

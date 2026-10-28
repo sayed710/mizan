@@ -19,7 +19,7 @@ export const OPERATIONS = {
     model: 'pos.order',
     run: (db, { cart = [], method, partner_id = null }) => {
       if (!['cash', 'card'].includes(method)) throw new Error('Unknown payment method');
-      const lines = priceLines(db, cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount) || 0, ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) })));
+      const lines = priceLines(db, cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) })));
       return payOrder(db, { lines, method, partner_id: Number(partner_id) || null });
     },
   },

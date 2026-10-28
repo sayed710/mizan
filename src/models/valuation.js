@@ -5,7 +5,7 @@ import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
 
 const round = (n) => Math.round(n * 100) / 100 || 0;
-const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
+const layers = (db, id) => (db.records['stock.valuation.layer'] ?? []).filter((l) => l.active !== false && l.product_id === id);
 const quantity = (ls) => ls.reduce((s, l) => s + l.quantity, 0);
 const valueOf = (ls) => round(ls.reduce((s, l) => s + l.value, 0));
 const product = (db, id) => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { postMove } from './models/accounting.js';
 import { nextName } from './models/common.js';
 import { seed } from './seed.js';
@@ -66,6 +66,38 @@ test('custom expense report references are kept as typed', () => {
   const sheets = [{ id: 1, name: 'Travel 2026', employee_id, state: 'draft' }, { id: 2, name: 'Travel 2026', employee_id, state: 'draft' }];
   const out = applyDiff(db, { upserts: { 'hr.expense.sheet': sheets } }, {});
   assert.deepEqual(out.records['hr.expense.sheet'].map((s) => s.name), ['Travel 2026', 'Travel 2026']);
+});
+
+test('generated expense sheet names are unique and keep their high-water mark', () => {
+  const base = seed();
+  const employee_id = base.records['hr.employee'][0].id;
+  const out = applyDiff(base, { upserts: { 'hr.expense.sheet': [{ id: 900, name: 'EXP/00001', employee_id, state: 'draft' }, { id: 901, name: 'EXP/00001', employee_id, state: 'draft' }] } });
+  assert.deepEqual(out.records['hr.expense.sheet'].filter((r) => r.id >= 900).map((r) => r.name), ['EXP/00001', 'EXP/00002']);
+  const gone = applyDiff(out, { deletes: { 'hr.expense.sheet': [901] } });
+  assert.equal(nextName(gone, 'hr.expense.sheet', 'EXP/'), 'EXP/00003');
+});
+
+test('a later edit after a missed renumbering response already preserves the server-assigned number', () => {
+  const { base, b, alice, bob } = savedPair();
+  const first = applyDiff(base, diffDb(base, alice));
+  const assigned = applyDiff(first, diffDb(base, bob));
+  const name = read(assigned, 'account.move', b.id).name;
+  const edited = write(bob, 'account.move', b.id, { ref: 'Changed after missed response' });
+  const saved = applyDiff(assigned, diffDb(bob, edited));
+  assert.equal(read(saved, 'account.move', b.id).name, name);
+  assert.equal(read(saved, 'account.move', b.id).ref, 'Changed after missed response');
+});
+
+test('server renumbering uses the request author and newly enabled audit setting', () => {
+  const { base, a, b, alice, bob } = savedPair();
+  const server = applyDiff(base, diffDb(base, alice), { author: 'First' });
+  const diff = diffDb(base, bob);
+  diff.settings = { ...base.settings, audit_trail: true };
+  const saved = applyDiff(server, diff, { author: 'Second', isAdmin: true });
+  const msg = saved.messages.find((m) => m.res_id === b.id && m.model === 'account.move' && m.body.includes('assigned by the server'));
+  assert.ok(msg, 'audit enablement takes effect in this diff');
+  assert.equal(msg.author, 'Second');
+  assert.notEqual(read(saved, 'account.move', a.id).name, read(saved, 'account.move', b.id).name);
 });
 
 test('a renumbered invoice carries the final number on its booked journal item and in the audit trail', () => {

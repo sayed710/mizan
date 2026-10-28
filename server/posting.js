@@ -25,7 +25,7 @@ export function runPosting(db, allowed, path, body = {}) {
   }
   if (path === '/api/pos/pay') {
     need(allowed, 'pos.order');
-    const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount) || 0 })) : [];
+    const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount ?? 0) })) : [];
     if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || !['cash', 'card', 'bank'].includes(p.method) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
     if (!body.payments && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
     // Prices come from the products, not from the request.

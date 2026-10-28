@@ -47,7 +47,12 @@ const ACTIONS = {
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b, _u, _store, view) => quoteShipping(ENV, view, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
-  '/api/barcode/count': { model: () => 'product', extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => ({ db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company: b.company }) }) },
+  '/api/barcode/count': { model: () => 'product', apps: ['barcode', 'inventory'], extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => {
+    if (typeof b.observed !== 'number' || !Number.isFinite(b.observed)) throw new Error('A finite observed quantity is required');
+    const company = b.company ?? view.settings.current_company_id ?? 1;
+    if (!Number.isSafeInteger(company) || !(view.records['res.company'] ?? []).some((c) => c.id === company && c.active !== false)) throw new Error('Select an existing active company');
+    return { db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company }) };
+  } },
   // E-signature: email each signer their private link (server/signing.js serves the link).
   // Signer links carry private tokens, so they are only built on the configured public address, never from the request's Host header.
   '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => sendSignRequest(SMTP, store, b, publicOrigin()) },
@@ -143,7 +148,19 @@ const ownLease = () => {
   }
 };
 /** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
-const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+const writeSql = (text, ...args) => {
+  const outer = sql.isTransaction;
+  if (!outer) sql.exec('BEGIN IMMEDIATE');
+  try {
+    ownLease();
+    const result = sql.prepare(text).run(...args);
+    if (!outer) sql.exec('COMMIT');
+    return result;
+  } catch (e) {
+    if (!outer) sql.exec('ROLLBACK');
+    throw e;
+  }
+};
 const storage = openStorage(sql, { beforeWrite: ownLease });
 const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
@@ -164,7 +181,12 @@ const commitDb = (raw, { full = false, actor = 'system', action = 'replace', aud
   const at = new Date().toISOString();
   const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
-  storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  const nextEpoch = full ? Math.max(epoch + 1, Date.now()) : epoch;
+  storage.save(full ? null : db, next, () => {
+    if (full) writeSql("INSERT INTO kv (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextEpoch));
+    for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes));
+  });
+  epoch = nextEpoch;
   db = next;
   revision++;
 };
@@ -174,7 +196,7 @@ const withAudit = (actor, model, resId, action, changes, step) => {
   try {
     ownLease();
     const out = step();
-    logChange.run(new Date().toISOString(), actor, model, resId ?? 0, action, JSON.stringify(changes));
+    if (out?.changes !== 0) logChange.run(new Date().toISOString(), actor, model, typeof resId === 'function' ? resId(out) : resId ?? 0, action, JSON.stringify(changes));
     sql.exec('COMMIT');
     return out;
   } catch (e) {
@@ -183,7 +205,8 @@ const withAudit = (actor, model, resId, action, changes, step) => {
   }
 };
 /** Changes whenever the whole database is replaced (restore, reset): work started before cannot be applied after. */
-let epoch = Date.now();
+writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('epoch', ?)", String(Date.now()));
+let epoch = Number(sql.prepare("SELECT value FROM kv WHERE key = 'epoch'").get().value);
 const RESTORED = 'The data was restored while this was running; nothing was saved, reload and try again';
 const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
 const visitors = createVisitTracker();
@@ -230,7 +253,7 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
   if (granted && (!granted.length || granted.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id)))) throw new Error('Allowed companies: select existing companies');
   const apps_ = allowed?.length ? allowed.join(',') : null;
   const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_, companies: granted?.join(',') ?? null };
-  const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
+  const made = withAudit(actor, 'auth.user', (out) => Number(out.lastInsertRowid), 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
     () => writeSql('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)', login, row.name, salt, hash, row.is_admin, apps_, row.companies));
   return made;
 }
@@ -650,6 +673,7 @@ async function api(req, res, path) {
   if (action && req.method === 'POST') {
     if (action.need && !{ ...integrationStatus(), smtp: !!SMTP }[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
     if (action.admin && !user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    if (action.apps && !user.isAdmin && user.apps && !action.apps.some((app) => user.apps.includes(app))) return send(res, 403, { error: 'Inventory or Barcode access is required' });
     const body = await readJson(req);
     const model = action.model(body);
     const allowed = allowedFor(user);
@@ -729,9 +753,11 @@ async function api(req, res, path) {
     // Newest first; pass the last id received as `before` for the next, older page.
     const before = q.has('before') ? Number(q.get('before')) : null;
     if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
+    const id = q.has('id') ? Number(q.get('id')) : null;
+    if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes FROM audit_log
       WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit, before);
+      .all(q.get('model'), id, limit, before);
     return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
   }
   // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
@@ -801,7 +827,6 @@ async function api(req, res, path) {
       // A dry run only reports what would change; the real restore needs the typed confirmation.
       if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
       commitDb(restored, { full: true, actor: user.login, action: 'restore' });
-      epoch = Math.max(epoch + 1, Date.now());
       console.info(`Backup restored by ${user.login}: ${summary.restored} records (was ${summary.current})`);
       return send(res, 200, { ok: true, ...summary });
     } catch (e) {
@@ -823,7 +848,6 @@ async function api(req, res, path) {
     writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
     console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
     commitDb(seed(), { full: true, actor: user.login, action: 'reset' });
-    epoch = Math.max(epoch + 1, Date.now());
     return send(res, 200, db, { 'X-Mizan-Epoch': String(epoch) });
   }
   if (path === '/api/keys') {

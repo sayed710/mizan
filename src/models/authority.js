@@ -61,6 +61,27 @@ const SHEET_STEPS = {
 };
 const SHEET_MANAGER_STEPS = new Set(['submit>approve', 'approve>draft']);
 
+/** Posting/completion must carry the accounting and expense-line effects, not just a status label. */
+function sheetBookingError(db, r) {
+  if (!['post', 'done'].includes(r.state)) return null;
+  const expenses = (db.records['hr.expense'] ?? []).filter((e) => e.sheet_id === r.id);
+  const entry = (db.records['account.move'] ?? []).find((m) => m.id === r.move_id);
+  const total = Math.round(expenses.reduce((s, e) => s + Number(e.total_amount || 0), 0) * 100) / 100;
+  const close = (a, b) => Math.abs(a - b) < 0.005;
+  if (!expenses.length || !entry || entry.state !== 'posted' || entry.ref !== r.name || !(total > 0)
+    || expenses.some((e) => e.move_id !== entry.id || e.employee_id !== r.employee_id || e.state !== (r.state === 'done' ? 'paid' : 'posted'))) return 'A posted expense report needs its accounting entry and posted expenses';
+  const account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code)?.id;
+  const credit = (m, code) => (m.line_ids ?? []).filter((l) => l.account_id === account(code)).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
+  if (r.payment_mode === 'company_account') return r.state === 'done' && close(credit(entry, '101401'), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
+  if (r.payment_mode !== 'own_account' || !close(credit(entry, '211000'), total)) return 'Employee expenses need their posted payable accounting entry';
+  if (r.state === 'done') {
+    const reimbursed = (db.records['account.move'] ?? []).filter((m) => m.state === 'posted' && m.ref === `Reimbursement: ${r.name}` && (m.company_id ?? 1) === (r.company_id ?? 1))
+      .reduce((s, m) => s + Math.min(-credit(m, '211000'), credit(m, '101401')), 0);
+    if (!close(Number(r.amount_paid), total) || !close(reimbursed, total)) return 'Paid employee expenses need their posted reimbursement entries';
+  }
+  return null;
+}
+
 /** Expense reports: judged on the stored report, one step at a time; approving or refusing needs its manager. */
 function sheetRule(db, before, r, ctx) {
   if (!deciding(ctx)) return null;
@@ -71,7 +92,7 @@ function sheetRule(db, before, r, ctx) {
   const owner = actingEmployee(db, ctx)?.id === before.employee_id;
   // The employee may take their own submitted report back; any other refusal, and every approval, is the manager's.
   if (before.state === 'submit' && r.state === 'draft') return owner ? null : approvalError(db, ctx, before.employee_id, before.manager_id);
-  return SHEET_MANAGER_STEPS.has(`${before.state}>${r.state}`) ? approvalError(db, ctx, before.employee_id, before.manager_id) : null;
+  return ((['approve', 'post', 'done'].includes(r.state) || SHEET_MANAGER_STEPS.has(`${before.state}>${r.state}`)) ? approvalError(db, ctx, before.employee_id, before.manager_id) : null) ?? sheetBookingError(db, r);
 }
 
 /** Single expenses: approving or refusing needs the manager of the stored employee, and they cannot start decided. */
@@ -89,7 +110,7 @@ function timesheetRule(db, before, r, ctx) {
   if (before?.validated && !r.validated) return 'Only administrators can reset validated timesheets';
   if (before?.validated && r.employee_id !== before.employee_id) return 'Validated timesheets cannot be moved to another employee';
   if (!r.validated || before?.validated) return null;
-  return approvalError(db, ctx, before ? before.employee_id : r.employee_id) ?? (before && r.employee_id !== before.employee_id ? approvalError(db, ctx, r.employee_id) : null)
+  return approvalError(db, ctx, before ? before.employee_id : r.employee_id) ?? (before && r.employee_id !== before.employee_id ? 'Validation cannot change the employee' : null)
     ?? (r.validated_by !== ctx.name ? 'Validated By must be your own name' : null);
 }
 
@@ -122,15 +143,18 @@ function requestRule(db, before, r, ctx) {
     const allowed = new Set([...(category?.approver_ids ?? []).map((a) => a.employee_id), owner?.parent_id].filter(Boolean));
     return lines.every((a) => allowed.has(a.employee_id)) ? null : 'Only the approvers of the approval type (or the owner\'s manager) can be on the request';
   }
-  if (was === 'pending' && status === 'new' && !lines.length && !(before.approver_ids ?? []).some((a) => a.status === 'approved')) return null;
+  if (was === 'pending' && status === 'new' && !lines.length && !(before.approver_ids ?? []).some((a) => a.status === 'approved')) return actingEmployee(db, ctx)?.id === before.request_owner_id ? null : 'Only the request owner can withdraw it';
   if (DECIDED.includes(was) || status === 'cancel') {
     const same = status === was && JSON.stringify(lines) === JSON.stringify(before.approver_ids ?? []) && r.request_owner_id === before.request_owner_id;
     return same ? null : 'A decided request cannot be changed';
   }
   if (was !== 'pending') return null;
   if (r.request_owner_id !== before.request_owner_id || r.category_id !== before.category_id) return 'The owner and type of a submitted request cannot change';
+  const business = ['name', 'amount', 'date', 'date_end', 'partner_id', 'product_lines', 'reason', 'company_id'];
+  if (business.some((k) => JSON.stringify(r[k] ?? null) !== JSON.stringify(before[k] ?? null))) return 'The business content of a submitted request cannot change';
   const stored = before.approver_ids ?? [];
-  if (lines.length !== stored.length || lines.some((a, i) => a.employee_id !== stored[i].employee_id)) return 'The approvers of a submitted request cannot change';
+  const roster = ({ status, ...rest }) => rest;
+  if (lines.length !== stored.length || lines.some((a, i) => JSON.stringify(roster(a)) !== JSON.stringify(roster(stored[i])))) return 'The approvers of a submitted request cannot change';
   const me = actingEmployee(db, ctx);
   const changed = lines.map((a, i) => [a, stored[i]]).filter(([a, old]) => a.status !== old.status);
   const mine = changed.find(([a]) => a.employee_id === me?.id);
@@ -168,4 +192,5 @@ export const authorityRules = {
 export const authorityDeleteRules = {
   'hr.leave': leaveDeleteRule,
   'hr.leave.allocation': leaveDeleteRule,
+  'approval.request': (_db, stored, ctx) => deciding(ctx) && requestStatus(stored) !== 'new' ? 'Submitted or decided approval requests cannot be deleted' : null,
 };

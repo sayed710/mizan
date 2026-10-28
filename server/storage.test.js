@@ -38,6 +38,17 @@ test('the old single-blob format is migrated on load', () => {
   assert.deepEqual(storage.load(), db0);
 });
 
+test('numbering high-water marks survive full, incremental and metadata-only saves', () => {
+  const sql = new DatabaseSync(':memory:');
+  const storage = openStorage(sql);
+  const base = { ...seed(), numbering: { 'account.move': { 'INV/2026/': 100 } } };
+  storage.save(null, base);
+  assert.deepEqual(storage.load().numbering, base.numbering);
+  const next = { ...base, numbering: { 'account.move': { 'INV/2026/': 101 } } };
+  storage.save(base, next);
+  assert.deepEqual(openStorage(sql).load().numbering, next.numbering);
+});
+
 test('a failure in the work saved alongside rolls the records back too, for incremental and full saves', () => {
   const sql = new DatabaseSync(':memory:');
   const storage = openStorage(sql);

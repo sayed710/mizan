@@ -33,6 +33,7 @@ const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatM
  * entries that pay it stay posted, so the books and the payment status cannot drift apart.
  */
 export function paymentGuard(db, before, after) {
+  if (after.state === 'posted' && isInvoice(after) && !(total(after) > 0)) return 'The total must be positive; use a credit note or refund instead';
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
   if (leavesPosted && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
@@ -222,7 +223,8 @@ const releasedTaxes = (db, r) => {
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
       const key = `${code}:${l.tax_name ?? ''}`;
-      released.set(key, (released.get(key) ?? 0) + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)));
+      const previous = released.get(key) ?? { amount: 0, base: 0 };
+      released.set(key, { amount: previous.amount + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), base: previous.base + (Number(l.tax_base) || 0) });
     }
   }
   return released;
@@ -242,15 +244,18 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const prior = final ? (released.get(`${g.account}:${g.tax_name}`) ?? 0) + (released.get(`${g.account}:`) ?? 0) * g.amount / accountTotal : 0;
-    return { ...g, amount: round2(final ? g.amount - prior : g.amount * Math.abs(share)), base: round2(g.base * share) };
+    const tagged = final ? released.get(`${g.account}:${g.tax_name}`) : null;
+    const legacy = final ? released.get(`${g.account}:`) : null;
+    const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * g.amount / accountTotal;
+    const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * g.amount / accountTotal;
+    return { ...g, amount: round2(final ? g.amount - prior : g.amount * Math.abs(share)), base: round2(final ? g.base - priorBase : g.base * share) };
   })
     .filter((g) => g.amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
   const lines = due.flatMap(({ account, amount, base, tax_name }) => {
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base };
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
@@ -327,6 +332,8 @@ const lineItem = {
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
     tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
+    tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
+    tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
   },
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };

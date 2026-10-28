@@ -51,8 +51,8 @@ export function postPayment(db, p) {
 export function reversePayment(db, p, date = today()) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   const entry = read(db, 'account.move', p.move_id);
-  const fromBank = p.invoice_id && search(db, 'account.bank.statement.line')
-    .some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount));
+  const fromBank = search(db, 'account.bank.statement.line')
+    .some((l) => l.state === 'reconciled' && (l.move_id === p.move_id || l.payment_move_id === p.move_id || (p.invoice_id && l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount))));
   if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
   const code = read(db, 'account.journal', entry.journal_id)?.code ?? 'BNK1';
   const { db: booked, id: reversalId } = create(db, 'account.move', {

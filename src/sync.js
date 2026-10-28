@@ -125,8 +125,9 @@ function merge(model, stored, raw, base) {
   return out;
 }
 /** Models whose `name` is a legal document number from `nextName`. */
-const SEQUENCED = ['account.move', 'account.payment', 'account.batch.payment', 'pos.session', 'stock.inventory.count', 'stock.picking.batch'];
+const SEQUENCED = ['account.move', 'account.payment', 'account.batch.payment', 'pos.session', 'stock.inventory.count', 'stock.picking.batch', 'hr.expense.sheet'];
 const SEQUENCE_NAME = /^(.*\D)(\d+)$/;
+const sequencedName = (model, name) => model === 'hr.expense.sheet' && !/^EXP\/\d+$/.test(name ?? '') ? null : SEQUENCE_NAME.exec(name ?? '');
 // Serialized size per db snapshot, measured once and then carried forward by what each diff adds or removes.
 const sizes = new WeakMap();
 const json = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
@@ -141,7 +142,7 @@ function highWater(numbering = {}, records) {
   for (const model of SEQUENCED) {
     const marks = { ...numbering[model] };
     for (const r of records[model] ?? []) {
-      const m = SEQUENCE_NAME.exec(r.name ?? '');
+      const m = sequencedName(model, r.name);
       if (m && Number.isSafeInteger(Number(m[2]))) marks[m[1]] = Math.max(marks[m[1]] ?? 0, Number(m[2]));
     }
     if (Object.keys(marks).length) out[model] = marks;
@@ -164,7 +165,7 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
     const owner = new Map();
     // Records keeping their number claim it first.
     for (const r of [...list.filter((r) => !incoming.has(r.id)), ...list.filter((r) => incoming.has(r.id))]) {
-      const m = SEQUENCE_NAME.exec(r.name ?? '');
+      const m = sequencedName(model, r.name);
       if (!m || !owner.has(r.name) || !incoming.has(r.id)) {
         if (!owner.has(r.name)) owner.set(r.name, r.id);
         continue;
@@ -189,14 +190,14 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
 /** Highest id in a list of records, without spreading the list into Math.max (argument limits on large models). */
 export const maxId = (recs = []) => { let top = 0; for (const r of recs) if (r.id > top) top = r.id; return top; };
 
-/** Reset id counters that are corrupt, behind the stored records, or absurdly far past them (e.g. poisoned by an old client). */
+/** Repair corrupt or lagging counters without losing the historical high-water mark after deletions. */
 export function repairSeq(db) {
   if (!db) return db;
   let changed = false;
   const seq = { ...db.seq };
   for (const [model, n] of Object.entries(seq)) {
     const top = maxId(db.records[model]);
-    if (!Number.isSafeInteger(n) || n < top || n > top + ID_WINDOW) { seq[model] = top; changed = true; }
+    if (!Number.isSafeInteger(n) || n < top) { seq[model] = top; changed = true; }
   }
   return changed ? { ...db, seq } : db;
 }
@@ -393,7 +394,11 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const now = (records[m.model] ?? []).find((r) => r.id === m.res_id);
     return !!now && !companyError(m.model, storedRecord(m.model, m.res_id), now);
   };
-  const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m)).map((m) => m.id));
+  const removedVisibleRecord = (m) => {
+    const old = storedRecord(m.model, m.res_id);
+    return old && (d.deletes?.[m.model] ?? []).includes(m.res_id) && !companyError(m.model, old);
+  };
+  const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m) && !removedVisibleRecord(m)).map((m) => m.id));
   const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));
   const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : [])
     .filter((id) => !kept.has(id) && !hiddenMessages.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
@@ -434,7 +439,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let next = { ...db, records, seq, settings, numbering: highWater(marks, records), messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
   // The audit trail shows the number the server finally gave, not only the one the browser proposed.
   for (const [model, id, from, to] of numbered.renamed) {
-    if (models[model].audited?.(db)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`);
+    if (models[model].audited?.(next)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
   }
   growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
   if (settings !== db.settings) growth += json(settings) - json(db.settings);

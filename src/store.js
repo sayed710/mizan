@@ -218,7 +218,7 @@ export async function restoreBackup(backup, confirm) {
 export async function resetDemo() {
   if (mode === 'local') return commit(await demoData());
   const r = await api('/api/reset', { confirm: 'RESET' });
-  if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
+  if (r.ok) { db = confirmed = r.data; dbTag = null; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }
 
 export async function login(loginName, password) {

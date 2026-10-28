@@ -143,6 +143,24 @@ test('approval requests: no self-added lines, no jumping the queue, no owner swa
   assert.equal(read(save(pending, oneOfTwo, as('mona')), 'approval.request', req.id).request_status ?? 'pending', 'pending');
 });
 
+test('expense report completion requires posted expense and reimbursement entries', async () => {
+  const { postSheet, registerPayment } = await import('./models/expenseplus.js');
+  for (const payment_mode of ['own_account', 'company_account']) {
+    const made = create(linked(), 'hr.expense', { name: 'Taxi', employee_id: 3, total_amount: 50, tax: 0, payment_mode });
+    const sheet = createSheet(made.db, [made.id]);
+    const submitted = submitSheet(sheet.db, sheet.id);
+    const approved = approveSheet(submitted, sheet.id, 2);
+    assert.throws(() => save(approved, write(approved, 'hr.expense.sheet', sheet.id, { state: 'done', amount_paid: 50 }), as('mona')), /posted.*expense|accounting entry/);
+    const posted = postSheet(approved, sheet.id);
+    const stored = save(approved, posted, as('mona'));
+    if (payment_mode === 'own_account') {
+      const forged = write(write(stored, 'hr.expense', made.id, { state: 'paid' }), 'hr.expense.sheet', sheet.id, { state: 'done', amount_paid: 50 });
+      assert.throws(() => save(stored, forged, as('mona')), /reimbursement/);
+      assert.equal(read(save(stored, registerPayment(stored, sheet.id, 50), as('mona')), 'hr.expense.sheet', sheet.id).state, 'done');
+    } else assert.equal(read(stored, 'hr.expense.sheet', sheet.id).state, 'done');
+  }
+});
+
 test('only administrators change who reports to whom', () => {
   const db = linked();
   assert.throws(() => save(db, write(db, 'hr.employee', 6, { parent_id: 5 }), as('karim')), /Only administrators can change who/);

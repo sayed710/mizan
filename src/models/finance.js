@@ -1,9 +1,9 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
-import { accountId, isBalanced, journalItems } from './ledger.js';
+import { accountId, isBalanced, journalItems, paymentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, lineUntaxed } from './taxes.js';
+import { lineTaxOf, lineUntaxed, TRANSITION } from './taxes.js';
 import { companySum } from './money.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -57,7 +57,7 @@ export function lockDateFor(settings = {}, move = {}) {
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
-const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && l.move_id === id);
+const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id));
 
 /**
  * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown
@@ -98,11 +98,13 @@ function postedMoveRule(before, after) {
   return null;
 }
 
-const settlementAccounts = (db) => [accountId(db, '121000'), accountId(db, '211000')];
 /** Whether invoice `inv` is settled by the credit (customer invoice, vendor refund) or the debit side of its partner's balance. */
 const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move_type);
-/** In company currency; the lower of face value and the invoice-date rate, as payments from the payment form apply at face value. */
-const appliedValue = (db, inv, p) => Math.min(Number(p.amount) || 0, toCompany(db, inv.currency_id, p.amount, inv.invoice_date ?? p.date, inv.company_id));
+/** Standalone payment allocations are company currency; invoice-linked applications use the invoice-date rate. */
+const appliedValue = (db, inv, p) => {
+  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
+  return payment && !payment.invoice_id ? Number(p.amount) || 0 : toCompany(db, inv.currency_id, p.amount, inv.invoice_date ?? p.date, inv.company_id);
+};
 
 /** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
 function settlementCapacity(db, entry, inv) {
@@ -112,9 +114,9 @@ function settlementCapacity(db, entry, inv) {
     && note.move_type === (original.move_type === 'out_invoice' ? 'out_refund' : original.move_type === 'in_invoice' ? 'in_refund' : null)
     && note.partner_id === original.partner_id && (note.currency_id ?? null) === (original.currency_id ?? null);
   if (entry.move_type !== 'entry' && !creditPair(entry, inv) && !creditPair(inv, entry)) return 0;
-  const accounts = settlementAccounts(db);
-  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && accounts.includes(l.account_id))
-    .reduce((s, l) => s + (Number(settledByCredit(inv) ? l.credit : l.debit) || 0), 0));
+  const account = accountId(db, ['in_invoice', 'in_refund'].includes(inv.move_type) ? '211000' : '121000');
+  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
+    .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
 
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
@@ -165,8 +167,16 @@ export function paymentInvariant(db, after) {
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
-  const accounts = settlementAccounts(db);
-  if (after.partner_id && !(entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id && accounts.includes(l.account_id))) return 'The journal entry does not belong to this payment';
+  if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
+  if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
+  const inbound = after.payment_type === 'inbound';
+  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000');
+  const net = (id) => round((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : round(Number(after.amount));
+  const bank = accountId(db, paymentJournal(db, after.journal_id).account);
+  if ((inbound ? -1 : 1) * net(account) <= 0 || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > 0.01
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > 0.01)) return 'The journal entry must book this payment amount and direction';
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
 }
@@ -239,12 +249,12 @@ export const datedLockDelete = (booked) => (db, r) => {
 export function moveDeleteGuard(db, move, staged = db) {
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
-  if (bookedByBank(db, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
+  if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
-  if (backsSettlement(db, move.id)) return 'This entry records a payment; reverse the payment instead';
+  if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }
 
@@ -257,11 +267,18 @@ function taxAccounts(db) {
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
   const accounts = taxAccounts(db);
+  const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  const transitions = new Set([accountId(db, TRANSITION.sale), accountId(db, TRANSITION.purchase)]);
   return journalItems(db, period).flatMap((l) => {
-    const side = accounts.sale.has(l.account_id) ? 'sale' : accounts.purchase.has(l.account_id) ? 'purchase' : null;
+    const move = l.tax_name && moves.get(l.move_id);
+    const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
+    const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
+    // Untagged manual items on a shared tax account use their debit/credit direction.
+    const manualSide = sale && purchase ? (l.balance < 0 ? 'sale' : 'purchase') : sale ? 'sale' : purchase ? 'purchase' : null;
+    const side = l.tax_side || (!transitions.has(l.account_id) && documentSide) || manualSide;
     if (!side) return [];
     const balance = (Number(l.debit) || 0) - (Number(l.credit) || 0);
-    return [{ ...l, side, tax: side === 'sale' ? -balance : balance }];
+    return [{ ...l, side, tax: l.tax_zero ? 0 : side === 'sale' ? -balance : balance }];
   });
 }
 
@@ -286,7 +303,7 @@ export function taxesByTax(db, period = {}) {
     const name = l.tax_name || 'Untagged';
     const key = `${l.side}|${name}`;
     const row = rows.get(key) ?? { side: l.side, name, base: 0, tax: 0 };
-    rows.set(key, { ...row, base: round(row.base + Math.sign(l.tax) * (Number(l.tax_base) || 0)), tax: round(row.tax + l.tax) });
+    rows.set(key, { ...row, base: round(row.base + (l.tax ? Math.sign(l.tax) : 1) * (Number(l.tax_base) || 0)), tax: round(row.tax + l.tax) });
   }
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }
