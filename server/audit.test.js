@@ -20,9 +20,10 @@ async function startServer() {
     child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
     child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
   });
+  // Wait for exit before removing the SQLite folder, including on Windows.
   return { url, stop: async () => {
     if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } };
 }
 

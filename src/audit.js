@@ -59,3 +59,11 @@ function noteEntries(was = [], now = []) {
     ...[...before].filter(([id]) => !after.has(id)).map(([, m]) => entry(m, 'delete', m.body, null)),
   ];
 }
+
+const shown = (v) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'object' ? JSON.stringify(v).slice(0, 60) : String(v));
+/** One line for an audit entry: "created", "deleted" or "field: old → new" per changed field. */
+export function auditSummary(entry) {
+  if (entry.action === 'create') return 'Created';
+  if (entry.action === 'delete') return 'Deleted';
+  return Object.entries(entry.changes ?? {}).map(([k, [a, b]]) => `${k}: ${shown(a)} → ${shown(b)}`).join(', ');
+}
