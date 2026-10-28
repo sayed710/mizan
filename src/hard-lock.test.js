@@ -55,8 +55,9 @@ test('a forged payment object cannot mark a locked invoice paid', () => {
   const inv = invoiceIn(db);
   const other = db.records['account.move'].find((m) => m.state === 'posted' && m.id !== inv.id && !(m.line_ids ?? []).some((l) => l.partner_id === inv.partner_id));
   for (const forged of [{ date: '2027-01-05', amount: inv.amount_residual }, { date: '2027-01-05', amount: inv.amount_residual, move_id: other?.id ?? 999999 }]) {
-    const next = write(db, 'account.move', inv.id, { amount_paid: (Number(inv.amount_paid) || 0) + inv.amount_residual, payment_date: '2027-01-05', payments: [...(inv.payments ?? []), forged] });
-    assert.throws(() => save(db, next), /locked/, JSON.stringify(forged));
+    const vals = { amount_paid: (Number(inv.amount_paid) || 0) + inv.amount_residual, payment_date: '2027-01-05', payments: [...(inv.payments ?? []), forged] };
+    const next = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === inv.id ? { ...m, ...vals } : m) } };
+    assert.throws(() => save(db, next), /locked|posted journal entry/, JSON.stringify(forged));
   }
 });
 

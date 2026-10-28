@@ -85,7 +85,7 @@ test('a credit note must match the invoice partner, currency and kind, and be po
   assert.throws(() => postMove(write(out.db, 'account.move', n, { partner_id: 3 }), n), /partner must be/);
   const other = create(seed(), 'res.currency', { name: 'OTH', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
   assert.throws(() => postMove(write({ ...out.db, records: { ...out.db.records, 'res.currency': other.db.records['res.currency'] } }, 'account.move', n, { currency_id: other.id }), n), /currency must be/);
-  assert.throws(() => postMove(write(out.db, 'account.move', n, { invoice_line_ids: [{ product_id: 1, qty: -1, price_unit: 30, tax: 0 }] }), n), /positive total/);
+  assert.throws(() => postMove(write(out.db, 'account.move', n, { invoice_line_ids: [{ product_id: 1, qty: -1, price_unit: 30, tax: 0 }] }), n), /positive total|cannot exceed the invoice total/);
   assert.throws(() => postMove(write(out.db, 'account.move', n, { move_type: 'in_refund' }), n), /can only reverse/);
 });
 

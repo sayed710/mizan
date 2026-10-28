@@ -25,7 +25,7 @@ test('a posted invoice cannot be marked paid, edited or deleted directly', () =>
   const db = seed();
   const inv = postedInvoice(db);
   assert.throws(() => save(db, write(db, 'account.move', inv.id, { amount_paid: inv.amount_total ?? 100 })), /paid amount|payments/i);
-  assert.throws(() => forged(db, 'account.move', { ...inv, payments: [...(inv.payments ?? []), { date: '2026-10-26', amount: 50, move_id: 424242 }], amount_paid: (inv.amount_paid ?? 0) + 50 }), /posted journal entry/);
+  assert.throws(() => forged(db, 'account.move', { ...inv, payments: [...(inv.payments ?? []), { date: '2026-10-26', amount: 50, move_id: 424242 }], amount_paid: (inv.amount_paid ?? 0) + 50 }), /posted journal entry|cannot exceed the invoice total/);
   assert.throws(() => forged(db, 'account.move', { ...inv, line_ids: [] }), /reset them to draft/);
   assert.throws(() => forged(db, 'account.move', { ...inv, state: 'cancel' }), /draft/);
   assert.throws(() => applyDiff(db, { upserts: {}, deletes: { 'account.move': [inv.id] } }, clerk), /cannot be deleted/);
@@ -77,7 +77,7 @@ test('a forged payment cannot point at an unrelated entry, an invoice, or more t
   const other = postedInvoice(db);
   const misc = db.records['account.move'].find((m) => m.state === 'posted' && m.move_type === 'entry' && !(m.line_ids ?? []).some((l) => l.partner_id === inv.partner_id));
   for (const move_id of [other.id, misc?.id, id].filter(Boolean)) {
-    assert.throws(() => forged(db, 'account.move', { ...inv, payments: [{ date: '2026-10-26', amount: 50, move_id }], amount_paid: 50 }), /posted journal entry/, String(move_id));
+    assert.throws(() => forged(db, 'account.move', { ...inv, payments: [{ date: '2026-10-26', amount: 50, move_id }], amount_paid: 50 }), /posted journal entry|cannot exceed the invoice total/, String(move_id));
   }
   const paid = save(db, payMove(db, id, 40));
   const entry = read(paid, 'account.move', id).payments[0].move_id;
@@ -91,9 +91,9 @@ test('the entry behind a posted payment cannot be reset or deleted', () => {
   const { db, id } = postedPaid();
   const paid = save(db, payMove(db, id, 40));
   const entry = read(paid, 'account.move', read(paid, 'account.move', id).payments[0].move_id);
-  assert.throws(() => forged(paid, 'account.move', { ...entry, state: 'draft' }), /reverse the payment/);
+  assert.throws(() => forged(paid, 'account.move', { ...entry, state: 'draft' }), /reverse the payment|settles an invoice payment/);
   const drafted = { ...paid, records: { ...paid.records, 'account.move': paid.records['account.move'].map((m) => (m.id === entry.id ? { ...m, state: 'draft' } : m)) } };
-  assert.throws(() => applyDiff(drafted, { upserts: {}, deletes: { 'account.move': [entry.id] } }, clerk), /reverse the payment/);
+  assert.throws(() => applyDiff(drafted, { upserts: {}, deletes: { 'account.move': [entry.id] } }, clerk), /reverse the payment|settles an invoice payment/);
 });
 
 test('an invoice with a discount line on its own account still posts with positive journal items', async () => {

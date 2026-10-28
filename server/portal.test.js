@@ -4,6 +4,7 @@ import { createServer, request } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { create, read, search, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
+import { postEntry } from '../src/models/ledger.js';
 import { readRaw } from './whatsapp.js';
 import { createPortal, portalUrl } from './portal.js';
 
@@ -132,7 +133,8 @@ test('portal HTML escapes partner names, offers token-protected print/download a
   assert.ok(!html.includes('<script>alert'));
   assert.equal(response.headers.get('x-frame-options'), 'DENY');
   assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
-  const invoice = create(f.db(), 'account.move', { partner_id: 1, move_type: 'out_invoice', state: 'draft', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }], amount_paid: 20 });
+  const settled = postEntry(f.db(), { journal: 'BNK1', ref: 'pay', lines: [{ account: '101401', debit: 20 }, { account: '121000', credit: 20, partner_id: 1 }] });
+  const invoice = create(settled.db, 'account.move', { partner_id: 1, move_type: 'out_invoice', state: 'draft', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }], amount_paid: 20, payments: [{ date: '2026-01-01', amount: 20, move_id: settled.id }] });
   f.set(force(invoice.db, 'account.move', invoice.id, { state: 'posted' }));
   const url = f.portal.portalUrl('account.move', read(f.db(), 'account.move', invoice.id));
   assert.match(await (await f.get(url)).text(), /Amount due[\s\S]*80\.00/);
