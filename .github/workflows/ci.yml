@@ -2,22 +2,81 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  inventory:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.prs.outputs.matrix }}
+    steps:
+      - id: prs
+        name: Snapshot all eligible open PR heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/${{ github.repository }}/pulls?state=open&per_page=100" > "$RUNNER_TEMP/open-prs.json"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const prs = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/open-prs.json`, 'utf8')).flat();
+          // Skip exact heads already built and tested by the completed initial batches.
+          const testedHeads = new Set(["5da7a5680e0435cbc000d3de5efe32cd8ea9ef44","e2add9a7eef4eff6094c60e7aa15313f3137c001","173317db6aa5ffdf4f7c6e67255bdc868839c446","3eb9003c1fd50810aef65526ad48da6d48c5be20","2cc9cc27bd59ef92e60078ae274bed66ce8193ee","a16b8a8f43ceb22f5df500ace47f60a0ef3543c5","36235fb2d4d22c74459b246106c3265c9e9ff661","714028016d3fcb6aa32f4655c3207eeff67c5705","ffd872a377d70a976a636b3214f97492253d0fe4","4f4a8615f28f9df369b667ae3437bf6b6fec72d3","c7e4f3f5128b5ad07de9cb2a7e6732baa7cb184e","0fe347e34bdc955c8f2dd29ac9ddf7a79d89a338","4bcfc88674d8f8562b8f23ccd9f8980b08b1f293","7a352076fe42c23a9d5b8b58e0c53b479ff9a506","0a01a736b2a34550c0433593710ad0291a9c6bf3","ced70a719075d2c7bcf703ba17e1473d83a65d17","28df817e1541624d002fa661b4787df4ad275201","25aa841473bcdc4601b3bc2c87638aa9cd1d6dd4","7264fe7f114f448a7106852ed725f80d68bc6304","5175f533f26473d60b1261e41cf28d07d9699a78","4c41d443d732bb59f81a4a1b4df590193ce126c3","b46b74b05fa0b0ab0812e265fcc2991209cc65bc","61b9a7ae81c278f1b4760fd0500699e726046080","9fe4709b5bd6311ebe07e0a016c8daa7156b295d","1f153d1694f41d06819912b354c2f1dc0d33bf22","e71077be3fa0e7da9beb41728d878a18c304775f","beda92ed9aab574d3ac41e5d3dd880a382cd24e3","51c26b649e7d2f8d45d0a36ad25a8f5c4bf50c3e","c5d8f072451c2f13b86c7c22141384e4dff64b87","58f83ff8cb8ab58b5b95cf4827079c4fa18dcad0","9c714c30bcfd9b20070b8d8dd9af4911ab6ea29e","bb61f5710d40a5cebe41267e014228d74c05df8b","8ba2c163901353a46d41e15f5a287343f2ad3fc5","5f81566fd575810bacf240eff0f6f6b6e5daae50","6f44f2c646cf0f95426c6944312f7e2fa3e4b333","e9dc905453410b1a21a1eeff56afcddbb891a321","ac222ca48d6b5f0e4c577c1f3cd615bb9aae47c4","6ca923c3b209730a438d275f2e32caa28814f3eb","78a9251236610f54393cb1573cc947e32843bd50","3e61b35d5eff7b5781db3fbc57a33f7538bd5296","07f59db2bf6a558c5a7a0b3c39accc1578b2cde0","c2b243227211000be213f84b1f7f6a5197ebe20d","1276c441d1b2af0aeacb4abd049374482a68378c","d139c88aa1f02bea99da329cb178644d2455538d","5c0e5a727eadc785f1aefda6b2ec346a789b40ef","d610a24801e0772dd5681b42198c897dd7221afc","bb23cfb9c795e6b1c0ed39d1803279503fabe979","5f2908d385d0358301076fb4540384bf5f44dd40","a3c61b51d548359349010686135f69dc616b96c6","97520ea0f392adcaa47caf86f5afb622aa4eb593","06b4099a73e253faf6597381e2dc9c7f9220113e","bcb0d1fc951330144a4c32b02f34ebd135be7724","2d896c07a6e7addc8d0afb979a951abe5e808b26","49720ae468d7c2413ace7f8a65e76970e3347e75","cd77835e79a81e0c216becff084882294f9e604e","be31963bf5d2e51ad90fae83ba0a1de39e8f3c1f","dcbc102b1433fcec065362f28f719c6311e0bb3a","c6f55d9b5876eb938049c1a947bdad8c82ba71a4","083a34d91afc396677cdbcce60801eb9cb4466ad","aecc637a568d33b68a0e1dca1a585496e089fec7","55a06a3f90e10152fe7a099c27281cba4a360853","284c2e360daba58bbf607709109368a4a067902e","5d0ab68e5dba73c0291e18b9b719487834170c70","802166776527202b4953176a38fa3d0aa7eb3fff","026a01efb134078127fedeb48f2c1ccedbbc4db5","89ecddf7014bcc7f3cca29d42d2d038638def7b7","12315789efd31a4c7ee3e29fdd719389e20740d7","8373dc01d7e03bf3f3050d4525c6b1f6f45c4a41","98186441f5458c782e8bcc652db457f270a33853","fb78d4878d59198ba0b57899ba363708c8736cb3","f8d53d60befd6fd8c35368ddc34fe36dfbb42ca9","c48690111ed35384cbe03dbefcec0f0de491f941","803c6c4e90b372b445fd0db305fb69238f35ce56","3e681dbf18f068ba080c24ee0d3539dbcbf7b215","72aeed1792775663c93171ba0b7211b5b19554ab","5a1f07f122f402b27b87cbefea38c4e2edc49aa9","6c65d9cfa6ae1846030618161d5cee6adbddf2d1","0f6eb015169c33eb41acf8d601113b63f2f4834c","309aa4fd15cfeffc1b12c4e842e3e295a7409efa","54b5097b0524f95a6fa38a3fa0033592fb7f2249","b4efad221a837fa8034c99edc48881b33ccbf53d","0432038002cfde51853f534c4acd0eadcbf5f2c1","b0cd9a32a721f9e59853f52a1266493cb01034d3","6d8321877ebb9ff949a352f55eaad3d42b36be73","8d590d8b0d1bd9935d37071a8e509ad89d34bee6","fdfb29569ebaf01847ec24ec06ab5a73e2da2255","bf0b1c0690efdff0faef862c145ed4443a5db226","f91a50f010359b573fb108a7998ad17949833f55","e943c4c3e9ca135b348496936b788ec4d8256aaa","94cccac0d4dd00c7935cc13b550248cffbb15336","43da75a66d72dc668481d88f1d100a2a3391a50a","fd4188a0aa5fe113fd65e64a2c2c6292e652f963","900c3bf9331320c5a57e17cba1d33d882b87d6e1","bd276d258b5333d1a4fff95259a0ed63c473c939","94165066802420a574db53054f1c7e155222ed2e","ae75a77f0f2dd1d7f6945961c5e52df1bd156a33","6caea756a9844141b67ed9d43e622200fe62614f","4ff99a69b72db4f9284a5ef654ff006e57fd96ef","6917dd010aceaf522f8fa4a2ef8d63656f4e2f7c","dfc3e7518e53565805e0a649b75d59c652d79d62","27a4579370c0f75f7a382fccf1e32742917eea11","8b2ca88a6ea53209692d4e454ca0ba95c3a3447e","ea9fc0e7108b4213e10a6147db270ba06431381d","7c9c34327565df3ac60190ab33258e17d12f2b32","726e1c199c6dd4db8756eeb77c1f420c79249184","7f5f489ffeaa15be0b7165b57a5eaacf44522fd6","ba974da15da1d86e9afefc7b46725549415c5a1a","17ed755add31e6de915d70ed8ce9a96db231397e","dc433e5947db8c24a71ea60624d5832df528a6f8","cdcbfa728b953865f1afb2bf3915111ff1634f38","73c885a67073da1e91789ea1d79796cd45cb56fd","09ffa5d19d5915bc96959cb82218436e2543e3b3","ac7c50c8bf29a456ac4872727bc6f7ab68d34a40","eee6fcab525ac3f2487c6c74d8240723d819dfa5","42c6cd8f143edca63737f028818d70b29eeceba8","7df881c54952d00f47417eb8a43ad8f000e4ca23","e692f995b20783fd9b359bf9a9354ef79867c7c4","930aeec468cdab8b3a1b0ade05fe40503c470041","aef3712cfc485142c46555cd44617f770da2fac4"]);
+          const include = prs.filter(pr => !testedHeads.has(pr.head.sha) && !pr.draft && pr.head.repo).map(pr => ({
+            pr: pr.number, sha: pr.head.sha, repository: pr.head.repo.full_name
+          }));
+          if (!include.length || include.length > 256) throw new Error(`Unsupported PR count: ${include.length}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## PR snapshot\n\n| PR | Head SHA |\n|---|---|\n${include.map(pr => `| #${pr.pr} | ${pr.sha} |`).join('\n')}\n`);
+          NODE
+
+  pilot:
+    name: Verify existing CI setup (PR 11)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: fd4188a0aa5fe113fd65e64a2c2c6292e652f963
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
-      # `npm test` builds first (pretest): the server tests serve dist/.
+      - run: npm run build
       - run: npm test
+
+  test:
+    name: PR ${{ matrix.pr }} - build and tests
+    needs: [inventory, pilot]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Record tested snapshot
+        if: always()
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+          PR_SHA: ${{ matrix.sha }}
+          TEST_STATUS: ${{ job.status }}
+        run: |
+          printf 'PR #%s\n\nHead: `%s`\n\nResult: %s\n' "$PR_NUMBER" "$PR_SHA" "$TEST_STATUS" >> "$GITHUB_STEP_SUMMARY"
