@@ -74,7 +74,7 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .navbar { display: flex; align-items: center; gap: 14px; height: 46px; padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .nav-home { color: var(--muted); display: grid; place-items: center; padding: 6px; border-radius: 6px; }
 .nav-home:hover { background: var(--bg); color: var(--brand); }
-.nav-app { font-weight: 700; font-size: 16px; color: var(--text); }
+.nav-app { font-weight: 700; font-size: 16px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-menus { display: flex; gap: 2px; overflow-x: auto; }
 .nav-toggle { display: none; border: 0; background: none; font-size: 20px; line-height: 1; padding: 4px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
 .nav-toggle:hover { background: var(--bg); }
@@ -207,7 +207,9 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 }
 @media (max-width: 640px) {
   .company { display: none; }
-  .navbar { position: relative; }
+  .navbar { position: relative; gap: 8px; padding: 0 8px; }
+  .nav-app { max-width: 110px; }
+  .company-switch { max-width: 90px; }
   .nav-toggle { display: inline-flex; }
   /* Menus become a panel under the navbar instead of disappearing. */
   .nav-menus { display: none; }
@@ -219,8 +221,8 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
   /* Nothing in a form may push the page wider than the screen: wide parts scroll inside themselves. */
   .form-layout { padding-inline: 8px; }
   .form-layout > *, .form-main, .sheet, .chatter, .form-header { min-width: 0; max-width: 100%; }
-  .lines-wrap, .statusbar { overflow-x: auto; max-width: 100%; }
-  .statusbar button { white-space: nowrap; }
+  .lines-wrap, .statusbar, .tabs { overflow-x: auto; max-width: 100%; }
+  .statusbar button, .tabs button { white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
