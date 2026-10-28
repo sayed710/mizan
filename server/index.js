@@ -410,9 +410,9 @@ async function api(req, res, path) {
     try {
       const snapshot = db;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: storeAllowed }));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -429,9 +429,9 @@ async function api(req, res, path) {
       mailBaseKnown = true;
       const snapshot = db;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }), body, lastBaseUrl)
+        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }));
       return send(res, out.status, out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -446,7 +446,7 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
+      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: allowedFor(user) }));
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }

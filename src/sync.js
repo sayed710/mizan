@@ -5,6 +5,7 @@ import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { setCompanies } from './models/company.js';
+import { authorityDeleteRules, authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
@@ -60,8 +61,11 @@ export function repairSeq(db) {
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
-/** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
+/**
+ * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
+ * `author` (their name) by the approval rules in authority.js.
+ */
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
@@ -79,7 +83,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
-      const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
+      const before = current.get(rec.id) ?? null;
+      // Authority rules judge the stored record, not one an earlier step of this same change set already rewrote.
+      const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin }) ?? authorityRules[model]?.(seen, (db.records[model] ?? []).find((x) => x.id === rec.id) ?? null, rec, { isAdmin, login, name: author });
       if (err) throw new Error(err);
       current.set(rec.id, rec);
     }
@@ -92,6 +98,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
     const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
+    const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
+    if (unauthorized) throw new Error(unauthorized);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
   // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
