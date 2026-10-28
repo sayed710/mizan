@@ -91,7 +91,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
       costs.push({ index, unit_cost: out.value / qty });
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
-      stocked = moveValued(stocked, [{ ...l, qty, unit_cost }], -sign, { reference: name, counterpart: '500000', actualCost: true });
+      stocked = moveValued(stocked, [{ ...l, qty, unit_cost }], -sign, { reference: name, counterpart: '500000' });
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
