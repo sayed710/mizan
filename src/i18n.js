@@ -885,6 +885,15 @@ const ar = {
   'Product (name or internal reference)': 'المنتج (الاسم أو المرجع الداخلي)',
   'On Hand in Packagings': 'المتاح بالعبوات', 'Loose units': 'وحدات منفردة',
   'Signers, as role=contact name separated by ;': 'الموقعون بصيغة الدور=اسم جهة الاتصال مفصولة بـ ;',
+  'Working Schedule': 'جدول العمل', 'Default Working Calendar': 'تقويم العمل الافتراضي',
+  'Working Schedules': 'جداول العمل', 'Calendar Type': 'نوع التقويم', Variable: 'متغير',
+  'Average Hour per Day': 'متوسط الساعات يومياً', 'Total Hours per Week': 'إجمالي الساعات أسبوعياً',
+  'Full Time Required Hours': 'ساعات العمل الكامل المطلوبة', 'Work Time Rate': 'معدل وقت العمل',
+  'Day of Week': 'يوم الأسبوع', 'Day Period': 'فترة اليوم', 'Full Day': 'يوم كامل',
+  'Work from': 'العمل من', 'Work to': 'العمل إلى', 'Duration (Hours)': 'المدة (بالساعات)',
+  Leaves: 'الإجازات', 'Public Holidays': 'العطلات الرسمية', 'Count as': 'احتساب كـ',
+  Absence: 'غياب', 'Working Time': 'وقت عمل', 'Public Holiday': 'عطلة رسمية',
+  'Standard 40 hours/week': 'القياسي 40 ساعة/أسبوع',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
