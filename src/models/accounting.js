@@ -92,20 +92,23 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   return postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
 }
 
-/** Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account. */
+/**
+ * Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account.
+ * A negative share (a reversed payment) moves them back.
+ */
 export function releaseCashBasis(db, r, share, date) {
   const sale = !isPurchase(r);
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
   const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date))
-    .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
+    .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * Math.abs(share) * 100) / 100])
     .filter(([, amount]) => amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
-  const lines = due.flatMap(([account, amount]) => (sale !== refund
+  const lines = due.flatMap(([account, amount]) => ((sale !== refund) === share > 0
     ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { account, credit: amount, partner_id: r.partner_id }]
     : [{ account, debit: amount, partner_id: r.partner_id }, { account: transition, credit: amount, partner_id: r.partner_id }]));
-  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
+  return postEntry(db, { journal: 'MISC', date, ref: `${share > 0 ? 'Cash basis taxes' : 'Cash basis taxes reversed'} ${r.name}`, lines }).db;
 }
 
 /** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill. */

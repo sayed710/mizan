@@ -1,5 +1,5 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
-import { postNote, read, search, write } from '../orm.js';
+import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
@@ -43,6 +43,34 @@ export function postPayment(db, p) {
   return write(applied, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: left });
 }
 
+/**
+ * Reverse a posted payment (FLOW-017): a mirror entry is posted on `date`, and what the payment settled becomes due
+ * again, cash-basis taxes included. Payments made by a bank reconciliation stay, since the bank line still matches them.
+ */
+export function reversePayment(db, p, date = today()) {
+  if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
+  const entry = read(db, 'account.move', p.move_id);
+  const fromBank = p.invoice_id && search(db, 'account.bank.statement.line')
+    .some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount));
+  if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
+  const code = read(db, 'account.journal', entry.journal_id)?.code ?? 'BNK1';
+  const { db: booked, id: reversalId } = create(db, 'account.move', {
+    move_type: 'entry', state: 'posted', journal_id: entry.journal_id, invoice_date: date, ref: `Reversal of ${entry.name}`, partner_id: entry.partner_id ?? null,
+    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
+    line_ids: (entry.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
+  });
+  const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => x.move_id === p.move_id));
+  const reopened = settled.reduce((acc, m) => {
+    const amount = round((m.payments ?? []).filter((x) => x.move_id === p.move_id).reduce((sum, x) => sum + Number(x.amount), 0));
+    const payments = m.payments.filter((x) => x.move_id !== p.move_id);
+    const released = releaseCashBasis(acc, m, -amount / m.amount_total, date);
+    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) - amount), payments, payment_date: payments.at(-1)?.date ?? null });
+    return postNote(next, 'account.move', m.id, `Payment ${p.name} reversed: ${amount}`);
+  }, booked);
+  const reversal = read(reopened, 'account.move', reversalId);
+  return postNote(write(reopened, 'account.payment', p.id, { state: 'cancel', unapplied: 0 }), 'account.payment', p.id, `Reversed by ${reversal.name}`);
+}
+
 const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']];
 
 export const payModels = {
@@ -74,6 +102,7 @@ export const payModels = {
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
         { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
+        { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
