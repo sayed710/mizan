@@ -56,6 +56,9 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
+const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && l.move_id === id);
+
 /**
  * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown
  * ones, so a single bad line would stop the trial balance and balance sheet from closing.
@@ -170,6 +173,7 @@ export function moveGuard(db, before, after) {
 
 
 function lockRule(db, before, after) {
+  if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
@@ -223,6 +227,7 @@ export const datedLockDelete = (booked) => (db, r) => {
 export function moveDeleteGuard(db, move, staged = db) {
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
+  if (bookedByBank(db, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
