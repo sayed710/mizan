@@ -50,8 +50,11 @@ Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
   `MIZAN_BACKUP_KEEP` (7). Copy that folder off the machine.
 - To restore a snapshot, stop the server and put the file in place of `MIZAN_DB` (remove any `-wal`/`-shm` files next to it).
   Do not copy the live `mizan.sqlite` itself: in WAL mode recent commits may still sit in the `-wal` file.
-- **Settings → Download backup** (admins) downloads the server's business data as JSON, which **Restore backup** takes back.
-  It does not include users or API keys.
+- **Settings → Download backup** (admins) downloads the server's business data as JSON. It is an export, not a restore
+  point: **Restore backup** imports its records through the normal validation and does not replace the database or
+  remove newer records, and users and API keys are not included. Use the SQLite snapshot for a full restore.
+- Snapshots are written owner-only (folder `0700`, files `0600`) and copied by a separate process, so a large database does not
+  stall requests. `npm run backup` refuses a path that is not an existing Mizan database.
 
 Development: `npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).

@@ -50,7 +50,8 @@ const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
 const COOKIE = 'mizan_session';
 
-const sql = new DatabaseSync(process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite'));
+const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
+const sql = new DatabaseSync(DB_PATH);
 sql.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -439,7 +440,7 @@ async function api(req, res, path) {
     }
     return send(res, 200, visibleDb(user));
   }
-  // The full business database as JSON (not the caller's filtered copy); /api/restore takes it back.
+  // The full business database as JSON (not the caller's filtered copy): an export for reading and re-importing records, not a restore point (see README).
   if (path === '/api/backup' && req.method === 'GET') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     return send(res, 200, db, { 'Content-Disposition': `attachment; filename="mizan-backup-${new Date().toISOString().slice(0, 10)}.json"` });
@@ -557,7 +558,7 @@ const runJobs = () => {
 };
 runJobs();
 setInterval(runJobs, JOB_INTERVAL_MS).unref();
-scheduleSnapshots(sql);
+scheduleSnapshots(DB_PATH);
 
 // Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
 const MAIL_JOB_INTERVAL_MS = 10 * 60 * 1000;
