@@ -141,7 +141,7 @@ const ar = {
   Manager: 'المدير', 'Employee Name': 'اسم الموظف', 'Job Title': 'المسمى الوظيفي', Department: 'القسم', 'Work Email': 'البريد الوظيفي',
   'Work Phone': 'هاتف العمل', 'Work Location': 'مكان العمل', 'Joined on': 'تاريخ الانضمام', 'Project Name': 'اسم المشروع',
   'Project Manager': 'مدير المشروع', 'Start Date': 'تاريخ البدء', 'End Date': 'تاريخ الانتهاء', Description: 'الوصف', 'Task Title': 'عنوان المهمة',
-  Assignee: 'المكلّف', Deadline: 'الموعد النهائي', 'Allocated Hours': 'الساعات المخصصة', Subject: 'الموضوع', 'Assigned to': 'مسندة إلى',
+  Assignee: 'المكلّف', Deadline: 'الموعد النهائي', Subject: 'الموضوع', 'Assigned to': 'مسندة إلى',
   'Meeting Subject': 'موضوع الاجتماع', Date: 'التاريخ', Time: 'الوقت', 'Duration (hours)': 'المدة (ساعات)', Attendee: 'الحضور', Location: 'المكان',
   Opportunities: 'الفرص', Invoiced: 'المفوتر', 'Sales Order ': 'أمر البيع',
   Login: 'اسم الدخول', Password: 'كلمة المرور', 'Log in': 'تسجيل الدخول', 'Log out': 'تسجيل الخروج', Users: 'المستخدمون',
