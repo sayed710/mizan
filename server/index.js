@@ -39,7 +39,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { modelsForApps } from '../src/models/index.js';
+import { modelsForApps, readOnlyForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -144,6 +144,7 @@ const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite
 
 /** Models a session/API user may touch (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
+const readOnlyFor = (u) => (u.isAdmin || !u.apps?.length ? null : readOnlyForApps(u.apps));
 const visibleDb = (u) => {
   const allowed = allowedFor(u);
   if (!allowed) return db;
@@ -362,7 +363,7 @@ async function api(req, res, path) {
     const keyUser = apiKeyUser(req);
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser), readOnly: readOnlyFor(keyUser) });
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -396,9 +397,9 @@ async function api(req, res, path) {
     try {
       const snapshot = db;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed, readOnly: readOnlyFor(user) }));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly: readOnlyFor(user) }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -415,9 +416,9 @@ async function api(req, res, path) {
       mailBaseKnown = true;
       const snapshot = db;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }), body, lastBaseUrl)
+        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed, readOnly: readOnlyFor(user) }), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly: readOnlyFor(user) }));
       return send(res, out.status, out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -432,7 +433,7 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user) }));
+      commitDb(applyDiff(db, diff, { author: user.name, isAdmin: user.isAdmin, allowed: allowedFor(user), readOnly: readOnlyFor(user) }));
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }

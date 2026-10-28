@@ -41,11 +41,13 @@ export const isEmptyDiff = (d) =>
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
+/** `readOnly`: models the user may see but not change (e.g. accounting configuration outside Accounting, ACC-009). */
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, readOnly = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
+    if (readOnly?.has(model)) throw new Error(`Only Accounting users can change ${models[model].label}`);
   };
   installCustomFields(db.settings?.customFields);
   let records = { ...db.records };
