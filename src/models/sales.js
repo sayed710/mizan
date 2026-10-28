@@ -196,6 +196,31 @@ export const parseAttributes = (text = '') => String(text).split(';')
 
 /** Create one product per combination of attribute values (skips combinations that already exist). */
 export function generateVariants(db, template) {
+  const lines = template.attribute_line_ids ?? [];
+  if (lines.length) {
+    const groups = [...lines].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map((line) => {
+      const values = (line.value_ids ?? []).map((id) => read(db, 'product.attribute.value', id));
+      if (!line.attribute_id || !values.length || values.some((v) => !v || v.attribute_id !== line.attribute_id)) throw new Error('Select values belonging to each attribute');
+      return values;
+    });
+    const combos = groups.reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
+    const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => [...(p.variant_value_ids ?? [])].sort((a, b) => a - b).join('|')));
+    return combos.reduce((acc, values) => {
+      const ids = values.map((v) => v.id).sort((a, b) => a - b);
+      if (existing.has(ids.join('|'))) return acc;
+      return create(acc, 'product', {
+        name: `${template.name} (${values.map((v) => v.name).join(', ')})`,
+        default_code: `${template.default_code || `VAR-${template.id}`}-${ids.join('-')}`,
+        type: template.type, categ: template.categ, categ_id: template.categ_id, uom: template.uom, uom_id: template.uom_id, uom_po_id: template.uom_po_id,
+        list_price: Math.round(((Number(template.list_price) || 0) + values.reduce((s, v) => s + (Number(v.default_extra_price) || 0), 0)) * 100) / 100,
+        cost: template.cost, cost_method: template.cost_method, valuation: template.valuation,
+        property_account_income_id: template.property_account_income_id, property_account_expense_id: template.property_account_expense_id,
+        property_stock_valuation_account_id: template.property_stock_valuation_account_id, property_stock_journal: template.property_stock_journal,
+        sale_ok: template.sale_ok, purchase_ok: template.purchase_ok, available_in_pos: template.available_in_pos, tag_ids: [...(template.tag_ids ?? [])],
+        qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values.map((v) => v.name), variant_value_ids: ids,
+      }).db;
+    }, db);
+  }
   const combos = parseAttributes(template.attributes).reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
   const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => (p.variant_values ?? []).join('|')));
   return combos.filter((c) => !existing.has(c.join('|'))).reduce((acc, values, i) => create(acc, 'product', {
@@ -399,7 +424,7 @@ export const salesModels = {
           ask: [{ label: 'New unit cost', type: 'number', default: (r) => String(r.cost ?? 0) }],
           run: (db, r, [cost]) => ({ db: revalue(db, r.id, cost) }),
         },
-        { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
+        { label: 'Generate Variants', when: (r) => !r.variant_of && (r.attribute_line_ids?.length || parseAttributes(r.attributes).length), run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
         { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' }],

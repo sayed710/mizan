@@ -4,6 +4,7 @@ import { nextName, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
 import { round } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
 const quantity = (ls) => ls.reduce((s, l) => s + l.quantity, 0);
@@ -55,12 +56,18 @@ function openingStock(db, ids, date) {
       description: 'Opening stock', reference: 'Opening stock', opening: true,
     });
     next = res.db;
-    if (p.valuation !== 'manual_periodic' && value) opened.push([res.id, value]);
+    if (!['manual_periodic', 'periodic'].includes(productProperty(next, p, 'property_valuation')) && value) opened.push({ id: res.id, value, account: read(next, 'account.account', productProperty(next, p, 'property_stock_valuation_account_id'))?.code || '110100', journal: read(next, 'account.journal', productProperty(next, p, 'property_stock_journal'))?.code || 'MISC' });
   }
-  const total = round(opened.reduce((s, [, v]) => s + v, 0));
-  if (!total || !accountId(next, '110100') || !accountId(next, OPENING_EQUITY)) return next;
-  const entry = postEntry(next, { journal: 'MISC', date, ref: 'Opening stock', lines: [{ account: '110100', debit: total }, { account: OPENING_EQUITY, credit: total }] });
-  return opened.reduce((acc, [layerId]) => write(acc, 'stock.valuation.layer', layerId, { move_id: entry.id }), entry.db);
+  if (!accountId(next, OPENING_EQUITY)) return next;
+  const groups = new Map();
+  for (const item of opened) { const key = JSON.stringify([item.account, item.journal]); groups.set(key, [...(groups.get(key) ?? []), item]); }
+  for (const items of groups.values()) {
+    const total = round(items.reduce((s, item) => s + item.value, 0));
+    if (!total || !accountId(next, items[0].account)) continue;
+    const entry = postEntry(next, { journal: items[0].journal, date, ref: 'Opening stock', lines: [{ account: items[0].account, debit: total }, { account: OPENING_EQUITY, credit: total }] });
+    next = items.reduce((acc, item) => write(acc, 'stock.valuation.layer', item.id, { move_id: entry.id }), entry.db);
+  }
+  return next;
 }
 
 /** Open (and post) the stock of every stockable product that has quantities but no valuation layers yet. */
@@ -71,7 +78,7 @@ export function postOpeningStock(db, date = today()) {
 
 /** Product costing policy; categories are free text, so policy lives on the product. */
 export function costMethod(db, productId) {
-  const method = product(db, productId).cost_method ?? 'standard';
+  const method = productProperty(db, product(db, productId), 'property_cost_method') ?? 'standard';
   if (!['standard', 'average', 'fifo'].includes(method)) throw new Error('Select a valid costing method');
   return method;
 }
@@ -80,14 +87,17 @@ export function costMethod(db, productId) {
 export function postValuation(db, layerId) {
   const l = read(db, 'stock.valuation.layer', layerId);
   if (!l) throw new Error('Valuation layer not found');
-  if (l.move_id || l.opening || product(db, l.product_id).valuation === 'manual_periodic') return db;
+  if (l.move_id || l.opening || ['manual_periodic', 'periodic'].includes(productProperty(db, product(db, l.product_id), 'property_valuation'))) return db;
   const diff = Number(l.price_difference) || 0;
   if (!l.value && !diff) return db;
   const line = (account, amount) => ({ account, ...(amount >= 0 ? { debit: amount } : { credit: -amount }) });
   const counterpart = l.counterpart || (l.kind === 'in' ? '110200' : l.kind === 'out' ? '500000' : '600000');
-  const lines = [line('110100', l.value), line(counterpart, -round(l.value + diff)), ...(diff ? [line('600000', diff)] : [])];
+  const p = product(db, l.product_id);
+  const stockAccount = read(db, 'account.account', productProperty(db, p, 'property_stock_valuation_account_id'))?.code || '110100';
+  const lines = [line(stockAccount, l.value), line(counterpart, -round(l.value + diff)), ...(diff ? [line('600000', diff)] : [])];
   if (lines.some((x) => !accountId(db, x.account))) throw new Error('Configure stock valuation accounts first');
-  const entry = postEntry(db, { journal: 'MISC', date: l.date, ref: l.reference || l.description, lines });
+  const journal = read(db, 'account.journal', productProperty(db, p, 'property_stock_journal'))?.code || 'MISC';
+  const entry = postEntry(db, { journal, date: l.date, ref: l.reference || l.description, lines });
   return write(entry.db, 'stock.valuation.layer', l.id, { move_id: entry.id });
 }
 
@@ -166,7 +176,7 @@ export function moveValued(db, lines, sign, options = {}) {
     const p = read(next, 'product', l.product_id);
     const qty = Number(l.qty) || 0;
     if (!p || p.type !== 'goods' || !qty || !sign) return next;
-    if (p.valuation === 'manual_periodic') {
+    if (['manual_periodic', 'periodic'].includes(productProperty(next, p, 'property_valuation'))) {
       // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
       if (sign < 0 && qty * -sign > (Number(p.qty_available) || 0) + 1e-8) throw new Error('Not enough stock to deliver');
       return moveStock(next, [{ ...l, ...options.stockLine }], sign);

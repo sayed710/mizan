@@ -8,6 +8,7 @@ import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty } from './picking.js';
 import { round as round2 } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -148,7 +149,7 @@ function postExpense(db, r) {
   if (!(total > 0)) throw new Error('The expense total must be positive');
   const tax = round2(total - total / (1 + (Number(r.tax) || 0) / 100));
   const product = read(db, 'product', r.product_id);
-  const accountCode = (product?.property_account_expense_id && read(db, 'account.account', product.property_account_expense_id)?.code) || CATEGORY_ACCOUNT[r.category] || '600000';
+  const accountCode = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'))?.code || CATEGORY_ACCOUNT[r.category] || '600000';
   const own = r.payment_mode !== 'company_account';
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,

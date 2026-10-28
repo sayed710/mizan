@@ -87,6 +87,7 @@ function danglingLink(records, upserts, stored) {
         const value = raw?.[key];
         if (f.compute || value == null || value === '' || JSON.stringify(value) === JSON.stringify(old?.[key])) continue;
         if (f.type === 'many2one' && !exists(f.relation, value)) return `${f.label}: ${models[f.relation].label} #${value} does not exist`;
+        if (f.type === 'many2many' && Array.isArray(value)) for (const id of value) if (!(old?.[key] ?? []).includes(id) && !exists(f.relation, id)) return `${f.label}: ${models[f.relation].label} #${id} does not exist`;
         if (f.type !== 'one2many' || !Array.isArray(value) || !f.fields) continue;
         // Lines have no ids: a link is unchanged only if some stored line holds the same value in the same field.
         const known = new Set((old?.[key] ?? []).flatMap((l) => Object.entries(l ?? {}).map(([k, v]) => `${k}:${v}`)));
@@ -94,6 +95,7 @@ function danglingLink(records, upserts, stored) {
           for (const [sub, sf] of Object.entries(f.fields)) {
             const v = line?.[sub];
             if (sf.type === 'many2one' && v != null && v !== '' && !known.has(`${sub}:${v}`) && !exists(sf.relation, v)) return `${f.label} › ${sf.label}: ${models[sf.relation].label} #${v} does not exist`;
+            if (sf.type === 'many2many' && Array.isArray(v)) for (const id of v) if (!exists(sf.relation, id)) return `${f.label} › ${sf.label}: ${models[sf.relation].label} #${id} does not exist`;
           }
         }
       }
@@ -213,17 +215,18 @@ function remapRefs(model, rec, remapped) {
   for (const [key, f] of Object.entries(models[model]?.fields ?? {})) {
     if (!(key in out)) continue;
     if (f.type === 'many2one' && f.relation) out[key] = to(f.relation, out[key]);
+    else if (f.type === 'many2many' && Array.isArray(out[key])) out[key] = out[key].map((id) => to(f.relation, id));
     else if (f.type === 'one2many' && Array.isArray(out[key])) {
       out[key] = out[key].map((line) => {
         if (f.relation && !f.fields) return to(f.relation, line);
         if (!line || typeof line !== 'object') return line;
-        const target = (s) => (s.type === 'many2one' ? s.relation : s.ref);
+        const target = (s) => (['many2one', 'many2many'].includes(s.type) ? s.relation : s.ref);
         const subs = Object.entries(f.fields ?? {}).filter(([k, s]) => target(s) && k in line);
         const distribution = line.analytic_distribution;
         const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
           ? { analytic_distribution: Object.fromEntries(Object.entries(distribution).map(([id, share]) => [to('account.analytic.account', Number(id)), share])) }
           : null;
-        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(target(s), line[k])])), ...analytic } : line;
+        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...analytic } : line;
       });
     }
   }
