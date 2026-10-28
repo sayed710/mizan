@@ -1,6 +1,6 @@
 import { addDays, today } from './common.js';
+import { cents } from '../money.js';
 
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
 function lineDate(line, invoiceDate) {

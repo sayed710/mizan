@@ -2,8 +2,8 @@
 import { read, write } from '../orm.js';
 import { promptedAmount, today } from './common.js';
 import { postEntry } from './ledger.js';
+import { cents } from '../money.js';
 
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 
 /** @throws a user-readable message when the loan cannot be scheduled. */

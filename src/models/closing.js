@@ -3,8 +3,8 @@ import { create, read, search, updateSettings, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
   && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;

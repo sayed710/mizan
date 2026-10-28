@@ -4,11 +4,11 @@ import { addDays, amounts, nextName, productLines, promptedAmount, today } from 
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
 import { paymentJournal, postEntry } from './ledger.js';
+import { round } from '../money.js';
 
 const order = ecommerceModels['sale.order'];
 const editable = (r) => ['draft', 'sent'].includes(r.state);
 const expired = (r, date) => editable(r) && !!r.validity_date && r.validity_date < date;
-const round = (n) => Math.round(n * 100) / 100;
 const present = (line, r) => (r.order_line ?? []).some((l) => l.product_id === line.product_id);
 const optionsFor = (r) => (r.option_ids ?? []).map((l) => ({ ...l, is_present: present(l, r) }));
 const percent = (r) => {

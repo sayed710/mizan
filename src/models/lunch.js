@@ -1,11 +1,11 @@
 // Lunch: vendors with opening days and an order deadline, employee wallets (cash moves), orders, alerts.
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
+import { round } from '../money.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 const dateOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const timeOf = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-const round = (n) => Math.round(n * 100) / 100;
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 
 export const WEEKDAYS = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];

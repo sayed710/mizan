@@ -7,6 +7,7 @@ import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty } from './picking.js';
+import { round as round2 } from '../money.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -136,7 +137,6 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
   return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
 }
 
-const round2 = (n) => Math.round(n * 100) / 100;
 const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
 
 /**

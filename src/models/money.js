@@ -2,8 +2,7 @@
 import { read } from '../orm.js';
 import { toCompany } from './currency.js';
 import { today } from './common.js';
-
-const round = (n) => Math.round(n * 100) / 100;
+import { round } from '../money.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 
 /** ISO code of the record's own currency, or null when it is in the company currency. */

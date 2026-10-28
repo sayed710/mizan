@@ -2,9 +2,8 @@
 import { read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { payMove } from './accounting.js';
+import { cents, round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
 

@@ -1,10 +1,10 @@
 // Attendances depth: kiosk scanning, overtime approval, automatic checkout and reporting.
 import { create, read, search, write } from '../orm.js';
 import { apps2Models, workedHours } from './apps2.js';
+import { round } from '../money.js';
 
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
-const round = (n) => Math.round(n * 100) / 100;
 const modes = [['kiosk', 'Kiosk'], ['manual', 'Manual'], ['systray', 'Systray']];
 const defaultRule = { daily_threshold_hours: 8, weekly_threshold_hours: 40, tolerance_minutes: 15, requires_approval: true, rate: 1.5 };
 const ruleFor = (db) => search(db, 'hr.attendance.overtime.rule')[0] ?? defaultRule;

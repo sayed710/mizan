@@ -2,8 +2,8 @@
 import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
+import { cents } from '../money.js';
 
-const cents = (n) => Math.round((Number(n) || 0) * 100);
 const DAY = 86400000;
 const pad2 = (n) => String(n).padStart(2, '0');
 const monthEnd = (y, m) => `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;

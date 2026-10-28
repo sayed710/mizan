@@ -4,8 +4,8 @@ import { nextName, promptedAmount, today } from './common.js';
 import { currentActor, employeeFor } from './authority.js';
 import { postEntry } from './ledger.js';
 import { moreModels } from './more.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const expense = moreModels['hr.expense'];
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 const sheetLines = (db, id) => search(db, 'hr.expense').filter((r) => r.sheet_id === id);

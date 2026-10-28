@@ -2,8 +2,8 @@
 import { read, search, write } from '../orm.js';
 import { accountId, postEntry } from './ledger.js';
 import { candidates, reconcileWith } from './bank.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
 function labelMatches(rule, label) {

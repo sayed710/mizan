@@ -2,8 +2,8 @@ import { read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { rateAt } from './currency.js';
 import { ACCOUNT_TYPES } from './ledger.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100 || 0;
 const pnl = (type) => type?.startsWith('income') || type?.startsWith('expense');
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
   && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;

@@ -3,9 +3,9 @@ import { create, messagesOf, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, today } from './common.js';
 import { moreModels } from './more.js';
 import { postMove } from './accounting.js';
+import { round } from '../money.js';
 
 const base = moreModels['sale.subscription'];
-const round = (n) => Math.round(n * 100) / 100;
 const days = (a, b) => (Date.parse(b) - Date.parse(a)) / 864e5;
 const fallback = (plan) => ({ interval: plan === 'quarterly' ? 3 : 1, unit: { weekly: 'week', yearly: 'year' }[plan] ?? 'month' });
 const planFor = (db, sub) => (sub.plan_id && read(db, 'sale.subscription.plan', sub.plan_id)) || fallback(sub.plan);

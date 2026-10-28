@@ -1,8 +1,8 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
 import { balances, balanceSheet, journalItems, profitAndLoss } from './ledger.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 const accountIds = (db, type) => new Set(search(db, 'account.account').filter((a) => a.account_type === type).map((a) => a.id));
 
