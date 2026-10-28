@@ -8,6 +8,7 @@ import { setCompanies } from './models/company.js';
 import { setActor } from './models/authority.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
+import { t } from './i18n.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v32';
@@ -120,8 +121,13 @@ export const isServer = () => mode === 'server';
 /** Id reassignments from the server, in arrival order. */
 const remaps = [];
 
-/** Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local). */
-export function commit(next) {
+/**
+ * Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local).
+ * Returns a promise of { ok, error } that settles once the server has accepted or refused the change, so callers
+ * can confirm success (or keep the user's input) only then. With `quiet`, a refusal is left to the caller to show;
+ * otherwise it is shown in a translated alert.
+ */
+export function commit(next, { quiet = false } = {}) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
@@ -130,7 +136,7 @@ export function commit(next) {
   notify();
   if (mode === 'local') {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
-    return;
+    return Promise.resolve({ ok: true });
   }
   dbTag = null;
   const gen = generation;
@@ -138,10 +144,13 @@ export function commit(next) {
     generation++;
     db = confirmed ?? db;
     notify();
-    alert(`${message} Showing the last saved data; please redo any edits made since.`);
+    const error = t(message);
+    if (!quiet) alert(`${error} ${t('Showing the last saved data; please redo any edits made since.')}`);
+    return { ok: false, error };
   };
-  enqueue(async () => {
-    if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
+  return enqueue(async () => {
+    if (isEmptyDiff(diff)) return { ok: true };
+    if (gen !== generation) return { ok: false, error: t('Could not save changes') }; // built on top of a failed save
     const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
     dbTag = null;
     if (r.ok) {
@@ -152,22 +161,21 @@ export function commit(next) {
         window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: remapped }));
       }
       notify();
-      return;
+      return { ok: true };
     }
     if (r.data?.db) confirmed = r.data.db;
-    failed(r.data?.error ?? 'Could not save changes.');
-  }, (e) => {
-    failed(`Could not save changes: ${e.message}.`);
-    return pull().catch(pollFailed);
+    return failed(r.data?.error ?? 'Could not save changes');
+  }, async (e) => {
+    const result = failed(`${t('Could not save changes')}: ${e.message}.`);
+    await pull().catch(pollFailed);
+    return result;
   });
 }
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
   // Queued behind pending saves, so the server sees the record as the user just saved it.
-  const request = inflight.then(() => api(path, body));
-  inflight = request.catch(() => {});
-  const r = await request;
+  const r = await enqueue(() => api(path, body), (e) => { throw e; });
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
   await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });

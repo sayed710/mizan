@@ -39,7 +39,7 @@ const ar = {
   Forecast: 'التوقعات', Orders: 'الطلبات', 'To Invoice': 'للفوترة', Products: 'المنتجات', Dashboard: 'لوحة التحكم', Invoices: 'الفواتير',
   Vendors: 'الموردون', Bills: 'فواتير الموردين', 'Invoice Analysis': 'تحليل الفواتير', 'Requests for Quotation': 'طلبات عروض الأسعار',
   'Purchase Orders': 'أوامر الشراء', Stock: 'المخزون', Meetings: 'الاجتماعات', Projects: 'المشاريع', 'All Tasks': 'كل المهام',
-  Tickets: 'التذاكر', Departments: 'الأقسام', 'General Settings': 'الإعدادات العامة', 'Open the company': 'فتح الشركة', 'The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.': 'عملة الشركة جزء من محاسبتها: المبالغ لا تُحوَّل، لذلك تُضبط في سجل الشركة قبل الترحيل.', Pipeline: 'الفرص', Tasks: 'المهام',
+  Tickets: 'التذاكر', Departments: 'الأقسام', 'General Settings': 'الإعدادات العامة', 'Open the company': 'فتح الشركة', 'The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.': 'عملة الشركة جزء من محاسبتها: المبالغ لا تُحوَّل، لذلك تُضبط في سجل الشركة قبل الترحيل.', 'Only administrators can change company settings.': 'إعدادات الشركة يغيرها المسؤولون فقط.', 'Could not save changes': 'تعذر حفظ التغييرات', 'Showing the last saved data; please redo any edits made since.': 'تم عرض آخر بيانات محفوظة؛ يرجى إعادة أي تعديلات أُجريت منذ ذلك الحين.', Pipeline: 'الفرص', Tasks: 'المهام',
   // control panel / search
   New: 'جديد', 'Search...': 'بحث...', Search: 'بحث', Filters: 'عوامل التصفية', 'Group By': 'تجميع حسب', Favorites: 'المفضلة',
   'Save current search': 'حفظ البحث الحالي', 'Saved search name': 'اسم البحث المحفوظ', 'Remove filter': 'إزالة الفلتر', or: 'أو',
