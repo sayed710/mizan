@@ -109,21 +109,56 @@ function trackingMessages(db, model, before, vals) {
     });
 }
 
-export function write(db, model, id, vals) {
-  const before = (db.records[model] ?? []).find((r) => r.id === id);
-  if (!before) throw new Error(`${model} #${id} not found`);
+/** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
+function prepareWrite(db, model, before, vals) {
   const base = stripComputed(model, vals);
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
   const after = { ...before, ...clean };
   const err = validate(model, after) ?? models[model].guard?.(db, before, after);
   if (err) throw new Error(err);
+  return { after, clean };
+}
+
+export function write(db, model, id, vals) {
+  const before = (db.records[model] ?? []).find((r) => r.id === id);
+  if (!before) throw new Error(`${model} #${id} not found`);
+  const { after, clean } = prepareWrite(db, model, before, vals);
   return {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
     messages: [...db.messages, ...trackingMessages(db, model, before, clean)],
   };
 }
+
+/**
+ * Write several records of one model in one pass: `updates` maps id -> vals. Each record gets the same onchange,
+ * validation, guard and tracking as write(), checked against `db`; the array and the chatter are copied once, so
+ * batch jobs stay linear instead of copying everything per record.
+ */
+export function writeMany(db, model, updates) {
+  if (!updates.size) return db;
+  const list = db.records[model] ?? [];
+  const byId = new Map(list.map((r) => [r.id, r]));
+  const written = new Map();
+  const tracked = [];
+  for (const [id, vals] of updates) {
+    const before = byId.get(id);
+    if (!before) throw new Error(`${model} #${id} not found`);
+    const { after, clean } = prepareWrite(db, model, before, vals);
+    written.set(id, after);
+    tracked.push(...trackingMessages(db, model, before, clean));
+  }
+  return {
+    ...db,
+    records: { ...db.records, [model]: list.map((r) => written.get(r.id) ?? r) },
+    messages: tracked.length ? [...db.messages, ...tracked] : db.messages,
+  };
+}
+
+/** Add several chatter notes at once: `notes` are [model, id, body]. */
+export const postNotes = (db, notes) => (notes.length
+  ? { ...db, messages: [...db.messages, ...notes.map(([model, id, body]) => message(model, id, body, 'note'))] } : db);
 
 export function unlink(db, model, ids) {
   const drop = new Set(ids);

@@ -570,7 +570,8 @@ const runJobs = () => {
     console.error('Scheduled job failed:', e);
   }
 };
-runJobs();
+// The first run waits until the server is listening, so a restart answers requests before the jobs finish.
+server.once('listening', () => setImmediate(runJobs));
 setInterval(runJobs, JOB_INTERVAL_MS).unref();
 
 // Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
