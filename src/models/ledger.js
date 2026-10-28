@@ -71,7 +71,8 @@ export function invoiceLines(db, move) {
   const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
   const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
   const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
-  const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
+  // A negative amount (a discount line on its own account) goes on the opposite side, so journal items stay positive.
+  const side = (amount, debit) => ((debit !== refund) !== (amount < 0) ? { debit: round(Math.abs(amount)), credit: 0 } : { debit: 0, credit: round(Math.abs(amount)) });
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
     ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),

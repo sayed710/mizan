@@ -53,3 +53,58 @@ test('the real workflow still posts, pays, resets and deletes drafts', () => {
   db = save(db, unlink(db, 'account.move', [other.id]));
   assert.equal(read(db, 'account.move', other.id) ?? null, null);
 });
+
+const postedPaid = () => {
+  let db = seed();
+  const draft = create(db, 'account.move', { partner_id: 1, move_type: 'out_invoice', state: 'draft', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }] });
+  db = save(db, postMove(save(db, draft.db), draft.id));
+  return { db, id: draft.id };
+};
+
+test('a posted entry cannot be archived, re-dated for follow-ups, or posted straight from cancelled', () => {
+  const db = seed();
+  const inv = postedInvoice(db);
+  assert.throws(() => save(db, write(db, 'account.move', inv.id, { active: false })), /reset them to draft/);
+  assert.throws(() => save(db, write(db, 'account.move', inv.id, { invoice_date_due: '2099-01-01' })), /reset them to draft/);
+  const cancelled = { id: 9100, name: 'INV/2026/91000', move_type: 'out_invoice', state: 'cancel', partner_id: 1, line_ids: [{ account_id: 1, debit: 5, credit: 0 }, { account_id: 2, debit: 0, credit: 5 }] };
+  const withCancelled = { ...db, records: { ...db.records, 'account.move': [...db.records['account.move'], cancelled] } };
+  assert.throws(() => forged(withCancelled, 'account.move', { ...cancelled, state: 'posted' }), /Only draft entries/);
+});
+
+test('a forged payment cannot point at an unrelated entry, an invoice, or more than its entry booked', () => {
+  const { db, id } = postedPaid();
+  const inv = read(db, 'account.move', id);
+  const other = postedInvoice(db);
+  const misc = db.records['account.move'].find((m) => m.state === 'posted' && m.move_type === 'entry' && !(m.line_ids ?? []).some((l) => l.partner_id === inv.partner_id));
+  for (const move_id of [other.id, misc?.id, id].filter(Boolean)) {
+    assert.throws(() => forged(db, 'account.move', { ...inv, payments: [{ date: '2026-10-26', amount: 50, move_id }], amount_paid: 50 }), /posted journal entry/, String(move_id));
+  }
+  const paid = save(db, payMove(db, id, 40));
+  const entry = read(paid, 'account.move', id).payments[0].move_id;
+  const again = read(paid, 'account.move', id);
+  assert.throws(() => forged(paid, 'account.move', { ...again, payments: [...again.payments, { date: '2026-10-26', amount: 40, move_id: entry }], amount_paid: 80 }), /more than its journal entry/);
+  assert.throws(() => forged(paid, 'account.payment', { id: 9200, name: 'PBNK1/2026/9200', state: 'posted', partner_id: 1, amount: 100, move_id: other.id, payment_type: 'inbound' }), /journal entry/);
+  assert.throws(() => forged(paid, 'account.payment', { id: 9201, name: 'PBNK1/2026/9201', state: 'posted', partner_id: 1, amount: 40, move_id: entry, payment_type: 'inbound' }), /another payment/);
+});
+
+test('the entry behind a posted payment cannot be reset or deleted', () => {
+  const { db, id } = postedPaid();
+  const paid = save(db, payMove(db, id, 40));
+  const entry = read(paid, 'account.move', read(paid, 'account.move', id).payments[0].move_id);
+  assert.throws(() => forged(paid, 'account.move', { ...entry, state: 'draft' }), /reverse the payment/);
+  const drafted = { ...paid, records: { ...paid.records, 'account.move': paid.records['account.move'].map((m) => (m.id === entry.id ? { ...m, state: 'draft' } : m)) } };
+  assert.throws(() => applyDiff(drafted, { upserts: {}, deletes: { 'account.move': [entry.id] } }, clerk), /reverse the payment/);
+});
+
+test('an invoice with a discount line on its own account still posts with positive journal items', async () => {
+  const { accountId } = await import('./models/ledger.js');
+  let db = seed();
+  const draft = create(db, 'account.move', { partner_id: 1, move_type: 'out_invoice', state: 'draft', invoice_line_ids: [
+    { name: 'Service', qty: 1, price_unit: 100, tax: 0 },
+    { name: 'Discount: Reward', qty: 1, price_unit: -10, tax: 0, account_id: accountId(db, '690200') },
+  ] });
+  db = save(db, postMove(save(db, draft.db), draft.id));
+  const lines = read(db, 'account.move', draft.id).line_ids;
+  assert.ok(lines.every((l) => l.debit >= 0 && l.credit >= 0));
+  assert.equal(lines.find((l) => l.account_id === accountId(db, '690200'))?.debit, 10);
+});

@@ -1,7 +1,8 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
-import { isBalanced, journalItems } from './ledger.js';
+import { accountId, isBalanced, journalItems } from './ledger.js';
+import { toCompany } from './currency.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -42,7 +43,7 @@ const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : 
 const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'date', 'company_id', 'fiscal_position_id'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'active'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(before, after) {
@@ -52,6 +53,7 @@ function postedMoveRule(before, after) {
     if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
+    if (before && before.state !== 'draft') return 'Only draft entries can be posted';
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
     if (!isBalanced(lines) || lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'A posted entry needs balanced journal items';
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
@@ -59,11 +61,33 @@ function postedMoveRule(before, after) {
   return null;
 }
 
+const settlementAccounts = (db) => [accountId(db, '121000'), accountId(db, '211000')];
+/** Whether invoice `inv` is settled by the credit (customer invoice, vendor refund) or the debit side of its partner's balance. */
+const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move_type);
+/** In company currency; the lower of face value and the invoice-date rate, as payments from the payment form apply at face value. */
+const appliedValue = (db, inv, p) => Math.min(Number(p.amount) || 0, toCompany(db, inv.currency_id, p.amount, inv.invoice_date ?? p.date));
+
+/** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
+function settlementCapacity(db, entry, inv) {
+  if (!entry || entry.state !== 'posted' || entry.move_type !== 'entry' || entry.id === inv.id) return 0;
+  const accounts = settlementAccounts(db);
+  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && accounts.includes(l.account_id))
+    .reduce((s, l) => s + (Number(settledByCredit(inv) ? l.credit : l.debit) || 0), 0));
+}
+
+/** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
+function backsSettlement(db, id) {
+  return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
+    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id));
+}
+
 /**
  * Checked once the whole change set is applied: the paid amount of an entry only moves by appending payments that point
- * at posted journal entries, by exactly their amount.
+ * at posted payment or discount entries for its partner, by exactly their amount and within what those entries settle;
+ * an entry that records a payment stays posted while the payment does.
  */
 export function moveInvariant(db, after, before) {
+  if (before?.state === 'posted' && after.state !== 'posted' && backsSettlement(db, after.id)) return 'This entry records a payment; reverse the payment instead';
   const was = Array.isArray(before?.payments) ? before.payments : [];
   const now = Array.isArray(after.payments) ? after.payments : [];
   const paidBefore = Number(before?.amount_paid) || 0;
@@ -72,16 +96,26 @@ export function moveInvariant(db, after, before) {
   if (now.length < was.length || JSON.stringify(now.slice(0, was.length)) !== JSON.stringify(was)) return 'Registered payments cannot be changed';
   const added = now.slice(was.length);
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  if (!added.every((p) => p && Number(p.amount) > 0 && entries.get(p.move_id)?.state === 'posted')) return 'Payments must point at a posted journal entry';
+  if (!added.every((p) => p && Number(p.amount) > 0 && settlementCapacity(db, entries.get(p.move_id), after) > 0)) return 'Payments must point at a posted journal entry';
   if (Math.abs(round(paidBefore + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
+  // One entry may settle several invoices (a payment applied oldest first), but never more than it booked.
+  for (const moveId of new Set(added.map((p) => p.move_id))) {
+    const used = [...entries.values()].reduce((sum, m) => sum + (m.payments ?? []).filter((p) => p?.move_id === moveId).reduce((s, p) => s + appliedValue(db, m, p), 0), 0);
+    // ponytail: a cent of slack for foreign-currency rounding on partial payments.
+    if (used > settlementCapacity(db, entries.get(moveId), after) + 0.01) return 'A payment cannot settle more than its journal entry booked';
+  }
   return null;
 }
 
-/** A posted payment must have its posted journal entry. */
+/** A posted payment must have its own posted journal entry, booked for its partner. */
 export function paymentInvariant(db, after) {
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
-  return entry?.state === 'posted' ? null : 'A posted payment needs its posted journal entry';
+  if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
+  const accounts = settlementAccounts(db);
+  if (after.partner_id && !(entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id && accounts.includes(l.account_id))) return 'The journal entry does not belong to this payment';
+  if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
+  return null;
 }
 
 export function moveGuard(db, before, after) {
@@ -105,6 +139,7 @@ export function moveDeleteGuard(db, move) {
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
+  if (backsSettlement(db, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }
 
