@@ -63,7 +63,7 @@ test('deleting the latest numbered record on the server never frees its number',
 test('custom expense report references are kept as typed', () => {
   const db = seed();
   const employee_id = db.records['hr.employee'][0].id;
-  const sheets = [{ id: 1, name: 'Travel 2026', employee_id }, { id: 2, name: 'Travel 2026', employee_id }];
+  const sheets = [{ id: 1, name: 'Travel 2026', employee_id, state: 'draft' }, { id: 2, name: 'Travel 2026', employee_id, state: 'draft' }];
   const out = applyDiff(db, { upserts: { 'hr.expense.sheet': sheets } }, {});
   assert.deepEqual(out.records['hr.expense.sheet'].map((s) => s.name), ['Travel 2026', 'Travel 2026']);
 });

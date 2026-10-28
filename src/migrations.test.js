@@ -18,7 +18,7 @@ test('the shipped seed is current and every seeded record can be saved again unc
   assert.equal(migrate(db), db);
   for (const [model, recs] of Object.entries(db.records)) {
     for (const r of recs) {
-      assert.doesNotThrow(() => applyDiff(db, { upserts: { [model]: [r] } }), `${model} ${r.id}`);
+      assert.doesNotThrow(() => applyDiff(db, { upserts: { [model]: [r] } }, { isAdmin: true }), `${model} ${r.id}`);
       assert.deepEqual(Object.keys(r).filter((k) => !(k in cleanRecord(model, r))), [], `${model} ${r.id} loses fields on save`);
     }
   }

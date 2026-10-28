@@ -292,7 +292,8 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
  */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null, companies = null, readOnly = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
+  isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
@@ -341,7 +342,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);
