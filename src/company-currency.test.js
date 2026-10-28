@@ -8,6 +8,7 @@ import { createCompany, ensureMainCompany } from './models/company.js';
 import { accountId } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
 import { rateAt } from './models/currency.js';
+import { revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 
 const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.move', id)).db;
 const currency = (db, name) => search(db, 'res.currency').find((c) => c.name === name)?.id;
@@ -52,4 +53,35 @@ test('the group conversion of the EUR books is applied once', () => {
   // Consolidation converts company → group currency with rate(group) / rate(company).
   const toGroup = rateAt(db, currency(db, 'USD'), date) / rateAt(db, currency(db, 'EUR'), date);
   assert.equal(Math.round(receivable(db, id).debit * toGroup * 100) / 100, 108.7);
+});
+
+test('the foreign amount of a journal item is the invoiced amount, not rebuilt from the rounded conversion', () => {
+  const base = seed();
+  const sar = currency(base, 'SAR');
+  const { db, id } = invoice(base, 1, sar, 1);
+  const line = receivable(db, id);
+  assert.equal(line.currency_id, sar);
+  assert.equal(line.amount_currency, 1);
+});
+
+test('a document in a foreign currency whose cross rate is 1 keeps its currency and amount', () => {
+  const { db: base, company } = setup();
+  const eur = currency(base, 'EUR');
+  const made = create(base, 'res.currency', { name: 'EQ', rate_ids: [{ date: addDays(today(), -60), rate: read(base, 'res.currency', eur).rate_ids[0].rate }] });
+  const { db, id } = invoice(made.db, company, made.id, 40);
+  const line = receivable(db, id);
+  assert.equal(line.debit, 40);
+  assert.equal(line.currency_id, made.id);
+  assert.equal(line.amount_currency, 40);
+});
+
+test('revaluation entries belong to the company of the invoice', () => {
+  const { db: base, company } = setup();
+  const { db, id } = invoice(base, company, currency(base, 'USD'), 100);
+  const rows = unrealizedExchange(db, today());
+  assert.ok(rows.length && rows.every((r) => r.company_id === company));
+  assert.ok(id);
+  const done = revalueForeignBalances(db, today());
+  const entries = search(done, 'account.move').filter((m) => m.revaluation_date === today());
+  assert.ok(entries.every((m) => m.company_id === company));
 });

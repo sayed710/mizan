@@ -9,6 +9,7 @@ import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
+import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
@@ -181,12 +182,14 @@ export const salesModels = {
             const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
               const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
               const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
+              // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
+              const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
               const purchase = (po?.order_line ?? []).map((l) => {
                 const product = read(d, 'product', l.product_id);
                 const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
                 const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
                 return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
-                  price_unit: l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : l.price_unit };
+                  price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
               });
               const lines = p.move_ids.map((m) => {
                 const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
