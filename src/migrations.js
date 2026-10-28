@@ -12,7 +12,7 @@ import { migrateTimeOff } from './models/timeoff.js';
 function documentTagLines(db) {
   let next = db;
   const tagId = (name) => {
-    const found = search(next, 'documents.tag').find((t) => t.name === name);
+    const found = search(next, 'documents.tag', { includeArchived: true }).find((t) => t.name === name);
     if (found) return found.id;
     const made = create(next, 'documents.tag', { name });
     next = made.db;
@@ -25,7 +25,7 @@ function documentTagLines(db) {
     if (!keys.length || !recs?.some((r) => keys.some((k) => r[k]?.some?.((x) => typeof x === 'string')))) continue;
     const records = recs.map((r) => {
       const fixed = Object.fromEntries(keys.filter((k) => Array.isArray(r[k]) && r[k].some((x) => typeof x === 'string'))
-        .map((k) => [k, r[k].map((x) => (typeof x === 'string' ? { tag_id: tagId(x) } : x))]));
+        .map((k) => [k, r[k].filter((x) => typeof x !== 'string' || x.trim()).map((x) => (typeof x === 'string' ? { tag_id: tagId(x) } : x))]));
       return Object.keys(fixed).length ? { ...r, ...fixed } : r;
     });
     next = { ...next, records: { ...next.records, [model]: records } };
@@ -39,6 +39,9 @@ export const MIGRATIONS = [
   { version: 3, name: 'Work orders: date-only times to datetimes', up: migrateWorkorderTimes },
   { version: 4, name: 'Stock: initialize located quants from done transfers and opening stock', up: ensureQuants },
   { version: 5, name: 'Time off: request units and leave types', up: migrateTimeOff },
+  { version: 6, name: 'Employees: random referral tokens invalidate forgeable legacy links', up: (db) => ({
+    ...db, records: { ...db.records, 'hr.employee': (db.records['hr.employee'] ?? []).map((e) => ({ ...e, referral_token: /^[0-9a-f]{32}$/.test(e.referral_token ?? '') ? e.referral_token : crypto.randomUUID().replaceAll('-', '') })) },
+  }) },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

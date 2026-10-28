@@ -7,7 +7,7 @@ import { moveQuantStock } from './quant.js';
 import { checkCreditLimit } from './finance.js';
 import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
-import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
+import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes, restoreOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
@@ -128,21 +128,28 @@ export function overDeliveryError(db, picking) {
  * cancelled with it. Delivered or received goods must be returned, and posted invoices or bills credited, first.
  */
 export function cancelOrder(db, model, order) {
+  if (order.state === 'cancel') return db;
   const field = model === 'sale.order' ? 'sale_id' : 'purchase_id';
-  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0)) {
+  // Service delivery is historical work, not physical stock to return; posted service invoices still need credits.
+  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0 && read(db, 'product', l.product_id)?.type !== 'service')) {
     throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
   }
-  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
-  // Credit notes point at their invoice by name (invoice_origin), not at the order.
-  const invoices = moves.filter((m) => m.state === 'posted');
-  const names = new Set(invoices.map((m) => m.name));
-  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_refund', 'in_refund'].includes(m.move_type) && (m[field] === order.id || names.has(m.invoice_origin)));
-  const totalOf = (list) => list.reduce((sum, m) => sum + amounts(m.invoice_line_ids ?? []).total, 0);
-  const posted = totalOf(invoices.filter((m) => !['out_refund', 'in_refund'].includes(m.move_type))) - totalOf(refunds);
-  if (Math.abs(posted) > 0.005) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
+  const type = model === 'sale.order' ? 'out_invoice' : 'in_invoice';
+  const moves = search(db, 'account.move').filter((m) => m.move_type === type && m.partner_id === order.partner_id
+    && (m.company_id ?? 1) === (order.company_id ?? 1) && m.state !== 'cancel'
+    && (m[field] === order.id || (!m[field] && (m.origin || m.invoice_origin) === order.name)));
+  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === (type === 'out_invoice' ? 'out_refund' : 'in_refund'));
+  const totalOf = (m) => amounts(m.invoice_line_ids ?? []).total;
+  const uncredited = moves.filter((m) => m.state === 'posted').some((m) => {
+    const credits = refunds.filter((n) => (n.reversed_entry_id ? n.reversed_entry_id === m.id : n.invoice_origin === m.name)
+      && n.partner_id === m.partner_id && (n.company_id ?? 1) === (m.company_id ?? 1) && (n.currency_id ?? null) === (m.currency_id ?? null));
+    return totalOf(m) - credits.reduce((sum, n) => sum + totalOf(n), 0) > 0.005;
+  });
+  if (uncredited) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
   const open = search(db, 'stock.picking').filter((p) => p[field] === order.id && ['draft', 'waiting', 'ready'].includes(p.state));
   let next = open.reduce((acc, p) => write(acc, 'stock.picking', p.id, { state: 'cancel' }), db);
   next = moves.filter((m) => m.state === 'draft').reduce((acc, m) => write(acc, 'account.move', m.id, { state: 'cancel' }), next);
+  if (model === 'sale.order' && ['sale', 'done'].includes(order.state)) next = restoreOrderCodes(next, order);
   return write(next, model, order.id, { state: 'cancel' });
 }
 

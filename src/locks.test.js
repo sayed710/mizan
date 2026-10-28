@@ -8,6 +8,7 @@ import { editableFields } from './models/locks.js';
 import { closeFiscalYear } from './models/closing.js';
 import { payMove, postMove } from './models/accounting.js';
 import { sendRequest, signFields } from './models/signplus.js';
+import { startSession, payOrder, priceLines } from './models/pos.js';
 
 const user = { author: 'Sam', isAdmin: false };
 
@@ -64,6 +65,21 @@ test('signing remains possible while sent and completed signatures cannot change
   }
   const reassigned = write(sent, 'sign.request', draft.id, { signer_ids: [{ ...read(sent, 'sign.request', draft.id).signer_ids[0], partner_id: 2 }] });
   assert.throws(() => applyDiff(sent, diffDb(sent, reassigned), user), /locked/);
+});
+
+test('locked POS orders and sent signature requests reject direct edits to user-entered exemption fields', () => {
+  const register = create(seed(), 'pos.config', { name: 'Other register' });
+  const opened = startSession(register.db, 0).db;
+  const order = payOrder(opened, { lines: priceLines(opened, [{ product_id: 1, qty: 1 }]), method: 'cash' });
+  const db = order.db;
+  const paid = read(db, 'pos.order', order.id);
+  assert.throws(() => applyDiff(db, { upserts: { 'pos.order': [{ ...paid, config_id: register.id }] } }, user), /locked/);
+  const draft = create(db, 'sign.request', { name: 'Sent contract', partner_id: 1, deadline: '2031-12-31', signer_ids: [{ partner_id: 1, role: 'company', signed: false }] });
+  const sent = sendRequest(draft.db, read(draft.db, 'sign.request', draft.id)).db;
+  const request = read(sent, 'sign.request', draft.id);
+  for (const vals of [{ deadline: '2032-12-31' }, { reminder_days: 90 }]) {
+    assert.throws(() => applyDiff(sent, { upserts: { 'sign.request': [{ ...request, ...vals }] } }, user), /locked/);
+  }
 });
 
 test('order lines on a locked document only lock their user-entered columns', () => {

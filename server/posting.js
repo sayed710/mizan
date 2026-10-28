@@ -25,7 +25,12 @@ export function runPosting(db, allowed, path, body = {}) {
   }
   if (path === '/api/pos/pay') {
     need(allowed, 'pos.order');
-    const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount ?? 0) })) : [];
+    if (!Array.isArray(body.lines) || !body.lines.length || body.lines.some((l) => !l || !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0 || !Number.isFinite(Number(l.discount ?? 0)) || Number(l.discount ?? 0) < 0 || Number(l.discount ?? 0) > 100)) throw new Error('Invalid cart quantities or discounts');
+    const cart = body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount ?? 0) }));
+    for (const line of cart) {
+      const product = read(db, 'product', line.product_id);
+      if (!product || product.active === false || product.available_in_pos === false || product.sale_ok === false) throw new Error('Product is not available in POS');
+    }
     if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || !['cash', 'card', 'bank'].includes(p.method) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
     if (!body.payments && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
     // Prices come from the products, not from the request.

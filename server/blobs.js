@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { models } from '../src/models/index.js';
 
-const DATA_URL = /^data:([^;,]*)(;base64)?,(.*)$/s;
+const DATA_URL = /^data:([^;,]*)(?:;[^;,=]+=[^;,]*)*(;base64)?,(.*)$/s;
 export const RASTER = /^image\/(png|jpeg|gif|webp)$/;
 
 const binaryFields = () => Object.entries(models)
@@ -24,7 +24,12 @@ export function openBlobs(sql, { beforeWrite = () => {} } = {}) {
     const m = DATA_URL.exec(value.data);
     if (!m) return value;
     const id = randomBytes(16).toString('hex');
-    const bytes = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
+    let bytes;
+    try { bytes = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3])); }
+    catch (e) {
+      if (!(e instanceof URIError)) throw e;
+      return value; // Preserve malformed legacy uploads rather than aborting startup.
+    }
     beforeWrite();
     insert.run(id, value.type || m[1] || 'application/octet-stream', bytes);
     const { data: _data, ...rest } = value;
@@ -45,5 +50,19 @@ export function openBlobs(sql, { beforeWrite = () => {} } = {}) {
     return records === db.records ? db : { ...db, records };
   };
 
-  return { externalize, get: (id) => (/^[0-9a-f]{32}$/.test(id) ? select.get(id) : undefined) };
+  /** Portable JSON exports carry bytes, not IDs that only this SQLite database can resolve. */
+  const inline = (db) => {
+    const records = { ...db.records };
+    for (const [model, keys] of binaryFields()) {
+      if (!records[model]) continue;
+      records[model] = records[model].map((r) => ({ ...r, ...Object.fromEntries(keys.filter((k) => r[k]?.blob).map((k) => {
+        const { blob, ...rest } = r[k];
+        const stored = select.get(blob);
+        if (!stored) throw new Error(`Missing attachment ${blob}`);
+        return [k, { ...rest, data: `data:${stored.type};base64,${Buffer.from(stored.data).toString('base64')}` }];
+      })) }));
+    }
+    return { ...db, records };
+  };
+  return { externalize, inline, get: (id) => (/^[0-9a-f]{32}$/.test(id) ? select.get(id) : undefined) };
 }

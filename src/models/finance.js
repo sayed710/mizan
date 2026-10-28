@@ -399,7 +399,8 @@ export function logManualFollowUp(db, partnerId, at = today()) {
   const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
   const level = search(db, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0)).find((l) => late >= (Number(l.delay) || 0));
   const noted = postNote(db, 'res.partner', partnerId, `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(db, f)}`);
-  return write(noted, 'res.partner', partnerId, { followup_date: at, ...(level ? { followup_level_delay: Number(level.delay) } : {}) });
+  const previous = read(db, 'res.partner', partnerId).followup_level_delay;
+  return write(noted, 'res.partner', partnerId, { followup_date: at, ...(level && (previous == null || Number(level.delay) > Number(previous)) ? { followup_level_delay: Number(level.delay) } : {}) });
 }
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */

@@ -122,3 +122,12 @@ test('a reminder opened in the mail app is logged on the customer with each amou
   assert.ok(messagesOf(next, 'res.partner', 5).some((m) => /Payment reminder sent by email/.test(m.body)));
   assert.throws(() => logManualFollowUp(seed(), 5), /no overdue/);
 });
+
+test('a manual reminder cannot regress the last recorded follow-up level', async () => {
+  const { logManualFollowUp } = await import('./models/finance.js');
+  const made = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -30), invoice_date_due: addDays(today(), -20) });
+  const db = write(made.db, 'res.partner', 5, { followup_level_delay: 45 });
+  const next = logManualFollowUp(db, 5);
+  assert.equal(read(next, 'res.partner', 5).followup_level_delay, 45);
+  assert.equal(read(next, 'res.partner', 5).followup_date, today());
+});

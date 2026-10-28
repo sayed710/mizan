@@ -34,6 +34,7 @@ export const workModels = {
       parent_id: employee('Manager'),
       work_email: { type: 'char', label: 'Work Email' },
       user_login: { type: 'char', label: 'Related User (login)' },
+      referral_token: { type: 'char', label: 'Source Token', readonly: true, hidden: true },
       work_phone: { type: 'char', label: 'Work Phone' },
       mobile_phone: { type: 'char', label: 'Work Mobile' },
       work_location: { type: 'selection', label: 'Work Location', options: [['office', 'Office'], ['home', 'Home'], ['other', 'Other']] },
@@ -78,7 +79,7 @@ export const workModels = {
       departure_date: { type: 'date', label: 'Departure Date' },
       departure_reason: { type: 'selection', label: 'Departure Reason', options: [['fired', 'Fired'], ['resigned', 'Resigned'], ['retired', 'Retired']] },
     },
-    defaults: () => ({ work_location: 'office', employee_type: 'employee', working_hours: '40', tag_ids: [], join_date: today(), resume_lines: [], certification_lines: [] }),
+    defaults: () => ({ work_location: 'office', employee_type: 'employee', working_hours: '40', tag_ids: [], join_date: today(), resume_lines: [], certification_lines: [], referral_token: crypto.randomUUID().replaceAll('-', '') }),
     filters: [
       [{ id: 'remote', label: 'Remote', fn: (r) => r.work_location === 'home' }],
       [{ id: 'visa', label: 'Visa Expiring Soon', fn: (r) => r.visa_expire && r.visa_expire <= addDays(today(), 60) }, { id: 'departed', label: 'Departed', fn: (r) => !!r.departure_date }],

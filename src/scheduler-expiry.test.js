@@ -15,3 +15,13 @@ test('the scheduler expires overdue signature requests and blanket orders', () =
   assert.equal(read(next, 'sign.request', open.id).state, 'sent');
   assert.equal(read(next, 'purchase.requisition', blanket.id).state, 'done');
 });
+
+test('expiry leaves tenders open and cancels unresolved quotations before closing blankets', () => {
+  const tender = create(seed(), 'purchase.requisition', { name: 'Tender', type: 'tender', partner_id: 2, date_end: '2026-01-31', state: 'ongoing' });
+  const blanket = create(tender.db, 'purchase.requisition', { name: 'Blanket', type: 'blanket', partner_id: 2, date_end: '2026-01-31', state: 'ongoing' });
+  const quote = create(blanket.db, 'purchase.order', { partner_id: 2, requisition_id: blanket.id });
+  const next = runScheduledJobs(quote.db, '2026-02-01');
+  assert.equal(read(next, 'purchase.requisition', tender.id).state, 'ongoing');
+  assert.equal(read(next, 'purchase.requisition', blanket.id).state, 'done');
+  assert.equal(read(next, 'purchase.order', quote.id).state, 'cancel');
+});

@@ -51,25 +51,46 @@ export function postPayment(db, p) {
 export function reversePayment(db, p, date = today()) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   const entry = read(db, 'account.move', p.move_id);
-  const fromBank = search(db, 'account.bank.statement.line')
-    .some((l) => l.state === 'reconciled' && (l.move_id === p.move_id || l.payment_move_id === p.move_id || (p.invoice_id && l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount))));
+  const fromBank = p.invoice_id && search(db, 'account.bank.statement.line')
+    .some((l) => l.state === 'reconciled' && (l.payment_move_id ? l.payment_move_id === p.move_id
+      // Legacy rows cannot disambiguate two identical payments: retain their conservative refusal until relinked.
+      : l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount)));
   if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
-  const code = read(db, 'account.journal', entry.journal_id)?.code ?? 'BNK1';
-  const { db: booked, id: reversalId } = create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: entry.journal_id, invoice_date: date, ref: `Reversal of ${entry.name}`, reversed_entry_id: entry.id, partner_id: entry.partner_id ?? null,
-    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
-    line_ids: (entry.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
-  });
-  const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => x.move_id === p.move_id));
+  const sources = new Set([entry.id]);
+  for (const m of search(db, 'account.move')) for (const x of m.payments ?? []) {
+    if (x.discount && !x.reversed && x.payment_move_id === p.move_id) sources.add(x.move_id);
+  }
+  let booked = db;
+  const reversals = new Map();
+  for (const id of sources) {
+    const source = read(booked, 'account.move', id);
+    const code = read(booked, 'account.journal', source.journal_id)?.code ?? 'BNK1';
+    const made = create(booked, 'account.move', {
+      move_type: 'entry', state: 'posted', journal_id: source.journal_id, invoice_date: date, ref: `Reversal of ${source.name}`, reversed_entry_id: source.id, partner_id: source.partner_id ?? null,
+      name: nextName(booked, 'account.move', `${code}/${date.slice(0, 4)}/`), company_id: source.company_id ?? 1,
+      line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
+    });
+    booked = made.db;
+    reversals.set(id, made.id);
+  }
+  const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => sources.has(x.move_id) && !x.reversed));
   const reopened = settled.reduce((acc, m) => {
-    const amount = round((m.payments ?? []).filter((x) => x.move_id === p.move_id).reduce((sum, x) => sum + Number(x.amount), 0));
-    const payments = m.payments.map((x) => x.move_id === p.move_id ? { ...x, reversed: true, reversal_move_id: reversalId } : x);
+    const amount = round((m.payments ?? []).filter((x) => sources.has(x.move_id) && !x.reversed).reduce((sum, x) => sum + Number(x.amount), 0));
+    const payments = m.payments.map((x) => sources.has(x.move_id) && !x.reversed ? { ...x, reversed: true, reversal_move_id: reversals.get(x.move_id) } : x);
     const released = releaseCashBasis(acc, m, -amount / m.amount_total, date);
     const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) - amount), payments, payment_date: payments.filter((x) => !x.reversed).at(-1)?.date ?? null });
     return postNote(next, 'account.move', m.id, `Payment ${p.name} reversed: ${amount}`);
   }, booked);
-  const reversal = read(reopened, 'account.move', reversalId);
-  return postNote(write(reopened, 'account.payment', p.id, { state: 'reversed', unapplied: 0 }), 'account.payment', p.id, `Reversed by ${reversal.name}`);
+  const reversal = read(reopened, 'account.move', reversals.get(entry.id));
+  let next = write(reopened, 'account.payment', p.id, { state: 'reversed', unapplied: 0 });
+  if (p.sale_id) {
+    const remaining = round(search(next, 'account.payment').filter((x) => x.sale_id === p.sale_id && x.state === 'posted').reduce((sum, x) => sum + Number(x.amount), 0));
+    next = write(next, 'sale.order', p.sale_id, { amount_paid: remaining, payment_state: remaining > 0 ? 'paid' : 'pending' });
+  }
+  for (const batch of search(next, 'account.batch.payment').filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
+    next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, cancelled: true } : l) });
+  }
+  return postNote(next, 'account.payment', p.id, `Reversed by ${reversal.name}`);
 }
 
 const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'], ['reversed', 'Reversed']];

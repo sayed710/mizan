@@ -27,13 +27,10 @@ const same = (field, a, b) => JSON.stringify(content(field, a)) === JSON.stringi
 // Fields that workflow buttons fill in on records the form already shows as locked.
 const MAINTAINED = {
   'hr.expense.sheet': ['accounting_date', 'manager_id'], // set when the report is approved and posted
-  'pos.order': ['config_id', 'payment_ids'], // settlement orders are written after payment
-  'sign.request': ['field_values', 'deadline', 'reminder_days'], // signing fills values; validity and reminders may be extended while sent
+  'sign.request': ['field_values'], // populated by the signer workflow; request configuration stays locked
   'documents.document': ['locked_by'], // Lock / Unlock
-  'mrp.workorder': ['qty_produced'], // production records progress
   'mailing.mailing': ['ab_testing_winner_selection'], // the A/B winner is chosen after sending
   'account.move': ['ref'], // the reference stays editable on posted entries
-  'account.analytic.line': ['unit_amount'], // timesheet validation adjusts hours
 };
 
 export function withLocks(models) {
@@ -48,7 +45,7 @@ export function withLocks(models) {
         if (own) return own;
         // Enforced for non-admin users on the server (applyDiff passes ctx); administrators may correct records.
         if (ctx?.isAdmin !== false || !before || !locked(before, db)) return null;
-        const maintained = name === 'sign.request' && before.state !== 'sent' ? [] : MAINTAINED[name] ?? [];
+        const maintained = (name === 'sign.request' && before.state !== 'sent') || (name === 'hr.expense.sheet' && before.state === r.state) ? [] : MAINTAINED[name] ?? [];
         const fields = editableFields(model, before, db).filter((f) => !maintained.includes(f));
         const changed = fields.filter((f) => !same(model.fields[f], before[f], r[f]));
         if (name === 'sign.request' && before.state !== 'sent') {

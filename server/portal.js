@@ -75,6 +75,11 @@ function documentPage(db, model, r, url, query, env) {
   const isOrder = model === ORDER;
   const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : 'Invoice';
   const partner = read(db, 'res.partner', r.partner_id);
+  const comp = read(db, 'res.company', r.company_id ?? 1);
+  const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
+  const docCurrency = (r.currency_id && read(db, 'res.currency', r.currency_id)?.name)
+    ?? (comp?.currency_id && read(db, 'res.currency', comp.currency_id)?.name)
+    ?? db.settings?.currency ?? 'USD';
   const token = new URL(url, 'http://x').searchParams.get('access_token');
   const lines = r[isOrder ? 'order_line' : 'invoice_line_ids'] ?? [];
   const printing = query.has('print') || query.has('download');
@@ -87,7 +92,7 @@ function documentPage(db, model, r, url, query, env) {
       controls += demoPaymentsAllowed(env) ? form(url, 'pay', token, '<p>Demo only: no real money is transferred.</p><button type="submit">Pay with demo provider</button>') : `<p>Pay by bank transfer. ${escape(search(db, 'payment.provider').find((p) => p.code === 'wire' && p.state === 'enabled')?.pending_msg || 'Contact us for bank details and use the document number as your payment reference.')}</p>`;
     }
   }
-  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(db.settings?.company?.name ?? db.settings?.company)} · ${escape(db.settings?.currency ?? 'USD')}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
+  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
     ${query.has('message') ? `<p role="status">${escape(query.get('message'))}</p>` : ''}
     <div class="scroll"><table><caption>Document lines</caption><thead><tr><th scope="col">Description</th><th scope="col">Quantity</th><th scope="col">Unit price</th><th scope="col">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr><td>${escape(l.name || read(db, 'product', l.product_id)?.name)}</td><td>${escape(l.qty)}</td><td>${money(l.price_unit)}</td><td>${money(subtotal(l))}</td></tr>`).join('')}</tbody></table></div>
     <dl><dt>Untaxed</dt><dd>${money(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${money(r.amount_tax)}</dd><dt>Total</dt><dd>${money(r.amount_total)}</dd>${!isOrder ? `<dt>Amount due</dt><dd>${money(r.amount_residual)}</dd>` : ''}</dl><p>${escape(r.note)}</p>

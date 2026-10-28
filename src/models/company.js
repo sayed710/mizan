@@ -146,7 +146,10 @@ export function ensureMainCompany(db) {
 
 /** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
 export function renameCompany(db, companyId, name) {
-  const next = write(db, 'res.company', companyId, { name });
+  const company = read(db, 'res.company', companyId);
+  const partner = read(db, 'res.partner', company?.partner_id);
+  let next = write(db, 'res.company', companyId, { name });
+  if (partner?.name === company.name) next = write(next, 'res.partner', partner.id, { name });
   return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
 }
 

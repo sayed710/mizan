@@ -150,6 +150,7 @@ export const rentalPlusModels = {
   },
   'rental.deposit': {
     label: 'Security Deposits',
+    duplicate: false,
     fields: {
       rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', required: true },
       amount: { type: 'monetary', label: 'Amount', required: true, readonly: true },

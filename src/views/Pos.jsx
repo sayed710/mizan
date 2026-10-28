@@ -72,7 +72,7 @@ export function Pos() {
       return;
     } finally { inFlight.current = false; setPending(false); }
     requestKey.current = null;
-    setReceipt({ ...receipt, method });
+    setReceipt({ ...receipt, total: receipt?.total ?? total.total, method });
     setCart([]);
     setPartner('');
   };
