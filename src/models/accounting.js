@@ -1,7 +1,7 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
-import { moveDeleteGuard, moveGuard } from './finance.js';
+import { accountDeleteGuard, moveDeleteGuard, moveGuard } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
@@ -183,6 +183,7 @@ export const accountingModels = {
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
     },
     defaults: () => ({ account_type: 'expense' }),
+    protectDelete: accountDeleteGuard,
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
     list: ['code', 'name', 'account_type'],

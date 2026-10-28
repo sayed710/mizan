@@ -37,7 +37,28 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/**
+ * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown
+ * ones, so a single bad line would stop the trial balance and balance sheet from closing.
+ */
+export function accountsError(db, before, after) {
+  if (after.state !== 'posted') return null;
+  if (before?.state === 'posted' && JSON.stringify(before.line_ids) === JSON.stringify(after.line_ids)) return null;
+  const known = new Set((db.records?.['account.account'] ?? []).map((a) => a.id));
+  const bad = (after.line_ids ?? []).findIndex((l) => ((Number(l.debit) || 0) || (Number(l.credit) || 0)) && !known.has(l.account_id));
+  return bad < 0 ? null : `Journal item ${bad + 1} needs an existing account`;
+}
+
+/** Accounts used by journal items cannot be deleted (archive them instead): their balances would vanish from reports. */
+export function accountDeleteGuard(db, account, pending = db) {
+  // `pending` is the database as the diff leaves it, so moves created in the same diff count too.
+  const used = [...(db.records['account.move'] ?? []), ...(pending.records['account.move'] ?? [])].some((m) => (m.line_ids ?? []).some((l) => l.account_id === account.id));
+  return used ? `${account.code} ${account.name} has journal items and cannot be deleted` : null;
+}
+
 export function moveGuard(db, before, after) {
+  const accounts = accountsError(db, before, after);
+  if (accounts) return accounts;
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   const lock = [before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)).sort().at(-1);
   if (!lock) return null;
