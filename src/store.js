@@ -18,6 +18,8 @@ let db = null;
 let confirmed = null; // last state the server acknowledged
 let generation = 0; // bumped when a save fails, so saves queued on top of it are dropped
 const enqueue = createQueue(); // saves and polls, in order
+// Which database generation this browser last synced with; the server refuses edits made before a restore.
+let epoch = null;
 
 const COMPANY_KEY = 'mizan-company';
 const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
@@ -62,7 +64,10 @@ function loadLocal() {
 async function api(path, body) {
   const res = await fetch(path, body === undefined
     ? { credentials: 'same-origin' }
-    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body) });
+    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', ...(path === '/api/diff' && epoch ? { 'X-Mizan-Epoch': epoch } : {}) }, body: JSON.stringify(body) });
+  const nextEpoch = res.headers.get('x-mizan-epoch') ?? epoch;
+  if (epoch && nextEpoch !== epoch) generation++; // drop edits queued against the replaced database
+  epoch = nextEpoch;
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const data = isJson ? await res.json() : null;
   return { ok: res.ok, status: res.status, isJson, data };
@@ -157,6 +162,18 @@ export async function serverAction(path, body) {
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
   await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
   return r.data;
+}
+
+/** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */
+export async function restoreBackup(backup, confirm) {
+  const restore = async () => {
+    const r = await api('/api/restore', { backup, confirm });
+    if (!r.ok) throw new Error(r.data?.error ?? 'Restore failed');
+    if (confirm) await pull();
+    return r.data;
+  };
+  // Serialize replacement and refresh with saves; the new epoch discards edits queued during the restore.
+  return confirm ? enqueue(restore, (e) => { throw e; }) : restore();
 }
 
 export async function resetDemo() {

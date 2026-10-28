@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff, assignIds, diffDb, repairSeq } from '../src/sync.js';
 import { runOperation } from '../src/operations.js';
+import { backupSummary, checkBackup } from '../src/backup.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -50,6 +51,7 @@ const DIST = join(ROOT, 'dist');
 const PORT = Number(process.env.PORT ?? 8069);
 const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
+const MAX_BACKUP = 200 * 1024 * 1024; // matches the whole-db size cap in src/sync.js
 const COOKIE = 'mizan_session';
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_KEY_MAX = 200;
@@ -80,15 +82,20 @@ const storage = openStorage(sql);
 let db = loadRepaired(storage, (loaded) => repairSeq(migrateAppointments(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+/** Changes whenever the whole database is replaced (restore, reset): work started before cannot be applied after. */
+let epoch = Date.now();
+const RESTORED = 'The data was restored while this was running; nothing was saved, reload and try again';
+const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
  */
 const storeFor = (opts) => {
   let base = db;
+  let at = epoch;
   return {
-    get: () => { base = db; return db; },
-    commit: (next) => { commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
+    get: () => { base = db; at = epoch; return db; },
+    commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
   };
 };
 if (!db) commitDb(seed(), { full: true });
@@ -189,13 +196,13 @@ const send = (res, status, body, headers = {}) => {
   res.end(JSON.stringify(body));
 };
 
-function readJson(req) {
+function readJson(req, limit = MAX_BODY) {
   return new Promise((ok, fail) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > MAX_BODY) { fail(new Error('Request too large')); req.destroy(); } else chunks.push(c);
+      if (size > limit) { fail(new Error('Request too large')); req.destroy(); } else chunks.push(c);
     });
     req.on('end', () => {
       try { ok(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { fail(new Error('Invalid JSON')); }
@@ -433,9 +440,11 @@ async function api(req, res, path) {
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
       const snapshot = db;
+      const at = epoch;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
       const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: storeAllowed }));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
+      sameEpoch(at);
       if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
@@ -452,9 +461,11 @@ async function api(req, res, path) {
       lastBaseUrl = baseUrlOf(req);
       mailBaseKnown = true;
       const snapshot = db;
+      const at = epoch;
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
+      if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
       const stored = recordSent(db, snapshot, out.db, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed });
       commitDb(stored.db);
@@ -468,18 +479,22 @@ async function api(req, res, path) {
     if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
-  if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
+  const stamp = () => ({ 'X-Mizan-Epoch': String(epoch) });
+  if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user), stamp());
   if (path === '/api/diff' && req.method === 'POST') {
     const body = await readJson(req);
     let remapped;
+    // A browser that last synced before a restore would otherwise replay its queued edits onto the restored data.
+    const seen = req.headers['x-mizan-epoch'];
+    if (seen !== undefined && seen !== String(epoch)) return send(res, 409, { error: 'The data was restored by an administrator; your unsaved edits were discarded', db: visibleDb(user) }, stamp());
     try {
       const assigned = assignIds(db, body);
       remapped = assigned.remapped;
       commitDb(applyDiff(db, assigned.diff, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: allowedFor(user) }));
     } catch (e) {
-      return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) });
+      return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) }, stamp());
     }
-    return send(res, 200, Object.keys(remapped).length ? { ...visibleDb(user), remapped } : visibleDb(user));
+    return send(res, 200, Object.keys(remapped).length ? { ...visibleDb(user), remapped } : visibleDb(user), stamp());
   }
   const op = /^\/api\/op\/([\w.]+)$/.exec(path);
   if (op && req.method === 'POST') {
@@ -493,6 +508,22 @@ async function api(req, res, path) {
       return send(res, e.status ?? 400, { error: e.message });
     }
   }
+  if (path === '/api/restore' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    try {
+      const body = await readJson(req, MAX_BACKUP);
+      const restored = checkBackup(body?.backup);
+      const summary = backupSummary(db, restored);
+      // A dry run only reports what would change; the real restore needs the typed confirmation.
+      if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
+      commitDb(restored, { full: true });
+      epoch = Math.max(epoch + 1, Date.now());
+      console.info(`Backup restored by ${user.login}: ${summary.restored} records (was ${summary.current})`);
+      return send(res, 200, { ok: true, ...summary });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     if (!RESET_ALLOWED) return send(res, 403, { error: 'Reset is disabled on this server (set MIZAN_ALLOW_RESET=1 to allow it)' });
@@ -503,7 +534,8 @@ async function api(req, res, path) {
     writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
     console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
     commitDb(seed(), { full: true });
-    return send(res, 200, db);
+    epoch = Math.max(epoch + 1, Date.now());
+    return send(res, 200, db, { 'X-Mizan-Epoch': String(epoch) });
   }
   if (path === '/api/keys') {
     if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT name, created FROM api_keys WHERE user_id = ? ORDER BY created').all(user.id));
