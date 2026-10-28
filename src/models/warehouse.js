@@ -1,7 +1,7 @@
 // Warehouse routes reuse transfer validation and boundary valuation.
 import { create, read, search, write } from '../orm.js';
 import { salesModels } from './sales.js';
-import { validatePicking } from './picking.js';
+import { reservePicking, validatePicking } from './picking.js';
 import { canValidatePicking } from './qualityplus.js';
 import { locationStock } from './routes.js';
 import { lineToStockQty } from './uom.js';
@@ -97,7 +97,8 @@ function createChain(db, specs, vals, predecessor = null) {
       name: `${warehouse(next, spec.warehouse_id).code}/${spec.picking_type === 'internal' ? 'INT' : spec.picking_type === 'incoming' ? 'IN' : 'OUT'}/${pad((next.seq['stock.picking'] ?? 0) + 1)}`,
       state: previous ? 'waiting' : 'ready', move_orig_picking_id: previous,
     });
-    next = res.db;
+    // A first-step delivery is ready only when its stock is free; otherwise it waits for availability.
+    next = !previous && spec.picking_type === 'outgoing' ? reservePicking(res.db, read(res.db, 'stock.picking', res.id)) : res.db;
     previous = res.id;
   }
   return next;
@@ -118,7 +119,10 @@ export function createOrderTransfers(db, { type, partner_id, origin, lines, link
   if (!moves.length) return db;
   const id = warehouse_id ?? order?.warehouse_id ?? (db.records['stock.warehouse'] ?? []).find((w) => w.code === 'WH' && w.active !== false)?.id;
   const vals = { partner_id, origin, carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link };
-  if (!id) return create(db, 'stock.picking', { ...vals, picking_type: type, move_ids: moves, state: 'ready' }).db;
+  if (!id) {
+    const res = create(db, 'stock.picking', { ...vals, picking_type: type, move_ids: moves, state: 'ready' });
+    return type === 'outgoing' ? reservePicking(res.db, read(res.db, 'stock.picking', res.id)) : res.db;
+  }
   const next = ensureWarehouseLocations(db, id);
   return createChain(next, planTransfers(next, id, type, moves), vals);
 }

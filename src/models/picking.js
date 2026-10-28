@@ -6,15 +6,19 @@ const doneQty = (l) => (l.quantity == null || l.quantity === '' ? Number(l.qty) 
 const isGoods = (db, l) => read(db, 'product', l.product_id)?.type === 'goods';
 
 /**
- * Stock still free for a product: on hand minus what other ready outgoing transfers already reserved.
+ * Stock still free for a product: on hand minus what ready outgoing transfers and manufacturing orders
+ * with available components already reserved (the picking or MO being checked excluded).
  * ponytail: one warehouse-wide figure; per-location reservation would need quants per location.
  */
-export function freeQty(db, productId, exceptPickingId = null) {
+export function freeQty(db, productId, exceptPickingId = null, exceptMoId = null) {
   const onHand = Number(read(db, 'product', productId)?.qty_available) || 0;
   const reserved = search(db, 'stock.picking')
     .filter((p) => p.id !== exceptPickingId && p.picking_type === 'outgoing' && p.state === 'ready')
     .flatMap((p) => p.move_ids ?? []).filter((m) => m.product_id === productId).reduce((s, m) => s + (Number(m.qty) || 0), 0);
-  return onHand - reserved;
+  const components = search(db, 'mrp.production')
+    .filter((mo) => mo.id !== exceptMoId && mo.state === 'confirmed' && mo.components_availability === 'available')
+    .flatMap((mo) => mo.move_raw ?? []).filter((m) => m.product_id === productId).reduce((s, m) => s + (Number(m.to_consume) || 0), 0);
+  return onHand - reserved - components;
 }
 
 /** 'available' when every goods line of an outgoing transfer is covered by free stock, else 'partial' or 'none'. */
@@ -46,6 +50,11 @@ export function validatePicking(db, picking, { backorder = true, apply, date = t
   if (lines.some((l) => doneQty(l) < 0)) throw new Error('Quantities cannot be negative');
   const rest = lines.map((l) => ({ ...l, qty: (Number(l.qty) || 0) - doneQty(l), quantity: null })).filter((l) => l.qty > 0);
   const sign = picking.picking_type === 'incoming' ? 1 : picking.picking_type === 'outgoing' ? -1 : 0;
+  // Stock reserved for other transfers or manufacturing orders cannot be shipped by this one.
+  if (sign < 0) {
+    const short = done.find((l) => isGoods(db, l) && l.qty > freeQty(db, l.product_id, picking.id) + 1e-8);
+    if (short) throw new Error(`Not enough free stock for ${read(db, 'product', short.product_id)?.name ?? 'a product'}: the rest is reserved for other operations`);
+  }
   let next = write(apply(db, { ...picking, move_ids: done }, sign), 'stock.picking', picking.id, {
     state: 'done', date_done: date, move_ids: done.map(({ quantity, ...l }) => l),
   });

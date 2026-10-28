@@ -6,6 +6,7 @@ import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
+import { freeQty } from './picking.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -48,16 +49,17 @@ export function explode(db, mo) {
   };
 }
 
-const availability = (db, moves) => (moves.every((m) => {
+// Components count as available only when free: stock reserved by deliveries or other MOs is left alone.
+const availability = (db, moves, moId) => (moves.every((m) => {
   const p = read(db, 'product', m.product_id);
-  return p?.type !== 'goods' || (Number(p.qty_available) || 0) >= m.to_consume;
+  return p?.type !== 'goods' || freeQty(db, p.id, null, moId) >= m.to_consume;
 }) ? 'available' : 'waiting');
 
 /** Confirm: lay out components and work orders and report whether components are in stock. */
 export function confirmMo(db, mo) {
   if (read(db, 'mrp.production', mo.id)?.state !== 'draft') throw new Error('Only draft manufacturing orders can be confirmed');
   const { move_raw, workorders } = explode(db, mo);
-  return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw) });
+  return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw, mo.id) });
 }
 
 /**
@@ -280,7 +282,7 @@ export const moreModels = {
       lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmMo(db, r) }) },
-        { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? []) }) }) },
+        { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? [], r.id) }) }) },
         { label: 'Start', when: (r) => r.state === 'confirmed', vals: { state: 'progress' } },
         { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produce },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) },
