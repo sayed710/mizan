@@ -533,7 +533,7 @@ const ar = {
   'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   'Depreciation Schedule': 'جدول الإهلاك الدوري',
   Base: 'الأساس',
-  'Payment QR Codes': 'رموز QR للدفع', 'ZATCA (Saudi e-invoicing)': 'زاتكا (الفوترة الإلكترونية السعودية)', 'SEPA Credit Transfer (EPC)': 'تحويل SEPA (EPC)',
+  'Payment QR Codes': 'رموز QR للدفع', 'ZATCA phase 1 QR (Saudi)': 'رمز QR للمرحلة الأولى من زاتكا (السعودية)', 'Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.': 'يطبع رمز QR للمرحلة الأولى فقط. المرحلة الثانية من زاتكا (XML، الختم التشفيري، الاعتماد) والفوترة الإلكترونية في مصر والإمارات غير مدعومة بعد.', 'SEPA Credit Transfer (EPC)': 'تحويل SEPA (EPC)',
   'Company Tax ID': 'الرقم الضريبي للشركة', 'Bank Account (IBAN)': 'الحساب البنكي (IBAN)', 'Payment QR code': 'رمز QR للدفع', 'Scan to verify this invoice': 'امسح للتحقق من الفاتورة',
   'Scan to pay': 'امسح للدفع', 'Set a valid IBAN for payment QR codes': 'أدخل رقم IBAN صحيحًا لرموز QR للدفع',
   'Import ID': 'معرّف الاستيراد', 'No transactions found in this file': 'لا توجد معاملات في هذا الملف',
