@@ -60,3 +60,35 @@ test('a refund reverses the same accounts', () => {
   assert.equal(sum(entry, refund.db, '251000', 'debit'), 14);
   assert.equal(sum(entry, refund.db, '101501', 'credit'), 114);
 });
+
+test('a settlement books exactly the tender collected; the rounding cent goes to a visible line', () => {
+  const { db: db0 } = withIncludedTax();
+  const other = search(db0, 'account.account').find((a) => a.code === '450000');
+  const db = write(db0, 'product', 1, { property_account_income_id: other.id });
+  const half = (id) => ({ product_id: id, qty: 0.5, price_unit: 1.01, discount: 0, tax: 0, tax_type: 'percent', tax_include: false });
+  const lines = [half(1), half(2)];
+  assert.equal(amounts(lines).total, 1.01);
+  const cash = payOrder(db, { lines, method: 'cash' });
+  const entry = entryOf(cash.db, cash.id);
+  assert.ok(isBalanced(entry.line_ids));
+  assert.equal(sum(entry, cash.db, '101501', 'debit'), 1.01);
+  assert.equal(sum(entry, cash.db, '690000', 'debit'), 0.01); // revenue booked 1.02, 1.01 collected
+  const card = payOrder(cash.db, { lines, method: 'card' });
+  assert.equal(sum(entryOf(card.db, card.id), card.db, '101401', 'debit'), 1.01);
+  const refund = refundOrder(card.db, read(card.db, 'pos.order', card.id));
+  const back = entryOf(refund.db, refund.id);
+  assert.ok(isBalanced(back.line_ids));
+  assert.equal(sum(back, refund.db, '101401', 'credit'), 1.01);
+});
+
+test('a refund reverses the accounts the sale used even if the product account changed since', () => {
+  const { db: db0 } = withIncludedTax();
+  const other = search(db0, 'account.account').find((a) => a.code === '450000');
+  const sale = payOrder(db0, { lines: priceLines(db0, [{ product_id: 1, qty: 1 }]), method: 'cash' });
+  assert.equal(sum(entryOf(sale.db, sale.id), sale.db, '400000', 'credit'), 100);
+  const changed = write(sale.db, 'product', 1, { property_account_income_id: other.id });
+  const refund = refundOrder(changed, read(changed, 'pos.order', sale.id));
+  const back = entryOf(refund.db, refund.id);
+  assert.equal(sum(back, refund.db, '400000', 'debit'), 100);
+  assert.equal(sum(back, refund.db, '450000', 'debit'), 0);
+});

@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
-import { invoiceLines, postEntry } from './ledger.js';
+import { invoiceLines, journalId, postEntry } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 
@@ -43,9 +43,31 @@ function saleEntry(db, lines, { method, partner_id, refund }) {
   };
   const receivable = (db.records['account.account'] ?? []).find((a) => a.code === '121000')?.id;
   const code = (id) => read(db, 'account.account', id)?.code;
-  return invoiceLines(db, move).map((l) => ({
-    account: l.account_id === receivable ? (method === 'cash' ? CASH : BANK) : code(l.account_id), debit: l.debit, credit: l.credit, partner_id, name: l.name,
+  const pay = method === 'cash' ? CASH : BANK;
+  const entries = invoiceLines(db, move).map((l) => ({
+    account: l.account_id === receivable ? pay : code(l.account_id), debit: l.debit, credit: l.credit, partner_id, name: l.name,
   }));
+  // Income and tax groups are rounded one by one, so their sum can differ by a cent from the tender actually
+  // collected (receipt and session totals). The payment account takes the tender; the cent goes to a visible line.
+  const tender = round(amounts(lines).total);
+  const paid = entries.find((e) => e.account === pay);
+  const booked = paid ? paid.debit || paid.credit : 0;
+  const diff = round(tender - booked);
+  if (!paid || !diff) return entries;
+  const collectedMore = refund ? diff < 0 : diff > 0; // more cash in (or less out) than revenue: other income
+  const gap = collectedMore ? { account: '450000', credit: Math.abs(diff), name: 'Rounding' } : { account: '690000', debit: Math.abs(diff), name: 'Rounding' };
+  return [...entries.map((e) => (e === paid ? { ...e, debit: paid.debit ? tender : 0, credit: paid.credit ? tender : 0 } : e)), { ...gap, partner_id }];
+}
+
+/** The posted POS entry of an order, when it exists. */
+const entryOfOrder = (db, order) => search(db, 'account.move').find((m) => m.state === 'posted' && m.ref === order.name && m.journal_id === journalId(db, 'POSS'));
+
+/** A refund undoes what the sale booked: the same accounts the other way round, whatever the products and fiscal position say today. */
+function reversalEntry(db, original, { partner_id }) {
+  const entry = entryOfOrder(db, original);
+  if (!entry) return null;
+  const code = (id) => read(db, 'account.account', id)?.code;
+  return entry.line_ids.map((l) => ({ account: code(l.account_id), debit: l.credit, credit: l.debit, partner_id: l.partner_id ?? partner_id, name: l.name }));
 }
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
@@ -73,7 +95,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
-  const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: saleEntry(stocked, lines, { method, partner_id, refund: !!refund_of }) });
+  const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: (original && reversalEntry(db, original, { partner_id })) ?? saleEntry(stocked, lines, { method, partner_id, refund: !!refund_of }) });
   return { db: booked, id };
 }
 
