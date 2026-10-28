@@ -205,7 +205,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && lockDateFor(db.settings, before);
+  const lock = before && [lockDateFor(db.settings, before), closedYearLock(db)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
