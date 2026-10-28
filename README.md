@@ -40,7 +40,8 @@ On first start the server creates user `admin` and prints a random password
 (or set `MIZAN_ADMIN_PASSWORD`). Admins add users in **Settings**.
 
 Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
-`MIZAN_SECURE_COOKIE=1` when served over HTTPS.
+`MIZAN_SECURE_COOKIE=1` when served over HTTPS. Every variable, and the JSON log format, is listed in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md); the server refuses to start on a malformed value.
 
 Development: `npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).
@@ -98,6 +99,7 @@ Writes go through the same validation as the web client.
 - `src/orm.js` — pure, immutable ORM (create/write/unlink/search, computed fields, tracking messages, grouping).
 - `src/sync.js` — record-level diff/apply, so concurrent edits to different records merge on the server;
   the server validates and strips every incoming record.
-- `server/index.js` — Node 24 built-ins only (`node:http`, `node:sqlite`, `node:crypto`): scrypt passwords,
+- `server/index.js` — Node built-ins (`node:http`, `node:sqlite`, `node:crypto`) plus two runtime packages,
+  `@anthropic-ai/sdk` (AI features, server/integrations.js) and `qrcode-generator` (src/models/qr.js): scrypt passwords,
   HttpOnly session cookies, CSRF header check, login rate limiting, static hosting.
 - `src/views/` — generic Kanban, List, Graph, Pivot, Calendar, Form, plus Dashboard and Settings pages.

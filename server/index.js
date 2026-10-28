@@ -1,9 +1,9 @@
-// Mizan server: auth + shared database + static frontend. Node 24 built-ins only.
+// Mizan server: auth + shared database + static frontend.
 //   npm run build && npm start        → http://localhost:8069
-// Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS.
+// Environment variables: server/config.js and docs/CONFIGURATION.md.
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,14 @@ const ACTIONS = {
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
+import { checkConfig } from './config.js';
+import { log, redactPath } from './log.js';
+
+const configProblems = checkConfig();
+if (configProblems.length) {
+  for (const problem of configProblems) log('error', 'Invalid configuration', { problem });
+  process.exit(1);
+}
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -527,15 +535,25 @@ async function website(req, res, path) {
 
 const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
+const LOG_REQUESTS = process.env.MIZAN_LOG_REQUESTS !== '0';
+
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
+  const requestId = randomUUID();
+  const started = process.hrtime.bigint();
+  res.setHeader('X-Request-Id', requestId);
+  if (LOG_REQUESTS) {
+    res.on('finish', () => log('info', 'request', {
+      requestId, method: req.method, path: redactPath(path), status: res.statusCode, ms: Number((process.hrtime.bigint() - started) / 1000000n),
+    }));
+  }
   try {
     if (await portal.handle(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {
-    console.error(`${req.method} ${path} failed:`, e);
-    if (!res.headersSent) send(res, 500, { error: 'Server error' });
+    log('error', 'request failed', { requestId, method: req.method, path: redactPath(path), error: e });
+    if (!res.headersSent) send(res, 500, { error: 'Server error', requestId });
   }
 }).listen(PORT, () => console.info(`Mizan listening on http://localhost:${server.address().port}`));
 
@@ -546,7 +564,7 @@ const runJobs = () => {
     const next = runScheduledJobs(db);
     if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }));
   } catch (e) {
-    console.error('Scheduled job failed:', e.message);
+    log('error', 'scheduled job failed', { error: e });
   }
 };
 runJobs();
@@ -569,7 +587,7 @@ const runMailJobs = async () => {
     try {
       await job(storeFor({ author: 'Scheduler' }));
     } catch (e) {
-      console.error('Scheduled mailing failed:', e.message);
+      log('error', 'scheduled mailing failed', { error: e });
     }
   }
 };

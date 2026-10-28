@@ -1,4 +1,4 @@
-# Production image: build the frontend, then run the Node server (no runtime dependencies).
+# Production image: build the frontend, then run the Node server with the production dependencies only.
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
