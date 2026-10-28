@@ -1,10 +1,12 @@
 // Mizan server: auth + shared database + static frontend. Node 24 built-ins only.
 //   npm run build && npm start        → http://localhost:8069
-// Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS.
+// Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS,
+// MIZAN_ALLOW_RESET=1 to allow resetting to demo data when NODE_ENV=production.
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
@@ -49,7 +51,10 @@ const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
 const COOKIE = 'mizan_session';
 
-const sql = new DatabaseSync(process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite'));
+const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
+const sql = new DatabaseSync(DB_PATH);
+// Wiping everything back to demo data is off unless MIZAN_ALLOW_RESET=1, or NODE_ENV=development (and not MIZAN_ALLOW_RESET=0).
+const RESET_ALLOWED = process.env.MIZAN_ALLOW_RESET === '1' || (process.env.NODE_ENV === 'development' && process.env.MIZAN_ALLOW_RESET !== '0');
 sql.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -393,7 +398,7 @@ async function api(req, res, path) {
   const user = sessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
 
-  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
+  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, canReset: user.isAdmin && RESET_ALLOWED, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
   const action = ACTIONS[path];
   if (action && req.method === 'POST') {
     if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
@@ -449,6 +454,13 @@ async function api(req, res, path) {
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    if (!RESET_ALLOWED) return send(res, 403, { error: 'Reset is disabled on this server (set MIZAN_ALLOW_RESET=1 to allow it)' });
+    if ((await readJson(req)).confirm !== 'RESET') return send(res, 400, { error: 'Type RESET to confirm' });
+    // Keep what is about to be wiped, next to the database file: owner-only, never over an existing file. The copy and
+    // the reset happen in one synchronous step, so no other request can commit in between and be lost.
+    const saved = `${DB_PATH}.before-reset-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
+    console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
     commitDb(seed(), { full: true });
     return send(res, 200, db);
   }
