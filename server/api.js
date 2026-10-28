@@ -1,7 +1,7 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { models } from '../src/models/index.js';
-import { create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
+import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
 import { payQuote } from '../src/models/quoteplus.js';
@@ -9,6 +9,7 @@ import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/m
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
+import { restrictRecords, visibleTo } from '../src/models/company.js';
 
 const MAX_LIMIT = 500;
 
@@ -283,7 +284,7 @@ const describe = (name) => ({
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req
  * @returns {{ status: number, body: unknown, db?: object }} db is set when the request changed data.
  */
-export function handleApi({ method, path, query, body, db, user, allowed = null }) {
+export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
   if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
@@ -292,7 +293,10 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, login: user.login }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, login: user.login, companies }) });
+  const visible = (r) => r && visibleTo(companies, model, r, db);
+  // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
+  const seen = companies ? { ...db, records: restrictRecords(db, companies).records } : db;
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {
@@ -300,17 +304,18 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
-      const all = search(db, model).filter((r) => matches(db, model, r, terms));
+      const all = search(db, model).filter((r) => visible(r) && matches(seen, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }
     if (id === null && method === 'POST') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
-      const res = create(db, model, vals);
+      // A limited user's new record belongs to the company they are working in, not to company 1.
+      const res = create(db, model, !SHARED_MODELS.has(model) && companies && company && vals.company_id == null ? { ...vals, company_id: company } : vals);
       const { db: saved } = commit(res.db);
       return { status: 201, body: read(saved, model, res.id), db: saved };
     }
     const rec = read(db, model, id);
-    if (!rec) return { status: 404, body: { error: `${model} #${id} not found` } };
+    if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
     if (method === 'GET') return { status: 200, body: rec };
     if (method === 'PATCH') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };

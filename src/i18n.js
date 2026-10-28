@@ -151,6 +151,7 @@ const ar = {
   'Check the label, type and options': 'راجع الاسم والنوع والخيارات', 'A field with this name already exists': 'يوجد حقل بهذا الاسم بالفعل',
   Text: 'نص', 'Multiline Text': 'نص متعدد الأسطر', Decimal: 'رقم عشري', Monetary: 'مبلغ', Checkbox: 'مربع اختيار', Selection: 'قائمة اختيار',
   Customizations: 'التخصيصات', 'All apps': 'كل التطبيقات', 'Related User (login)': 'المستخدم المرتبط (اسم الدخول)', 'Allowed apps': 'التطبيقات المسموحة', 'Allowed apps (e.g. crm,sales) — empty = all': 'التطبيقات المسموحة (مثل crm,sales) — فارغ = الكل',
+  'All companies': 'كل الشركات', 'Allowed companies': 'الشركات المسموحة', 'Allowed company ids (e.g. 1,2) — empty = all': 'أرقام الشركات المسموحة (مثل 1,2) — فارغ = الكل',
   'Live Chat': 'الدردشة المباشرة', 'SMS Marketing': 'التسويق بالرسائل', 'Social Marketing': 'التسويق الاجتماعي', 'Marketing Automation': 'أتمتة التسويق',
   PLM: 'إدارة دورة المنتج', 'Meeting Rooms': 'قاعات الاجتماعات', Referrals: 'الترشيحات', Skills: 'المهارات', ESG: 'الاستدامة',
   'Kitchen Display': 'شاشة المطبخ', 'To Cook': 'للطهي', Cooking: 'قيد الطهي', Ready: 'جاهز', 'Tap to advance': 'اضغط للتقدم', 'Tap when served': 'اضغط عند التقديم',

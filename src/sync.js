@@ -4,7 +4,7 @@ import { models } from './models/index.js';
 import { postTracking, validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
-import { setCompanies } from './models/company.js';
+import { setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
@@ -245,8 +245,10 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
  */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null, companies = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
+  const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
@@ -262,6 +264,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
       if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
+      const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
+      if (denied) throw new Error(denied);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const before = current.get(rec.id) ?? null;
       // Authority rules judge the stored record, not one an earlier step of this same change set already rewrote.
@@ -279,7 +283,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r, { ...db, records })).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => companyError(model, r) ?? models[model].protectDelete?.(db, r, { ...db, records })).find(Boolean);
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
@@ -301,12 +305,19 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
+  // A limited user may only comment on a record that exists in the result and that they can see.
+  const onVisibleRecord = (m) => {
+    if (!companies) return true;
+    const now = (records[m.model] ?? []).find((r) => r.id === m.res_id);
+    return !!now && !companyError(m.model, storedRecord(m.model, m.res_id), now);
+  };
+  const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m)).map((m) => m.id));
   const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));
   const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : [])
-    .filter((id) => !kept.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
+    .filter((id) => !kept.has(id) && !hiddenMessages.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
-    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
+    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)) && onVisibleRecord(m))
     // Who and when come from the server: a client cannot backdate a chatter entry or sign it as someone else.
     .map((m) => ({ ...m, author: author ?? m.author, date: author ? new Date().toISOString() : m.date }));
   // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.

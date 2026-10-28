@@ -33,19 +33,20 @@ import { createPortal } from './portal.js';
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
-  '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
-  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b) => digitizeBill(db, b) },
+  '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
+  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, _store, view) => digitizeBill(view, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
-  '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
-  '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
-  '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
+  '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b, _u, _store, view) => quoteShipping(ENV, view, b) },
+  '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
+  '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
 };
 
 const SMTP = smtpConfig();
 import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
+import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -76,9 +77,24 @@ sql.exec(`
 `);
 
 try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
+// companies: the company ids a user may work in (null = all); selection: their own company switcher state (JSON).
+try { sql.exec('ALTER TABLE users ADD COLUMN companies TEXT'); } catch { /* column already exists */ }
+try { sql.exec('ALTER TABLE users ADD COLUMN selection TEXT'); } catch { /* column already exists */ }
 
 /** Comma-separated app ids a user may open; null/empty = all apps. */
 const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x)) : null);
+/** Comma-separated company ids a user may work in; null/empty = all companies. */
+const parseCompanies = (v) => {
+  const parts = String(v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const ids = [...new Set(parts.map(Number))];
+  // A stored grant that cannot be read must not turn into "every company": it grants none.
+  return ids.every((n) => Number.isInteger(n) && n > 0) ? ids : [];
+};
+const userOf = (row) => ({
+  id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps),
+  companies: row.is_admin ? null : parseCompanies(row.companies), selection: row.selection ?? null,
+});
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
@@ -117,12 +133,12 @@ const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
  */
-const storeFor = (opts, actor = opts.author) => {
-  let base = db;
+const storeFor = (opts, actor = opts.author, view = (d) => d) => {
+  let base = view(db);
   let at = epoch;
   return {
-    get: () => { base = db; at = epoch; return db; },
-    commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = db; },
+    get: () => { base = view(db); at = epoch; return base; },
+    commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = view(db); },
   };
 };
 if (!db) commitDb(seed(), { full: true, action: 'seed' });
@@ -132,15 +148,17 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-function createUser({ login, name, password, isAdmin = false, apps = '' }, actor = 'system') {
+function createUser({ login, name, password, isAdmin = false, apps = '', companies = '' }, actor = 'system') {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
+  const granted = parseCompanies(companies);
+  if (granted && (!granted.length || granted.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id)))) throw new Error('Allowed companies: select existing companies');
   const apps_ = allowed?.length ? allowed.join(',') : null;
-  const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_ };
+  const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_, companies: granted?.join(',') ?? null };
   const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
-    () => sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)').run(login, row.name, salt, hash, row.is_admin, apps_));
+    () => sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)').run(login, row.name, salt, hash, row.is_admin, apps_, row.companies));
   return made;
 }
 
@@ -160,17 +178,17 @@ function checkPassword(login, password) {
 function sessionUser(req) {
   const token = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
   if (!token) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
+  const row = sql.prepare('SELECT u.*, s.expires FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(sha256(token));
   if (!row || row.expires < Date.now()) return null;
-  return { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) };
+  return userOf(row);
 }
 
 /** User owning a "Bearer mzn_…" API key, or null. Keys are stored only as SHA-256 hashes. */
 function apiKeyUser(req) {
   const key = /^Bearer (mzn_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
   if (!key) return null;
-  const row = sql.prepare('SELECT u.id, u.login, u.name, u.is_admin, u.apps FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
-  return row ? { id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps) } : null;
+  const row = sql.prepare('SELECT u.* FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ?').get(sha256(key));
+  return row ? userOf(row) : null;
 }
 
 // Secure cookies by default in production; MIZAN_SECURE_COOKIE=0 to serve plain HTTP (e.g. LAN), =1 to force.
@@ -194,15 +212,57 @@ const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsF
 const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsForApps(u.apps));
 /** Models a session/API user may read (null = everything). */
 const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
-const visibleDb = (u) => {
-  const readable = readableFor(u);
-  if (!readable) return db;
-  return redactForApps({
-    ...db,
-    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => readable.has(m))),
-    messages: db.messages.filter((m) => readable.has(m.model)),
-  }, u.apps);
+/** Company ids a user may work in (null = all). */
+const companiesFor = (u) => (u.companies ? new Set(u.companies) : null);
+/**
+ * The user's own company switcher state, kept to the companies they may use: each user has their own current and
+ * selected companies instead of one setting shared by everyone.
+ */
+const selectionFor = (u) => {
+  const granted = companiesFor(u);
+  const usable = (db.records['res.company'] ?? []).filter((c) => c.active !== false && visibleTo(granted, 'res.company', c)).map((c) => c.id);
+  let saved = null;
+  try { saved = JSON.parse(u.selection ?? 'null'); } catch { /* ignore a damaged selection */ }
+  const allowed = (saved?.allowed ?? db.settings.allowed_company_ids ?? []).filter((id) => usable.includes(id));
+  const current = [saved?.current, db.settings.current_company_id].find((id) => allowed.includes(id)) ?? allowed[0] ?? usable[0] ?? 1;
+  return { current_company_id: current, allowed_company_ids: allowed.length ? allowed : [current] };
 };
+/** Validate a user's company switcher state without storing it; throws when it names a company they may not use. */
+const checkSelection = (u, { current_company_id: current, allowed_company_ids: allowed }) => {
+  const granted = companiesFor(u);
+  if (granted && (!granted.has(current) || !Array.isArray(allowed) || !allowed.every((id) => granted.has(id)))) throw new Error('No access to that company');
+  setCompanies(db, { current, allowed });
+  return JSON.stringify({ current, allowed: [...new Set(allowed)] });
+};
+const saveSelection = (u, selection) => {
+  sql.prepare('UPDATE users SET selection = ? WHERE id = ?').run(selection, u.id);
+  u.selection = selection;
+};
+/** Records a user may read: their apps' models, only their companies' records, and their own company selection. */
+const visibleDb = (u, { models = true } = {}) => {
+  const allowed = models ? readableFor(u) : null;
+  const companies = companiesFor(u);
+  const { records: inCompanies, hidden } = restrictRecords(db, companies);
+  const records = allowed ? Object.fromEntries(Object.entries(inCompanies).filter(([model]) => allowed.has(model))) : inCompanies;
+  const selection = selectionFor(u);
+  // A user limited to some companies gets those companies' identity, not the group-wide VAT number and bank account.
+  const own = companies && (db.records['res.company'] ?? []).find((c) => c.id === selection.current_company_id);
+  const identity = !companies ? {} : {
+    company: own?.name ?? db.settings.company, company_vat: own?.vat ?? '', company_iban: '',
+    ...(Array.isArray(db.settings.companies) ? { companies: db.settings.companies.filter((c) => companies.has(c.id)) } : {}),
+  };
+  const visible = {
+    ...db,
+    records,
+    messages: db.messages.filter((m) => (!allowed || allowed.has(m.model)) && !hidden.has(`${m.model}:${m.res_id}`)),
+    settings: { ...db.settings, ...identity, ...selection },
+  };
+  return models && allowed ? redactForApps(visible, u.apps) : visible;
+};
+/** The database as a user may read it for server-side work: other companies' records are left out. */
+const scopeFor = (u) => (companiesFor(u) ? visibleDb(u, { models: false }) : db);
+/** Write options for a user: who they are, what they may change, and in which companies. */
+const writeOptions = (u, allowed = allowedFor(u)) => ({ author: u.name, isAdmin: u.isAdmin, login: u.login, allowed, companies: companiesFor(u) });
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
 // Stored in SQLite so a restart does not reset an attacker's counter.
@@ -429,11 +489,11 @@ async function api(req, res, path) {
       sql.prepare('DELETE FROM idempotency WHERE created < ?').run(Date.now() - IDEMPOTENCY_TTL_MS);
       const prior = sql.prepare('SELECT model, record_id FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
       if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
-      if (prior) return send(res, 200, read(db, prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
+      if (prior) return send(res, 200, read(visibleDb(keyUser), prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
     }
     // Reads see what the web client sees; writes are checked against the stricter write set.
     const reading = req.method === 'GET';
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser) });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
     if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
     if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);
@@ -459,7 +519,7 @@ async function api(req, res, path) {
   const user = sessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
 
-  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, canReset: user.isAdmin && RESET_ALLOWED, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
+  if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, selection: undefined, canReset: user.isAdmin && RESET_ALLOWED, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
   const action = ACTIONS[path];
   if (action && req.method === 'POST') {
     if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
@@ -469,13 +529,13 @@ async function api(req, res, path) {
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
-      const snapshot = db;
+      const snapshot = scopeFor(user);
       const at = epoch;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: storeAllowed }, user.login));
+      const out = await action.run(body, user, storeFor(writeOptions(user, storeAllowed), user.login, () => scopeFor(user)), snapshot);
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       sameEpoch(at);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }), { actor: user.login });
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)), { actor: user.login });
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -490,14 +550,14 @@ async function api(req, res, path) {
     try {
       lastBaseUrl = baseUrlOf(req);
       mailBaseKnown = true;
-      const snapshot = db;
+      const snapshot = scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }, user.login), body, lastBaseUrl)
-        : await sendDocument(SMTP, db, user, body);
+        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, lastBaseUrl)
+        : await sendDocument(SMTP, snapshot, user, body);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
-      const stored = recordSent(db, snapshot, out.db, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed });
+      const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed));
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
@@ -533,7 +593,20 @@ async function api(req, res, path) {
     try {
       const assigned = assignIds(db, body);
       remapped = assigned.remapped;
-      commitDb(applyDiff(db, assigned.diff, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: allowedFor(user) }), { actor: user.login });
+      const diff = assigned.diff;
+      // The company switcher is per user: store it with the user, never in the shared settings. It is checked first
+      // but only stored once the rest of the change has been accepted, so a rejected request changes nothing.
+      let selection = null;
+      if (diff?.settings && typeof diff.settings === 'object') {
+        const { current_company_id: current, allowed_company_ids: chosen, ...rest } = diff.settings;
+        const mine = selectionFor(user);
+        if ((current !== undefined && current !== mine.current_company_id) || (chosen !== undefined && JSON.stringify(chosen) !== JSON.stringify(mine.allowed_company_ids))) {
+          selection = checkSelection(user, { current_company_id: current ?? mine.current_company_id, allowed_company_ids: chosen ?? mine.allowed_company_ids });
+        }
+        diff.settings = rest;
+      }
+      commitDb(applyDiff(db, diff, writeOptions(user)), { actor: user.login });
+      if (selection) saveSelection(user, selection);
     } catch (e) {
       return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) }, stamp());
     }
@@ -544,8 +617,9 @@ async function api(req, res, path) {
     const body = await readJson(req).catch(() => null);
     if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
     try {
-      const out = runOperation(db, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
-      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: out.allowed }), { actor: user.login });
+      const snapshot = scopeFor(user);
+      const out = runOperation(snapshot, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
+      commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, out.allowed)), { actor: user.login });
       return send(res, 200, out.reply);
     } catch (e) {
       return send(res, e.status ?? 400, { error: e.message });
@@ -556,6 +630,11 @@ async function api(req, res, path) {
     try {
       const body = await readJson(req, MAX_BACKUP);
       const restored = checkBackup(body?.backup);
+      // The company switcher belongs to each user, not to the shared backup being restored.
+      for (const key of ['current_company_id', 'allowed_company_ids']) {
+        if (key in db.settings) restored.settings[key] = db.settings[key];
+        else delete restored.settings[key];
+      }
       const summary = backupSummary(db, restored);
       // A dry run only reports what would change; the real restore needs the typed confirmation.
       if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
@@ -600,7 +679,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/users') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
-    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps FROM users ORDER BY id').all());
+    if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps, companies FROM users ORDER BY id').all());
     if (req.method === 'POST') {
       try {
         createUser(await readJson(req), user.login);
@@ -666,7 +745,7 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
-const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, canSee: (u, model, rec) => visibleTo(companiesFor(u), model, rec, db), clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
