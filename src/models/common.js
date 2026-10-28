@@ -42,7 +42,7 @@ export const productLines = (label, priceField) => ({
     tax_type: { type: 'char', label: 'Tax Computation', hidden: true },
     tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
     tax_cash_basis: { type: 'boolean', label: 'Cash Basis', hidden: true },
-    tax_account_id: { type: 'integer', label: 'Tax Account', hidden: true },
+    tax_account_id: { type: 'integer', ref: 'account.account', label: 'Tax Account', hidden: true }, // ref: id remaps follow it
     tax_name: { type: 'char', label: 'Tax Name', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
   },

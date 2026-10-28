@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
-import { diffDb, isEmptyDiff, remapDiff } from './sync.js';
+import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
 import { installCustomFields } from './models/studio.js';
@@ -114,7 +114,7 @@ export function commit(next) {
   inflight = inflight.then(async () => {
     if (isEmptyDiff(diff)) return;
     // A change queued before an earlier save came back still uses the ids this browser picked.
-    const r = await api('/api/diff', remaps.slice(known).reduce(remapDiff, diff));
+    const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
     if (r.ok || r.data?.db) {
       const { remapped, ...saved } = r.ok ? r.data : r.data.db;
       db = saved;

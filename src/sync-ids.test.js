@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create } from './orm.js';
 import { seed } from './seed.js';
-import { applyDiff, assignIds, diffDb, remapDiff } from './sync.js';
+import { applyDiff, assignIds, diffDb, rebaseDiff, remapDiff } from './sync.js';
 
 const save = (server, client, next) => {
   const { diff, remapped } = assignIds(server, diffDb(client, next));
@@ -61,4 +61,44 @@ test('a change queued against a local id is rewritten through the remap', () => 
   assert.equal(out.upserts['res.partner'][0].id, 8);
   assert.deepEqual(out.deletes['res.partner'], [8]);
   assert.equal(out.messages[0].res_id, 8);
+});
+
+test('two quick saves keep their link when the first save moves onto the second one\'s local id', () => {
+  const base = seed();
+  // Someone else takes the next id on the server first.
+  const server0 = save(base, base, create(base, 'hr.department', { name: 'Rival' }).db).db;
+  // This browser creates a department, then (before the first save returns) a sub-department of it.
+  const first = create(base, 'hr.department', { name: 'Mine' });
+  const second = create(first.db, 'hr.department', { name: 'Child', parent_id: first.id });
+  assert.equal(second.id, first.id + 1);
+  const one = save(server0, base, first.db);
+  assert.equal(one.remapped['hr.department'][first.id], first.id + 1, 'the first record now sits on the second one\'s local id');
+  const queued = rebaseDiff(diffDb(first.db, second.db), one.remapped);
+  const { diff } = assignIds(one.db, queued);
+  const db = applyDiff(one.db, diff, { author: 'test' });
+  const mine = db.records['hr.department'].find((p) => p.name === 'Mine');
+  const child = db.records['hr.department'].find((p) => p.name === 'Child');
+  assert.equal(child.parent_id, mine.id);
+  assert.notEqual(child.id, mine.id);
+});
+
+test('client counters are ignored, so a huge counter cannot make creates share an id', () => {
+  const base = seed();
+  const poisoned = applyDiff(base, { upserts: {}, seq: { 'res.partner': 1e100 } }, { author: 'test' });
+  assert.equal(poisoned.seq['res.partner'], base.seq['res.partner']);
+  const a = save(poisoned, base, create(base, 'res.partner', { name: 'A' }).db).db;
+  const b = save(a, base, create(base, 'res.partner', { name: 'B' }).db).db;
+  const ids = b.records['res.partner'].filter((p) => p.name === 'A' || p.name === 'B').map((p) => p.id);
+  assert.equal(new Set(ids).size, 2);
+});
+
+test('a queued company selection follows the new company id', () => {
+  const out = remapDiff({ upserts: {}, settings: { current_company_id: 7, allowed_company_ids: [1, 7] } }, { 'res.company': { 7: 9 } });
+  assert.equal(out.settings.current_company_id, 9);
+  assert.deepEqual(out.settings.allowed_company_ids, [1, 9]);
+});
+
+test('invoice lines keep pointing at a tax account created in the same save', () => {
+  const out = remapDiff({ upserts: { 'account.move': [{ id: 1, invoice_line_ids: [{ id: 1, tax_account_id: 50, product_id: null }] }] } }, { 'account.account': { 50: 60 } });
+  assert.equal(out.upserts['account.move'][0].invoice_line_ids[0].tax_account_id, 60);
 });
