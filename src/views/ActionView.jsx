@@ -156,7 +156,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
-      {view === 'calendar' && <CalendarView model={model} records={records} open={open} newHref={newHref} />}
+      {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
     </main>
   );

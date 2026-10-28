@@ -2,13 +2,13 @@
 import { create, read, search, write } from '../orm.js';
 import { apps2Models, workedHours } from './apps2.js';
 import { round } from '../money.js';
+import { calendarFor, isWorkingDay } from './calendar.js';
 
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
 const modes = [['kiosk', 'Kiosk'], ['manual', 'Manual'], ['systray', 'Systray']];
 const defaultRule = { daily_threshold_hours: 8, weekly_threshold_hours: 40, tolerance_minutes: 15, requires_approval: true, rate: 1.5 };
 const ruleFor = (db) => search(db, 'hr.attendance.overtime.rule')[0] ?? defaultRule;
-const weekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay());
 const onLeave = (db, employeeId, date) => search(db, 'hr.leave').some((l) => l.employee_id === employeeId && l.state === 'validate' && l.date_from <= date && l.date_to >= date);
 
 function dateValue(date) {
@@ -112,9 +112,10 @@ export function overtimeFor(db, employeeId, { from, to }) {
 
 function overtimeSummary(db, employeeId, records, { from, to }) {
   const rule = ruleFor(db);
+  const cal = calendarFor(db, employeeId);
   const daily = datesBetween(from, to).map((date) => {
     const worked = workedOn(records, date);
-    const expected = weekend(date) || onLeave(db, employeeId, date) ? 0 : Number(rule.daily_threshold_hours);
+    const expected = !isWorkingDay(cal, date, db) || onLeave(db, employeeId, date) ? 0 : Number(rule.daily_threshold_hours);
     return { date, worked: round(worked), expected, overtime: tolerated(Math.max(0, worked - expected), rule) };
   });
   const weeks = new Map();
@@ -182,9 +183,10 @@ export function attendanceReport(db, { from, to }) {
       const starts = records.filter((r) => r.date === date).map((r) => r.check_in).sort();
       return starts.length && starts[0] > '09:15';
     }).length;
+    const cal = calendarFor(db, employee.id);
     return { employee_id: employee.id, name: employee.name, days: present.length,
       worked: round(dates.reduce((sum, date) => sum + workedOn(records, date), 0)), expected: round(summary.daily.reduce((sum, d) => sum + d.expected, 0)), overtime: summary.total, late,
-      absences: dates.filter((date) => !weekend(date) && !present.includes(date) && !onLeave(db, employee.id, date)).length };
+      absences: dates.filter((date) => isWorkingDay(cal, date, db) && !present.includes(date) && !onLeave(db, employee.id, date)).length };
   });
 }
 

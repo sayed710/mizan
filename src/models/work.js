@@ -40,6 +40,7 @@ export const workModels = {
       coach_id: employee('Coach'),
       employee_type: { type: 'selection', label: 'Employee Type', options: [['employee', 'Employee'], ['worker', 'Worker'], ['student', 'Student'], ['trainee', 'Trainee'], ['contractor', 'Contractor'], ['freelance', 'Freelancer']] },
       working_hours: { type: 'selection', label: 'Working Hours', options: [['40', '40 hours/week'], ['35', '35 hours/week'], ['20', 'Part-time 20 hours/week'], ['flexible', 'Flexible']] },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Working Schedule' },
       join_date: { type: 'date', label: 'Joined on' },
       wage: { type: 'monetary', label: 'Monthly Wage' },
       tag_ids: { type: 'tags', label: 'Tags' },
@@ -99,7 +100,7 @@ export const workModels = {
       ],
       groups: [['work_email', 'work_phone', 'mobile_phone', 'tag_ids'], ['job_title', 'department_id', 'parent_id', 'coach_id']],
       tabs: [
-        { label: 'Work Information', fields: ['work_location', 'working_hours', 'employee_type', 'join_date', 'wage'] },
+        { label: 'Work Information', fields: ['work_location', 'working_hours', 'resource_calendar_id', 'employee_type', 'join_date', 'wage'] },
         { label: 'Resume', fields: ['resume_lines'] },
         { label: 'Certifications', fields: ['certification_lines'] },
         { label: 'Private Information', fields: ['private_address', 'private_email', 'private_phone', 'bank_account', 'birthday', 'place_of_birth', 'gender', 'marital', 'children', 'nationality', 'identification_id', 'passport_id', 'visa_no', 'permit_no', 'visa_expire', 'emergency_contact', 'emergency_phone'] },
