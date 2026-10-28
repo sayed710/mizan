@@ -39,5 +39,5 @@ test('users limited to apps cannot write other models', () => {
   assert.ok(!allowed.has('hr.payslip'));
   const db = seed();
   assert.throws(() => applyDiff(db, upsert('hr.payslip', { id: 99, employee_id: 1 }), { allowed }), /No access/);
-  assert.ok(applyDiff(db, upsert('crm.lead', { id: 1, name: 'Renamed' }), { allowed }));
+  assert.equal(applyDiff(db, upsert('crm.lead', { id: 1, name: 'Renamed' }), { allowed }).records['crm.lead'].find((r) => r.id === 1).name, 'Renamed');
 });

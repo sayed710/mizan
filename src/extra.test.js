@@ -43,5 +43,5 @@ test('signing requires the typed signature (prompt) and locks the document', () 
   assert.equal(signed.signature, 'Gulf Interiors');
   assert.ok(models['sign.request'].form.lockedWhen(signed));
   delete globalThis.prompt;
-  assert.ok(write(db, 'sign.request', req.id, { state: 'canceled' }));
+  assert.equal(read(write(db, 'sign.request', req.id, { state: 'canceled' }), 'sign.request', req.id).state, 'canceled');
 });
