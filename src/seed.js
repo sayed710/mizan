@@ -112,14 +112,35 @@ export function seed() {
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  leads.forEach(([name, partner_id, expected_revenue, stage_id, priority, tag_ids], i) => {
+
+  const crmStages = [
+    { name: 'New', sequence: 1, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Qualified', sequence: 2, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Proposition', sequence: 3, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Won', sequence: 4, is_won: true, fold: true, team_ids: [], rotting_threshold_days: 0 },
+  ];
+  crmStages.forEach((s) => add('crm.stage', s));
+
+  const lostReasons = [
+    { name: 'Too expensive', active: true },
+    { name: 'We lost to a competitor', active: true },
+    { name: 'Not the right timing', active: true },
+    { name: 'No answer', active: true },
+    { name: 'Other', active: true },
+  ];
+  lostReasons.forEach((r) => add('crm.lost.reason', r));
+
+  const crmStageMap = { new: 1, qualified: 2, proposition: 3, won: 4 };
+  leads.forEach(([name, partner_id, expected_revenue, stage, priority, tag_ids], i) => {
     const partner = partners[partner_id - 1];
+    const stage_id = typeof stage === 'number' ? stage : (crmStageMap[stage] ?? 1);
     add('crm.lead', {
       name, partner_id, expected_revenue, stage_id, priority, tag_ids,
       email: partner.email, phone: partner.phone,
-      probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[stage_id],
+      probability: { 1: 10, 2: 30, 3: 60, 4: 100, new: 10, qualified: 30, proposition: 60, won: 100 }[stage_id] ?? 10,
       date_deadline: addDays(today(), i * 4 - 6),
       create_date: addDays(today(), -40 + i * 5),
+      date_last_stage_update: addDays(today(), -40 + i * 5),
     });
   });
   const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
@@ -189,10 +210,30 @@ export function seed() {
   add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
-  add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });
-  add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: ['Consulting'], date: addDays(today(), 60) });
-  tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) =>
-    add('project.task', { name, project_id, user_id, stage_id, planned_hours, priority, date_start: addDays(today(), d - Math.ceil(planned_hours / 4)), date_deadline: addDays(today(), d) }));
+  const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
+  const tagConsulting = add('project.tags', { name: 'Consulting', color: 2 });
+  add('project.tags', { name: 'Product', color: 3 });
+
+  const taskStages = [
+    { name: 'To Do', sequence: 1, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'In Progress', sequence: 2, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'Review', sequence: 3, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'Done', sequence: 4, fold: true, active: true, project_ids: [], rotting_threshold_days: 0 },
+  ];
+  taskStages.forEach((s) => add('project.task.type', s));
+
+  add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: [tagInterior], date: addDays(today(), 45) });
+  add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: [tagConsulting], date: addDays(today(), 60) });
+  const taskStageMap = { todo: 1, progress: 2, review: 3, done: 4 };
+  tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) => {
+    const sId = typeof stage_id === 'number' ? stage_id : (taskStageMap[stage_id] ?? 1);
+    add('project.task', {
+      name, project_id, user_id, stage_id: sId, tag_ids: [], planned_hours, priority,
+      date_start: addDays(today(), d - Math.ceil(planned_hours / 4)),
+      date_deadline: addDays(today(), d),
+      date_last_stage_update: addDays(today(), d < 0 ? d : 0),
+    });
+  });
 
   tickets.forEach(([name, partner_id, user_id, ticket_type, stage_id, priority], i) =>
     add('helpdesk.ticket', { name, partner_id, user_id, ticket_type, stage_id, priority, create_date: addDays(today(), -i * 3) }));

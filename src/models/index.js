@@ -151,7 +151,9 @@ const allApps = [
         { key: 'forecast', label: 'Forecast', model: 'crm.lead', view: 'pivot' },
       ] },
       { label: 'Configuration', children: [
+        { key: 'stages', label: 'Stages', model: 'crm.stage' },
         { key: 'teams', label: 'Sales Teams', model: 'crm.team' },
+        { key: 'lost-reasons', label: 'Lost Reasons', model: 'crm.lost.reason' },
       ] },
     ],
   },
@@ -284,6 +286,10 @@ const allApps = [
       { key: 'updates', label: 'Project Updates', model: 'project.update' },
       { key: 'recurring', label: 'Recurring Tasks', model: 'project.recurrence' },
       { key: 'report', label: 'Reporting', model: 'project.task', view: 'pivot' },
+      { label: 'Configuration', children: [
+        { key: 'stages', label: 'Task Stages', model: 'project.task.type' },
+        { key: 'tags', label: 'Tags', model: 'project.tags' },
+      ] },
     ],
   },
   {
@@ -691,3 +697,4 @@ export function targetOf(model, uninstalled = []) {
   return '#/';
 }
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];

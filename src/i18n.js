@@ -934,6 +934,24 @@ const ar = {
   'Min quantity must be a nonnegative number': 'يجب أن يكون الحد الأدنى للكمية رقماً غير سالب',
   'Max quantity must be a nonnegative number': 'يجب أن يكون الحد الأقصى للكمية رقماً غير سالب',
   'Select a stockable product': 'اختر منتجاً قابلاً للتخزين',
+  // Configurable CRM and Task stages
+  Stages: 'المراحل',
+  'Stage Name': 'اسم المرحلة',
+  'Is Won Stage': 'مرحلة فوز',
+  'Folded in Pipeline': 'مطوية في المسار',
+  Requirements: 'المتطلبات',
+  'Rotting Threshold (Days)': 'مهلة الركود (بالأيام)',
+  'Lost Reasons': 'أسباب الخسارة',
+  'Closing Note': 'ملاحظة الإغلاق',
+  'Last Stage Update': 'آخر تحديث للمرحلة',
+  Rotting: 'راكدة',
+  'Lost Reason (Legacy)': 'سبب الخسارة (قديم)',
+  'Task Stages': 'مراحل المهام',
+  'Folded in Kanban': 'مطوية في كانبان',
+  'Stage Owner': 'مسؤول المرحلة',
+  'Automatic Validation State': 'حالة الاعتماد التلقائي',
+  Unfold: 'فرد',
+  Fold: 'طي',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

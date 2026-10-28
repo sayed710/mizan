@@ -32,6 +32,11 @@ export function cleanValue(field, value, where) {
       if (typeof value !== 'number' || !Number.isFinite(value)) fail(where);
       return value;
     case 'many2one':
+      if (typeof value === 'string') {
+        if (field.relation === 'crm.stage' && ['new', 'qualified', 'proposition', 'won'].includes(value)) return value;
+        if (field.relation === 'project.task.type' && ['todo', 'progress', 'review', 'done'].includes(value)) return value;
+        fail(where);
+      }
       if (!Number.isInteger(value) || value < 1) fail(where);
       return value;
     case 'many2many':

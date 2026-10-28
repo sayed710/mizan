@@ -440,19 +440,36 @@ export function FormView({ leaf, id, base, params }) {
                   <button key={b.label} type="button" className={`btn ${b.primary ? 'primary' : ''}`} onClick={() => runButton(b)}>{t(b.label)}</button>
                 ))}
               </div>
-              {statusField && (
-                <ol className="statusbar" aria-label={t(statusField.label)}>
-                  {statusField.options
-                    .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
-                    .map(([k, label]) => (
-                      <li key={k}>
-                        <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
-                          disabled={!def.form.statusbarClickable}
-                          onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
-                      </li>
-                    ))}
-                </ol>
-              )}
+              {statusField && (() => {
+                const rawOptions = statusField.type === 'selection'
+                  ? (statusField.options ?? [])
+                  : (statusField.type === 'many2one' && statusField.relation
+                    ? (() => {
+                        let relRecs = [...(db.records[statusField.relation] ?? [])];
+                        if (model === 'crm.lead' && current.team_id) {
+                          relRecs = relRecs.filter((s) => !s.team_ids?.length || s.team_ids.includes(current.team_id));
+                        } else if (model === 'project.task' && current.project_id) {
+                          relRecs = relRecs.filter((s) => !s.project_ids?.length || s.project_ids.includes(current.project_id));
+                        }
+                        return relRecs
+                          .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+                          .map((s) => [s.id, s.name]);
+                      })()
+                    : []);
+                return (
+                  <ol className="statusbar" aria-label={t(statusField.label)}>
+                    {rawOptions
+                      .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
+                      .map(([k, label]) => (
+                        <li key={k}>
+                          <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
+                            disabled={!def.form.statusbarClickable}
+                            onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
+                        </li>
+                      ))}
+                  </ol>
+                );
+              })()}
             </div>
           )}
 
