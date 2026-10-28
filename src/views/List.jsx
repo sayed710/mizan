@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { models } from '../models/index.js';
 import { groupRecords } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, isNumeric, money } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money } from '../ui.jsx';
+import { write } from '../orm.js';
+import { commit, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
 
@@ -48,7 +50,12 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
       </td>
-      {cols.map((f) => <td key={f} className={isNumeric(fields[f]) ? 'num' : ''}>{display(db, fields[f], r[f], r)}</td>)}
+      {cols.map((f) => <td key={f} className={isNumeric(fields[f]) ? 'num' : ''}
+        onClick={def.editableList?.includes(f) ? (e) => e.stopPropagation() : undefined}>
+        {def.editableList?.includes(f) ? <FieldInput db={db} field={fields[f]} value={r[f]} label={t(fields[f].label)}
+          onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
+          : display(db, fields[f], r[f], r)}
+      </td>)}
     </tr>
   );
 

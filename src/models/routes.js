@@ -145,7 +145,7 @@ export const routeModels = {
     fields: {
       name: { type: 'char', label: 'Location Name', required: true },
       parent_id: { type: 'many2one', relation: 'stock.location', label: 'Parent Location' },
-      usage: { type: 'selection', label: 'Location Type', options: [['internal', 'Internal'], ['view', 'View'], ['transit', 'Transit']] },
+      usage: { type: 'selection', label: 'Location Type', options: [['internal', 'Internal'], ['view', 'View'], ['transit', 'Transit'], ['inventory', 'Inventory Adjustment']] },
       barcode: { type: 'char', label: 'Barcode' },
     },
     defaults: () => ({ usage: 'internal' }),

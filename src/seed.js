@@ -1,3 +1,4 @@
+import { ensureQuants } from './models/quant.js';
 import { create, emptyDb, postNote, read, search, write } from './orm.js';
 import { ensureUoms } from './models/uom.js';
 import { ensureMainCompany } from './models/company.js';
@@ -424,5 +425,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...ready, schema_version: SCHEMA_VERSION };
+  return { ...ensureQuants(ready), schema_version: SCHEMA_VERSION };
 }

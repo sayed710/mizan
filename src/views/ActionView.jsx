@@ -122,6 +122,23 @@ export function ActionView({ leaf, base, params }) {
   );
   const extra = view === 'list' ? (
     <>
+      {(def.listActions ?? []).map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
+        try {
+          const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
+          if (!ids.length) return;
+          let options;
+          if (action.label === 'Request a count') {
+            const date = prompt(t('Scheduled Count Date'), new Date().toISOString().slice(0, 10));
+            if (date == null) return;
+            const name = prompt(t('Counter (name, optional)'), '');
+            if (name == null) return;
+            const user = name ? searchRecords(getDb(), 'hr.employee').find((u) => u.name === name) : null;
+            if (name && !user) throw new Error(t('Select an existing counter'));
+            options = { date, user_id: user?.id ?? null };
+          }
+          commit(action.run(getDb(), ids, options));
+        } catch (e) { alert(t(e.message)); }
+      }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
       <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
