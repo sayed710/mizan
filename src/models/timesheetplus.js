@@ -28,8 +28,8 @@ const getTimesheet = (db, id) => {
 };
 
 /** Enforce validation locks, valid hours, sales links and one running timer per employee. */
-export function timesheetGuard(db, before, after) {
-  const inherited = base.guard?.(db, before, after);
+export function timesheetGuard(db, before, after, ctx) {
+  const inherited = base.guard?.(db, before, after, ctx);
   if (inherited) return inherited;
   if (before && isTimesheet(before) && before.validated) {
     const changed = Object.keys({ ...before, ...after }).filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]));

@@ -41,7 +41,7 @@ export const isEmptyDiff = (d) =>
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = false, allowed = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);

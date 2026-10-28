@@ -171,7 +171,7 @@ export const quotePlusModels = {
       is_expired: { type: 'boolean', label: 'Expired', compute: (r) => expired(r, r.expiry_checked_date > today() ? r.expiry_checked_date : today()) },
     },
     defaults: (id) => ({ ...order.defaults(id), option_ids: [], require_signature: false, require_payment: false, prepayment_percent: 0 }),
-    guard: (db, before, r) => order.guard?.(db, before, r) ?? (!Number.isFinite(Number(r.prepayment_percent ?? 0)) || Number(r.prepayment_percent ?? 0) < 0 || Number(r.prepayment_percent ?? 0) > 100 ? 'Prepayment percentage must be between 0 and 100' : null),
+    guard: (db, before, r, ctx) => order.guard?.(db, before, r, ctx) ?? (!Number.isFinite(Number(r.prepayment_percent ?? 0)) || Number(r.prepayment_percent ?? 0) < 0 || Number(r.prepayment_percent ?? 0) > 100 ? 'Prepayment percentage must be between 0 and 100' : null),
     onchange: (r, key, db) => ({ ...order.onchange?.(r, key, db), ...(['order_line', 'option_ids'].includes(key) ? { option_ids: optionsFor(r) } : {}) }),
     form: {
       ...order.form,

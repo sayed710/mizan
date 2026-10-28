@@ -41,5 +41,5 @@ test('attendance hours and uninstalled apps survive sync', () => {
   assert.equal(workedHours({ check_in: '08:55', check_out: '17:05' }), 8.17);
   const base = seed();
   const next = updateSettings(base, { uninstalled: ['fleet', 'lunch'] });
-  assert.deepEqual(applyDiff(base, diffDb(base, next)).settings.uninstalled, ['fleet', 'lunch']);
+  assert.deepEqual(applyDiff(base, diffDb(base, next), { isAdmin: true }).settings.uninstalled, ['fleet', 'lunch']);
 });

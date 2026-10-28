@@ -544,7 +544,7 @@ const JOB_INTERVAL_MS = 60 * 60 * 1000;
 const runJobs = () => {
   try {
     const next = runScheduledJobs(db);
-    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }));
+    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler', isAdmin: true }));
   } catch (e) {
     console.error('Scheduled job failed:', e.message);
   }
@@ -567,7 +567,7 @@ const runMailJobs = async () => {
   ];
   for (const job of jobs) {
     try {
-      await job(storeFor({ author: 'Scheduler' }));
+      await job(storeFor({ author: 'Scheduler', isAdmin: true }));
     } catch (e) {
       console.error('Scheduled mailing failed:', e.message);
     }
