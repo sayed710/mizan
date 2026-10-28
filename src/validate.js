@@ -12,6 +12,8 @@ function losslessJson(v, depth = 0) {
   if (Array.isArray(v)) return v.every((x) => losslessJson(x, depth + 1));
   return isPlain(v) && Object.values(v).every((x) => losslessJson(x, depth + 1));
 }
+/** The calendar day exists (Date.parse would roll 2026-02-30 over into March). */
+const realDay = (day) => new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 const fail = (where) => { throw new Error(`Invalid value for ${where}`); };
 
@@ -36,6 +38,9 @@ export function cleanValue(field, value, where) {
       return value;
     case 'date':
       if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(where);
+      return value;
+    case 'datetime':
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.test(value) || !Number.isFinite(Date.parse(value)) || !realDay(value.slice(0, 10))) fail(where);
       return value;
     case 'tags':
       if (!Array.isArray(value) || value.length > 50 || !value.every((x) => typeof x === 'string')) fail(where);

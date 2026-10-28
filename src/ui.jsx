@@ -27,6 +27,8 @@ function safeFormat(code) {
 }
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
+/** An ISO instant as a datetime-local input value (local time, minutes). */
+const localInput = (iso) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
 /** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
@@ -41,6 +43,7 @@ export function display(db, field, value, rec = null) {
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
+    case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
   }
 }
@@ -121,7 +124,7 @@ function FileInput({ id, value, onChange }) {
   );
 }
 
-import { subtotal as lineSubtotal } from './models/common.js';
+import { subtotal as lineSubtotal, pickedInstant } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly, record }) {
@@ -184,6 +187,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
+    case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (

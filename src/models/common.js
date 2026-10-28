@@ -7,6 +7,26 @@ import { lineTaxOf, lineUntaxed, productTax, taxSnapshot } from './taxes.js';
 
 /** Local calendar date as YYYY-MM-DD (not UTC, so "today" matches the user's wall clock). */
 export const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/** Calendar day (YYYY-MM-DD) of a date, or of a datetime in the viewer's timezone (the day the forms show). */
+export const dayOf = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(s) ? s : isoDate(new Date(s)));
+/** Move a date, or a datetime keeping its time of day, by whole calendar days. */
+export const shiftDay = (s, n) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return addDays(s, n);
+  const d = new Date(s);
+  d.setDate(d.getDate() + n);
+  return d.toISOString();
+};
+/** The input has minute precision: keep the stored seconds when the minute is unchanged or only re-typed. */
+export const pickedInstant = (input, old) => {
+  if (!input) return null;
+  const next = new Date(input);
+  if (!Number.isFinite(next.getTime())) return null;
+  if (old) {
+    const prev = new Date(old);
+    if (Number.isFinite(prev.getTime())) next.setSeconds(prev.getSeconds(), prev.getMilliseconds());
+  }
+  return next.toISOString();
+};
 export const today = () => isoDate(new Date());
 export const addDays = (date, n) => {
   const d = new Date(date + 'T00:00');

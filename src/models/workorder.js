@@ -184,6 +184,19 @@ const center = moreModels['mrp.workcenter'];
 const relation = (relation, label) => ({ type: 'many2one', relation, label, required: true });
 const number = (label) => ({ type: 'float', label });
 
+/** Work order times used to be plain dates; the fields are datetimes now, so stored date-only values become midnight UTC. */
+export function migrateWorkorderTimes(db) {
+  const orders = db?.records?.['mrp.workorder'];
+  const upgrade = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T00:00:00.000Z` : v);
+  const stale = (w) => [w.date_start, w.date_finished, ...(w.time_ids ?? []).flatMap((l) => [l.date_start, l.date_end])].some((v) => upgrade(v) !== v);
+  if (!orders?.some(stale)) return db;
+  const fixed = orders.map((w) => (!stale(w) ? w : {
+    ...w, date_start: upgrade(w.date_start), date_finished: upgrade(w.date_finished),
+    time_ids: (w.time_ids ?? []).map((l) => ({ ...l, date_start: upgrade(l.date_start), date_end: upgrade(l.date_end) })),
+  }));
+  return { ...db, records: { ...db.records, 'mrp.workorder': fixed } };
+}
+
 export const workorderModels = {
   'mrp.workorder': {
     label: 'Work Orders',
@@ -195,14 +208,14 @@ export const workorderModels = {
       duration_expected: number('Expected Duration (min)'),
       duration: { ...number('Actual Duration (min)'), compute: duration },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['pending', 'Waiting for another WO'], ['ready', 'Ready'], ['progress', 'In Progress'], ['done', 'Done'], ['cancel', 'Cancelled']] },
-      date_start: { type: 'date', label: 'Started on' },
-      date_finished: { type: 'date', label: 'Finished on' },
+      date_start: { type: 'datetime', label: 'Started on' },
+      date_finished: { type: 'datetime', label: 'Finished on' },
       employee_id: { type: 'many2one', relation: 'hr.employee', label: 'Operator' },
       qty_produced: number('Quantity Produced'),
       blocked_reason: { type: 'char', label: 'Blocked Reason' },
       time_ids: {
         type: 'one2many', label: 'Time Tracking', readonly: true,
-        fields: { employee_id: relation('hr.employee', 'Employee'), date_start: { type: 'date', label: 'Start' }, date_end: { type: 'date', label: 'End' }, minutes: number('Minutes'), loss: { type: 'selection', label: 'Time Type', options: losses } },
+        fields: { employee_id: relation('hr.employee', 'Employee'), date_start: { type: 'datetime', label: 'Start' }, date_end: { type: 'datetime', label: 'End' }, minutes: number('Minutes'), loss: { type: 'selection', label: 'Time Type', options: losses } },
         newLine: () => ({ employee_id: null, minutes: 0, loss: 'productive' }),
       },
     },
