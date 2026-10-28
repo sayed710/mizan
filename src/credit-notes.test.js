@@ -57,3 +57,43 @@ test('a partial credit note leaves the rest due; on a paid invoice it stays open
   assert.equal(move(lateNote, noteId(late)).amount_residual, 100);
   assert.equal(move(lateNote, paid.id).amount_paid, 100);
 });
+
+import { accountId } from './models/ledger.js';
+
+const receivable = (db, partner) => {
+  const id = accountId(db, '121000');
+  return Math.round(db.records['account.move'].filter((m) => m.state === 'posted').flatMap((m) => m.line_ids ?? [])
+    .filter((l) => l.account_id === id && l.partner_id === partner).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0) * 100) / 100;
+};
+
+test('a foreign-currency credit note at another rate clears the receivable with an exchange difference', () => {
+  const fx = create(seed(), 'res.currency', { name: 'FXC', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-03-01', rate: 4 }] });
+  const inv = create(fx.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, currency_id: fx.id, invoice_date: '2026-01-15', invoice_date_due: '2026-01-15', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const db = postMove(inv.db, inv.id);
+  const before = receivable(db, 2);
+  const out = creditNote(db, move(db, inv.id));
+  const dated = write(out.db, 'account.move', noteId(out), { invoice_date: '2026-03-15' });
+  const posted = postMove(dated, noteId(out));
+  assert.equal(move(posted, inv.id).payment_state, 'paid');
+  assert.equal(receivable(posted, 2), 0, `receivable should clear, was ${before}`);
+});
+
+test('a credit note must match the invoice partner, currency and kind, and be positive', () => {
+  const { db, id } = postedInvoice(100);
+  const out = creditNote(db, move(db, id));
+  const n = noteId(out);
+  assert.throws(() => postMove(write(out.db, 'account.move', n, { partner_id: 3 }), n), /partner must be/);
+  const other = create(seed(), 'res.currency', { name: 'OTH', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  assert.throws(() => postMove(write({ ...out.db, records: { ...out.db.records, 'res.currency': other.db.records['res.currency'] } }, 'account.move', n, { currency_id: other.id }), n), /currency must be/);
+  assert.throws(() => postMove(write(out.db, 'account.move', n, { invoice_line_ids: [{ product_id: 1, qty: -1, price_unit: 30, tax: 0 }] }), n), /positive total/);
+  assert.throws(() => postMove(write(out.db, 'account.move', n, { move_type: 'in_refund' }), n), /can only reverse/);
+});
+
+test('a credit note that settled an invoice, and that invoice, cannot be deleted', () => {
+  const { db, id } = postedInvoice(100);
+  const out = creditNote(db, move(db, id));
+  const posted = postMove(out.db, noteId(out));
+  const settings = { isAdmin: true };
+  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [noteId(out)] } }, settings), /cannot be deleted/);
+  assert.throws(() => applyDiff(posted, { upserts: {}, deletes: { 'account.move': [id] } }, settings), /cannot be deleted/);
+});

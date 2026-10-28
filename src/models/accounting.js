@@ -51,10 +51,22 @@ const creditNotesOf = (db, invoiceId, exceptId = null) => (db.records['account.m
   .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state !== 'cancel');
 const round2 = (n) => Math.round(n * 100) / 100;
 
+/** A credit note that settled its invoice (and the invoice it settled) stays: deleting either would leave the other falsely paid. */
+function settledByCreditNote(db, m) {
+  if (m.reversed_entry_id && (m.payments ?? []).some((p) => p.move_id)) return `${m.name} settled ${read(db, 'account.move', m.reversed_entry_id)?.name ?? 'its invoice'} and cannot be deleted; cancel it instead`;
+  if (creditNotesOf(db, m.id).some((n) => n.state === 'posted')) return `${m.name} was credited by a posted credit note and cannot be deleted`;
+  return null;
+}
+
 /** An invoice is credited at most once in total: its posted credit notes together cannot exceed it. */
 function creditCheck(db, note) {
   const invoice = read(db, 'account.move', note.reversed_entry_id);
   if (!invoice || invoice.state !== 'posted') throw new Error('A credit note must reverse a posted invoice');
+  // It must be the matching kind of document for the same partner and currency, and a real (positive) credit.
+  if (invoice.move_type !== (note.move_type === 'out_refund' ? 'out_invoice' : 'in_invoice')) throw new Error(`A ${note.move_type === 'out_refund' ? 'credit note' : 'refund'} can only reverse a ${note.move_type === 'out_refund' ? 'customer invoice' : 'vendor bill'}`);
+  if (invoice.partner_id !== note.partner_id) throw new Error(`The partner must be the one of ${invoice.name}`);
+  if ((invoice.currency_id ?? null) !== (note.currency_id ?? null)) throw new Error(`The currency must be the one of ${invoice.name}`);
+  if (!(total(note) > 0)) throw new Error('A credit note must have a positive total');
   const credited = creditNotesOf(db, invoice.id, note.id).filter((m) => m.state === 'posted').reduce((s, m) => s + total(m), 0);
   if (round2(credited + total(note)) > round2(total(invoice))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(round2(total(invoice) - credited))} is left to credit`);
 }
@@ -72,7 +84,19 @@ function offsetCreditNote(db, noteId) {
   const settle = (next, r, other) => write(next, 'account.move', r.id, {
     amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id }],
   });
-  const next = settle(settle(db, invoice, note), note, invoice);
+  let next = settle(settle(db, invoice, note), note, invoice);
+  // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
+  const sale = !isPurchase(invoice);
+  const gap = round2(toCompany(db, invoice.currency_id, value, invoice.invoice_date ?? date) - toCompany(db, note.currency_id, value, date));
+  if (gap) {
+    const account = sale ? '121000' : '211000';
+    const amount = Math.abs(gap);
+    // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
+    const clearsDebit = sale ? gap < 0 : gap > 0;
+    const open = clearsDebit ? { account, debit: amount, partner_id: invoice.partner_id } : { account, credit: amount, partner_id: invoice.partner_id };
+    const fxLine = clearsDebit ? { account: '450100', credit: amount } : { account: '690100', debit: amount };
+    next = postEntry(next, { journal: 'MISC', date, ref: `Exchange difference ${note.name}`, lines: [open, fxLine] }).db;
+  }
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
 
@@ -248,7 +272,7 @@ export const accountingModels = {
   'account.move': {
     label: 'Invoices',
     guard: moveGuard,
-    protectDelete: moveDeleteGuard,
+    protectDelete: (db, m) => moveDeleteGuard(db, m) ?? settledByCreditNote(db, m),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
