@@ -293,18 +293,34 @@ export function FormView({ leaf, id, base, params }) {
     if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
     const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
     if (live) {
+      if (b.prompt) {
+        // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
+        const spec = b.wizard?.(getDb(), current);
+        if (spec) {
+          setWizard({
+            b, spec, error: null,
+            live: (values) => {
+              const savedId = save();
+              if (savedId == null) return;
+              serverAction(endpoint, { model, id: savedId, text: String(values[spec.fields[0].name] ?? '').trim() })
+                .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
+            },
+          });
+          return;
+        }
+        const savedId = save();
+        if (savedId == null) return;
+        const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
+        if (text != null && text.trim()) {
+          serverAction(endpoint, { model, id: savedId, text })
+            .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
+        }
+        return;
+      }
       const savedId = save();
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
         .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
-      if (b.prompt) {
-        // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
-        const spec = b.wizard?.(getDb(), read(getDb(), model, savedId));
-        if (spec) { setWizard({ b, id: savedId, spec, error: null, live: (values) => send({ text: String(values[spec.fields[0].name] ?? '').trim() }) }); return; }
-        const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
-        if (text != null && text.trim()) send({ text });
-        return;
-      }
       if (!b.upload) { send(); return; }
       const input = Object.assign(document.createElement('input'), { type: 'file', accept: b.upload });
       input.onchange = () => {
@@ -324,6 +340,9 @@ export function FormView({ leaf, id, base, params }) {
       if (id != null && b.vals.active === false) location.hash = backHash;
       return;
     }
+    // Buttons that need input open an in-app dialog; the button runs with what was entered.
+    const spec = b.wizard?.(getDb(), current);
+    if (spec) { setWizard({ b, spec, error: null }); return; }
     const answers = [];
     for (const q of b.ask ?? []) {
       const text = prompt(t(q.label), q.default?.(current) ?? '');
@@ -338,9 +357,6 @@ export function FormView({ leaf, id, base, params }) {
         if (out.go) location.hash = out.go;
         return;
       }
-      // Buttons that need input open an in-app dialog; the button runs with what was entered.
-      const spec = b.wizard?.(getDb(), read(getDb(), model, savedId));
-      if (spec) { setWizard({ b, id: savedId, spec, error: null }); return; }
       const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
       noteUnsent(savedId);
@@ -353,7 +369,9 @@ export function FormView({ leaf, id, base, params }) {
   const confirmWizard = (values) => {
     if (wizard.live) { setWizard(null); wizard.live(values); return; }
     try {
-      const res = wizard.b.run(getDb(), read(getDb(), model, wizard.id), values);
+      const savedId = wizard.id ?? save();
+      if (savedId == null) return;
+      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), values);
       commit(res.db);
       setWizard(null);
       setError(null);

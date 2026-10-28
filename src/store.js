@@ -177,8 +177,26 @@ export function commit(next, { quiet = false } = {}) {
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
+  const gen = generation;
+  const known = remaps.length;
   // Queued behind pending saves, so the server sees the record as the user just saved it.
-  const r = await enqueue(() => api(path, body), (e) => { throw e; });
+  const r = await enqueue(async () => {
+    if (gen !== generation) return { ok: false, error: t('Could not save changes') };
+    let id = body?.id;
+    if (id != null) {
+      for (const m of remaps.slice(known)) {
+        if (body.model && m[body.model]?.[id] != null) id = m[body.model][id];
+        else if (!body.model) {
+          for (const map of Object.values(m)) {
+            if (map[id] != null) { id = map[id]; break; }
+          }
+        }
+      }
+    }
+    const payload = body && typeof body === 'object' && 'id' in body && id !== body.id ? { ...body, id } : body;
+    return api(path, payload);
+  }, (e) => { throw e; });
+  if (r?.ok === false && 'error' in r) return r;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
   await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
@@ -244,7 +262,7 @@ const subscribe = (l) => {
   return () => listeners.delete(l);
 };
 
-export const useDb = () => useSyncExternalStore(subscribe, getDb);
+export const useDb = () => useSyncExternalStore(subscribe, getDb, getDb);
 
 // The store holds the loaded database; hot-swapping this module would drop it, so reload the page instead.
 if (import.meta.hot) import.meta.hot.decline();
