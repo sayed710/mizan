@@ -275,6 +275,23 @@ export function remapDiff(d, remapped) {
  * have picked ids that the earlier remap now uses for other records; those move out of the way first, so a
  * reference to the earlier record and the queued record's own id never end up as the same number.
  */
+/** One simultaneous identity map for every queued snapshot, reserving all later creates before moving collisions. */
+export function queuedRemap(diffs, remapped) {
+  const map = Object.fromEntries(Object.entries(remapped ?? {}).map(([model, ids]) => [model, { ...ids }]));
+  const created = new Map();
+  for (const d of diffs) for (const [model, ids] of Object.entries(d.created ?? {})) {
+    const all = created.get(model) ?? new Set();
+    for (const id of ids) all.add(id);
+    created.set(model, all);
+  }
+  for (const [model, ids] of created) {
+    const taken = new Set(Object.values(remapped?.[model] ?? {}));
+    let free = Math.max(0, ...taken, ...ids);
+    for (const id of ids) if (taken.has(id)) (map[model] ??= {})[id] = ++free;
+  }
+  return map;
+}
+
 export function rebaseDiff(d, remapped) {
   if (!d || !Object.keys(remapped ?? {}).length) return d;
   const map = Object.fromEntries(Object.entries(remapped).map(([model, m]) => [model, { ...m }]));
@@ -325,7 +342,15 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       sent.add(raw?.id);
       if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
-      const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
+      const prior = current.get(raw.id);
+      // Issued legal numbers belong to the server, even when an old client explicitly resubmits its provisional one.
+      const issued = SEQUENCED.includes(model) && sequencedName(model, prior?.name);
+      const provisional = sequencedName(model, raw.name);
+      const submitted = issued && provisional?.[1] === issued[1] && raw.name !== prior.name ? {
+        ...raw, name: prior.name,
+        ...(Array.isArray(raw.line_ids) ? { line_ids: raw.line_ids.map((l) => l?.name === raw.name ? { ...l, name: prior.name } : l) } : {}),
+      } : raw;
+      const rec = cleanRecord(model, merge(model, prior, submitted, d.bases?.[model]?.[raw.id]));
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
       const old = current.get(rec.id);

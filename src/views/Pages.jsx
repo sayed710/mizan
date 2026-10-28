@@ -4,7 +4,7 @@ import { models, today } from '../models/index.js';
 import { postNote, read, search } from '../orm.js';
 import { countProduct } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
-import { commit, currentCompany, getDb, isServer, serverAction, useDb } from '../store.js';
+import { commit, currentCompany, getDb, isServer, reloadDb, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
@@ -19,9 +19,13 @@ export function Barcode() {
   const [counted, setCounted] = useState(0);
   const [message, setMessage] = useState(null);
   const input = useRef(null);
+  const inFlight = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const product = productId && read(db, 'product', productId);
 
   const scan = () => {
+    if (inFlight.current || refreshFailed) return;
     const q = code.trim().toLowerCase();
     if (!q) return;
     const found = search(db, 'product').find((p) => p.barcode?.toLowerCase() === q || p.default_code?.toLowerCase() === q)
@@ -33,17 +37,25 @@ export function Barcode() {
     setMessage(null);
   };
   const apply = async () => {
+    if (inFlight.current || refreshFailed) return;
+    inFlight.current = true;
+    setPending(true);
     const count = { productId: product.id, counted, observed: product.qty_available, company: currentCompany(db)?.id };
     try {
       // A count is a valued adjustment (layer + journal entry). On a server it runs there, on the current stock and
       // company, so a Barcode-only user needs no accounting access and two counters cannot overwrite each other.
-      if (isServer()) await serverAction('/api/barcode/count', count);
-      else commit(countProduct(getDb(), count));
-      setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
+      let refreshError;
+      if (isServer()) {
+        const result = await serverAction('/api/barcode/count', count);
+        if (result?.ok === false) throw new Error(result.error);
+        refreshError = result?.refreshError;
+      } else await commit(countProduct(getDb(), count));
+      setRefreshFailed(!!refreshError);
+      setMessage(`${t('Stock of {name} set to {qty}', { name: product.name, qty: counted })}${refreshError ? ` — ${t('Saved, but refresh failed. Reload before continuing.')}` : ''}`);
       setProductId(null);
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
-    }
+    } finally { inFlight.current = false; setPending(false); }
     input.current?.focus();
   };
 
@@ -52,19 +64,24 @@ export function Barcode() {
       <section className="sheet barcode-card">
         <div className="barcode-icon" aria-hidden="true">▮▯▮▮▯▮▯▮</div>
         <h1>{t('Scan a product')}</h1>
-        <input ref={input} autoFocus value={code} placeholder={t('Barcode or reference, then Enter')} aria-label={t('Barcode')}
+        <input ref={input} disabled={pending || refreshFailed} autoFocus value={code} placeholder={t('Barcode or reference, then Enter')} aria-label={t('Barcode')}
           onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') scan(); }} />
         {message && <p role="status" className="muted">{message}</p>}
+        {refreshFailed && <button type="button" className="btn" disabled={pending} onClick={async () => {
+          setPending(true);
+          try { await reloadDb(); setRefreshFailed(false); setMessage(null); } catch (e) { setMessage(e.message); }
+          finally { setPending(false); input.current?.focus(); }
+        }}>{t('Reload')}</button>}
         {product && (
           <div className="barcode-product">
             <h2>{product.name}</h2>
             <p className="muted">{product.default_code} · {t('On Hand')}: <b>{product.qty_available}</b></p>
             <div className="row barcode-count">
-              <button type="button" className="round" aria-label="−" onClick={() => setCounted((c) => Math.max(0, c - 1))}>−</button>
-              <input type="number" min="0" aria-label={t('Counted Quantity')} value={counted} onChange={(e) => setCounted(Math.max(0, Number(e.target.value) || 0))} />
-              <button type="button" className="round" aria-label="+" onClick={() => setCounted((c) => c + 1)}>+</button>
+              <button type="button" className="round" disabled={pending} aria-label="−" onClick={() => setCounted((c) => Math.max(0, c - 1))}>−</button>
+              <input type="number" disabled={pending} min="0" aria-label={t('Counted Quantity')} value={counted} onChange={(e) => setCounted(Math.max(0, Number(e.target.value) || 0))} />
+              <button type="button" className="round" disabled={pending} aria-label="+" onClick={() => setCounted((c) => c + 1)}>+</button>
             </div>
-            <button type="button" className="btn primary" onClick={apply}>{t('Apply Count')}</button>
+            <button type="button" className="btn primary" disabled={pending} onClick={apply}>{t('Apply Count')}</button>
           </div>
         )}
       </section>

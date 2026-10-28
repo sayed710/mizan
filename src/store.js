@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
+import { diffDb, isEmptyDiff, queuedRemap, remapDiff } from './sync.js';
 import { createQueue } from './queue.js';
 import { migrate } from './migrations.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
@@ -123,6 +123,7 @@ export const isServer = () => mode === 'server';
 
 /** Id reassignments from the server, in arrival order. */
 const remaps = [];
+const pending = new Set();
 
 /**
  * Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local).
@@ -134,7 +135,7 @@ export function commit(next, { quiet = false } = {}) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
-  const known = remaps.length;
+  const job = { diff };
   db = next;
   notify();
   if (mode === 'local') {
@@ -151,17 +152,21 @@ export function commit(next, { quiet = false } = {}) {
     if (!quiet) alert(`${error} ${t('Showing the last saved data; please redo any edits made since.')}`);
     return { ok: false, error };
   };
+  pending.add(job);
   return enqueue(async () => {
-    if (isEmptyDiff(diff)) return { ok: true };
+    pending.delete(job);
+    if (isEmptyDiff(job.diff)) return { ok: true };
     if (gen !== generation) return { ok: false, error: t('Could not save changes') }; // built on top of a failed save
-    const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
+    const r = await api('/api/diff', job.diff);
     dbTag = null;
     if (r.ok) {
       const { remapped, ...saved } = r.data;
       db = confirmed = saved;
       if (remapped) {
-        remaps.push(remapped);
-        window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: remapped }));
+        const identities = queuedRemap([...pending].map((p) => p.diff), remapped);
+        for (const queued of pending) queued.diff = remapDiff(queued.diff, identities);
+        remaps.push(identities);
+        window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: identities }));
       }
       notify();
       return { ok: true };
@@ -199,9 +204,13 @@ export async function serverAction(path, body) {
   if (r?.ok === false && 'error' in r) return r;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
-  await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
-  return r.data;
+  let refreshError = null;
+  await pull().catch((e) => { refreshError = e.message; pollFailed(e); enqueue(pull, pollFailed); });
+  return refreshError ? { ...r.data, refreshError } : r.data;
 }
+
+/** Retry a failed snapshot refresh without repeating the action that already succeeded. */
+export const reloadDb = () => enqueue(pull, (e) => { throw e; });
 
 /** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */
 export async function restoreBackup(backup, confirm) {

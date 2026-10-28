@@ -121,6 +121,20 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
   return { db: booked, id };
 }
 
+/** Durable retry identity is stored with the booking; a changed catalog never reprices an already-paid cart. */
+export function payCart(db, { cart = [], method, payments = null, partner_id = null, request_key = null }) {
+  const normalized = cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) }));
+  const fingerprint = JSON.stringify([normalized, method, payments, partner_id]);
+  if (request_key !== null && (typeof request_key !== 'string' || !/^[\w:-]{8,200}$/.test(request_key))) throw new Error('Invalid payment request key');
+  const prior = request_key && search(db, 'pos.order').find((o) => o.request_key === request_key);
+  if (prior) {
+    if (prior.request_fingerprint !== fingerprint) throw new Error('This request key was already used for a different payment');
+    return { db, id: prior.id };
+  }
+  const out = payOrder(db, { lines: priceLines(db, normalized, partner_id), method, payments, partner_id });
+  return request_key ? { ...out, db: write(out.db, 'pos.order', out.id, { request_key, request_fingerprint: fingerprint }) } : out;
+}
+
 /** Refund a paid order in full (stock comes back, money goes out the way it came in). */
 export function refundOrder(db, order) {
   if (order.state !== 'paid') throw new Error('Only paid orders can be refunded');

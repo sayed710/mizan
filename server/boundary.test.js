@@ -68,6 +68,17 @@ test('state-changing calls without the CSRF header or as a form post are refused
   assert.equal(form.status, 403);
 });
 
+test('browser diffs require the current generation even when its header is absent', async () => {
+  const current = await call('/api/db', { cookie: sales });
+  const headers = { 'Sec-Fetch-Site': 'same-origin' };
+  const missing = await call('/api/diff', { method: 'POST', cookie: sales, body: { upserts: {}, deletes: {} }, headers });
+  assert.equal(missing.status, 409);
+  assert.deepEqual(missing.data.db.records, current.data.records);
+  assert.equal(missing.headers.get('x-mizan-epoch'), current.headers.get('x-mizan-epoch'));
+  const valid = await call('/api/diff', { method: 'POST', cookie: sales, body: { upserts: {}, deletes: {} }, headers: { ...headers, 'X-Mizan-Epoch': current.headers.get('x-mizan-epoch') } });
+  assert.equal(valid.status, 200);
+});
+
 test('barcode counts require inventory entitlement independently of shared product access', async () => {
   const body = { productId: 2, counted: 10, observed: 10, company: 1 };
   assert.equal((await call('/api/barcode/count', { method: 'POST', cookie: sales, body })).status, 403);

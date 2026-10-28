@@ -765,7 +765,7 @@ async function api(req, res, path) {
     try {
       const body = await readJson(req);
       const snapshot = scopeFor(user);
-      const out = runPosting(snapshot, allowedFor(user), path, body);
+      const out = runPosting(snapshot, allowedFor(user), path, body.request_key == null ? body : { ...body, request_key: `${user.id}:${body.request_key}` });
       commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, null)), { actor: user.login });
       return send(res, 200, out.body);
     } catch (e) {
@@ -777,7 +777,8 @@ async function api(req, res, path) {
     let remapped;
     // A browser that last synced before a restore would otherwise replay its queued edits onto the restored data.
     const seen = req.headers['x-mizan-epoch'];
-    if (seen !== undefined && seen !== String(epoch)) return send(res, 409, { error: 'The data was restored by an administrator; your unsaved edits were discarded', db: visibleDb(user) }, stamp());
+    const browser = req.headers['sec-fetch-site'] !== undefined || req.headers.origin !== undefined || /^Mozilla\//.test(req.headers['user-agent'] ?? '');
+    if ((browser || seen !== undefined) && seen !== String(epoch)) return send(res, 409, { error: 'The data was restored by an administrator; your unsaved edits were discarded', db: visibleDb(user) }, stamp());
     try {
       const assigned = assignIds(db, body);
       remapped = assigned.remapped;
@@ -806,7 +807,7 @@ async function api(req, res, path) {
     if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
     try {
       const snapshot = scopeFor(user);
-      const out = runOperation(snapshot, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
+      const out = runOperation(snapshot, op[1], body.request_key == null ? body : { ...body, request_key: `${user.id}:${body.request_key}` }, { allowed: allowedFor(user), direct: menuModelsFor(user) });
       commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, out.allowed)), { actor: user.login });
       return send(res, 200, out.reply);
     } catch (e) {

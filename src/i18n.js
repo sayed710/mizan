@@ -53,7 +53,7 @@ const ar = {
   // form
   'Record not found.': 'السجل غير موجود.', 'Back to': 'العودة إلى', 'Previous record': 'السجل السابق', 'Next record': 'السجل التالي',
   'Log an internal note…': 'سجّل ملاحظة داخلية…', 'Log note': 'تسجيل ملاحظة', 'No messages yet.': 'لا توجد رسائل بعد.',
-  'Excludes {n} documents in a currency with no exchange rate': 'يستثني {n} مستنداً بعملة بلا سعر صرف', 'Add a description…': 'أضف وصفاً…', 'Enter a number': 'أدخل رقماً', 'Add a tag…': 'أضف وسماً…', 'Add a line': 'إضافة بند', 'Select a product…': 'اختر منتجاً…',
+  'Correction of': 'تصحيح لـ', 'Correct Credit Note': 'تصحيح الإشعار الدائن', 'Resume Unsent': 'استئناف الرسائل غير المرسلة', 'Delivery Uncertain': 'التسليم غير مؤكد', 'Attempted At': 'وقت المحاولة', 'Reload': 'إعادة التحميل', 'Saved, but refresh failed. Reload before continuing.': 'تم الحفظ، لكن فشل تحديث البيانات. أعد التحميل قبل المتابعة.', 'includes {n} items without a rate': 'يشمل {n} عناصر بدون سعر صرف', 'Excludes {n} documents in a currency with no exchange rate': 'يستثني {n} مستنداً بعملة بلا سعر صرف', 'Add a description…': 'أضف وصفاً…', 'Enter a number': 'أدخل رقماً', 'Add a tag…': 'أضف وسماً…', 'Add a line': 'إضافة بند', 'Select a product…': 'اختر منتجاً…',
   Subtotal: 'المجموع الفرعي', Archived: 'مؤرشف', 'Could not save': 'تعذّر الحفظ', 'is required': 'مطلوب',
   // buttons
   Won: 'مكسوبة', Lost: 'خاسرة', Restore: 'استعادة', 'Send by Email': 'إرسال بالبريد', Confirm: 'تأكيد', 'Create Invoice': 'إنشاء فاتورة',

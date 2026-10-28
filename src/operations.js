@@ -3,7 +3,7 @@
 import { read } from './orm.js';
 import { promptedAmount } from './models/common.js';
 import { payQuote } from './models/quoteplus.js';
-import { closeSession, payOrder, priceLines, refundOrder } from './models/pos.js';
+import { closeSession, payCart, refundOrder } from './models/pos.js';
 import { payWithMethods, refundBill } from './models/posplus.js';
 
 const record = (db, model, id) => {
@@ -17,10 +17,9 @@ export const OPERATIONS = {
   'sale.prepay': { model: 'sale.order', run: (db, { id, text, amount = text }) => payQuote(db, record(db, 'sale.order', id).id, promptedAmount(amount) ?? Number.NaN) },
   'pos.pay': {
     model: 'pos.order',
-    run: (db, { cart = [], method, partner_id = null }) => {
+    run: (db, { cart = [], method, partner_id = null, request_key = null }) => {
       if (!['cash', 'card'].includes(method)) throw new Error('Unknown payment method');
-      const lines = priceLines(db, cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) })));
-      return payOrder(db, { lines, method, partner_id: Number(partner_id) || null });
+      return payCart(db, { cart, method, partner_id: Number(partner_id) || null, request_key });
     },
   },
   'pos.refund': { model: 'pos.order', run: (db, { id }) => { const out = refundOrder(db, record(db, 'pos.order', id)); return { ...out, go: `#/pos/orders/${out.id}` }; } },

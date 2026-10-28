@@ -88,6 +88,16 @@ test('a later edit after a missed renumbering response already preserves the ser
   assert.equal(read(saved, 'account.move', b.id).ref, 'Changed after missed response');
 });
 
+test('explicit resubmission of a stale provisional name cannot renumber an existing document', () => {
+  const { base, b, alice, bob } = savedPair();
+  const assigned = applyDiff(applyDiff(base, diffDb(base, alice)), diffDb(base, bob));
+  const storedName = read(assigned, 'account.move', b.id).name;
+  const stale = bob.records['account.move'].find((m) => m.id === b.id);
+  const saved = applyDiff(assigned, { upserts: { 'account.move': [{ ...stale, ref: 'Retry with provisional name' }] } });
+  assert.equal(read(saved, 'account.move', b.id).name, storedName);
+  assert.equal(read(saved, 'account.move', b.id).ref, 'Retry with provisional name');
+});
+
 test('server renumbering uses the request author and newly enabled audit setting', () => {
   const { base, a, b, alice, bob } = savedPair();
   const server = applyDiff(base, diffDb(base, alice), { author: 'First' });

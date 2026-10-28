@@ -4,7 +4,7 @@ import { today } from './common.js';
 import { accountId, isBalanced, journalItems, paymentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { lineTaxOf, lineUntaxed, TRANSITION } from './taxes.js';
-import { companySum } from './money.js';
+import { companySum, unratedCount } from './money.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
@@ -329,6 +329,7 @@ export function agedBalance(db, kind = 'receivable', at = today()) {
  */
 export function journalCards(db, at = today()) {
   const moves = search(db, 'account.move');
+  const companyByMove = new Map(moves.map((m) => [m.id, m.company_id]));
   const items = journalItems(db);
   // Draft invoices get their journal on posting, so they count on the default INV/BILL journal meanwhile.
   const draftJournal = (m) => (m.move_type === 'entry' ? null : ['in_invoice', 'in_refund'].includes(m.move_type) ? 'BILL' : 'INV');
@@ -338,13 +339,14 @@ export function journalCards(db, at = today()) {
       const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
         journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
-        unpaidAmount: companySum(db, unpaid, 'amount_residual'), late: unpaid.filter((m) => m.invoice_date_due < at).length,
+        unpaidAmount: companySum(db, unpaid, 'amount_residual', at), unratedCount: unratedCount(db, unpaid, at), late: unpaid.filter((m) => m.invoice_date_due < at).length,
       };
     }
     if (['bank', 'cash'].includes(j.type)) {
-      const balance = round(items.filter((l) => l.account_id === j.default_account_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+      const balances = items.filter((l) => l.account_id === j.default_account_id).map((l) => ({ company_id: companyByMove.get(l.move_id), balance: (Number(l.debit) || 0) - (Number(l.credit) || 0) }));
+      const balance = companySum(db, balances, 'balance', at);
       const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check') : [];
-      return { journal: j, kind: j.type, balance, toReconcile: toCheck.length, toReconcileAmount: round(toCheck.reduce((s, l) => s + (Number(l.amount) || 0), 0)) };
+      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...toCheck], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, toCheck, 'amount', at) };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
   });

@@ -5,6 +5,7 @@ import { t } from '../i18n.js';
 import { display, isNumeric, money } from '../ui.jsx';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
+import { RateNote } from './RateNote.jsx';
 
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
@@ -18,11 +19,11 @@ function sortRecords(db, fields, records, sort) {
   });
 }
 
-// Footer sums are in the company currency: foreign-currency documents are converted at their date.
+// Footer sums use the active company's reporting currency.
 const Totals = ({ db, cols, fields, records }) =>
   cols.map((f) => (
     <td key={f} className="num" title={fields[f].type === 'monetary' && unratedCount(db, records) ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedCount(db, records) }) : undefined}>
-      {fields[f].type === 'monetary' ? <>{money(companySum(db, records, f))}{unratedCount(db, records) ? ' *' : ''}</> : ''}
+      {fields[f].type === 'monetary' ? <>{money(companySum(db, records, f))} <RateNote count={unratedCount(db, records)} /></> : ''}
     </td>
   ));
 

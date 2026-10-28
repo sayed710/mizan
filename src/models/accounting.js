@@ -33,6 +33,13 @@ const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatM
  * entries that pay it stay posted, so the books and the payment status cannot drift apart.
  */
 export function paymentGuard(db, before, after) {
+  if (after.correction_of_id && after.state !== 'cancel') {
+    const note = read(db, 'account.move', after.correction_of_id);
+    if (!note || note.state !== 'posted' || !isRefund(note) || after.move_type !== (note.move_type === 'out_refund' ? 'out_invoice' : 'in_invoice')
+      || after.partner_id !== note.partner_id || after.company_id !== note.company_id || (after.currency_id ?? null) !== (note.currency_id ?? null)) return 'A correction must match its posted credit note';
+    if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.correction_of_id === note.id && m.state !== 'cancel')) return 'This credit note already has a correction';
+    if (after.state === 'posted' && round2(total(after)) !== round2(total(note))) return 'A correction must restore the full credit note amount';
+  }
   if (after.state === 'posted' && isInvoice(after) && !(total(after) > 0)) return 'The total must be positive; use a credit note or refund instead';
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
@@ -137,7 +144,14 @@ function offsetCreditNote(db, noteId) {
   let next = settle(settle(db, invoice, note), note, invoice);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
-  const gap = round2(toCompany(db, invoice.currency_id, value, invoice.invoice_date ?? date) - toCompany(db, note.currency_id, value, date));
+  const bookedPortion = (r) => {
+    const account = accountId(db, isPurchase(r) ? '211000' : '121000');
+    const booked = Math.abs((r.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === r.partner_id)
+      .reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0));
+    const paid = Number(r.amount_paid) || 0;
+    return round2(booked * (paid + value) / total(r)) - round2(booked * paid / total(r));
+  };
+  const gap = round2(bookedPortion(invoice) - bookedPortion(note));
   if (gap) {
     const account = sale ? '121000' : '211000';
     const amount = Math.abs(gap);
@@ -273,6 +287,20 @@ export function creditNote(db, r) {
     invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null, fiscal_position_id: r.fiscal_position_id ?? null,
   });
   return { db: next, go: `#/accounting/${purchase ? 'refunds' : 'credit-notes'}/${id}` };
+}
+
+/** Correct an issued credit with a fresh debit invoice; never reopen or erase its historical settlement. */
+export function correctCreditNote(db, note) {
+  if (note.state !== 'posted' || !isRefund(note)) throw new Error('Only posted credit notes can be corrected');
+  if ((db.records['account.move'] ?? []).some((m) => m.correction_of_id === note.id && m.state !== 'cancel')) throw new Error('This credit note already has a correction');
+  const purchase = isPurchase(note);
+  const out = create(db, 'account.move', {
+    move_type: purchase ? 'in_invoice' : 'out_invoice', correction_of_id: note.id, company_id: note.company_id,
+    partner_id: note.partner_id, currency_id: note.currency_id ?? null, fiscal_position_id: note.fiscal_position_id ?? null,
+    invoice_origin: note.name, ref: `Correction of ${note.name}`, invoice_date: today(), invoice_date_due: today(),
+    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, ...line }) => ({ ...line })),
+  });
+  return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
 }
 
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
@@ -433,6 +461,7 @@ export const accountingModels = {
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
       revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
       reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
+      correction_of_id: { type: 'many2one', relation: 'account.move', label: 'Correction of', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
@@ -464,6 +493,7 @@ export const accountingModels = {
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
         { label: 'Credit Note', when: (r) => r.state === 'posted' && ['out_invoice', 'in_invoice'].includes(r.move_type), run: creditNote },
+        { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(removeAnalytic(write(db, 'account.move', r.id, { state: 'cancel' }), r.id), r) }) },

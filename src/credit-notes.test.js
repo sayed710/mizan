@@ -4,6 +4,7 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { creditNote, payMove, postMove } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';
+import { models } from './models/index.js';
 
 function postedInvoice(price = 100) {
   const inv = create(seed(), 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: price, tax: 0 }] });
@@ -24,6 +25,34 @@ test('a posted credit note settles its invoice (ACC-007)', () => {
   // The server keeps the link and the settlement.
   const synced = applyDiff(out.db, diffDb(out.db, posted));
   assert.equal(move(synced, id).amount_paid, 100);
+});
+
+test('settled customer and vendor credit notes can be corrected by a linked replacement invoice without rewriting issued books', () => {
+  for (const kind of ['out_invoice', 'in_invoice']) {
+    const created = create(seed(), 'account.move', { move_type: kind, partner_id: 2, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+    const posted = postMove(created.db, created.id);
+    const draftNote = creditNote(posted, move(posted, created.id));
+    const settled = postMove(draftNote.db, noteId(draftNote));
+    const note = move(settled, noteId(draftNote));
+    const before = JSON.stringify(settled.records['account.move']);
+    const action = models['account.move'].form.buttons.find((b) => b.label === 'Correct Credit Note');
+    assert.ok(action, 'a posted credit note must have a correction workflow');
+    assert.equal(action.when(note, settled), true);
+    const correction = action.run(settled, note);
+    const replacementId = noteId(correction);
+    const replacement = move(correction.db, replacementId);
+    assert.equal(replacement.move_type, kind);
+    assert.equal(replacement.correction_of_id, note.id);
+    assert.equal(replacement.amount_residual, 100);
+    assert.equal(JSON.stringify(settled.records['account.move']), before, 'the issued invoice and credit remain immutable');
+    assert.throws(() => action.run(correction.db, note), /already.*correction/i);
+    const booked = postMove(correction.db, replacementId);
+    const synced = applyDiff(settled, diffDb(settled, booked), { isAdmin: true });
+    assert.equal(move(synced, replacementId).state, 'posted');
+    assert.equal(move(synced, replacementId).amount_residual, 100);
+    assert.equal(move(synced, created.id).amount_residual, 0);
+    assert.equal(move(synced, note.id).amount_residual, 0);
+  }
 });
 
 test('credit notes of one invoice cannot exceed it in total', () => {
@@ -76,6 +105,22 @@ test('a foreign-currency credit note at another rate clears the receivable with 
   const posted = postMove(dated, noteId(out));
   assert.equal(move(posted, inv.id).payment_state, 'paid');
   assert.equal(receivable(posted, 2), 0, `receivable should clear, was ${before}`);
+});
+
+test('credit settlement clears actual separately-rounded historical counterpart lines', () => {
+  const fx = create(seed(), 'res.currency', { name: 'FRA', rate_ids: [{ date: '2020-01-01', rate: 0.6 }] });
+  const inv = create(fx.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, currency_id: fx.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 0.01, tax: 0 }, { qty: 1, price_unit: 0.01, tax: 0 }] });
+  const posted = postMove(inv.db, inv.id);
+  const legacy = { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((m) => m.id !== inv.id ? m : { ...m, line_ids: [
+    { account_id: accountId(posted, '121000'), partner_id: 2, debit: 0.02, credit: 0 },
+    { account_id: accountId(posted, '121000'), partner_id: 2, debit: 0.02, credit: 0 },
+    { account_id: accountId(posted, '400000'), partner_id: 2, debit: 0, credit: 0.04 },
+  ] }) } };
+  const drafted = creditNote(legacy, move(legacy, inv.id));
+  const settled = postMove(drafted.db, noteId(drafted));
+  assert.equal(receivable(settled, 2), 0);
+  assert.equal(move(settled, inv.id).amount_residual, 0);
+  assert.equal(move(applyDiff(drafted.db, diffDb(drafted.db, settled)), inv.id).amount_residual, 0);
 });
 
 test('a credit note must match the invoice partner, currency and kind, and be positive', () => {
