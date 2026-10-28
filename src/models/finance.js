@@ -37,7 +37,11 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
+const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && l.move_id === id);
+
 export function moveGuard(db, before, after) {
+  if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   const lock = [before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)).sort().at(-1);
   if (!lock) return null;
@@ -49,6 +53,7 @@ export function moveGuard(db, before, after) {
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move) {
+  if (bookedByBank(db, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = lockDateFor(db.settings, move);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';

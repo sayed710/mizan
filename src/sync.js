@@ -49,7 +49,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   };
   installCustomFields(db.settings?.customFields);
   let records = { ...db.records };
-  for (const [model, recs] of Object.entries(d.upserts ?? {})) {
+  // Models that point at other records (guardLast) are validated after those records of the same change set.
+  const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
+  for (const [model, recs] of upserts) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);

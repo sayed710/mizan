@@ -64,23 +64,24 @@ function bookToAccount(db, line) {
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id }) };
 }
 
-/** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, link). */
+/** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
 function lineGuard(db, before, after) {
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_ref'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (after.state !== 'reconciled') return null;
   if (!after.move_id) return 'A bank transaction can only be reconciled against a posted journal entry';
-  // An entry posted in the same change set may not be visible yet on the server; dangling ids are refused by the reference check.
+  // The server validates bank lines after the entries of the same change set (guardLast), so a new entry is visible here.
   const move = read(db, 'account.move', after.move_id);
-  return !move || move.state === 'posted' ? null : 'A bank transaction can only be reconciled against a posted journal entry';
+  return move?.state === 'posted' ? null : 'A bank transaction can only be reconciled against a posted journal entry';
 }
 
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
     guard: lineGuard,
+    guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
     fields: {

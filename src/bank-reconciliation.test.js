@@ -82,3 +82,26 @@ test('server mode: the booked entry and the reconciled line are accepted in one 
   const out = applyDiff(db0, reordered, { author: 'Admin' });
   assert.equal(out.records[LINE].find((l) => l.id === rent.id).state, 'reconciled');
 });
+
+test('a bank line cannot cite an entry that does not exist, locally or on the server', async () => {
+  const { applyDiff, diffDb } = await import('./sync.js');
+  const db0 = seed();
+  const line = search(db0, LINE)[0];
+  assert.throws(() => write(db0, LINE, line.id, { state: 'reconciled', move_id: 987654 }), /posted journal entry/);
+  const forged = { ...db0, records: { ...db0.records, [LINE]: db0.records[LINE].map((l) => (l.id === line.id ? { ...l, state: 'reconciled', move_id: 987654 } : l)) } };
+  assert.throws(() => applyDiff(db0, diffDb(db0, forged), { author: 'Clerk' }), /posted journal entry/);
+});
+
+test('an entry matched with a reconciled bank line cannot be reset, cancelled or deleted, nor can the label drift', async () => {
+  const { applyDiff, diffDb } = await import('./sync.js');
+  const db0 = seed();
+  const rent = search(db0, LINE).find((l) => l.payment_ref.includes('rent'));
+  const db = run(db0, rent.id, 'Book to Account');
+  const booked = read(db, LINE, rent.id).move_id;
+  assert.throws(() => write(db, 'account.move', booked, { state: 'draft' }), /has to stay posted/);
+  assert.throws(() => write(db, 'account.move', booked, { state: 'cancel' }), /has to stay posted/);
+  assert.throws(() => applyDiff(db, { upserts: {}, deletes: { 'account.move': [booked] } }, { author: 'Clerk' }), /cannot be deleted/);
+  const reset = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => (m.id === booked ? { ...m, state: 'draft' } : m)) } };
+  assert.throws(() => applyDiff(db, diffDb(db, reset), { author: 'Clerk' }), /has to stay posted/);
+  assert.throws(() => write(db, LINE, rent.id, { payment_ref: 'something else' }), /cannot be changed/);
+});
