@@ -27,6 +27,7 @@ export function openBlobs(sql) {
 
   /** `db` with every inline file moved to the blobs table; records without inline data are kept as they are. */
   const externalize = (db) => {
+    if (!db) return db; // empty database before the first save
     let records = db.records;
     for (const [model, keys] of binaryFields()) {
       const list = records[model] ?? [];

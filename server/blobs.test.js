@@ -34,3 +34,7 @@ test('stored files validate as references and only raster images reach the websi
   assert.equal(safeImage({ ...ref, type: 'text/html' }), null);
   assert.equal(safeImage({ data: PNG }), PNG);
 });
+
+test('an empty database (fresh install) passes through', () => {
+  assert.equal(openBlobs(new DatabaseSync(':memory:')).externalize(null), null);
+});
