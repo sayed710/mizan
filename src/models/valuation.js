@@ -1,5 +1,5 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
-import { create, read, search, write } from '../orm.js';
+import { create, postNote, read, search, setActiveCompany, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
@@ -243,6 +243,22 @@ export function adjustQuantity(db, productId, newQty, { date = today(), referenc
     line_ids: count.line_ids.map((l) => ({ ...l, counted_qty: Number(newQty) })),
   });
   return applyCount(counted, started.id);
+}
+
+/**
+ * A scanner count of one product: refuses when the stock moved since `observed` was read, and books the count,
+ * valuation layer and journal entry under `company` (the one the counter works in), not the default company.
+ */
+export function countProduct(db, { productId, counted, observed, company }) {
+  const p = product(db, productId);
+  if (observed != null && Number(observed) !== p.qty_available) throw new Error(`Stock of ${p.name} changed to ${p.qty_available} since you started counting; scan it again`);
+  const before = p.qty_available;
+  setActiveCompany(company);
+  try {
+    return postNote(adjustQuantity(db, productId, counted), 'product', productId, `Inventory adjustment: ${before} → ${counted}`);
+  } finally {
+    setActiveCompany(null);
+  }
 }
 
 export function applyCount(db, countId) {

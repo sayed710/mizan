@@ -1,9 +1,10 @@
 // Barcode scanning, Shop Floor and the cross-app Overview dashboard.
 import { useRef, useState } from 'react';
 import { models, today } from '../models/index.js';
-import { postNote, read, search, write } from '../orm.js';
+import { postNote, read, search } from '../orm.js';
+import { countProduct } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, currentCompany, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
@@ -31,12 +32,18 @@ export function Barcode() {
     else { setProductId(found.id); setCounted(1); }
     setMessage(null);
   };
-  const apply = () => {
-    const before = product.qty_available;
-    const next = write(getDb(), 'product', product.id, { qty_available: counted });
-    commit(postNote(next, 'product', product.id, `Inventory adjustment: ${before} → ${counted}`));
-    setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
-    setProductId(null);
+  const apply = async () => {
+    const count = { productId: product.id, counted, observed: product.qty_available, company: currentCompany(db)?.id };
+    try {
+      // A count is a valued adjustment (layer + journal entry). On a server it runs there, on the current stock and
+      // company, so a Barcode-only user needs no accounting access and two counters cannot overwrite each other.
+      if (isServer()) await serverAction('/api/barcode/count', count);
+      else commit(countProduct(getDb(), count));
+      setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
+      setProductId(null);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    }
     input.current?.focus();
   };
 

@@ -30,6 +30,7 @@ import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE 
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { read, search } from '../src/orm.js';
+import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
 
 const ENV = process.env;
@@ -43,6 +44,7 @@ const ACTIONS = {
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b, _u, _store, view) => quoteShipping(ENV, view, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
+  '/api/barcode/count': { model: () => 'product', extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => ({ db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company: b.company }) }) },
 };
 
 const SMTP = smtpConfig();
@@ -593,7 +595,7 @@ async function api(req, res, path) {
       const out = await action.run(body, user, storeFor(writeOptions(user, storeAllowed), user.login, () => scopeFor(user)), snapshot);
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       sameEpoch(at);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)), { actor: user.login });
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, storeAllowed)), { actor: user.login });
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
