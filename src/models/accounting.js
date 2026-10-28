@@ -401,6 +401,7 @@ export const accountingModels = {
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
+      subscription_period: { type: 'date', label: 'Subscription Period', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
       invoice_line_ids: invoiceLineField,
       payments: {

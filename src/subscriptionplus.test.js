@@ -5,6 +5,7 @@ import { seed } from './seed.js';
 import { isBalanced } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
 import { autoClose, invoiceDue, kpis, mrr, nextDate, renew, subscriptionJobs, subscriptionPlusModels, upsell } from './models/subscriptionplus.js';
+import { addDays, today } from './models/common.js';
 
 const model = 'sale.subscription';
 const baseDb = () => {
@@ -32,13 +33,15 @@ test('invoiceDue catches up two months, posts linked balanced invoices, stays im
   const snapshot = structuredClone(db);
   const billed = invoiceDue(db, '2024-03-15');
   assert.deepEqual(db, snapshot);
-  assert.deepEqual(invoices(billed, id).map((r) => r.invoice_date), ['2024-02-01', '2024-03-01']);
+  // Late periods are issued on the run date, not back-dated; each invoice still names its period.
+  assert.deepEqual(invoices(billed, id).map((r) => [r.subscription_period, r.invoice_date]), [['2024-02-01', '2024-03-15'], ['2024-03-01', '2024-03-15']]);
   assert.ok(invoices(billed, id).every((r) => r.state === 'posted' && isBalanced(r.line_ids)));
   const sub = read(billed, model, id);
   assert.equal(sub.next_invoice_date, '2024-04-01');
-  assert.equal(sub.last_invoice_date, '2024-03-01');
+  assert.equal(sub.last_invoice_date, '2024-03-15');
   assert.deepEqual(sub.invoice_ids.map((r) => r.invoice_id), invoices(billed, id).map((r) => r.id));
-  assert.equal(sub.health, 'bad');
+  // Just issued, so not overdue yet.
+  assert.equal(sub.health, 'normal');
   assert.strictEqual(invoiceDue(billed, '2024-03-15'), billed);
   assert.equal(invoices(invoiceDue(write(billed, model, id, { stage: 'paused' }), '2025-01-01'), id).length, 2);
 });
@@ -47,7 +50,7 @@ test('invoiceDue respects custom plans and the exclusive end date; automatic pay
   const plan = create(baseDb(), 'sale.subscription.plan', { name: 'Two weeks', interval: 2, unit: 'week' });
   const { db, id } = addSub(plan.db, { plan_id: plan.id, payment_token: true, end_date: '2024-01-29' });
   const billed = invoiceDue(db, '2024-03-01');
-  assert.deepEqual(invoices(billed, id).map((r) => r.invoice_date), ['2024-01-01', '2024-01-15']);
+  assert.deepEqual(invoices(billed, id).map((r) => r.subscription_period), ['2024-01-01', '2024-01-15']);
   // FLOW-012: no payment provider charges the customer, so the invoices stay due, with a note to collect them.
   assert.ok(invoices(billed, id).every((r) => r.amount_residual > 0 && r.payment_state === 'not_paid'));
   assert.equal(search(billed, 'account.payment').length, search(db, 'account.payment').length);
@@ -65,8 +68,9 @@ test('autoClose uses the oldest unpaid posted invoice, strict grace threshold an
   const b = addSub(a.db, { plan_id: plan.id });
   const billed = invoiceDue(b.db, '2024-01-01');
   const paid = payMove(billed, invoices(billed, b.id)[0].id, 114, '2024-01-05');
-  assert.equal(read(autoClose(paid, '2024-01-21'), model, a.id).stage, 'progress');
-  const closed = autoClose(paid, '2024-01-22');
+  // Grace days count from the due date (2024-01-16), not the invoice date.
+  assert.equal(read(autoClose(paid, '2024-02-05'), model, a.id).stage, 'progress');
+  const closed = autoClose(paid, '2024-02-06');
   assert.equal(read(closed, model, a.id).stage, 'closed');
   assert.equal(read(closed, model, a.id).close_reason, 'unpaid');
   assert.equal(read(closed, model, a.id).health, 'done');
@@ -161,10 +165,11 @@ test('plan onchange normalizes MRR and close/reopen actions preserve reason prom
     assert.equal(read(closed, model, sub.id).close_reason, 'price');
     assert.ok(read(closed, model, sub.id).closed_date);
     const reopen = subscriptionPlusModels[model].form.buttons.find((b) => b.label === 'Reopen');
-    const reopened = write(closed, model, sub.id, reopen.vals);
+    const reopened = reopen.run(closed, read(closed, model, sub.id)).db;
     assert.equal(read(reopened, model, sub.id).stage, 'progress');
     assert.equal(read(reopened, model, sub.id).close_reason, null);
     assert.equal(read(reopened, model, sub.id).closed_date, null);
+    assert.ok(read(reopened, model, sub.id).next_invoice_date >= today());
   } finally {
     if (prompt === undefined) delete globalThis.prompt;
     else globalThis.prompt = prompt;
@@ -179,7 +184,17 @@ test('subscriptionJobs composes billing and closure; the seed and original model
   for (const label of ['Start', 'Generate Invoice', 'Pause', 'Resume', 'Close', 'Upsell', 'Renew', 'Reopen']) assert.ok(subscriptionPlusModels[model].form.buttons.some((b) => b.label === label));
   assert.equal(subscriptionPlusModels[model].kanban.badge, 'health');
   const sub = addSub(baseDb());
+  // The catch-up run bills without closing the customer in the same breath.
   const result = subscriptionJobs(sub.db, '2024-01-22');
   assert.equal(invoices(result, sub.id).length, 1);
-  assert.equal(read(result, model, sub.id).close_reason, 'unpaid');
+  assert.equal(read(result, model, sub.id).stage, 'progress');
+  assert.equal(read(subscriptionJobs(result, '2024-02-22'), model, sub.id).close_reason, 'unpaid');
+});
+
+test('reopening a closed subscription bills from the reopen date, not the months it was closed', () => {
+  const sub = addSub(baseDb(), { next_invoice_date: addDays(today(), -120), stage: 'closed', close_reason: 'unpaid', closed_date: addDays(today(), -120) });
+  const reopen = subscriptionPlusModels[model].form.buttons.find((b) => b.label === 'Reopen');
+  const reopened = reopen.run(sub.db, read(sub.db, model, sub.id)).db;
+  const billed = invoiceDue(reopened, today());
+  assert.deepEqual(invoices(billed, sub.id).map((r) => r.subscription_period), [today()]);
 });

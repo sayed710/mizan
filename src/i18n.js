@@ -780,6 +780,7 @@ const ar = {
   'Order Line': 'بند الطلب',
   'Analytic Distribution': 'التوزيع التحليلي',
   'Amount in Currency': 'المبلغ بالعملة',
+  'Subscription Period': 'فترة الاشتراك',
   'Reversal of': 'عكس القيد',
   'Reversed': 'معكوس',
   'Reverse': 'عكس',
