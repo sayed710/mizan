@@ -1,6 +1,6 @@
 import { balanceSheet, profitAndLoss } from '../models/ledger.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const iso = (date) => date.toISOString().slice(0, 10);
 

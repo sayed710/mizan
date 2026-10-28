@@ -3,6 +3,7 @@ import { create, read, search } from '../orm.js';
 import { nextName, subtotal, today } from './common.js';
 import { rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
+import { round } from '../money.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -36,7 +37,6 @@ export const JOURNALS = [
 export const accountId = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code)?.id ?? null;
 export const journalId = (db, code) => (db.records['account.journal'] ?? []).find((j) => j.code === code)?.id ?? null;
 
-const round = (n) => Math.round(n * 100) / 100;
 export const isBalanced = (lines = []) =>
   lines.length >= 2 && round(lines.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0)) === 0;
 

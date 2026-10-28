@@ -4,8 +4,8 @@ import { amounts } from './common.js';
 import { moreModels } from './more.js';
 import { openSession, payOrder, refundOrder } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const baseOrder = moreModels['pos.order'];
 const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
 const discountsOf = (lines) => round(lines.filter((l) => !l.payment_rounding && !l.is_tip).reduce((s, l) => s + (l.price_unit < 0 ? -amounts([l]).total : amounts([{ ...l, discount: 0 }]).total - amounts([l]).total), 0));

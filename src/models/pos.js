@@ -4,8 +4,8 @@ import { amounts, nextName, today } from './common.js';
 import { deliver, moveValued } from './valuation.js';
 import { postEntry } from './ledger.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const CASH = '101501';
 const BANK = '101401';
 

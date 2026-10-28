@@ -1,8 +1,8 @@
 import { create, read, search, write } from '../orm.js';
 import { postEntry } from './ledger.js';
+import { round } from '../money.js';
 
 const periods = { hour: 1, day: 24, week: 168, month: 720 };
-const round = (n) => Math.round(n * 100) / 100;
 const timestamp = (value) => {
   const time = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
   if (!Number.isFinite(time)) throw new Error('Enter a valid pickup and return date');

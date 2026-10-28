@@ -1,11 +1,11 @@
 // Time off allocations (regular and accrual) and the balance check on requests.
 import { search, write } from '../orm.js';
 import { today } from './common.js';
+import { round } from '../money.js';
 
 const LEAVE_TYPES = [['paid', 'Paid Time Off'], ['sick', 'Sick Time Off'], ['unpaid', 'Unpaid'], ['comp', 'Compensatory Days']];
 export const REQUIRES_ALLOCATION = new Set(['paid', 'comp']);
 
-const round = (n) => Math.round(n * 100) / 100;
 const days = (from, to) => (from && to ? Math.max(0, Math.round((new Date(to) - new Date(from)) / 864e5) + 1) : 0);
 
 /** Completed months from `from` to `to` (a month completes on the same day of month). */

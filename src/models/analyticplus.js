@@ -4,8 +4,8 @@ import { subtotal, today } from './common.js';
 import { financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { mapAccount } from './taxes.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100 || 0;
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];

@@ -3,8 +3,8 @@ import { postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 // Which open documents a payment settles, by direction and partner side.
 const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
 

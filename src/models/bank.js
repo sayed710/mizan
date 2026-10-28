@@ -5,12 +5,12 @@ import { postEntry } from './ledger.js';
 import { payMove } from './accounting.js';
 import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
+import { round } from '../money.js';
 
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
   ?? search(db, 'account.reconcile.model').filter((m) => m.active !== false && m.rule_type === 'writeoff_button' && ruleMatches(m, line)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))[0] ?? null;
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /** Open posted invoices (money in) or bills (money out) whose amount due equals the line amount; same partner first. */
 export function candidates(db, line) {

@@ -1,9 +1,9 @@
 // Stations, planned visits, badge check-in, refreshments and evacuation reporting.
 import { create, postNote, read, search, write } from '../orm.js';
 import { apps2Models } from './apps2.js';
+import { round } from '../money.js';
 
 const MODEL = 'frontdesk.visitor';
-const round = (n) => Math.round(n * 100) / 100;
 const filled = (v) => v != null && String(v).trim() !== '';
 const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 

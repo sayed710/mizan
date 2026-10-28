@@ -5,9 +5,9 @@ import { accountId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
+import { round } from '../money.js';
 
 const number = (n) => Number(n) || 0;
-const round = (n) => Math.round(n * 100) / 100;
 const method = (p) => p?.purchase_method ?? (p?.type === 'service' ? 'purchase' : 'receive');
 const quantities = (l, policy) => {
   const ordered = number(l.qty), received = number(l.qty_delivered), billed = number(l.qty_invoiced);

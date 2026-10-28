@@ -1,8 +1,8 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
 import { read } from '../orm.js';
 import { today } from './common.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /** Units of `currencyId` per 1 company-currency unit on `date` (latest rate on or before it; 1 for the company currency). */
 export function rateAt(db, currencyId, date = today()) {

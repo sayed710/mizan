@@ -3,8 +3,8 @@ import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { capitalizeStock } from './valuation.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /**
  * On sale confirmation, apply each product's route:

@@ -1,8 +1,8 @@
 // Delivery methods, lots & serial numbers, phone calls, IoT devices.
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /** Total weight (kg) of an order's lines. */
 export const orderWeight = (db, lines = []) => round(lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(read(db, 'product', l.product_id)?.weight) || 0), 0));

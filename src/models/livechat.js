@@ -2,6 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { t } from '../i18n.js';
+import { round } from '../money.js';
 
 export const MAX_MESSAGE = 2000;
 /** Messages kept per conversation; a longer one must be continued in a new conversation. */
@@ -11,7 +12,6 @@ const AUTHORS = [['visitor', 'Visitor'], ['operator', 'Operator'], ['bot', 'Bot'
 const RULE_ACTIONS = [['display_button', 'Show'], ['auto_popup', 'Open automatically'], ['hide_button', 'Hide']];
 const STEP_TYPES = [['text', 'Text'], ['question', 'Question'], ['forward_operator', 'Forward to Operator'], ['end', 'End Conversation']];
 
-const round = (n) => Math.round(n * 100) / 100;
 const list = (s) => String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
 const minutesBetween = (a, b) => (a && b ? Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 60000)) : 0);
 

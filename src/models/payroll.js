@@ -2,8 +2,8 @@
 import { create, read, search, write } from '../orm.js';
 import { pad, today } from './common.js';
 import { postEntry } from './ledger.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /**
  * Default salary structure (rules in order). Categories: basic, allowance, gross (= basic + allowances),

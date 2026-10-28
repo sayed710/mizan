@@ -3,8 +3,8 @@ import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
 
 /** Open receivable (posted, unpaid invoices) of a partner. */

@@ -1,7 +1,7 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
 import { read, search } from '../orm.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 /** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
 export const TRANSITION = { sale: '251100', purchase: '131100' };
 
