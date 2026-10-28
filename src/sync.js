@@ -1,6 +1,6 @@
 // Record-level diff between two db snapshots, applied server-side so concurrent edits
 // to different records don't overwrite each other.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 import { postTracking, referenceTo, validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';

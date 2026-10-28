@@ -1,5 +1,5 @@
 // WhatsApp: message templates reviewed before use, a message log per phone and the 24-hour customer-service window.
-import { models } from './index.js';
+import { models } from '../registry.js';
 import { create, postNote, read, search, write } from '../orm.js';
 import { t } from '../i18n.js';
 

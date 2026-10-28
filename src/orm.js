@@ -1,6 +1,6 @@
 // Pure ORM over a plain db object: { records: {model: [rec]}, seq: {model: n}, messages: [] }.
 // Every function returns a new db; nothing is mutated.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD' } });
 
