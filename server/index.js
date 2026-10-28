@@ -280,8 +280,10 @@ async function api(req, res, path) {
   if (path === '/api/iot/ingest' && req.method === 'POST') {
     if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
     const token = /^Bearer (iot_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
-    const body = await readJson(req);
-    const next = token && ingestIot(db, token, body);
+    if (!token) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
+    const body = await readJson(req).catch(() => null);
+    if (!body) { recordFailure(`iot:${ip}`); return send(res, 400, { error: 'Invalid JSON' }); }
+    const next = ingestIot(db, token, body);
     if (!next) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
     commitDb(applyDiff(db, diffDb(db, next), { author: 'IoT', isAdmin: false }));
     return send(res, 200, { ok: true });

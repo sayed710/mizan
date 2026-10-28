@@ -56,3 +56,13 @@ test('a slow public request does not revert changes committed while its body was
   const after = await (await fetch(`${origin}/api/db`, { headers: { cookie } })).json();
   assert.ok(after.records['res.partner'].some((p) => p.id === id && p.name === 'Saved meanwhile'), 'the contact saved during the slow request must survive');
 });
+
+test('IoT requests without a token or with bad JSON are refused and counted', async () => {
+  const noToken = await fetch(`${origin}/api/iot/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json' });
+  assert.equal(noToken.status, 401);
+  const badJson = await fetch(`${origin}/api/iot/ingest`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer iot_${'x'.repeat(24)}` }, body: '{not json' });
+  assert.equal(badJson.status, 400);
+  let last;
+  for (let i = 0; i < 12; i++) last = await fetch(`${origin}/api/iot/ingest`, { method: 'POST', body: '{not json' });
+  assert.equal(last.status, 429, 'failed attempts must reach the per-client limit');
+});
