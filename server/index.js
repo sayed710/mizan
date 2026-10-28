@@ -272,14 +272,18 @@ async function api(req, res, path) {
     const limitKey = path.endsWith('/vote') ? `vote:${ip}` : `forum:${ip}`;
     if (tooMany(limitKey)) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(limitKey); // counts every post or vote: max 10 per client per 15 minutes
-    const out = forumRoutes[path](db, await readJson(req), ip);
+    const body = await readJson(req);
+    const out = forumRoutes[path](db, body, ip);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
   if (path === '/api/iot/ingest' && req.method === 'POST') {
     if (tooMany(`iot:${ip}`)) return send(res, 429, { error: 'Too many failed attempts' });
     const token = /^Bearer (iot_[\w-]{20,})$/.exec(req.headers.authorization ?? '')?.[1];
-    const next = token && ingestIot(db, token, await readJson(req));
+    if (!token) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
+    const body = await readJson(req).catch(() => null);
+    if (!body) { recordFailure(`iot:${ip}`); return send(res, 400, { error: 'Invalid JSON' }); }
+    const next = ingestIot(db, token, body);
     if (!next) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
     commitDb(applyDiff(db, diffDb(db, next), { author: 'IoT', isAdmin: false }));
     return send(res, 200, { ok: true });
@@ -288,7 +292,8 @@ async function api(req, res, path) {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`apply:${ip}`)) return send(res, 429, { error: 'Too many applications, try again later' });
     recordFailure(`apply:${ip}`);
-    const out = publicApply(db, await readJson(req));
+    const body = await readJson(req);
+    const out = publicApply(db, body);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -298,7 +303,8 @@ async function api(req, res, path) {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`form:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`form:${ip}`);
-    const out = publicForms[path](db, await readJson(req));
+    const body = await readJson(req);
+    const out = publicForms[path](db, body);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -307,7 +313,8 @@ async function api(req, res, path) {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`chat:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`chat:${ip}`);
-    const out = livechatStart(db, await readJson(req));
+    const body = await readJson(req);
+    const out = livechatStart(db, body);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -331,7 +338,8 @@ async function api(req, res, path) {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (tooMany(`order:${ip}`)) return send(res, 429, { error: 'Too many orders, try again later' });
     recordFailure(`order:${ip}`); // counts every order: max 10 per client per 15 minutes
-    const out = publicOrder(db, await readJson(req));
+    const body = await readJson(req);
+    const out = publicOrder(db, body);
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -340,7 +348,8 @@ async function api(req, res, path) {
     if (req.headers['x-requested-with'] !== 'mizan') return send(res, 403, { error: 'Missing CSRF header' });
     if (recent(`cart:${ip}`).length >= CART_PRICINGS_PER_WINDOW) return send(res, 429, { error: 'Too many requests, try again later' });
     recordFailure(`cart:${ip}`);
-    const out = publicCart(db, await readJson(req));
+    const body = await readJson(req);
+    const out = publicCart(db, body);
     return send(res, out.status, out.body);
   }
   const slotsRoute = /^\/api\/public\/appointment\/(\d+)\/slots$/.exec(path);
