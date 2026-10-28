@@ -1,5 +1,5 @@
 // Recurring plans, billing, upsells, renewals and subscription metrics.
-import { create, read, search, write } from '../orm.js';
+import { create, messagesOf, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, today } from './common.js';
 import { moreModels } from './more.js';
 import { payMove, postMove } from './accounting.js';
@@ -74,25 +74,38 @@ export function invoiceDue(db, date = today()) {
   checkDate(date);
   let next = db;
   for (const initial of search(db, 'sale.subscription')) {
-    let sub = read(next, 'sale.subscription', initial.id);
-    while (sub.stage === 'progress' && sub.next_invoice_date && sub.next_invoice_date <= date) {
-      const at = sub.next_invoice_date;
-      if (sub.end_date && at >= sub.end_date) {
-        next = write(next, 'sale.subscription', sub.id, { stage: 'closed', closed_date: sub.end_date });
-        break;
-      }
-      const following = nextDate(at, planFor(next, sub));
-      if (!invoicesFor(next, sub.id).some((r) => r.invoice_date === at && r.state !== 'cancel')) {
-        const billed = billPeriod(next, sub, at);
-        next = billed.db;
-        if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, date);
-      }
-      next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: 'progress', close_reason: sub.close_reason });
-      sub = read(next, 'sale.subscription', sub.id);
+    const before = next;
+    try {
+      next = invoiceOne(next, initial.id, date);
+    } catch (e) {
+      // One failing contract (e.g. a locked period) must not stop the others; say why on the contract, once.
+      const body = `Recurring invoicing failed: ${e.message}`;
+      next = messagesOf(before, 'sale.subscription', initial.id).some((m) => m.body === body) ? before : postNote(before, 'sale.subscription', initial.id, body);
     }
-    next = refresh(next, read(next, 'sale.subscription', initial.id), date);
   }
   return next;
+}
+
+/** Bill every due period of one contract. */
+function invoiceOne(db, id, date) {
+  let next = db;
+  let sub = read(next, 'sale.subscription', id);
+  while (sub.stage === 'progress' && sub.next_invoice_date && sub.next_invoice_date <= date) {
+    const at = sub.next_invoice_date;
+    if (sub.end_date && at >= sub.end_date) {
+      next = write(next, 'sale.subscription', sub.id, { stage: 'closed', closed_date: sub.end_date });
+      break;
+    }
+    const following = nextDate(at, planFor(next, sub));
+    if (!invoicesFor(next, sub.id).some((r) => r.invoice_date === at && r.state !== 'cancel')) {
+      const billed = billPeriod(next, sub, at);
+      next = billed.db;
+      if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, date);
+    }
+    next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: 'progress', close_reason: sub.close_reason });
+    sub = read(next, 'sale.subscription', sub.id);
+  }
+  return refresh(next, read(next, 'sale.subscription', id), date);
 }
 
 /** Close running contracts whose oldest posted unpaid invoice has exceeded the plan's grace days. */
