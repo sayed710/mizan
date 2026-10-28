@@ -206,7 +206,7 @@ export function zReport(db, sessionId) {
   return { ...report, byMethod: { cash: round(report.byMethod.cash), bank: round(report.byMethod.bank) }, taxes: round(report.taxes), tips: round(report.tips), discounts: round(report.discounts), total: round(report.total) };
 }
 
-function refundBill(db, order) {
+export function refundBill(db, order) {
   const settlements = search(db, 'pos.order').filter((o) => o.settlement_of === order.id);
   if (!settlements.length) return refundOrder(db, order).db;
   let next = db;
@@ -271,9 +271,9 @@ export const posPlusModels = {
       groups: [...baseOrder.form.groups, ['config_id', 'table_id', 'customer_count', 'tip_amount', 'loyalty_points_earned']],
       tabs: [...baseOrder.form.tabs, { label: 'Payments', fields: ['payment_ids'] }, { label: 'Notes', fields: ['note'] }],
       buttons: [
-        { label: 'Pay', primary: true, when: (r) => r.state === 'draft', run: (db, r) => payWithMethods(db, r.id, r.payment_ids) },
+        { label: 'Pay', primary: true, server: '/api/op/pos.bill.pay', when: (r) => r.state === 'draft', run: (db, r) => payWithMethods(db, r.id, r.payment_ids) },
         { label: 'Apply Promotions', when: (r) => r.state === 'draft', run: (db, r) => ({ db: applyLoyaltyToOrder(db, r.id) }) },
-        { label: 'Refund', when: (r) => r.state === 'paid' && !r.settlement_of, run: (db, r) => ({ db: refundBill(db, r) }) },
+        { label: 'Refund', server: '/api/op/pos.bill.refund', when: (r) => r.state === 'paid' && !r.settlement_of, run: (db, r) => ({ db: refundBill(db, r) }) },
       ],
     },
   },

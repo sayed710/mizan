@@ -576,7 +576,7 @@ const PRIVATE_FIELDS = {
 };
 
 /** Models on the menus of `appIds`, plus the shared basics. */
-function menuModels(appIds) {
+export function menuModelsForApps(appIds) {
   const base = new Set(SHARED);
   for (const app of apps.filter((a) => appIds.includes(a.id))) {
     for (const leaf of leavesOf(app)) if (leaf.model) base.add(leaf.model);
@@ -586,13 +586,13 @@ function menuModels(appIds) {
 
 /** Models a user restricted to `appIds` may write: the readable ones, minus accounting, HR and company records their apps don't show. */
 export function writableModelsForApps(appIds) {
-  const base = menuModels(appIds);
+  const base = menuModelsForApps(appIds);
   return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
 }
 
 /** `db` without the private employee fields the apps in `appIds` may not see. */
 export function redactForApps(db, appIds) {
-  const base = menuModels(appIds);
+  const base = menuModelsForApps(appIds);
   let records = db.records;
   for (const [model, fields] of Object.entries(PRIVATE_FIELDS)) {
     const hidden = Object.keys(fields).filter((f) => !fields[f].some((m) => base.has(m)));
@@ -604,7 +604,7 @@ export function redactForApps(db, appIds) {
 
 /** Models a user restricted to `appIds` may read: their menus' models, related models, shared basics. */
 export function modelsForApps(appIds) {
-  const base = menuModels(appIds);
+  const base = menuModelsForApps(appIds);
   const out = new Set(base);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {

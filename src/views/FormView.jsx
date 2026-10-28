@@ -256,9 +256,9 @@ export function FormView({ leaf, id, base, params }) {
       const savedId = save();
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
-        .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
+        .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
       if (b.prompt) {
-        const text = prompt(t(b.prompt), '');
+        const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
         if (text != null && text.trim()) send({ text });
         return;
       }

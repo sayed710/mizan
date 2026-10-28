@@ -9,6 +9,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
+import { runOperation } from '../src/operations.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -39,7 +40,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
+import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -144,6 +145,8 @@ const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite
 
 /** Models a session/API user may change (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
+/** Models on a user's own app menus (null = everything): who may share portal links or run booking operations, never via a relation. */
+const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsForApps(u.apps));
 /** Models a session/API user may read (null = everything). */
 const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 const visibleDb = (u) => {
@@ -442,6 +445,18 @@ async function api(req, res, path) {
     }
     return send(res, 200, visibleDb(user));
   }
+  const op = /^\/api\/op\/([\w.]+)$/.exec(path);
+  if (op && req.method === 'POST') {
+    const body = await readJson(req).catch(() => null);
+    if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
+    try {
+      const out = runOperation(db, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
+      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, allowed: out.allowed }));
+      return send(res, 200, out.reply);
+    } catch (e) {
+      return send(res, e.status ?? 400, { error: e.message });
+    }
+  }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     commitDb(seed(), { full: true });
@@ -529,7 +544,7 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
-const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: readableFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;

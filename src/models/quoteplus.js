@@ -192,7 +192,7 @@ export const quotePlusModels = {
           const signature = r.signature || prompt('Signature');
           return signature == null ? { db } : { db: signQuote(db, r.id, { name, signature }) };
         } },
-        { label: 'Register Prepayment', when: (r) => editable(r) && r.require_payment, run: (db, r) => {
+        { label: 'Register Prepayment', server: '/api/op/sale.prepay', prompt: 'Prepayment amount', promptDefault: (r) => String(prepaymentAmount(r)), when: (r) => editable(r) && r.require_payment, run: (db, r) => {
           const amount = prompt('Prepayment amount', String(prepaymentAmount(r)));
           return amount == null || amount === '' ? { db } : { db: payQuote(db, r.id, Number(amount)) };
         } },
