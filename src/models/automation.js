@@ -107,6 +107,7 @@ const ACTIONS = [['email', 'Send Email'], ['sms', 'Send SMS'], ['wait', 'Wait'],
 export const automationModels = {
   'marketing.campaign': {
     label: 'Campaigns',
+    simulated: 'Email and SMS activities are marked as processed on schedule, but no email or SMS is sent.',
     fields: {
       name: { type: 'char', label: 'Campaign', required: true },
       list_id: { type: 'many2one', relation: 'mailing.list', label: 'Target' },

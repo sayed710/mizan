@@ -64,6 +64,9 @@ export const Avatar = ({ name = '?', size = 28 }) => (
   </span>
 );
 
+/** Honest notice for a model whose effects stay inside Mizan (no real network call); see `simulated` in the model. */
+export const SimulatedNote = ({ text }) => (text ? <p className="simulated" role="note"><b>{t('Simulation')}:</b> {t(text)}</p> : null);
+
 export function Stars({ value = 0, onChange }) {
   return (
     <span className="stars" aria-label={t('Priority')}>

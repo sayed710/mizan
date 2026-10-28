@@ -5,11 +5,14 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
-import { Avatar, display, FieldInput, money } from '../ui.jsx';
+import { Avatar, display, FieldInput, money, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
+
+/** Integrations whose buttons fall back to only recording a send when not configured. */
+const SENDING = { smtp: 'Email', sms: 'SMS' };
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -252,7 +255,12 @@ export function FormView({ leaf, id, base, params }) {
   const runButton = async (b) => {
     const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
     const need = b.requires ?? (b.email ? 'smtp' : 'server');
-    if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
+    const live = endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need]);
+    // Without the integration the button only records the send: say so, ask first and leave a trace.
+    const channel = !live && endpoint && SENDING[need];
+    if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
+    const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
+    if (live) {
       const savedId = save();
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
@@ -276,7 +284,9 @@ export function FormView({ leaf, id, base, params }) {
     }
     if (b.upload) { fail(new Error(t('This needs the server with AI enabled'))); return; }
     if (!b.run) {
-      if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
+      const id = save(b.vals);
+      if (id != null) noteUnsent(id);
+      if (id != null && b.vals.active === false) location.hash = backHash;
       return;
     }
     const savedId = save();
@@ -289,6 +299,7 @@ export function FormView({ leaf, id, base, params }) {
       }
       const res = b.run(getDb(), read(getDb(), model, savedId));
       commit(res.db);
+      noteUnsent(savedId);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
@@ -364,6 +375,7 @@ export function FormView({ leaf, id, base, params }) {
           )}
 
           {error && <div className="alert" role="alert">{error}</div>}
+          <SimulatedNote text={def.simulated} />
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}

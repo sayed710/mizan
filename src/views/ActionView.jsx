@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, create, matches, read, search as searchRecords, unlink } from '../orm.js';
-import { display } from '../ui.jsx';
+import { display, SimulatedNote } from '../ui.jsx';
 import { fromCsv, toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
@@ -112,6 +112,7 @@ export function ActionView({ leaf, base, params }) {
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
         view={view} search={search} setSearch={setSearch} extra={extra} />
+      <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={records} open={open} groupBy={groupBy[0] ?? def.kanban?.groupBy} defaults={defaults} />}
       {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
