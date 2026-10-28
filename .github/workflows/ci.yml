@@ -25,7 +25,8 @@ jobs:
           node <<'NODE'
           const fs = require('node:fs');
           const prs = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/open-prs.json`, 'utf8')).flat();
-          const include = prs.filter(pr => !pr.draft && pr.head.repo).map(pr => ({
+          // PRs 1-102 were snapshotted by run 40618059274; process later arrivals in this run.
+          const include = prs.filter(pr => pr.number > 102 && !pr.draft && pr.head.repo).map(pr => ({
             pr: pr.number, sha: pr.head.sha, repository: pr.head.repo.full_name
           }));
           if (!include.length || include.length > 256) throw new Error(`Unsupported PR count: ${include.length}`);
