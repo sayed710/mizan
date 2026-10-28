@@ -30,7 +30,11 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
     try {
       return step(d, ...args);
     } catch (e) {
-      onError(step.name || 'job', e);
+      try {
+        onError(step.name || 'job', e);
+      } catch (reporter) {
+        console.error(`Scheduler error reporter failed for ${step.name || 'job'}:`, reporter);
+      }
       return d;
     }
   };

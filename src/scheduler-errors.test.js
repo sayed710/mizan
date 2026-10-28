@@ -35,3 +35,12 @@ test('a failing scheduled job is reported instead of silently swallowed', () => 
   assert.deepEqual(failures, [['syncFromApplicant', 'hr.applicant record not found']]);
   assert.ok(out.records['hr.referral'].some((r) => r.id === 999));
 });
+
+test('an error reporter that throws cannot stop the other jobs', (t) => {
+  t.mock.method(console, 'error', () => {});
+  const db = seed();
+  const broken = { ...db, records: { ...db.records, 'hr.referral': [...(db.records['hr.referral'] ?? []), { id: 999, applicant_id: 424242 }] } };
+  const out = runScheduledJobs(broken, undefined, { onError: () => { throw new Error('reporter down'); } });
+  assert.ok(out.records['hr.referral'].some((r) => r.id === 999));
+  assert.equal(console.error.mock.callCount(), 1);
+});
