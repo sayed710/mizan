@@ -19,12 +19,12 @@ import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThr
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { sendDocument, sendMailing } from './mail.js';
-import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
+import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
-import { search } from '../src/orm.js';
+import { read, search } from '../src/orm.js';
 import { createPortal } from './portal.js';
 
 const ENV = process.env;
@@ -50,6 +50,8 @@ const PORT = Number(process.env.PORT ?? 8069);
 const SESSION_DAYS = 14;
 const MAX_BODY = 5 * 1024 * 1024;
 const COOKIE = 'mizan_session';
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const IDEMPOTENCY_KEY_MAX = 200;
 
 const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
 const sql = new DatabaseSync(DB_PATH);
@@ -64,6 +66,7 @@ sql.exec(`
   );
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (user_id, key));
 `);
 
 try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
@@ -378,8 +381,17 @@ async function api(req, res, path) {
     const keyUser = apiKeyUser(req);
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
+    // A retried create with the same Idempotency-Key returns the record made the first time.
+    const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '').slice(0, IDEMPOTENCY_KEY_MAX) : '';
+    if (idemKey) {
+      sql.prepare('DELETE FROM idempotency WHERE created < ?').run(Date.now() - IDEMPOTENCY_TTL_MS);
+      const prior = sql.prepare('SELECT model, record_id FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
+      if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
+      if (prior) return send(res, 200, read(db, prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
+    }
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
     if (out.db) commitDb(out.db);
+    if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);
   }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
@@ -586,6 +598,7 @@ const runMailJobs = async () => {
   if (!SMTP || (!process.env.MIZAN_PUBLIC_URL && !mailBaseKnown)) return;
   const at = new Date().toISOString().slice(0, 10);
   const jobs = [
+    (store) => resumeQueued(SMTP, store, lastBaseUrl),
     ...dueMailings(db, at).map((m) => (store) => deliverMailing(SMTP, store, m.id, lastBaseUrl)),
     ...dueAbWinners(db, at).map((key) => (store) => {
       const winner = selectWinner(store.get(), key);
