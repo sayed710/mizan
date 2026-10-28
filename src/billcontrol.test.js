@@ -85,7 +85,7 @@ test('three-way match reports exact, excess quantity and price mismatch, includi
   assert.deepEqual(matchBill(exact.db, exact.id), [{ product_id: 1, billedQty: 3, receivedQty: 5, orderedQty: 10, priceDifference: 0, status: 'ok' }]);
   const excess = bill(out.db, out.id, [line(1, 6)]);
   assert.equal(matchBill(excess.db, excess.id)[0].status, 'qty_exceeds_received');
-  const price = create(out.db, 'account.move', { move_type: 'in_invoice', origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
+  const price = create(out.db, 'account.move', { move_type: 'in_invoice', invoice_origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
   assert.equal(matchBill(price.db, price.id)[0].status, 'price_differs');
   assert.equal(checkBillMatch(price.db, read(price.db, 'account.move', price.id))[0].priceDifference, 6);
   assert.throws(() => matchBill(out.db, -1), /not found/);

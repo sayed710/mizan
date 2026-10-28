@@ -7,6 +7,22 @@ const token = () => crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID(
 const roles = [['customer', 'Customer'], ['employee', 'Employee'], ['company', 'Company']];
 const relation = (model, label) => ({ type: 'many2one', relation: model, label });
 const lines = (label, fields, newLine) => ({ type: 'one2many', label, fields, newLine });
+
+/**
+ * Turn plain-text document tags (older data) into tag lines, creating the missing documents.tag records. The server
+ * only accepts tag lines, so documents still holding text tags could not be saved at all.
+ */
+export function migrateDocumentTags(db) {
+  const docs = db?.records?.['documents.document'] ?? [];
+  if (!docs.some((d) => (d.tag_ids ?? []).some((t) => typeof t === 'string'))) return db;
+  const tags = [...(db.records['documents.tag'] ?? [])];
+  let seq = Math.max(db.seq?.['documents.tag'] ?? 0, ...tags.map((t) => t.id));
+  const tagFor = (name) => tags.find((t) => t.name === name) ?? (tags.push({ id: ++seq, name, facet: '' }), tags.at(-1));
+  const documents = docs.map((d) => (!(d.tag_ids ?? []).some((t) => typeof t === 'string') ? d : {
+    ...d, tag_ids: d.tag_ids.map((t) => (typeof t === 'string' ? { tag_id: tagFor(t).id, name: t } : t)),
+  }));
+  return { ...db, records: { ...db.records, 'documents.document': documents, 'documents.tag': tags }, seq: { ...db.seq, 'documents.tag': seq } };
+}
 const signersOf = (r) => r.signer_ids?.length ? r.signer_ids : [{ partner_id: r.partner_id, role: 'signer', signed: r.state === 'signed', signature: r.signature, sign_date: r.sign_date, token: r.token }];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
 const requireDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid ISO date (YYYY-MM-DD)'); };
@@ -301,8 +317,8 @@ export const signPlusModels = {
     ...baseDocument,
     fields: {
       ...baseDocument.fields, folder_id: relation('documents.folder', 'Folder'), locked_by: relation('hr.employee', 'Locked By'),
-      tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag') }, () => ({ tag_id: null })),
-      legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r) => (r.tag_ids ?? []).filter((t) => typeof t === 'string') },
+      tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag'), name: { type: 'char', label: 'Tag Name', hidden: true } }, () => ({ tag_id: null })),
+      legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r, db) => (r.tag_ids ?? []).map((t) => (typeof t === 'string' ? t : (db?.records?.['documents.tag'] ?? []).find((x) => x.id === t?.tag_id)?.name ?? t?.name)).filter(Boolean) },
     },
     kanban: { ...baseDocument.kanban, tags: 'legacy_tags' },
     form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b) },

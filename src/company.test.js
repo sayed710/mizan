@@ -75,7 +75,8 @@ test('database-local document defaults follow the selected company and products 
   assert.notStrictEqual(db.settings.allowed_company_ids, allowed);
   for (const model of ['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket']) {
     if (!models[model]) continue;
-    const result = createForCompany(db, model, { name: 'New document', code: 'NEW', partner_id: 1 });
+    const vals = Object.fromEntries(Object.entries({ name: 'New document', code: 'NEW', partner_id: 1 }).filter(([k]) => models[model].fields[k]));
+    const result = createForCompany(db, model, vals);
     assert.equal(read(result.db, model, result.id).company_id, 2, model);
   }
   const owned = createForCompany(db, 'product', { name: 'Company product' });

@@ -6,7 +6,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { accountId } from './models/ledger.js';
 
 const synced = (db, next) => applyDiff(db, diffDb(db, next), { isAdmin: false, author: 'Clerk' });
-const entry = (db, lines, state = 'posted') => create(db, 'account.move', { move_type: 'entry', state, name: 'MISC/TEST', date: '2026-10-01', line_ids: lines });
+const entry = (db, lines, state = 'posted') => create(db, 'account.move', { move_type: 'entry', state, name: 'MISC/TEST', invoice_date: '2026-10-01', line_ids: lines });
 
 test('a posted entry needs an existing account on every journal item (ACC-008)', () => {
   const db = seed();

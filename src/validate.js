@@ -4,6 +4,14 @@ import { models } from './models/index.js';
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
 const MAX_FILE = 3 * 1024 * 1024; // data URL of a ≤ 2 MB file
+/** True when `v` survives a JSON round trip unchanged: finite numbers, strings, booleans, null, arrays, plain objects. */
+function losslessJson(v, depth = 0) {
+  if (depth > 20) return false;
+  if (v === null || typeof v === 'string' || typeof v === 'boolean') return true;
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (Array.isArray(v)) return v.every((x) => losslessJson(x, depth + 1));
+  return isPlain(v) && Object.values(v).every((x) => losslessJson(x, depth + 1));
+}
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 const fail = (where) => { throw new Error(`Invalid value for ${where}`); };
 
@@ -40,6 +48,15 @@ export function cleanValue(field, value, where) {
       const entries = isPlain(value) ? Object.entries(value) : null;
       if (!entries || entries.length > 50 || !entries.every(([k, n]) => /^[1-9]\d*$/.test(k) && typeof n === 'number' && n >= 0 && n <= 100)) fail(where);
       return Object.fromEntries(entries);
+    }
+    case 'json': {
+      // Structured workflow data (costs, applied programs, distributions): plain JSON, bounded in size.
+      // Rejected rather than converted: JSON.stringify would turn NaN into null and drop undefined members, so the
+      // client's local copy and the synchronized one would disagree.
+      if (!(isPlain(value) || Array.isArray(value)) || !losslessJson(value)) fail(where);
+      const text = JSON.stringify(value);
+      if (text.length > MAX_TEXT * 5) fail(where);
+      return JSON.parse(text);
     }
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);

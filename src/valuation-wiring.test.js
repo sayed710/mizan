@@ -72,7 +72,7 @@ test('duplicate PO product lines keep their individual purchase costs through pa
   db = run(db, 'stock.picking', rest.id, 'Validate');
   assert.deepEqual(layers(db, f.id).at(-1).unit_cost, 17);
   assert.equal(qty(db, f.id), 5);
-  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line });
+  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line.map(({ purchase_method, qty_delivered, ...l }) => l) });
   assert.equal(delta(f.db, postMove(bill.db, bill.id), '110200'), 0);
 });
 

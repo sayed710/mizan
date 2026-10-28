@@ -145,7 +145,7 @@ test('folders support moves and cycle protection; tags retain facets and legacy 
   assert.equal(read(tagged, 'documents.tag', tag.id).facet, 'Status');
   assert.deepEqual(read(tagged, 'documents.document', one).tag_ids, [{ tag_id: tag.id }]);
   const legacy = search(db, 'documents.document').find((d) => d.legacy_tags.length);
-  assert.deepEqual(legacy.legacy_tags, legacy.tag_ids);
+  assert.deepEqual(legacy.legacy_tags, legacy.tag_ids.map((t) => t.name));
 });
 
 test('locks reject another user unlocking or taking over and prevent moving locked files', () => {

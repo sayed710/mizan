@@ -80,6 +80,7 @@ import { companyModels, withCompany } from './company.js';
 import { warehouseModels } from './warehouse.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { declareWorkflowFields } from './workflowFields.js';
 
 export { today } from './common.js';
 
@@ -100,6 +101,7 @@ for (const [name, model] of Object.entries(models)) {
   }
 }
 models['hr.leave'].guard = leaveGuard;
+declareWorkflowFields(models);
 
 // Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
 const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];

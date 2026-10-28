@@ -147,5 +147,5 @@ test('only administrators change who reports to whom', () => {
   const db = linked();
   assert.throws(() => save(db, write(db, 'hr.employee', 6, { parent_id: 5 }), as('karim')), /Only administrators can change who/);
   assert.equal(read(save(db, write(db, 'hr.employee', 6, { parent_id: 5 }), { isAdmin: true }), 'hr.employee', 6).parent_id, 5);
-  assert.equal(read(save(db, write(db, 'hr.employee', 6, { phone: '1' }), as('karim')), 'hr.employee', 6).phone ?? '1', '1');
+  assert.equal(read(save(db, write(db, 'hr.employee', 6, { mobile_phone: '1' }), as('karim')), 'hr.employee', 6).mobile_phone, '1');
 });

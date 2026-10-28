@@ -35,7 +35,7 @@ test('reset to draft drops the posted journal items, and posting again rebuilds 
 });
 
 test('an invoice created from a sales order keeps the order currency', () => {
-  const eur = create(seed(), 'res.currency', { name: 'EUR', symbol: '€', rate: 1 });
+  const eur = create(seed(), 'res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: '2020-01-01', rate: 1 }] });
   const order = create(eur.db, 'sale.order', { partner_id: 2, currency_id: eur.id, order_line: [{ product_id: 1, qty: 1, price_unit: 10 }] });
   const confirmed = press(order.db, 'sale.order', order.id, 'Confirm').db;
   const invoiced = press(confirmed, 'sale.order', order.id, 'Create Invoice').db;

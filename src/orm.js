@@ -14,9 +14,9 @@ let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
-const withComputed = (fields, r) => {
+const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
-  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r)])) } : r;
+  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
 };
 
 /** Records of a model in the active company, with computed fields. Archived (active === false) hidden by default. */
@@ -24,7 +24,7 @@ export function search(db, model, { includeArchived = false } = {}) {
   const fields = models[model].fields;
   return (db.records[model] ?? [])
     .filter((r) => (includeArchived || r.active !== false) && inCompany(model, r))
-    .map((r) => withComputed(fields, r));
+    .map((r) => withComputed(fields, r, db));
 }
 
 // id -> position per records array. Arrays are never mutated (writes copy them), so an index stays valid for the
@@ -46,7 +46,7 @@ function locate(list, id) {
 /** One record by id regardless of company (cross-company links still display). */
 export function read(db, model, id) {
   const r = locate(db.records[model] ?? [], id);
-  return r && withComputed(models[model].fields, r);
+  return r && withComputed(models[model].fields, r, db);
 }
 
 /** @returns {string|null} error message when a required field is empty */
@@ -56,6 +56,28 @@ export function validate(model, vals) {
   );
   return missing ? `${missing[1].label} is required` : null;
 }
+
+/**
+ * Field paths in `rec` that the server's sanitizer (validate.js cleanRecord) would silently drop: keys the model does
+ * not declare, top level or inside one2many lines. Logic must only write declared fields, or client and server diverge.
+ */
+export function undeclaredFields(model, rec) {
+  const fields = models[model].fields;
+  const out = Object.keys(rec).filter((k) => !['id', 'active', 'company_id'].includes(k) && !fields[k]);
+  for (const [k, f] of Object.entries(fields)) {
+    if (f.type !== 'one2many' || !Array.isArray(rec[k]) || !f.fields) continue;
+    for (const line of rec[k]) out.push(...Object.keys(line ?? {}).filter((sub) => !f.fields[sub]).map((sub) => `${k}.${sub}`));
+  }
+  return [...new Set(out)];
+}
+const STRICT_FIELDS = globalThis.process?.env?.MIZAN_STRICT_FIELDS;
+const checkDeclared = (model, rec) => {
+  if (!STRICT_FIELDS) return;
+  const bad = undeclaredFields(model, rec);
+  if (!bad.length) return;
+  if (STRICT_FIELDS === 'log') globalThis.process.stderr.write(`UNDECLARED ${model}: ${bad.join(',')} @ ${new Error().stack.split('\n').slice(3).find((l) => !l.includes('orm.js'))?.trim()}\n`);
+  else throw new Error(`Undeclared fields on ${model}: ${bad.join(', ')}`);
+};
 
 function stripComputed(model, vals) {
   const fields = models[model].fields;
@@ -86,6 +108,7 @@ export function create(db, model, vals) {
   };
   const err = validate(model, rec) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
+  checkDeclared(model, rec);
   return {
     db: {
       ...db,
@@ -117,6 +140,7 @@ function prepareWrite(db, model, before, vals) {
   const after = { ...before, ...clean };
   const err = validate(model, after) ?? models[model].guard?.(db, before, after);
   if (err) throw new Error(err);
+  checkDeclared(model, after);
   return { after, clean };
 }
 
