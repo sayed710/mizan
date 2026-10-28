@@ -101,7 +101,13 @@ for (const [name, model] of Object.entries(models)) {
 }
 models['hr.leave'].guard = leaveGuard;
 
-export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
+// Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
+const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
+export const viewsOf = (model) => {
+  const def = models[model];
+  const views = (def.views ?? ['kanban', 'list']).filter((v) => !SPEC_VIEWS.includes(v) || def[v]);
+  return views.length ? views : ['list'];
+};
 
 const customers = { key: 'customers', label: 'Customers', model: 'res.partner' };
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
