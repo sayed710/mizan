@@ -92,7 +92,7 @@ sql.exec(`
   );
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
-  CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (user_id, key));
+  CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, response TEXT, PRIMARY KEY (user_id, key));
   CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, res_id INTEGER NOT NULL, action TEXT NOT NULL, changes TEXT NOT NULL);
   CREATE INDEX IF NOT EXISTS audit_log_record ON audit_log (model, res_id);
 `);
@@ -144,6 +144,8 @@ const ownLease = () => {
 };
 /** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
 const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+ownLease();
+if (!sql.prepare('PRAGMA table_info(idempotency)').all().some((c) => c.name === 'response')) sql.exec('ALTER TABLE idempotency ADD COLUMN response TEXT');
 const storage = openStorage(sql, { beforeWrite: ownLease });
 const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
@@ -159,12 +161,12 @@ const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, 
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
  * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
  */
-const commitDb = (raw, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
+const commitDb = (raw, { full = false, actor = 'system', action = 'replace', audit = true, alongside = () => {} } = {}) => {
   const next = blobs.externalize(raw);
   const at = new Date().toISOString();
   const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
-  storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  storage.save(full ? null : db, next, () => { alongside(); for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
   db = next;
   revision++;
 };
@@ -610,18 +612,27 @@ async function api(req, res, path) {
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
     // A retried create with the same Idempotency-Key returns the record made the first time.
-    const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '').slice(0, IDEMPOTENCY_KEY_MAX) : '';
+    const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '') : '';
+    if (idemKey.length > IDEMPOTENCY_KEY_MAX) return send(res, 400, { error: 'Idempotency-Key is too long' });
+    if (idemKey && !/^\/api\/v1\/[^/]+$/.test(path)) return send(res, 404, { error: 'Idempotency-Key requires a collection create route' });
     if (idemKey) {
       writeSql('DELETE FROM idempotency WHERE created < ?', Date.now() - IDEMPOTENCY_TTL_MS);
-      const prior = sql.prepare('SELECT model, record_id FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
+      const prior = sql.prepare('SELECT model, record_id, response FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
       if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
-      if (prior) return send(res, 200, read(visibleDb(keyUser), prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
+      if (prior) {
+        const access = handleApi({ method: 'GET', path, query: new URLSearchParams('limit=1'), db: visibleDb(keyUser), user: keyUser, allowed: allowedFor(keyUser) });
+        if (access.status !== 200) return send(res, access.status, access.body);
+        const original = prior.response ? JSON.parse(prior.response) : read(visibleDb(keyUser), prior.model, prior.record_id);
+        if (!original || !visibleTo(companiesFor(keyUser), prior.model, original, db)) return send(res, 404, { error: 'Not found' });
+        return send(res, 200, original);
+      }
     }
     // Reads see what the web client sees; writes are checked against the stricter write set.
     const reading = req.method === 'GET';
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), readOnly: readOnlyFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
-    if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
-    if (idemKey && out.status === 201) writeSql('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)', keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
+    if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}`, alongside: () => {
+      if (idemKey && out.status === 201) writeSql('INSERT INTO idempotency (user_id, key, model, record_id, created, response) VALUES (?, ?, ?, ?, ?, ?)', keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now(), JSON.stringify(out.body));
+    } });
     return send(res, out.status, out.body);
   }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
@@ -962,7 +973,11 @@ const server = createServer(async (req, res) => {
     log('error', 'request failed', { requestId, method: req.method, path: redactPath(path), error: e });
     if (!res.headersSent) send(res, 500, { error: 'Server error', requestId });
   }
-}).listen(PORT, () => console.info(`Mizan listening on http://localhost:${server.address().port}`));
+}).listen(PORT, () => {
+  const url = `http://localhost:${server.address().port}`;
+  console.info(`Mizan listening on ${url}`);
+  if (process.send) process.send({ type: 'ready', port: server.address().port, url });
+});
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;

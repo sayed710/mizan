@@ -15,13 +15,23 @@ before(async () => {
   child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   origin = await new Promise((resolve, reject) => {
     let output = '';
-    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
+    const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 30000);
+    child.on('message', (msg) => {
+      if (msg?.type === 'ready' && msg.port > 0) {
+        clearTimeout(timeout);
+        resolve(`http://127.0.0.1:${msg.port}`);
+      }
+    });
     child.stdout.on('data', (chunk) => {
       output += chunk;
-      const match = /Mizan listening on (http:\/\/localhost:\d+)/.exec(output);
-      if (match) { clearTimeout(timeout); resolve(match[1]); }
+      const match = /Mizan listening on http:\/\/(?:localhost|127\.0\.0\.1):([1-9]\d*)/.exec(output);
+      if (match) {
+        clearTimeout(timeout);
+        resolve(`http://127.0.0.1:${match[1]}`);
+      }
     });
     child.stderr.on('data', (chunk) => { output += chunk; });
+    child.on('error', (err) => { clearTimeout(timeout); reject(err); });
     child.once('exit', () => { clearTimeout(timeout); reject(new Error(output)); });
   });
 });
@@ -35,11 +45,12 @@ test('a slow public request does not revert changes committed while its body was
   const login = await fetch(`${origin}/api/login`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }) });
   const cookie = login.headers.get('set-cookie').split(';')[0];
 
-  // Start a public live chat request and hold its body open.
-  const slow = request(`${origin}/api/public/livechat/start`, { method: 'POST', headers: JSON_HEADERS });
+  // Start a public live chat request with Expect: 100-continue and hold its body open.
+  const slow = request(`${origin}/api/public/livechat/start`, { method: 'POST', headers: { ...JSON_HEADERS, Expect: '100-continue' } });
   const answered = new Promise((resolve, reject) => { slow.on('response', resolve); slow.on('error', reject); });
+  const ready = new Promise((resolve, reject) => { slow.once('continue', resolve); slow.once('error', reject); });
+  await ready;
   slow.write('{"name":"Visitor",');
-  await new Promise((resolve) => setTimeout(resolve, 100));
 
   // Meanwhile an employee creates a contact.
   const db = await (await fetch(`${origin}/api/db`, { headers: { cookie } })).json();

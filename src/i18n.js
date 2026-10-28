@@ -797,7 +797,7 @@ const ar = {
   'Actual Duration (min)': 'المدة الفعلية (دقيقة)', 'Waiting for another WO': 'بانتظار أمر عمل آخر', 'Quantity Produced': 'الكمية المنتجة',
   Minutes: 'دقائق', Productive: 'منتج', 'Reduced Speed': 'سرعة منخفضة', 'Unplanned Stop': 'توقف غير مخطط', 'Blanket Order': 'أمر شامل',
   'Call for Tenders': 'طلب مناقصات', 'Remaining Quantity': 'الكمية المتبقية', 'Remaining Value': 'القيمة المتبقية',
-  'Price Difference': 'فرق السعر', 'Inventory Adjustment': 'تسوية المخزون', Revaluation: 'إعادة التقييم', 'Landed Cost': 'تكلفة الوصول',
+  'Price Difference': 'فرق السعر', Revaluation: 'إعادة التقييم', 'Landed Cost': 'تكلفة الوصول',
   'Theoretical Quantity': 'الكمية النظرية', Reward: 'المكافأة', 'Parent Menu': 'القائمة الأم', 'Permanent (301)': 'دائم (301)',
   'Temporary (302)': 'مؤقت (302)', Features: 'المميزات', Dynamic: 'ديناميكي', 'Inner Content': 'المحتوى الداخلي', Hidden: 'مخفي',
   Chat: 'دردشة', 'Email and Chat': 'بريد إلكتروني ودردشة', Lines: 'البنود', 'Company Contact': 'جهة اتصال الشركة',
