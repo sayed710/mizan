@@ -40,6 +40,25 @@ test('structured values are plain JSON of bounded size', () => {
   assert.throws(() => synced(db, write(db, 'pos.order', 1, { stock_costs: [{ blob: 'x'.repeat(200000) }] })), /Invalid value/);
 });
 
+test('structured values that JSON would silently alter are refused', () => {
+  const db = seed();
+  for (const stock_costs of [[{ a: NaN }], [{ a: undefined }], [{ a: [Infinity] }], [{ a: () => 1 }], [{ a: new Date() }]]) {
+    assert.throws(() => synced(db, write(db, 'pos.order', 1, { stock_costs })), /Invalid value/);
+  }
+  assert.doesNotThrow(() => synced(db, write(db, 'pos.order', 1, { stock_costs: [{ a: 1, b: ['x', null, true], c: { d: 2.5 } }] })));
+});
+
+test('document tag names follow the referenced tag record', () => {
+  const db = seed();
+  const [first] = db.records['documents.document'];
+  const tag = db.records['documents.tag'][0];
+  const doc = { ...first, tag_ids: [{ tag_id: tag.id }] };
+  const withDoc = { ...db, records: { ...db.records, 'documents.document': [doc, ...db.records['documents.document'].slice(1)] } };
+  assert.deepEqual(read(withDoc, 'documents.document', doc.id).legacy_tags, [tag.name]);
+  const renamed = { ...withDoc, records: { ...withDoc.records, 'documents.tag': withDoc.records['documents.tag'].map((t) => (t.id === tag.id ? { ...t, name: 'Renamed' } : t)) } };
+  assert.deepEqual(read(renamed, 'documents.document', doc.id).legacy_tags, ['Renamed']);
+});
+
 test('text document tags from older data become tag lines the server accepts', () => {
   const db = seed();
   const old = { ...db, records: { ...db.records, 'documents.document': db.records['documents.document'].map((d, i) => (i === 0 ? { ...d, tag_ids: ['Tax', 'Archive'] } : d)) } };

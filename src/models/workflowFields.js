@@ -1,7 +1,7 @@
 // Fields that workflows write but no model declared. The server keeps only declared fields (validate.js cleanRecord),
 // so without these the client and the server disagree after a sync: gift cards become reusable, POS refunds are
 // valued at today's cost, fiscal-year closing entries count as P&L, rented goods vanish from valuation, and so on.
-// Run `npm run check:fields` to find new ones.
+// Run `npm run test:fields` to find new ones.
 
 const m2o = (relation, label) => ({ type: 'many2one', relation, label, readonly: true, hidden: true });
 const hidden = (type, label, extra = {}) => ({ type, label, readonly: true, hidden: true, ...extra });

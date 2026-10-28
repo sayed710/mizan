@@ -14,9 +14,9 @@ let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
-const withComputed = (fields, r) => {
+const withComputed = (fields, r, db) => {
   const computed = Object.entries(fields).filter(([, f]) => f.compute);
-  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r)])) } : r;
+  return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
 };
 
 /** Records of a model in the active company, with computed fields. Archived (active === false) hidden by default. */
@@ -24,13 +24,13 @@ export function search(db, model, { includeArchived = false } = {}) {
   const fields = models[model].fields;
   return (db.records[model] ?? [])
     .filter((r) => (includeArchived || r.active !== false) && inCompany(model, r))
-    .map((r) => withComputed(fields, r));
+    .map((r) => withComputed(fields, r, db));
 }
 
 /** One record by id regardless of company (cross-company links still display). */
 export function read(db, model, id) {
   const r = (db.records[model] ?? []).find((x) => x.id === id);
-  return r && withComputed(models[model].fields, r);
+  return r && withComputed(models[model].fields, r, db);
 }
 
 /** @returns {string|null} error message when a required field is empty */

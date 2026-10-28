@@ -52,7 +52,7 @@ test('workflow adds/removes tag references, preserves legacy tags, moves, assign
   assert.notEqual(next, action.db);
   assert.deepEqual(action.db, snapshot);
   assert.deepEqual(doc(next, made.id).tag_ids, [{ name: 'legacy' }, ...refs(tags.paid, tags.approved)]);
-  assert.deepEqual(doc(next, made.id).legacy_tags, ['legacy']);
+  assert.deepEqual(doc(next, made.id).legacy_tags, ['legacy', 'Paid', 'Approved']);
   assert.equal(doc(next, made.id).folder_id, destination.id);
   assert.equal(doc(next, made.id).owner_id, 2);
   const activities = search(next, 'mail.activity').filter((r) => r.res_model === 'documents.document' && r.res_id === made.id);

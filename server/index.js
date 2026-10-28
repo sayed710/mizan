@@ -69,7 +69,10 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
-let db = migrateDocumentTags(migrateAppointments(storage.load()));
+const loadedDb = storage.load();
+let db = migrateDocumentTags(migrateAppointments(loadedDb));
+// Persist the migration now: later saves diff against `db`, so unsaved migrated tags/seq would never reach storage.
+if (loadedDb && db !== loadedDb) storage.save(loadedDb, db);
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
 /**
