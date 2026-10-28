@@ -71,7 +71,7 @@ test('confirming a sale creates a delivery; stock leaves only when it is validat
   db = runButton(db, 'sale.order', 1, 'Confirm').db;
   assert.equal(read(db, 'product', 1).qty_available, before);
   const delivery = search(db, 'stock.picking').find((p) => p.sale_id === 1);
-  assert.deepEqual(delivery.move_ids, [{ product_id: 1, qty: 40 }]); // service line (installation) is not shipped
+  assert.deepEqual(delivery.move_ids, [{ product_id: 1, qty: 40, so_line: 0 }]); // service line (installation) is not shipped
   db = runButton(db, 'stock.picking', delivery.id, 'Validate').db;
   assert.equal(read(db, 'product', 1).qty_available, before - 40);
   const { db: db2, id } = create(db, 'purchase.order', { partner_id: 7, order_line: [{ product_id: 1, qty: 10, price_unit: 120, tax: 14 }] });

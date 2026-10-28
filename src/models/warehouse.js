@@ -105,10 +105,17 @@ function createChain(db, specs, vals, predecessor = null) {
 
 /** Create an order's ready/waiting chain, or the exact legacy transfer when no warehouse exists. */
 export function createOrderTransfers(db, { type, partner_id, origin, lines, link, carrier_id = null, scheduled_date, warehouse_id }) {
-  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods')
-    .map((l) => ({ product_id: l.product_id, qty: lineToStockQty(db, l, read(db, 'product', l.product_id)) }));
-  if (!moves.length) return db;
   const order = link?.sale_id ? read(db, 'sale.order', link.sale_id) : link?.purchase_id ? read(db, 'purchase.order', link.purchase_id) : null;
+  // Each move remembers its order line (matched by content, each line once) so returns can go back to that line.
+  const taken = new Set();
+  const lineOf = (l) => {
+    const ix = (order?.order_line ?? []).findIndex((o, i) => !taken.has(i) && o.product_id === l.product_id && Number(o.qty) === Number(l.qty) && Number(o.price_unit) === Number(l.price_unit));
+    if (ix >= 0) taken.add(ix);
+    return ix >= 0 ? { so_line: ix } : {};
+  };
+  const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods')
+    .map((l) => ({ product_id: l.product_id, qty: lineToStockQty(db, l, read(db, 'product', l.product_id)), ...lineOf(l) }));
+  if (!moves.length) return db;
   const id = warehouse_id ?? order?.warehouse_id ?? (db.records['stock.warehouse'] ?? []).find((w) => w.code === 'WH' && w.active !== false)?.id;
   const vals = { partner_id, origin, carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link };
   if (!id) return create(db, 'stock.picking', { ...vals, picking_type: type, move_ids: moves, state: 'ready' }).db;

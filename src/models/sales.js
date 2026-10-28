@@ -4,7 +4,7 @@ import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { checkCreditLimit } from './finance.js';
-import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
+import { pickingAvailability, reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
@@ -26,29 +26,102 @@ export function createPicking(db, args) {
   return createOrderTransfers(db, args);
 }
 
+const stockUnitOf = (db, l) => {
+  const p = read(db, 'product', l.product_id);
+  return p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+};
+/** An order-line quantity in the product's stock unit (and back), unrounded. */
+const toStock = (db, l, qty) => (l.uom_id ? convert(db, qty, l.uom_id, stockUnitOf(db, l), { round: false }) : qty);
+const fromStock = (db, l, qty) => (l.uom_id ? convert(db, qty, stockUnitOf(db, l), l.uom_id, { round: false }) : qty);
+/** The order line a stock move came from (moves of order transfers carry `so_line`), when it still matches. */
+const sourceLine = (order, m) => (Number.isInteger(m.so_line) && order.order_line[m.so_line]?.product_id === m.product_id ? m.so_line : null);
+
 /**
- * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced), filling lines in order.
- * ponytail: matches by product, so two lines of the same product share the quantity first-come.
+ * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced). A delivered move goes to the
+ * line it came from; everything else fills the matching lines in order.
+ * ponytail: invoices carry no line link, so two invoiced lines of the same product share the quantity first-come.
  */
 function addLineQty(db, model, order, field, moves) {
   const left = new Map();
-  const stockUnit = (l) => {
-    const p = read(db, 'product', l.product_id);
-    return p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
-  };
-  const stockQty = (l, qty) => l.uom_id ? convert(db, qty, l.uom_id, stockUnit(l), { round: false }) : qty;
+  const lines = order.order_line.map((l) => ({ ...l }));
+  const room = (l) => toStock(db, l, (Number(l.qty) || 0) - (Number(l[field]) || 0));
+  const put = (l, take) => { l[field] = (Number(l[field]) || 0) + fromStock(db, l, take); };
   for (const m of moves) {
     const qty = Number(m.qty) || 0;
-    left.set(m.product_id, (left.get(m.product_id) ?? 0) + (field === 'qty_invoiced' ? stockQty(m, qty) : qty));
+    const ix = field === 'qty_delivered' ? sourceLine(order, m) : null;
+    if (ix == null) { left.set(m.product_id, (left.get(m.product_id) ?? 0) + (field === 'qty_invoiced' ? toStock(db, m, qty) : qty)); continue; }
+    const take = Math.max(0, Math.min(room(lines[ix]), qty));
+    if (take) put(lines[ix], take);
+    if (qty - take > 1e-9) left.set(m.product_id, (left.get(m.product_id) ?? 0) + qty - take);
   }
-  const order_line = order.order_line.map((l) => {
-    const room = stockQty(l, (Number(l.qty) || 0) - (Number(l[field]) || 0));
-    const take = Math.max(0, Math.min(room, left.get(l.product_id) ?? 0));
+  for (const l of lines) {
+    const take = Math.max(0, Math.min(room(l), left.get(l.product_id) ?? 0));
     left.set(l.product_id, (left.get(l.product_id) ?? 0) - take);
-    const qty = l.uom_id ? convert(db, take, stockUnit(l), l.uom_id, { round: false }) : take;
-    return take ? { ...l, [field]: (Number(l[field]) || 0) + qty } : l;
-  });
-  return write(db, model, order.id, { order_line });
+    if (take) put(l, take);
+  }
+  return write(db, model, order.id, { order_line: lines });
+}
+
+/**
+ * Take returned quantities (stock units) back off the order lines' `field`: from the line each move came from, and
+ * anything unlinked from the last matching line backwards.
+ */
+function removeLineQty(db, model, order, field, moves) {
+  const left = new Map();
+  const lines = order.order_line.map((l) => ({ ...l }));
+  const have = (l) => toStock(db, l, Number(l[field]) || 0);
+  const take = (l, qty) => { l[field] = (Number(l[field]) || 0) - fromStock(db, l, qty); };
+  for (const m of moves) {
+    const qty = Number(m.qty) || 0;
+    const ix = sourceLine(order, m);
+    const here = ix == null ? 0 : Math.min(have(lines[ix]), qty);
+    if (here) take(lines[ix], here);
+    if (qty - here > 1e-9) left.set(m.product_id, (left.get(m.product_id) ?? 0) + qty - here);
+  }
+  for (const l of [...lines].reverse()) {
+    const n = Math.min(have(l), left.get(l.product_id) ?? 0);
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) - n);
+    if (n) take(l, n);
+  }
+  return write(db, model, order.id, { order_line: lines });
+}
+
+/** Per product, the order quantity not delivered yet, in stock units. */
+function undelivered(db, order) {
+  const left = new Map();
+  for (const l of order.order_line ?? []) {
+    const p = read(db, 'product', l.product_id);
+    const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+    const qty = Math.max(0, (Number(l.qty) || 0) - (Number(l.qty_delivered) || 0));
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) + (l.uom_id ? convert(db, qty, l.uom_id, stock) : qty)); // rounded up like the transfer demand
+  }
+  return left;
+}
+
+/**
+ * Why a transfer cannot be validated with these done quantities: a delivery may not ship more than its sales order
+ * still has to deliver, and returns of one transfer may not exceed what it moved.
+ */
+export function overDeliveryError(db, picking) {
+  const done = new Map();
+  for (const l of picking.move_ids ?? []) {
+    const qty = l.quantity == null || l.quantity === '' ? Number(l.qty) || 0 : Number(l.quantity) || 0;
+    done.set(l.product_id, (done.get(l.product_id) ?? 0) + qty);
+  }
+  const name = (id) => read(db, 'product', id)?.name ?? `#${id}`;
+  if (picking.return_of) {
+    const original = read(db, 'stock.picking', picking.return_of);
+    const left = original ? returnableQty(db, original) : new Map();
+    // returnableQty already counts this return's demand; its done quantity must fit what that leaves plus the demand.
+    for (const l of picking.move_ids ?? []) left.set(l.product_id, (left.get(l.product_id) ?? 0) + (Number(l.qty) || 0));
+    const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
+    return over ? `Returning ${over[1]} ${name(over[0])} is more than ${original?.name ?? 'the original transfer'} has left to return (${left.get(over[0]) ?? 0})` : null;
+  }
+  const order = picking.picking_type === 'outgoing' && picking.sale_id && read(db, 'sale.order', picking.sale_id);
+  if (!order) return null;
+  const left = undelivered(db, order);
+  const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
+  return over ? `Delivering ${over[1]} ${name(over[0])} is more than ${order.name} still has to deliver (${left.get(over[0]) ?? 0})` : null;
 }
 
 /** Recompute an order's invoiced quantities from its invoices/bills that are not cancelled (`move` is one of them). */
@@ -148,7 +221,7 @@ export const salesModels = {
         type: 'one2many',
         label: 'Operations',
         // qty is the demand; quantity is what was actually done (empty = all of the demand).
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' } },
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, so_line: { type: 'integer', label: 'Order Line', hidden: true } },
         newLine: () => ({ product_id: null, qty: 1, quantity: null, lot_name: '' }),
       },
     },
@@ -176,6 +249,8 @@ export const salesModels = {
           run: (db, r) => {
             const quality = canValidatePicking(db, r);
             if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
+            const over = overDeliveryError(db, r);
+            if (over) throw new Error(over);
             const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
             const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
             const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
@@ -206,9 +281,10 @@ export const salesModels = {
               return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id });
             } });
             let next = out.db;
-            if (r.purchase_id && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
+            if (r.purchase_id && !r.return_of && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
             const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
-            if (order) next = addLineQty(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
+            // A return takes its quantities back off the order; anything else adds to what was delivered.
+            if (order) next = (r.return_of ? removeLineQty : addLineQty)(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
             return { db: next };
           },
         },
