@@ -34,3 +34,14 @@ test('accounts with journal items cannot be deleted; unused ones can', () => {
   const removed = { ...stored, records: { ...stored.records, 'account.account': stored.records['account.account'].filter((a) => a.id !== spare.id) } };
   assert.ok(!synced(stored, removed).records['account.account'].some((a) => a.id === spare.id));
 });
+
+test('an account cannot be deleted in the same diff that posts an entry using it', () => {
+  const db = seed();
+  const spare = create(db, 'account.account', { code: '999998', name: 'Spare 2', account_type: 'expense' });
+  const stored = synced(db, spare.db);
+  const cash = accountId(stored, '101401');
+  const posted = entry(stored, [{ account_id: spare.id, debit: 50, credit: 0 }, { account_id: cash, debit: 0, credit: 50 }]);
+  const diff = diffDb(stored, posted.db);
+  diff.deletes = { 'account.account': [spare.id] };
+  assert.throws(() => applyDiff(stored, diff, { isAdmin: false }), /has journal items and cannot be deleted/);
+});

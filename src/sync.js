@@ -68,7 +68,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r, { ...db, records })).find(Boolean);
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }

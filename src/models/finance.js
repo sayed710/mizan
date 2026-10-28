@@ -50,8 +50,9 @@ export function accountsError(db, before, after) {
 }
 
 /** Accounts used by journal items cannot be deleted (archive them instead): their balances would vanish from reports. */
-export function accountDeleteGuard(db, account) {
-  const used = (db.records['account.move'] ?? []).some((m) => (m.line_ids ?? []).some((l) => l.account_id === account.id));
+export function accountDeleteGuard(db, account, pending = db) {
+  // `pending` is the database as the diff leaves it, so moves created in the same diff count too.
+  const used = [...(db.records['account.move'] ?? []), ...(pending.records['account.move'] ?? [])].some((m) => (m.line_ids ?? []).some((l) => l.account_id === account.id));
   return used ? `${account.code} ${account.name} has journal items and cannot be deleted` : null;
 }
 
