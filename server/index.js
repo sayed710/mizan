@@ -16,7 +16,7 @@ import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
-import { sendDocument, sendMailing } from './mail.js';
+import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, trackingResponse } from './mailtrack.js';
 import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/models/mailing.js';
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
@@ -417,8 +417,10 @@ async function api(req, res, path) {
       const out = path.endsWith('mailing')
         ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed }), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
-      return send(res, out.status, out.body);
+      if (!out.db) return send(res, out.status, out.body);
+      const stored = recordSent(db, snapshot, out.db, { author: user.name, isAdmin: user.isAdmin, allowed });
+      commitDb(stored.db);
+      return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
     }
