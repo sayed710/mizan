@@ -209,3 +209,34 @@ test('a period that does not add up or has unmapped accounts cannot be closed', 
   const db = entry(f.db, f.child, '2090-01-01', [{ account: '101401', debit: 200 }, { account: '301000', credit: 200 }]);
   assert.throws(() => closePeriod(db, f.id), /Map these accounts before closing: 301000/);
 });
+
+test('cents lost to rounding of individual lines do not block closing a balanced period', () => {
+  const f = fixture({ method: 'proportional', ownership: 60 });
+  let db = entry(f.db, f.child, '2090-01-01', [{ account: '101401', debit: 0.07 }, { account: '600000', debit: 0.07 }, { account: '400000', credit: 0.14 }]);
+  const closed = closePeriod(db, f.id);
+  const lines = read(closed, 'consolidation.period', f.id).lines;
+  assert.equal(Math.round(lines.reduce((s, l) => s + l.total, 0) * 100), 0);
+});
+
+test('a matched cross-currency inter-company pair closes; the rate difference is its own line', () => {
+  const f = fixture();
+  const seller = read(f.db, 'res.company', f.parent).partner_id;
+  const buyer = read(f.db, 'res.company', f.child).partner_id;
+  let db = entry(f.db, f.parent, '2090-01-01', [{ account: '121000', debit: 100, partner_id: buyer }, { account: '400000', credit: 100, partner_id: buyer }]);
+  db = entry(db, f.child, '2090-01-01', [{ account: '600000', debit: 200, partner_id: seller }, { account: '211000', credit: 200, partner_id: seller }]);
+  const closed = closePeriod(db, f.id);
+  const lines = read(closed, 'consolidation.period', f.id).lines;
+  assert.ok(lines.find((l) => l.group_code === 'EQUITY:ELIM_FX'));
+  assert.equal(Math.round(lines.reduce((s, l) => s + l.total, 0) * 100), 0);
+});
+
+test('the minority keeps its share of a subsidiary result even when that result is an inter-company sale', () => {
+  const f = fixture({ method: 'full', ownership: 60 });
+  const parentPartner = read(f.db, 'res.company', f.parent).partner_id;
+  const childPartner = read(f.db, 'res.company', f.child).partner_id;
+  let db = entry(f.db, f.child, '2090-01-01', [{ account: '121000', debit: 200, partner_id: parentPartner }, { account: '400000', credit: 200, partner_id: parentPartner }]);
+  db = entry(db, f.parent, '2090-01-01', [{ account: '600000', debit: 100, partner_id: childPartner }, { account: '211000', credit: 100, partner_id: childPartner }]);
+  const lines = read(closePeriod(db, f.id), 'consolidation.period', f.id).lines;
+  const own = lines.find((l) => l.group_code === 'SALES').by_company[f.child];
+  assert.equal(lines.find((l) => l.group_code === 'EQUITY:NCI_RESULT').by_company[f.child], Math.round(-0.4 * own * 100) / 100);
+});

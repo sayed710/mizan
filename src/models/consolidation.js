@@ -89,6 +89,7 @@ export function consolidate(db, periodId) {
   const mapping = new Map((chart.account_ids ?? []).flatMap((a, i) => codes(a).map((code) => [code, lines[i]])));
   const partners = new Map(chart.company_ids.map((c) => [read(db, 'res.company', c.company_id).partner_id, c]));
   const unmapped = new Set();
+  let fxElimination = 0;
   // Group lines the method adds itself; the EQUITY: namespace is reserved for them.
   const systemLine = (code, name) => {
     let line = lines.find((l) => l.group_code === code);
@@ -126,7 +127,12 @@ export function consolidate(db, periodId) {
         pending.push([line, kind, amount]);
         const other = partners.get(item.partner_id ?? move.partner_id);
         if (other && other.company_id !== company.id && other.method !== 'equity'
-          && (pnl(account.account_type) || ['asset_receivable', 'liability_payable'].includes(account.account_type))) line.eliminations -= amount;
+          && (pnl(account.account_type) || ['asset_receivable', 'liability_payable'].includes(account.account_type))) {
+          line.eliminations -= amount;
+          // Both sides of a pair match at the rate of the day they were booked; what closing/average rates add on top is
+          // a translation difference, not a mismatch, and is carried to its own line below.
+          fxElimination += amount - balance * historical(date) * factor;
+        }
       }
     }
     // The translation difference closes the company's translated trial balance (local books always balance).
@@ -149,14 +155,18 @@ export function consolidate(db, periodId) {
     }
     for (const [code, balance] of balances) if (round(balance) && !mapping.has(code)) unmapped.add(code);
   }
-  return {
-    lines: lines.map((line) => {
-      const by_company = Object.fromEntries(Object.entries(line.by_company).map(([id, amount]) => [id, round(amount)]));
-      const eliminations = round(line.eliminations);
-      return { ...line, by_company, eliminations, total: round(Object.values(by_company).reduce((s, a) => s + a, 0) + eliminations) };
-    }),
-    unmapped: [...unmapped].sort(),
-  };
+  if (round(fxElimination)) systemLine('EQUITY:ELIM_FX', 'Translation Difference on Eliminations').eliminations += fxElimination;
+  const rounded = lines.map((line) => {
+    const by_company = Object.fromEntries(Object.entries(line.by_company).map(([id, amount]) => [id, round(amount)]));
+    const eliminations = round(line.eliminations);
+    return { ...line, by_company, eliminations, total: round(Object.values(by_company).reduce((s, a) => s + a, 0) + eliminations) };
+  });
+  // Lines are rounded one by one: when the unrounded balances offset, the cents lost to rounding go to their own line
+  // so the stored report adds up exactly. A real imbalance is left alone and still blocks closing.
+  const exact = lines.reduce((s, l) => s + Object.values(l.by_company).reduce((t, a) => t + a, 0) + l.eliminations, 0);
+  const drift = round(rounded.reduce((s, l) => s + l.total, 0));
+  if (Math.abs(exact) < 0.005 && drift) rounded.push({ group_code: 'EQUITY:ROUNDING', name: 'Rounding Difference', by_company: {}, eliminations: -drift, total: -drift });
+  return { lines: rounded, unmapped: [...unmapped].sort() };
 }
 
 /** Store a fresh draft report and its effective rates through the ORM. */
