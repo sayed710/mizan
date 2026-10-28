@@ -108,7 +108,7 @@ test('executive summary reports margins, liquidity and days sales outstanding', 
   assert.equal(s.grossMargin, 100);
   assert.equal(s.netMargin, 100);
   assert.equal(s.dso, 138); // 1780 / 9400 × 731 days
-  assert.ok(s.currentRatio > 18.95 && s.currentRatio < 18.96); // (1780 + 188936 + 1134 + 8100 stock) / (9234 + 1316)
+  assert.ok(s.currentRatio > 21.58 && s.currentRatio < 21.59); // (1780 + 188936 + 1134 + 35852 stock, opening stock included) / (9234 + 1316)
   const none = executiveSummary(db, { from: '2000-01-01', to: '2000-12-31' });
   assert.deepEqual([none.revenue, none.cash, none.receivables, none.payables], [0, 0, 0, 0]);
   assert.deepEqual([none.currentRatio, none.grossMargin, none.netMargin, none.dso], [null, null, null, null]);

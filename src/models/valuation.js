@@ -27,12 +27,39 @@ function prepare(db, id, date) {
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !p.qty_available) return db;
   if (p.qty_available < 0) throw new Error('Reconcile negative opening stock before valuation');
-  return create(db, 'stock.valuation.layer', {
-    product_id: id, date: '0001-01-01', quantity: p.qty_available, unit_cost: Number(p.cost) || 0,
-    value: round(p.qty_available * (Number(p.cost) || 0)), remaining_qty: p.qty_available,
-    remaining_value: round(p.qty_available * (Number(p.cost) || 0)), kind: 'adjustment',
-    description: 'Opening stock', reference: 'Opening stock', opening: true,
-  }).db;
+  return openingStock(db, [id], date);
+}
+
+const OPENING_EQUITY = '301000';
+
+/**
+ * Value stock that exists without layers (seeded, imported or typed in) as opening layers, and post their value
+ * once to the stock account against opening equity so the valuation report and the ledger agree.
+ */
+function openingStock(db, ids, date) {
+  let next = db;
+  const opened = [];
+  for (const id of ids) {
+    const p = product(next, id);
+    const value = round(p.qty_available * (Number(p.cost) || 0));
+    const res = create(next, 'stock.valuation.layer', {
+      product_id: id, date: '0001-01-01', quantity: p.qty_available, unit_cost: Number(p.cost) || 0,
+      value, remaining_qty: p.qty_available, remaining_value: value, kind: 'adjustment',
+      description: 'Opening stock', reference: 'Opening stock', opening: true,
+    });
+    next = res.db;
+    if (p.valuation !== 'manual_periodic' && value) opened.push([res.id, value]);
+  }
+  const total = round(opened.reduce((s, [, v]) => s + v, 0));
+  if (!total || !accountId(next, '110100') || !accountId(next, OPENING_EQUITY)) return next;
+  const entry = postEntry(next, { journal: 'MISC', date, ref: 'Opening stock', lines: [{ account: '110100', debit: total }, { account: OPENING_EQUITY, credit: total }] });
+  return opened.reduce((acc, [layerId]) => write(acc, 'stock.valuation.layer', layerId, { move_id: entry.id }), entry.db);
+}
+
+/** Open (and post) the stock of every stockable product that has quantities but no valuation layers yet. */
+export function postOpeningStock(db, date = today()) {
+  const ids = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available) > 0 && !layers(db, p.id).length).map((p) => p.id);
+  return ids.length ? openingStock(db, ids, date) : db;
 }
 
 /** Product costing policy; categories are free text, so policy lives on the product. */
@@ -42,7 +69,7 @@ export function costMethod(db, productId) {
   return method;
 }
 
-/** Post a layer once; periodic valuation and legacy opening balances create no entry. */
+/** Post a layer once; periodic valuation creates no entry, and opening layers are posted when they are opened. */
 export function postValuation(db, layerId) {
   const l = read(db, 'stock.valuation.layer', layerId);
   if (!l) throw new Error('Valuation layer not found');

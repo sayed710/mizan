@@ -6,7 +6,7 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
-import { moveValued } from './models/valuation.js';
+import { moveValued, postOpeningStock } from './models/valuation.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -418,5 +418,7 @@ export function seed() {
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
 
   const seeded = { ...db, messages: [] };
-  return postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(seeded))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
+  const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
+  return postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
 }
