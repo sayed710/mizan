@@ -249,7 +249,7 @@ export function FormView({ leaf, id, base, params }) {
   };
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
-  const runButton = (b) => {
+  const runButton = async (b) => {
     const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
     const need = b.requires ?? (b.email ? 'smtp' : 'server');
     if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
@@ -282,6 +282,11 @@ export function FormView({ leaf, id, base, params }) {
     const savedId = save();
     if (savedId == null) return;
     try {
+      if (b.posts && isServer()) {
+        const out = await serverAction('/api/button', { model, id: savedId, label: b.label });
+        if (out.go) location.hash = out.go;
+        return;
+      }
       const res = b.run(getDb(), read(getDb(), model, savedId));
       commit(res.db);
       if (res.go) location.hash = res.go;

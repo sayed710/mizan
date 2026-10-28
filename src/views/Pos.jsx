@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { read } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { relationCandidates, viewRecords } from '../companyView.js';
@@ -42,17 +42,31 @@ export function Pos() {
     : [...c, { product_id: id, qty: 1 }]));
   const setQty = (id, qty) => setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
 
-  const pay = (method) => {
-    const { db: booked, id } = payOrder(getDb(), { lines, method, partner_id: Number(partner) || null });
-    commit(booked);
-    setReceipt({ id, name: read(booked, 'pos.order', id).name, total: total.total, method });
+  const pay = async (method) => {
+    const partner_id = Number(partner) || null;
+    let receipt;
+    try {
+      if (isServer()) {
+        receipt = await serverAction('/api/pos/pay', { lines: cart, method, partner_id });
+      } else {
+        const { db: booked, id } = payOrder(getDb(), { lines, method, partner_id });
+        commit(booked);
+        receipt = { id, name: read(booked, 'pos.order', id).name };
+      }
+    } catch (e) {
+      alert(e.message);
+      return;
+    }
+    setReceipt({ ...receipt, total: total.total, method });
     setCart([]);
     setPartner('');
   };
   const close = () => {
     const { expected } = sessionTotals(getDb(), session);
     const counted = prompt(t('Counted cash in the drawer (expected {n})', { n: expected }), String(expected));
-    if (counted != null) commit(closeSession(getDb(), session, counted));
+    if (counted == null) return;
+    if (isServer()) serverAction('/api/pos/close', { session_id: session.id, counted }).catch((e) => alert(e.message));
+    else commit(closeSession(getDb(), session, counted));
   };
 
   if (!session) return <OpenSession />;

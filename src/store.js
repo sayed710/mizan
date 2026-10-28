@@ -117,7 +117,10 @@ export function commit(next) {
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
-  const r = await api(path, body);
+  // Queued behind pending saves, so the server sees the record as the user just saved it.
+  const request = inflight.then(() => api(path, body));
+  inflight = request.catch(() => {});
+  const r = await request;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
   await pull();
   return r.data;

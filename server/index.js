@@ -11,6 +11,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { openStorage } from './storage.js';
+import { runPosting } from './posting.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -429,6 +430,16 @@ async function api(req, res, path) {
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
+  // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
+  if (['/api/button', '/api/pos/pay', '/api/pos/close'].includes(path) && req.method === 'POST') {
+    try {
+      const out = runPosting(db, allowedFor(user), path, await readJson(req));
+      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, allowed: null }));
+      return send(res, 200, out.body);
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
