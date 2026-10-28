@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
@@ -58,7 +58,8 @@ function newDefaults(db, model, leaf, params) {
 function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
-  const text = <>{t(field.label)}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
+  const label = field.custom ? field.label : t(field.label);
+  const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
   return (
     <div className="field">
       {isLabelable(field, readonly) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
@@ -144,7 +145,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          <button type="button" role="menuitem" onClick={() => run(duplicate)}>{t('Duplicate')}</button>
+          <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>
           <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
           <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
             if (!confirm(t('Delete {n} record(s)?', { n: 1 }))) return;
@@ -237,6 +238,7 @@ export function FormView({ leaf, id, base, params }) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
+  const revRef = useRef(0);
   const current = withComputed(model, { ...(isNew ? initial : rec), ...changes });
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
@@ -255,13 +257,17 @@ export function FormView({ leaf, id, base, params }) {
    */
   const save = (extra = {}) => {
     try {
+      const curRev = ++revRef.current;
       if (isNew) {
         const values = { ...changes, ...extra };
         const res = create(getDb(), model, { ...current, ...extra });
+        const expectedHash = `${base}/${res.id}${query}`;
         commit(res.db, { quiet: true }).then((r) => {
-          if (r.ok) return;
-          refusedNew = { base, values, error: r.error };
-          location.hash = `${base}/new${query}`;
+          if (r.ok || curRev !== revRef.current) return;
+          if (location.hash === expectedHash) {
+            refusedNew = { base, values, error: r.error };
+            location.hash = `${base}/new${query}`;
+          }
         });
         setChanges({});
         location.hash = `${base}/${res.id}${query}`;
@@ -270,7 +276,7 @@ export function FormView({ leaf, id, base, params }) {
       const vals = { ...changes, ...extra };
       if (Object.keys(vals).length) {
         commit(write(getDb(), model, rec.id, vals), { quiet: true }).then((r) => {
-          if (r.ok) return;
+          if (r.ok || curRev !== revRef.current) return;
           setChanges((c) => ({ ...vals, ...c }));
           setError(r.error);
         });
@@ -409,7 +415,7 @@ export function FormView({ leaf, id, base, params }) {
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>
-              <button type="button" className="btn sm" onClick={() => { setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
+              <button type="button" className="btn sm" onClick={() => { revRef.current++; setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
             </span>
           )}
         </div>

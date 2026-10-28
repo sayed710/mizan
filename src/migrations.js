@@ -35,6 +35,9 @@ export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
   { version: 3, name: 'Work orders: date-only times to datetimes', up: migrateWorkorderTimes },
+  { version: 4, name: 'Employees: random referral tokens invalidate forgeable legacy links', up: (db) => ({
+    ...db, records: { ...db.records, 'hr.employee': (db.records['hr.employee'] ?? []).map((e) => ({ ...e, referral_token: /^[0-9a-f]{32}$/.test(e.referral_token ?? '') ? e.referral_token : crypto.randomUUID().replaceAll('-', '') })) },
+  }) },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

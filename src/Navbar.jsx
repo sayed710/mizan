@@ -80,7 +80,7 @@ export function Navbar({ app, active }) {
       <a href={`#/${app.id}`} className="nav-app">{t(app.name)}</a>
       <button type="button" className="nav-toggle" aria-expanded={menuOpen} aria-controls="nav-menus" aria-label={t('Menu')}
         onClick={() => setMenuOpen(!menuOpen)}>☰</button>
-      <nav id="nav-menus" className={`nav-menus${menuOpen ? ' open' : ''}`} aria-label={t(app.name)}>
+      <nav id="nav-menus" className={`nav-menus${menuOpen ? ' open' : ''}`} aria-label={t(app.name)} onClick={() => setMenuOpen(false)}>
         {app.menus.map((m) => (m.children
           ? <MenuGroup key={m.label} app={app} menu={m} active={active} />
           : <a key={m.key} href={`#/${app.id}/${m.key}`} className={m.key === active ? 'active' : ''}>{t(m.label)}</a>))}

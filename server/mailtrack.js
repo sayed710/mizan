@@ -1,7 +1,7 @@
 // Mass mailing delivery and tracking: personalised emails with tracked links, an open pixel and an unsubscribe link.
 import { randomUUID } from 'node:crypto';
 import { read, search } from '../src/orm.js';
-import { markBounced, markSent, queueMailing, renderTemplate, trackEvent, unsubscribe } from '../src/models/mailing.js';
+import { awaitingDelivery, markBounced, markSent, queueMailing, renderTemplate, trackEvent, unsubscribe } from '../src/models/mailing.js';
 import { sendMail } from './smtp.js';
 import { log } from './log.js';
 
@@ -52,16 +52,22 @@ const inFlight = new Set();
 /** Email each queued trace; each success is committed as sent and each failure as a bounce. Returns the delivered count. */
 async function sendTraces(cfg, store, traces, baseUrl) {
   let delivered = 0;
-  for (const trace of traces.filter((t) => !inFlight.has(t.token))) {
+  for (const snapshot of traces) {
+    const db = store.get();
+    const trace = search(db, 'mailing.trace').find((t) => t.token === snapshot.token);
+    if (!awaitingDelivery(trace) || inFlight.has(trace.token)) continue;
     inFlight.add(trace.token);
     try {
-      const db = store.get();
-      await sendMail(cfg, emailFor(db, read(db, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
+      try {
+        await sendMail(cfg, emailFor(db, read(db, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
+      } catch (e) {
+        log('warn', 'mailing email failed', { mailingId: trace.mailing_id, traceId: trace.id, error: e.message });
+        store.commit(markBounced(store.get(), trace.token));
+        continue;
+      }
+      // SMTP already accepted the message: persistence errors must remain recoverable, not become bounces.
       store.commit(markSent(store.get(), trace.token));
       delivered += 1;
-    } catch (e) {
-      log('warn', 'mailing email failed', { mailingId: trace.mailing_id, traceId: trace.id, error: e.message });
-      store.commit(markBounced(store.get(), trace.token));
     } finally {
       inFlight.delete(trace.token);
     }
@@ -70,7 +76,7 @@ async function sendTraces(cfg, store, traces, baseUrl) {
 }
 
 /** Send traces still queued after a crash or restart (at-least-once: one interrupted mid-send may go out twice). */
-export const resumeQueued = (cfg, store, baseUrl) => sendTraces(cfg, store, search(store.get(), 'mailing.trace').filter((t) => t.state === 'queued'), baseUrl);
+export const resumeQueued = (cfg, store, baseUrl) => sendTraces(cfg, store, search(store.get(), 'mailing.trace').filter(awaitingDelivery), baseUrl);
 
 /**
  * Public tracking endpoints: /api/public/mail/(open|click|unsubscribe)/<token>[/<link index>].

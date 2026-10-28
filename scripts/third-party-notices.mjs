@@ -1,24 +1,32 @@
 // Writes THIRD_PARTY_NOTICES.md for the production dependency tree (what the Docker image ships).
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+const root = fileURLToPath(new URL('..', import.meta.url));
 const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)(\.|$)/i;
+
+const OVERRIDES = {
+  'qrcode-generator': `QR Code Generator for JavaScript\nCopyright (c) 2009 Kazuhiko Arase (http://www.d-project.com/)\nLicensed under the MIT license: http://www.opensource.org/licenses/mit-license.php`,
+  standardwebhooks: `MIT License\n\nCopyright (c) Standard Webhooks\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the "Software"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.`,
+};
 
 const sections = Object.entries(lock.packages)
   .filter(([path, p]) => path.startsWith('node_modules/') && !p.dev && !p.optional)
   .map(([path]) => {
     const dir = join(root, path);
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-    const texts = existsSync(dir) ? readdirSync(dir).filter((f) => LICENSE_FILE.test(f)).sort().map((f) => readFileSync(join(dir, f), 'utf8').trim()) : [];
+    let texts = existsSync(dir) ? readdirSync(dir).filter((f) => LICENSE_FILE.test(f)).sort().map((f) => readFileSync(join(dir, f), 'utf8').trim()) : [];
+    if (!texts.length && OVERRIDES[pkg.name]) texts = [OVERRIDES[pkg.name]];
+    if (!texts.length) throw new Error(`Missing license notice for ${pkg.name}`);
     return { name: pkg.name, version: pkg.version, license: pkg.license ?? 'UNKNOWN', texts };
   })
   .sort((a, b) => a.name.localeCompare(b.name));
 
 const body = sections.map((s) => [
   `## ${s.name} ${s.version} (${s.license})`,
-  ...(s.texts.length ? s.texts.map((t) => `\`\`\`\n${t}\n\`\`\``) : ['No licence file is included in the package; see its package.json licence field.']),
+  ...s.texts.map((t) => '```\n' + t + '\n```'),
 ].join('\n\n'));
 writeFileSync(join(root, 'THIRD_PARTY_NOTICES.md'), [
   '# Third-party notices',

@@ -370,7 +370,12 @@ const ACCOUNT_FAILURES_PER_WINDOW = 50;
 const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
 const tooMany = (k) => hits(k) >= 10;
 const recordFailure = (k) => writeSql('INSERT INTO rate_events (key, at) VALUES (?, ?)', k, Date.now());
-setInterval(() => writeSql('DELETE FROM rate_events WHERE at <= ?', Date.now() - WINDOW), WINDOW).unref();
+const pruneRateEvents = () => {
+  try { writeSql('DELETE FROM rate_events WHERE at <= ?', Date.now() - WINDOW); }
+  catch (e) { log('warn', 'Rate-event cleanup failed; will retry', { error: e.message }); }
+};
+pruneRateEvents();
+setInterval(pruneRateEvents, WINDOW).unref();
 // Behind a reverse proxy set MIZAN_TRUST_PROXY=1 so limits apply per client, not per proxy.
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
@@ -462,8 +467,9 @@ const baseUrlOf = (req) => configuredBase() || `${SECURE ? 'https' : 'http'}://$
 const websiteOrigin = () => {
   try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
 };
-let lastBaseUrl = configuredBase() || `http://localhost:${PORT}`;
-let mailBaseKnown = false;
+const savedMailBase = sql.prepare("SELECT value FROM kv WHERE key = 'mail_base_url'").get()?.value;
+let lastBaseUrl = configuredBase() || savedMailBase || `http://localhost:${PORT}`;
+let mailBaseKnown = !!(configuredBase() || savedMailBase);
 
 async function api(req, res, path) {
   const ip = clientIp(req);
@@ -704,6 +710,11 @@ async function api(req, res, path) {
     try {
       lastBaseUrl = baseUrlOf(req);
       mailBaseKnown = true;
+      try {
+        writeSql("INSERT INTO kv (key, value) VALUES ('mail_base_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", lastBaseUrl);
+      } catch (e) {
+        log('warn', 'failed to persist mail_base_url', { error: e.message });
+      }
       const snapshot = scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')

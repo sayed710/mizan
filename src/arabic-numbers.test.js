@@ -42,3 +42,10 @@ test('Register Payment takes an amount typed with Arabic digits instead of silen
     else globalThis.prompt = saved;
   }
 });
+
+test('CSV export removes directional isolation marks from cells', async () => {
+  const { toCsv } = await import('./csv.js');
+  const csv = toCsv([['Price'], ['\u2066-100.00\u2069']]);
+  assert.equal(csv, '"Price"\r\n"-100.00"');
+  assert.doesNotMatch(csv, /[\u2066\u2069\u200E\u200F\u061C]/);
+});

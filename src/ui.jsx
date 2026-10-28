@@ -221,6 +221,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
  */
 function NumberInput({ id, value, onChange, integer, ...rest }) {
   const [draft, setDraft] = useState(null);
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setDraft(null);
+  }
   const parsed = draft == null ? null : parseAmount(draft);
   const invalid = draft != null && draft.trim() !== '' && (Number.isNaN(parsed) || (integer && !Number.isInteger(parsed)));
   return (
@@ -232,6 +237,7 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
         const n = parseAmount(raw);
         if (raw.trim() === '') onChange(null);
         else if (!Number.isNaN(n) && (!integer || Number.isInteger(n))) onChange(n);
+        else onChange(NaN);
       }}
       onBlur={() => { if (!invalid) setDraft(null); }} />
   );

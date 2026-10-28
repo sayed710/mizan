@@ -75,12 +75,13 @@ export function queueMailing(db, mailing, { now = today(), token = () => crypto.
   if (!picked.length) throw new Error('Every recipient of this A/B campaign has already received a version');
   const next = picked.reduce((acc, r) => create(acc, 'mailing.trace', {
     mailing_id: mailing.id, email: r.email, name: r.name, res_model: r.res_model, res_id: r.res_id,
-    token: token(), state: queued ? 'queued' : 'sent', sent_date: now, ab_version: isVersion, links_clicked: [],
+    token: token(), state: queued ? 'queued' : 'sent', delivery_counted: !queued, sent_date: now, ab_version: isVersion, links_clicked: [],
   }).db, db);
   return write(next, 'mailing.mailing', mailing.id, { state: 'sent', sent_date: now, sent: picked.length, delivered: queued ? 0 : picked.length });
 }
 
 const traceBy = (db, token) => (token ? search(db, 'mailing.trace').find((t) => t.token === token) : undefined);
+export const awaitingDelivery = (t) => !!t && !['bounced', 'cancel'].includes(t.state) && (t.delivery_counted === false || (t.delivery_counted == null && t.state === 'queued'));
 const bump = (db, mailingId, deltas) => {
   const m = read(db, 'mailing.mailing', mailingId);
   if (!m) return db;
@@ -90,15 +91,16 @@ const bump = (db, mailingId, deltas) => {
 /** A queued email went out: the trace is sent and the mailing counts one more delivery. */
 export function markSent(db, token) {
   const t = traceBy(db, token);
-  if (!t || t.state !== 'queued') return db;
-  return bump(write(db, 'mailing.trace', t.id, { state: 'sent' }), t.mailing_id, { delivered: 1 });
+  if (!awaitingDelivery(t)) return db;
+  return bump(write(db, 'mailing.trace', t.id, { state: t.state === 'queued' ? 'sent' : t.state, delivery_counted: true }), t.mailing_id, { delivered: 1 });
 }
 
 /** A hard bounce: the trace is bounced and, if it had counted as delivered, the mailing counts one delivery less. */
 export function markBounced(db, token) {
   const t = traceBy(db, token);
   if (!t || t.state === 'bounced') return db;
-  return bump(write(db, 'mailing.trace', t.id, { state: 'bounced' }), t.mailing_id, { delivered: t.state === 'queued' ? 0 : -1, bounced: 1 });
+  const counted = t.delivery_counted ?? t.state !== 'queued';
+  return bump(write(db, 'mailing.trace', t.id, { state: 'bounced', delivery_counted: false }), t.mailing_id, { delivered: counted ? -1 : 0, bounced: 1 });
 }
 
 /** Record an open, click or reply; states only move up and each counter counts a trace once. */
@@ -298,6 +300,7 @@ export const mailingModels = {
       res_id: { type: 'integer', label: 'Document ID' },
       token: { type: 'char', label: 'Token', readonly: true },
       state: state([['queued', 'Queued'], ['sent', 'Sent'], ['opened', 'Opened'], ['clicked', 'Clicked'], ['replied', 'Replied'], ['bounced', 'Bounced'], ['cancel', 'Cancelled']]),
+      delivery_counted: { type: 'boolean', label: 'Delivered', readonly: true, hidden: true },
       sent_date: { type: 'date', label: 'Sent On' },
       open_date: { type: 'date', label: 'Opened On' },
       click_date: { type: 'date', label: 'Clicked On' },

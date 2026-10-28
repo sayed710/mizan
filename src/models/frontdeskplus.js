@@ -114,8 +114,8 @@ export function checkOut(db, visitorId, at) {
 }
 
 /** Close every visitor still on site, excluding future check-ins. */
-export function checkOutAll(db, at) {
-  return onSite(db, at).reduce((next, r) => checkOut(next, r.id, at), db);
+export function checkOutAll(db, at, stationId = null) {
+  return onSite(db, at).filter((r) => stationId == null || r.station_id === stationId).reduce((next, r) => checkOut(next, r.id, at), db);
 }
 
 /** Mark an offered drink as served while its visitor is on site. */
@@ -193,7 +193,7 @@ export const frontdeskPlusModels = {
             return { db: res.db, go: `#/frontdesk/visitors/${res.id}` };
           },
         },
-        { label: 'Check Out All Visitors', run: (db) => ({ db: checkOutAll(db, now()) }) },
+        { label: 'Check Out All Visitors', run: (db, r) => ({ db: checkOutAll(db, now(), r.id) }) },
       ],
     },
   },

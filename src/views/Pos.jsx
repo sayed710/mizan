@@ -37,12 +37,15 @@ export function Pos() {
   const lines = priceLines(db, cart, Number(partner) || null);
   const total = amounts(lines);
 
+  const [paying, setPaying] = useState(false);
   const add = (id) => setCart((c) => (c.some((l) => l.product_id === id)
     ? c.map((l) => (l.product_id === id ? { ...l, qty: l.qty + 1 } : l))
     : [...c, { product_id: id, qty: 1 }]));
   const setQty = (id, qty) => setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
 
   const pay = async (method) => {
+    if (paying) return;
+    setPaying(true);
     const partner_id = Number(partner) || null;
     let receipt;
     try {
@@ -56,6 +59,8 @@ export function Pos() {
     } catch (e) {
       alert(e.message);
       return;
+    } finally {
+      setPaying(false);
     }
     setReceipt({ ...receipt, total: total.total, method });
     setCart([]);
@@ -134,8 +139,8 @@ export function Pos() {
           <div className="grand"><dt>{t('Total')}</dt><dd>{money(total.total)}</dd></div>
         </dl>
         <div className="pos-pay">
-          <button type="button" className="btn primary" disabled={!lines.length} onClick={() => pay('cash')}>{t('Cash')}</button>
-          <button type="button" className="btn primary" disabled={!lines.length} onClick={() => pay('card')}>{t('Card')}</button>
+          <button type="button" className="btn primary" disabled={!lines.length || paying} onClick={() => pay('cash')}>{t('Cash')}</button>
+          <button type="button" className="btn primary" disabled={!lines.length || paying} onClick={() => pay('card')}>{t('Card')}</button>
         </div>
       </aside>
     </main>

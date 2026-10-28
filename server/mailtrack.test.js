@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from '../src/orm.js';
+import { create, read, search, write } from '../src/orm.js';
 import { markBounced, markSent, queueMailing } from '../src/models/mailing.js';
 import { deliverMailing, emailFor, linksOf, resumeQueued, trackingResponse } from './mailtrack.js';
 import { seed } from '../src/seed.js';
+import net from 'node:net';
 
 const queued = () => {
   const base = seed();
@@ -98,4 +99,97 @@ test('resume sends traces left queued by an interrupted delivery', async () => {
   assert.equal(delivered, 0);
   assert.equal(search(current, 'mailing.trace').filter((t) => t.state === 'queued').length, 0);
   assert.equal(read(current, 'mailing.mailing', id).delivered, 0);
+});
+
+test('engagement before SMTP completion counts delivery exactly once and preserves engagement', () => {
+  // Use an actual server-queued mailing so delivery starts at zero.
+  const mailing = create(seed(), 'mailing.mailing', { subject: 'Pending', list_id: 1, body: 'Hello' });
+  const db = queueMailing(mailing.db, read(mailing.db, 'mailing.mailing', mailing.id), { queued: true });
+  const trace = search(db, 'mailing.trace').find((t) => t.mailing_id === mailing.id);
+  const opened = trackingResponse(db, `/api/public/mail/open/${trace.token}`).db;
+  const sent = markSent(opened, trace.token);
+  assert.equal(read(sent, 'mailing.mailing', mailing.id).delivered, 1);
+  assert.equal(read(sent, 'mailing.trace', trace.id).state, 'opened');
+  assert.equal(markSent(sent, trace.token), sent);
+});
+
+test('a bounce of an engaged but undelivered trace does not decrement another delivery', () => {
+  const mailing = create(seed(), 'mailing.mailing', { subject: 'Pending', list_id: 1, body: 'Hello' });
+  const db = queueMailing(mailing.db, read(mailing.db, 'mailing.mailing', mailing.id), { queued: true });
+  const [a, b] = search(db, 'mailing.trace').filter((t) => t.mailing_id === mailing.id);
+  const sent = markSent(db, a.token);
+  const opened = trackingResponse(sent, `/api/public/mail/open/${b.token}`).db;
+  const bounced = markBounced(opened, b.token);
+  assert.equal(read(bounced, 'mailing.mailing', mailing.id).delivered, 1);
+});
+
+const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+async function smtpFixture(t, accept = async () => {}) {
+  let count = 0;
+  const server = net.createServer((socket) => {
+    socket.write('220 test SMTP\r\n');
+    let buffer = '', data = false;
+    socket.on('data', (bytes) => {
+      buffer += bytes;
+      let end;
+      while ((end = buffer.indexOf('\r\n')) >= 0) {
+        const line = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        if (data) {
+          if (line === '.') { data = false; const n = ++count; Promise.resolve(accept(n)).then(() => socket.write('250 queued\r\n')); }
+        } else if (line.startsWith('EHLO')) socket.write('250 test\r\n');
+        else if (line.startsWith('MAIL') || line.startsWith('RCPT')) socket.write('250 ok\r\n');
+        else if (line === 'DATA') { data = true; socket.write('354 go\r\n'); }
+        else if (line === 'QUIT') socket.end('221 bye\r\n');
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  return { cfg: { host: '127.0.0.1', port: server.address().port, from: 'test@example.test' }, count: () => count };
+}
+function pendingStore() {
+  const mailing = create(seed(), 'mailing.mailing', { subject: 'Pending', list_id: 1, body: 'Hello' });
+  let db = queueMailing(mailing.db, read(mailing.db, 'mailing.mailing', mailing.id), { queued: true });
+  const traces = search(db, 'mailing.trace').filter((t) => t.mailing_id === mailing.id).slice(0, 2);
+  db = { ...db, records: { ...db.records, 'mailing.trace': traces } };
+  return { traces, store: { get: () => db, commit: (next) => { db = next; } } };
+}
+
+test('overlapping resume loops claim each trace immediately before SMTP', async (t) => {
+  const first = deferred(), second = deferred(), releaseFirst = deferred(), releaseSecond = deferred();
+  const smtp = await smtpFixture(t, async (n) => { if (n === 1) { first.resolve(); await releaseFirst.promise; } if (n === 2) { second.resolve(); await releaseSecond.promise; } });
+  const { store } = pendingStore();
+  const a = resumeQueued(smtp.cfg, store, 'https://erp.example');
+  await first.promise;
+  const b = resumeQueued(smtp.cfg, store, 'https://erp.example');
+  await second.promise;
+  releaseFirst.resolve();
+  await a;
+  releaseSecond.resolve();
+  await b;
+  assert.equal(smtp.count(), 2);
+});
+
+test('resume rechecks a cancelled trace after waiting for another SMTP attempt', async (t) => {
+  const first = deferred(), release = deferred();
+  const smtp = await smtpFixture(t, async (n) => { if (n === 1) { first.resolve(); await release.promise; } });
+  const { store, traces } = pendingStore();
+  const pending = resumeQueued(smtp.cfg, store, 'https://erp.example');
+  await first.promise;
+  store.commit(write(store.get(), 'mailing.trace', traces[1].id, { state: 'cancel' }));
+  release.resolve();
+  await pending;
+  assert.equal(smtp.count(), 1);
+  assert.equal(read(store.get(), 'mailing.trace', traces[1].id).state, 'cancel');
+});
+
+test('post-SMTP persistence failure is surfaced and does not mark accepted mail bounced', async (t) => {
+  const smtp = await smtpFixture(t);
+  const { store, traces } = pendingStore();
+  const commit = store.commit;
+  let failed = false;
+  store.commit = (next) => { if (!failed) { failed = true; throw new Error('Database unavailable'); } commit(next); };
+  await assert.rejects(resumeQueued(smtp.cfg, store, 'https://erp.example'), /Database unavailable/);
+  assert.equal(read(store.get(), 'mailing.trace', traces[0].id).state, 'queued');
+  assert.equal(read(store.get(), 'mailing.mailing', traces[0].mailing_id).bounced, 0);
 });

@@ -100,6 +100,16 @@ test('referral links round-trip with stable per-employee attribution and normali
   assert.throws(() => referralLink(db, 1, 99999), /not found/);
 });
 
+test('referral tokens are random per database and do not accept the legacy employee-id hash', () => {
+  const db = seed();
+  const token = refOf(referralLink(db, 1, 1));
+  assert.match(token, /^[0-9a-f]{32}$/);
+  assert.notEqual(token, refOf(referralLink(seed(), 1, 1)));
+  let hash = 2166136261;
+  for (const c of 'mizan-referral-v1:1') hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
+  assert.throws(() => referFromLink(db, { token: `1-${hash.toString(16).padStart(8, '0')}`, jobId: 1, name: 'Forged', email: 'forged@example.test' }), /Unknown referral token/);
+});
+
 test('sync follows recruitment interviews, offers, employee creation, refusals and restoration idempotently', () => {
   const result = referred(seed());
   let db = scheduleInterview(result.db, read(result.db, 'hr.applicant', result.applicantId), { date: '2026-01-15', time: '10:00', interviewer: 'Hiring Manager' });

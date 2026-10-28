@@ -65,6 +65,19 @@ test('a database from a newer version is refused instead of being silently downg
   assert.throws(() => migrate({ ...seed(), schema_version: SCHEMA_VERSION + 1 }), /newer/);
 });
 
+test('legacy employees receive durable random referral tokens without changing employee identity', () => {
+  const base = seed();
+  const legacy = { ...base, schema_version: 3, records: { ...base.records, 'hr.employee': base.records['hr.employee'].map(({ referral_token, ...e }) => e) } };
+  const migrated = migrate(legacy);
+  for (const employee of migrated.records['hr.employee']) {
+    assert.match(employee.referral_token, /^[0-9a-f]{32}$/);
+    assert.equal(employee.name, legacy.records['hr.employee'].find((e) => e.id === employee.id).name);
+  }
+  assert.equal(new Set(migrated.records['hr.employee'].map((e) => e.referral_token)).size, migrated.records['hr.employee'].length);
+  assert.equal(migrate(migrated), migrated);
+  assert.equal(legacy.records['hr.employee'][0].referral_token, undefined);
+});
+
 test('legacy blank document tags are omitted without losing named tags', () => {
   const old = legacyDb();
   old.records['documents.document'][0].tag_ids = ['', '   ', 'Tax'];
