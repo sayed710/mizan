@@ -219,7 +219,11 @@ function remapRefs(model, rec, remapped) {
         if (!line || typeof line !== 'object') return line;
         const target = (s) => (s.type === 'many2one' ? s.relation : s.ref);
         const subs = Object.entries(f.fields ?? {}).filter(([k, s]) => target(s) && k in line);
-        return subs.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(target(s), line[k])])) } : line;
+        const distribution = line.analytic_distribution;
+        const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
+          ? { analytic_distribution: Object.fromEntries(Object.entries(distribution).map(([id, share]) => [to('account.analytic.account', Number(id)), share])) }
+          : null;
+        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, to(target(s), line[k])])), ...analytic } : line;
       });
     }
   }
