@@ -43,6 +43,7 @@ export function display(db, field, value, rec = null) {
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
+    case 'many2many': return (value ?? []).map((id) => read(db, field.relation, id)?.name).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
@@ -270,6 +271,8 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
           {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </select>
       );
+    case 'many2many':
+      return <select {...a11y} multiple value={(value ?? []).map(String)} onChange={(e) => onChange([...e.target.selectedOptions].map((o) => Number(o.value)))}>{relationCandidates(db, field.relation, null).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}</select>;
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
     case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;

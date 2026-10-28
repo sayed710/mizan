@@ -15,7 +15,15 @@ const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
-const total = (r) => (isInvoice(r) ? amounts(r.invoice_line_ids).total : (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0));
+const total = (r) => {
+  if (!isInvoice(r)) return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
+  const base = amounts(r.invoice_line_ids).total;
+  if (r.invoice_cash_rounding_id && r.state === 'posted') {
+    const main = (r.line_ids ?? []).find((l) => l.name === r.name);
+    if (main) return main.amount_currency ? Math.abs(main.amount_currency) : Number(main.debit || main.credit) || base;
+  }
+  return base;
+};
 const residual = (r) => (isInvoice(r) ? Math.max(0, Math.round((total(r) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
 const paymentState = (r) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
@@ -398,6 +406,7 @@ export const accountingModels = {
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      invoice_cash_rounding_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding' },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       subscription_period: { type: 'date', label: 'Subscription Period', readonly: true },

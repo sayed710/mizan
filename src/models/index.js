@@ -225,6 +225,7 @@ const allApps = [
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
         { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
+        { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
         { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
       ] },
     ],
@@ -316,7 +317,14 @@ const allApps = [
       { key: 'orders', label: 'Orders', model: 'pos.order' },
       { key: 'sessions', label: 'Sessions', model: 'pos.session' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
-      { label: 'Configuration', children: [{ key: 'pos-config', label: 'Point of Sale', model: 'pos.config' }, { key: 'floors', label: 'Floors', model: 'restaurant.floor' }] },
+      { label: 'Configuration', children: [
+        { key: 'pos-config', label: 'Point of Sale', model: 'pos.config' },
+        { key: 'payment-methods', label: 'Payment Methods', model: 'pos.payment.method' },
+        { key: 'pos-categories', label: 'PoS Product Categories', model: 'pos.category' },
+        { key: 'presets', label: 'Presets', model: 'pos.preset' },
+        { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
+        { key: 'floors', label: 'Floors', model: 'restaurant.floor' },
+      ] },
     ],
   },
   {

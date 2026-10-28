@@ -26,10 +26,19 @@ export function runPosting(db, allowed, path, body = {}) {
   if (path === '/api/pos/pay') {
     need(allowed, 'pos.order');
     const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount) || 0 })) : [];
-    if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || !['cash', 'card', 'bank'].includes(p.method) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
-    if (!body.payments && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
+    if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || (!p.payment_method_id && !['cash', 'card', 'bank'].includes(p.method)) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
+    if (!body.payments && !Number.isInteger(Number(body.method)) && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
+    const preset = body.preset_id ? read(db, 'pos.preset', Number(body.preset_id)) : null;
     // Prices come from the products, not from the request.
-    const { db: next, id } = payOrder(db, { lines: priceLines(db, cart, Number(body.partner_id) || null), method: body.method, payments: body.payments, partner_id: Number(body.partner_id) || null });
+    const lines = priceLines(db, cart, Number(body.partner_id) || null, { pricelistId: preset?.pricelist_id ?? null, fiscalPositionId: preset?.fiscal_position_id ?? null });
+    const { db: next, id } = payOrder(db, {
+      lines,
+      method: Number.isInteger(Number(body.method)) ? Number(body.method) : body.method,
+      payments: body.payments,
+      partner_id: Number(body.partner_id) || null,
+      config_id: Number(body.config_id) || null,
+      preset_id: Number(body.preset_id) || null,
+    });
     return { db: next, body: { id, name: read(next, 'pos.order', id).name } };
   }
   if (path === '/api/pos/close') {
