@@ -20,6 +20,12 @@ test('typed amounts accept Arabic-Indic digits and separators, and refuse ambigu
   assert.throws(() => promptedAmount('0'), /not a valid amount/);
 });
 
+test('oversized decimal text cannot become an infinite amount', () => {
+  const input = '9'.repeat(400);
+  assert.ok(Number.isNaN(parseAmount(input)));
+  assert.throws(() => promptedAmount(input), /not a valid amount/);
+});
+
 test('Register Payment takes an amount typed with Arabic digits instead of silently ignoring it', () => {
   const db = seed();
   const inv = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted' && m.amount_residual >= 100);

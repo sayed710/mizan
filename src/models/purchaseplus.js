@@ -121,8 +121,9 @@ export function closeRequisition(db, id, { force = false } = {}) {
 
 /** Close ongoing agreements strictly past their end date. */
 export function blanketExpiryCheck(db, date = today()) {
-  return search(db, 'purchase.requisition').filter((r) => r.state === 'ongoing' && r.date_end && r.date_end < date)
-    .reduce((next, r) => closeRequisition(next, r.id, { force: true }), db);
+  return search(db, 'purchase.requisition').filter((r) => r.type === 'blanket' && r.state === 'ongoing' && r.date_end && r.date_end < date)
+    .reduce((next, r) => closeRequisition(orders(next, r.id).filter(draft)
+      .reduce((acc, p) => write(acc, 'purchase.order', p.id, { state: 'cancel' }), next), r.id), db);
 }
 
 const purchase = salesModels['purchase.order'];

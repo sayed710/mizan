@@ -56,13 +56,14 @@ const notify = () => {
 const demoData = async () => (await import('./seed.js')).seed();
 
 async function loadLocal() {
+  let parsed;
   try {
     const saved = localStorage.getItem(KEY);
-    if (saved) return migrate(JSON.parse(saved));
+    if (saved) parsed = JSON.parse(saved);
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
-  return demoData();
+  return parsed ? migrate(parsed) : demoData();
 }
 
 async function api(path, body, headers = {}) {
@@ -180,7 +181,7 @@ export async function serverAction(path, body) {
   const gen = generation;
   const known = remaps.length;
   // Queued behind pending saves, so the server sees the record as the user just saved it.
-  const r = await enqueue(async () => {
+  return enqueue(async () => {
     if (gen !== generation) return { ok: false, error: t('Could not save changes') };
     let id = body?.id;
     if (id != null) {
@@ -194,13 +195,13 @@ export async function serverAction(path, body) {
       }
     }
     const payload = body && typeof body === 'object' && 'id' in body && id !== body.id ? { ...body, id } : body;
-    return api(path, payload);
+    const r = await api(path, payload);
+    if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
+    // Keep the refresh serialized too: a stale action response must not replace a newer snapshot.
+    // The action already happened, so a refresh failure must not invite the user to repeat it.
+    await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
+    return r.data;
   }, (e) => { throw e; });
-  if (r?.ok === false && 'error' in r) return r;
-  if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
-  // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
-  await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
-  return r.data;
 }
 
 /** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */

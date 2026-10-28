@@ -50,3 +50,8 @@ test('failures spread over many addresses still hit a per-account ceiling', asyn
   assert.equal(await attempt(origin, 'victim', 'any-password', '10.9.9.9'), 429);
   assert.equal(await attempt(origin, 'admin', 'admin-password-1', '10.9.9.9'), 200);
 });
+
+test('case-distinct login identities do not share the account failure ceiling', async () => {
+  for (let i = 0; i < 50; i++) assert.equal(await attempt(origin, 'ADMIN', 'wrong-password', `10.20.${i}.1`), 401);
+  assert.equal(await attempt(origin, 'admin', 'admin-password-1', '10.21.1.1'), 200);
+});

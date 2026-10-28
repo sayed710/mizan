@@ -65,6 +65,26 @@ test('a database from a newer version is refused instead of being silently downg
   assert.throws(() => migrate({ ...seed(), schema_version: SCHEMA_VERSION + 1 }), /newer/);
 });
 
+test('legacy blank document tags are omitted without losing named tags', () => {
+  const old = legacyDb();
+  old.records['documents.document'][0].tag_ids = ['', '   ', 'Tax'];
+  const db = migrate(old);
+  const lines = db.records['documents.document'][0].tag_ids;
+  assert.equal(lines.length, 1);
+  assert.equal(search(db, 'documents.tag').find((t) => t.id === lines[0].tag_id).name, 'Tax');
+});
+
+test('legacy names reuse archived document tags', () => {
+  const old = legacyDb();
+  const tag = old.records['documents.tag'].find((t) => t.name === 'Tax');
+  tag.active = false;
+  old.records['sign.template'] = [{ id: 900, name: 'Legacy template', tag_ids: ['Tax'] }];
+  const db = migrate(old);
+  assert.equal(db.records['documents.document'][0].tag_ids[0].tag_id, tag.id);
+  assert.equal(db.records['documents.tag'].filter((t) => t.name === 'Tax').length, 1);
+  assert.equal(db.records['sign.template'][0].tag_ids[0].tag_id, tag.id);
+});
+
 test('the migrated data and its version are persisted', () => {
   const storage = openStorage(new DatabaseSync(':memory:'));
   const old = legacyDb();

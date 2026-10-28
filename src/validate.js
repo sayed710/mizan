@@ -50,6 +50,9 @@ export function cleanValue(field, value, where) {
       if (!isPlain(value)) fail(where);
       if (typeof value.blob === 'string' && /^[0-9a-f]{32}$/.test(value.blob)) return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, blob: value.blob };
       if (typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
+      if (!/^data:[^,]*;base64,/i.test(value.data)) {
+        try { decodeURIComponent(value.data.slice(value.data.indexOf(',') + 1)); } catch { fail(where); }
+      }
       return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, data: value.data };
     case 'distribution': {
       // { [analytic account id]: percentage }
