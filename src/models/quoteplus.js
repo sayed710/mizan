@@ -25,10 +25,13 @@ function quotation(db, id) {
   return r;
 }
 
-// Confirm also drafts the inter-company purchase; a misconfigured rule must not block the sale itself.
+// Confirm also drafts the inter-company purchase; a misconfigured rule must not block the sale itself,
+// but it is reported on the order instead of being silently dropped.
 const orderButtons = order.form.buttons.map((b) => b.label === 'Confirm' ? { ...b, run: (db, r) => {
   const res = b.run(db, r);
-  try { return { ...res, db: interCompanyRules(res.db, r.id) }; } catch { return res; }
+  try { return { ...res, db: interCompanyRules(res.db, r.id) }; } catch (e) {
+    return { ...res, db: postNote(res.db, 'sale.order', r.id, `Inter-company purchase not created: ${e.message}`) };
+  }
 } } : b);
 const confirm = (db, id) => orderButtons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', id)).db;
 const lineFields = {
