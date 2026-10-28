@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, search } from './orm.js';
+import { create, read, search } from './orm.js';
 import { companyAmount, companySum, currencyCode } from './models/money.js';
 import { journalCards } from './models/finance.js';
 import { seed } from './seed.js';
@@ -36,4 +36,23 @@ test('the sales journal card adds the SAR invoice at its company value', () => {
   const before = journalCards(seed()).find((c) => c.kind === 'sale' && c.journal.code === 'INV').unpaidAmount;
   const after = journalCards(db0).find((c) => c.kind === 'sale' && c.journal.code === 'INV').unpaidAmount;
   assert.equal(Math.round((after - before) * 100) / 100, 10000);
+});
+
+import { unratedCount } from './models/money.js';
+
+test('a document in the company\'s own currency is never revalued, even when that currency carries a rate', () => {
+  const { db, id, sar } = sarInvoice();
+  const rated = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === sar.id ? { ...c, rate_ids: [{ date: '2020-01-01', rate: 0.9 }] } : c)) } };
+  const company = { ...rated, records: { ...rated.records, 'res.company': [{ id: 1, name: 'Co', currency_id: sar.id }] } };
+  const move = read(company, 'account.move', id);
+  assert.equal(companyAmount(company, move, 'amount_total'), 37500);
+});
+
+test('a currency with no rate is counted as unconverted, not as 1:1', () => {
+  const { db, id, sar } = sarInvoice();
+  const bare = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === sar.id ? { ...c, rate_ids: [] } : c)) } };
+  const move = read(bare, 'account.move', id);
+  assert.equal(companyAmount(bare, move, 'amount_total'), 0);
+  assert.equal(companySum(bare, [move], 'amount_total'), 0);
+  assert.equal(unratedCount(bare, [move]), 1);
 });

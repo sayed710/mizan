@@ -3,7 +3,7 @@ import { models } from '../models/index.js';
 import { groupRecords } from '../orm.js';
 import { t } from '../i18n.js';
 import { display, isNumeric, money } from '../ui.jsx';
-import { companySum } from '../models/money.js';
+import { companySum, unratedCount } from '../models/money.js';
 
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
@@ -20,7 +20,9 @@ function sortRecords(db, fields, records, sort) {
 // Footer sums are in the company currency: foreign-currency documents are converted at their date.
 const Totals = ({ db, cols, fields, records }) =>
   cols.map((f) => (
-    <td key={f} className="num">{fields[f].type === 'monetary' ? money(companySum(db, records, f)) : ''}</td>
+    <td key={f} className="num" title={fields[f].type === 'monetary' && unratedCount(db, records) ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedCount(db, records) }) : undefined}>
+      {fields[f].type === 'monetary' ? <>{money(companySum(db, records, f))}{unratedCount(db, records) ? ' *' : ''}</> : ''}
+    </td>
   ));
 
 export function List({ db, model, records, open, selected, setSelected, groupBy }) {
