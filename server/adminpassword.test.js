@@ -10,7 +10,7 @@ test('a generated admin password goes to an owner-only file, never to the server
   const directory = await mkdtemp(join(tmpdir(), 'mizan-admin-'));
   const dbFile = join(directory, 'test.sqlite');
   const { MIZAN_ADMIN_PASSWORD, ...env } = process.env;
-  const child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...env, PORT: '0', MIZAN_DB: dbFile, MIZAN_SECURE_COOKIE: '0' } });
+  const child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...env, PORT: '0', MIZAN_DB: dbFile, MIZAN_SECURE_COOKIE: '0' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   let output = '';
   try {
     const origin = await new Promise((resolve, reject) => {
@@ -30,7 +30,7 @@ test('a generated admin password goes to an owner-only file, never to the server
     const login = await fetch(`${origin}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify({ login: 'admin', password }) });
     assert.equal(login.status, 200);
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
     await rm(directory, { recursive: true, force: true });
   }
 });

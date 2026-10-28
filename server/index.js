@@ -2,6 +2,7 @@
 //   npm run build && npm start        → http://localhost:8069
 // Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS,
 // MIZAN_ALLOW_RESET=1 to allow resetting to demo data when NODE_ENV=production.
+// MIZAN_FORCE_TAKEOVER=1 to take the database over from a crashed server.
 import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,7 +17,7 @@ import { runOperation } from '../src/operations.js';
 import { backupSummary, checkBackup } from '../src/backup.js';
 import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
-import { loadRepaired, openStorage } from './storage.js';
+import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -99,7 +100,33 @@ const userOf = (row) => ({
 });
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
-const storage = openStorage(sql);
+let writer;
+try {
+  writer = claimWriter(sql, { force: process.env.MIZAN_FORCE_TAKEOVER === '1' });
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
+// A competing process may hold the write lock for a moment: wait for it instead of failing, and never let a failed renewal kill the timer.
+sql.exec('PRAGMA busy_timeout = 5000');
+setInterval(() => { try { writer.renew(); } catch (e) { console.error(`Lease renewal failed, will retry: ${e.message}`); } }, 10 * 1000).unref();
+process.on('exit', () => { try { writer.release(); } catch { /* database already closed */ } });
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(0));
+// IPC lets Windows test hosts request a normal exit (TerminateProcess skips exit handlers).
+process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });
+/** Stop (and refuse the write) when another server took over this database. */
+const ownLease = () => {
+  try {
+    writer.assert();
+  } catch (e) {
+    console.error(e.message);
+    setImmediate(() => process.exit(1));
+    throw e;
+  }
+};
+/** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
+const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+const storage = openStorage(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 let revision = 0;
@@ -119,8 +146,9 @@ const commitDb = (next, { full = false, actor = 'system', action = 'replace', au
 };
 /** Log an account-administration step (never a password, hash or key) in the same transaction as the step itself. */
 const withAudit = (actor, model, resId, action, changes, step) => {
-  sql.exec('BEGIN');
+  sql.exec('BEGIN IMMEDIATE');
   try {
+    ownLease();
     const out = step();
     logChange.run(new Date().toISOString(), actor, model, resId ?? 0, action, JSON.stringify(changes));
     sql.exec('COMMIT');
@@ -145,6 +173,7 @@ const storeFor = (opts, actor = opts.author, view = (d) => d) => {
   return {
     get: () => { base = view(db); at = epoch; return base; },
     commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = view(db); },
+    check: ownLease,
   };
 };
 if (!db) commitDb(seed(), { full: true, action: 'seed' });
@@ -164,7 +193,7 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
   const apps_ = allowed?.length ? allowed.join(',') : null;
   const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_, companies: granted?.join(',') ?? null };
   const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
-    () => sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)').run(login, row.name, salt, hash, row.is_admin, apps_, row.companies));
+    () => writeSql('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)', login, row.name, salt, hash, row.is_admin, apps_, row.companies));
   return made;
 }
 
@@ -209,7 +238,7 @@ const SECURE = process.env.MIZAN_SECURE_COOKIE ? process.env.MIZAN_SECURE_COOKIE
 const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${SECURE ? '; Secure' : ''}`;
 
 // Sessions use opaque random tokens, not a signing secret. Persist a separate key in the existing kv store.
-sql.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)").run(randomBytes(32).toString('hex'));
+writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)", randomBytes(32).toString('hex'));
 const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
 const pageToken = (p) => createHmac('sha256', PAGE_SECRET).update(`${p.id}:${p.visibility_password}`).digest('hex');
 const pageUnlocked = (req, p) => {
@@ -249,7 +278,7 @@ const checkSelection = (u, { current_company_id: current, allowed_company_ids: a
   return JSON.stringify({ current, allowed: [...new Set(allowed)] });
 };
 const saveSelection = (u, selection) => {
-  sql.prepare('UPDATE users SET selection = ? WHERE id = ?').run(selection, u.id);
+  writeSql('UPDATE users SET selection = ? WHERE id = ?', selection, u.id);
   u.selection = selection;
 };
 /** Records a user may read: their apps' models, only their companies' records, and their own company selection. */
@@ -289,8 +318,8 @@ const WHATSAPP_HOOKS_PER_WINDOW = 600;
 const ACCOUNT_FAILURES_PER_WINDOW = 50;
 const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
 const tooMany = (k) => hits(k) >= 10;
-const recordFailure = (k) => sql.prepare('INSERT INTO rate_events (key, at) VALUES (?, ?)').run(k, Date.now());
-setInterval(() => sql.prepare('DELETE FROM rate_events WHERE at <= ?').run(Date.now() - WINDOW), WINDOW).unref();
+const recordFailure = (k) => writeSql('INSERT INTO rate_events (key, at) VALUES (?, ?)', k, Date.now());
+setInterval(() => writeSql('DELETE FROM rate_events WHERE at <= ?', Date.now() - WINDOW), WINDOW).unref();
 // Behind a reverse proxy set MIZAN_TRUST_PROXY=1 so limits apply per client, not per proxy.
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
@@ -515,7 +544,7 @@ async function api(req, res, path) {
     // A retried create with the same Idempotency-Key returns the record made the first time.
     const idemKey = req.method === 'POST' ? String(req.headers['idempotency-key'] ?? '').slice(0, IDEMPOTENCY_KEY_MAX) : '';
     if (idemKey) {
-      sql.prepare('DELETE FROM idempotency WHERE created < ?').run(Date.now() - IDEMPOTENCY_TTL_MS);
+      writeSql('DELETE FROM idempotency WHERE created < ?', Date.now() - IDEMPOTENCY_TTL_MS);
       const prior = sql.prepare('SELECT model, record_id FROM idempotency WHERE user_id = ? AND key = ?').get(keyUser.id, idemKey);
       if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
       if (prior) return send(res, 200, read(visibleDb(keyUser), prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
@@ -524,7 +553,7 @@ async function api(req, res, path) {
     const reading = req.method === 'GET';
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), readOnly: readOnlyFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
     if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
-    if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
+    if (idemKey && out.status === 201) writeSql('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)', keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);
   }
   // CSRF: state-changing calls must be JSON with a custom header (not sendable by cross-site forms).
@@ -541,7 +570,7 @@ async function api(req, res, path) {
     const user = checkPassword(login, password);
     if (!user) { recordFailure(limitKey); recordFailure(accountKey); return send(res, 401, { error: 'Wrong login or password' }); }
     const token = randomBytes(32).toString('base64url');
-    sql.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').run(sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
+    writeSql('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)', sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
     return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin, apps: parseApps(user.apps) }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
   }
 
@@ -595,7 +624,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/logout' && req.method === 'POST') {
     const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
-    if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+    if (token) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   const stamp = () => ({ 'X-Mizan-Epoch': String(epoch) });
@@ -706,13 +735,13 @@ async function api(req, res, path) {
       const label = String(name || 'API key').slice(0, 60);
       const created = Date.now();
       withAudit(user.login, 'auth.api_key', user.id, 'create', { name: [null, label], created: [null, created] },
-        () => sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, label, created));
+        () => writeSql('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)', sha256(key), user.id, label, created));
       return send(res, 201, { key }); // shown once; only the hash is stored
     }
     if (req.method === 'DELETE') {
       const created = Number(new URL(req.url, 'http://x').searchParams.get('created'));
       withAudit(user.login, 'auth.api_key', user.id, 'delete', { created: [created, null] },
-        () => sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created));
+        () => writeSql('DELETE FROM api_keys WHERE user_id = ? AND created = ?', user.id, created));
       return send(res, 200, { ok: true });
     }
   }

@@ -47,6 +47,8 @@ Environment: `PORT` (8069), `MIZAN_DB` (SQLite file, default `mizan.sqlite`),
 including a plain `npm start` and the Docker image; turn it on with `MIZAN_ALLOW_RESET=1`, or run with
 `NODE_ENV=development` (then `MIZAN_ALLOW_RESET=0` switches it off again). It needs RESET typed and saves the
 previous data, readable by the server's user only, to `<MIZAN_DB>.before-reset-<time>.json` first.
+One server per database file: a second one refuses to start while the first is running
+(after a crash, wait 30 seconds or start with `MIZAN_FORCE_TAKEOVER=1`).
 
 ### Backups
 

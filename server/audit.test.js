@@ -13,7 +13,7 @@ async function startServer() {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-audit-'));
   const child = spawn(process.execPath, ['server/index.js'], {
     env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: PASSWORD },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const url = await new Promise((resolve, reject) => {
     let out = '';
@@ -22,7 +22,7 @@ async function startServer() {
   });
   // Wait for exit before removing the SQLite folder, including on Windows.
   return { url, stop: async () => {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } };
 }

@@ -10,14 +10,14 @@ async function startServer() {
   const dir = mkdtempSync(join(tmpdir(), 'mizan-idem-'));
   const proc = spawn(process.execPath, ['server/index.js'], {
     env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'db.sqlite'), MIZAN_ADMIN_PASSWORD: 'idem-test-pass-1', NODE_ENV: 'test' },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   const port = await new Promise((ok, fail) => {
     proc.stdout.on('data', (d) => { const m = /localhost:(\d+)/.exec(String(d)); if (m) ok(Number(m[1])); });
     proc.on('exit', (code) => fail(new Error(`server exited ${code}`)));
   });
   return { base: `http://127.0.0.1:${port}`, stop: async () => {
-    proc.kill();
+    proc.send('shutdown');
     await new Promise((ok) => (proc.exitCode !== null ? ok() : proc.once('exit', ok)));
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } };

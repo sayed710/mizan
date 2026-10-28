@@ -11,7 +11,7 @@ const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan
 /** Start a server with `env`, run `fn(origin, adminHeaders, directory)`, then stop it. */
 async function withServer(env, fn) {
   const directory = await mkdtemp(join(tmpdir(), 'mizan-reset-'));
-  const child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', NODE_ENV: '', MIZAN_ALLOW_RESET: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', NODE_ENV: '', MIZAN_ALLOW_RESET: '', ...env }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   try {
     const origin = await new Promise((resolve, reject) => {
       let output = '';
@@ -27,7 +27,7 @@ async function withServer(env, fn) {
     const res = await fetch(`${origin}/api/login`, { method: 'POST', headers, body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }) });
     await fn(origin, { ...headers, Cookie: res.headers.get('set-cookie').split(';')[0] }, directory);
   } finally {
-    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
     await rm(directory, { recursive: true, force: true });
   }
 }

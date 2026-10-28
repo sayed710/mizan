@@ -21,7 +21,7 @@ const raw = (path, { method = 'GET', headers = {}, body } = {}) => new Promise((
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'mizan-poll-'));
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   origin = await new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
@@ -38,7 +38,7 @@ before(async () => {
 });
 
 after(async () => {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 

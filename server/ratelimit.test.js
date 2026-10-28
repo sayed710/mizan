@@ -11,7 +11,7 @@ let child;
 let origin;
 
 async function start() {
-  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0', MIZAN_TRUST_PROXY: '1' } });
+  child = spawn(process.execPath, ['server/index.js'], { cwd: new URL('..', import.meta.url), env: { ...process.env, PORT: '0', MIZAN_DB: join(directory, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'admin-password-1', MIZAN_SECURE_COOKIE: '0', MIZAN_TRUST_PROXY: '1' }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   return new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => reject(new Error(`Server did not start: ${output}`)), 15000);
@@ -25,7 +25,7 @@ async function start() {
   });
 }
 async function stop() {
-  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+  if (child && child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
 }
 after(async () => { await stop(); await rm(directory, { recursive: true, force: true }); });
 

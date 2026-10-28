@@ -250,6 +250,7 @@ export async function sendWhatsApp(env, store, user, { model, id, text, template
     ? { type: 'template', template: { name: template.name, language: { code: template.language || 'en' }, components: [{ type: 'body', parameters: renderWhatsApp(queued.db, template, rec).values.map((v) => ({ type: 'text', text: v })) }] } }
     : { type: 'text', text: { body: msg.body } };
   try {
+    store.check?.(); // the lease may have been lost since the message was queued
     const out = await fetchJson(`https://graph.facebook.com/v21.0/${encodeURIComponent(env.MIZAN_WHATSAPP_PHONE_ID)}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.MIZAN_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
@@ -288,6 +289,7 @@ export async function sendSmsCampaign(env, store, { id }) {
   let sent = 0;
   for (const trace of traces) {
     try {
+      store.check?.();
       await sendSms(env, trace.phone, c.body);
       store.commit(markSms(store.get(), trace.id, true));
       sent += 1;
