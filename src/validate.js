@@ -1,5 +1,5 @@
 // Type checks for untrusted record values, so one bad write can't break rendering for every user.
-import { models } from './models/index.js';
+import { models } from './registry.js';
 
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
