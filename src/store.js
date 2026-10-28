@@ -129,7 +129,8 @@ export function commit(next) {
 export async function serverAction(path, body) {
   const r = await api(path, body);
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
-  await pull();
+  // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
+  await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
   return r.data;
 }
 
