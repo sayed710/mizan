@@ -2,22 +2,79 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  inventory:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.prs.outputs.matrix }}
+    steps:
+      - id: prs
+        name: Snapshot all eligible open PR heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/${{ github.repository }}/pulls?state=open&per_page=100" > "$RUNNER_TEMP/open-prs.json"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const prs = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/open-prs.json`, 'utf8')).flat();
+          const include = prs.filter(pr => !pr.draft && pr.head.repo).map(pr => ({
+            pr: pr.number, sha: pr.head.sha, repository: pr.head.repo.full_name
+          }));
+          if (!include.length || include.length > 256) throw new Error(`Unsupported PR count: ${include.length}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## PR snapshot\n\n| PR | Head SHA |\n|---|---|\n${include.map(pr => `| #${pr.pr} | ${pr.sha} |`).join('\n')}\n`);
+          NODE
+
+  pilot:
+    name: Verify existing CI setup (PR 11)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: fd4188a0aa5fe113fd65e64a2c2c6292e652f963
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
-      # `npm test` builds first (pretest): the server tests serve dist/.
+      - run: npm run build
       - run: npm test
+
+  test:
+    name: PR ${{ matrix.pr }} - build and tests
+    needs: [inventory, pilot]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Record tested snapshot
+        if: always()
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+          PR_SHA: ${{ matrix.sha }}
+          TEST_STATUS: ${{ job.status }}
+        run: |
+          printf 'PR #%s\n\nHead: `%s`\n\nResult: %s\n' "$PR_NUMBER" "$PR_SHA" "$TEST_STATUS" >> "$GITHUB_STEP_SUMMARY"
