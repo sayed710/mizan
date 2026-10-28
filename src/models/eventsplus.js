@@ -263,7 +263,7 @@ export const eventsPlusModels = {
     list: ['name', 'event_id', 'speaker_name', 'date', 'start', 'duration', 'location', 'stage', 'is_published'],
     views: ['list', 'kanban', 'calendar'],
     calendar: { date: 'date' },
-    form: { statusbar: 'stage', title: 'name', groups: [['event_id', 'name', 'stage', 'is_published'], ['speaker_name', 'speaker_email'], ['date', 'start', 'duration', 'location']], chatter: false },
+    form: { statusbar: 'stage', statusbarClickable: true, title: 'name', groups: [['event_id', 'name', 'stage', 'is_published'], ['speaker_name', 'speaker_email'], ['date', 'start', 'duration', 'location']], chatter: false },
   },
   'event.sponsor': {
     label: 'Sponsors',
