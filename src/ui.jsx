@@ -42,7 +42,8 @@ export function display(db, field, value, rec = null) {
     case 'monetary': return money(value, currencyCode(db, rec));
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
-    case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
+    case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
+    case 'many2many': return value.map((id) => { const r = read(db, field.relation, id); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
@@ -191,7 +192,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
                     ? display(db, f, l[k], record)
-                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    : <FieldInput db={db} field={f} value={l[k]} record={l} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
               {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
@@ -266,6 +267,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'selection':
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+          {!field.required && <option value="" />}
           {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
@@ -273,9 +275,13 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
-          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
+    case 'many2many':
+      return <select {...a11y} multiple value={(value ?? []).map(String)} onChange={(e) => onChange(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
+        {relationCandidates(db, field.relation).filter((r) => !field.domain || field.domain(r, record) || (value ?? []).includes(r.id)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
+      </select>;
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
     case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;

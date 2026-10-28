@@ -5,6 +5,7 @@ import { financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { mapAccount } from './taxes.js';
 import { round } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
@@ -57,7 +58,7 @@ export function analyticLinesForMove(db, move) {
   return (move.invoice_line_ids ?? []).flatMap((line) => {
     const product = read(db, 'product', line.product_id);
     const fallback = search(db, 'account.account').find((a) => a.code === (purchase ? '600000' : '400000'))?.id;
-    const account = mapAccount(db, move.fiscal_position_id, line.account_id || product?.[purchase ? 'property_account_expense_id' : 'property_account_income_id'] || fallback);
+    const account = mapAccount(db, move.fiscal_position_id, line.account_id || productProperty(db, product, purchase ? 'property_account_expense_id' : 'property_account_income_id') || fallback);
     return Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => ({
       name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
       account_id: Number(id), amount: round(subtotal(line) * percent / 100 * (purchase ? -1 : 1)),

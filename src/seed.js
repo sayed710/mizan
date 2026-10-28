@@ -11,6 +11,7 @@ import { moveValued, postOpeningStock } from './models/valuation.js';
 import { SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
+import { migrateProductCategories } from './models/productconfig.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -427,5 +428,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...ensureCalendars(migrateTimeOff(ensureQuants(ready))), schema_version: SCHEMA_VERSION };
+  return { ...ensureCalendars(migrateProductCategories(migrateTimeOff(ensureQuants(ready)))), schema_version: SCHEMA_VERSION };
 }

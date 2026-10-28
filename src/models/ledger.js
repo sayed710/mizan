@@ -4,6 +4,7 @@ import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount, taxGroups } from './taxes.js';
 import { round } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -55,8 +56,8 @@ export function invoiceLines(db, move) {
   const byAccount = new Map();
   const productAccount = (l) => {
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
-    if (!sale && p?.type === 'goods' && p.valuation !== 'manual_periodic') return accountId(db, '110200');
-    return p?.[sale ? 'property_account_income_id' : 'property_account_expense_id'];
+    if (!sale && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200');
+    return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
   };
   for (const l of move.invoice_line_ids ?? []) {
     const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);

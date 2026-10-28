@@ -8,6 +8,7 @@ import { migrateWorkorderTimes } from './models/workorder.js';
 import { ensureQuants } from './models/quant.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
+import { migrateProductCategories } from './models/productconfig.js';
 
 /** Tag lists stored as names (['Tax']) become lines pointing at documents.tag records, creating missing tags. */
 function documentTagLines(db) {
@@ -44,6 +45,7 @@ export const MIGRATIONS = [
   { version: 7, name: 'Employees: random referral tokens invalidate forgeable legacy links', up: (db) => ({
     ...db, records: { ...db.records, 'hr.employee': (db.records['hr.employee'] ?? []).map((e) => ({ ...e, referral_token: /^[0-9a-f]{32}$/.test(e.referral_token ?? '') ? e.referral_token : crypto.randomUUID().replaceAll('-', '') })) },
   }) },
+  { version: 8, name: 'Product categories: preserve and link legacy names', up: migrateProductCategories },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

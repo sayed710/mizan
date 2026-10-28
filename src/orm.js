@@ -105,6 +105,7 @@ export function create(db, model, vals) {
   const id = nextId(db, model);
   const rec = {
     ...(models[model].defaults?.(id) ?? {}),
+    ...(models[model].createDefaults?.(db, vals) ?? {}),
     ...(SHARED_MODELS.has(model) ? {} : { company_id: activeCompany ?? 1 }),
     ...stripComputed(model, vals),
     id,
@@ -196,10 +197,11 @@ export function referenceTo(db, model, ids) {
   for (const [source, def] of Object.entries(models)) {
     for (const [key, f] of Object.entries(def.fields)) {
       const direct = f.type === 'many2one' && f.relation === model && !f.compute;
-      const sub = f.type === 'one2many' && f.fields ? Object.keys(f.fields).filter((k) => f.fields[k].type === 'many2one' && f.fields[k].relation === model) : [];
-      if (!direct && !sub.length) continue;
+      const multiple = f.type === 'many2many' && f.relation === model && !f.compute;
+      const sub = f.type === 'one2many' && f.fields ? Object.keys(f.fields).filter((k) => ['many2one', 'many2many'].includes(f.fields[k].type) && f.fields[k].relation === model) : [];
+      if (!direct && !multiple && !sub.length) continue;
       const hit = (db.records[source] ?? []).find((r) => !(source === model && drop.has(r.id))
-        && (direct ? drop.has(r[key]) : Array.isArray(r[key]) && r[key].some((l) => sub.some((k) => drop.has(l?.[k])))));
+        && (direct ? drop.has(r[key]) : multiple ? (r[key] ?? []).some((id) => drop.has(id)) : Array.isArray(r[key]) && r[key].some((l) => sub.some((k) => Array.isArray(l?.[k]) ? l[k].some((id) => drop.has(id)) : drop.has(l?.[k])))));
       if (hit) return `${def.label} ${hit.name ?? `#${hit.id}`}`;
     }
   }

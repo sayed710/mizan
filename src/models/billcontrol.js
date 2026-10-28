@@ -5,6 +5,7 @@ import { accountId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
+import { productProperty } from './productconfig-helpers.js';
 import { round } from '../money.js';
 
 const number = (n) => Number(n) || 0;
@@ -106,7 +107,7 @@ export function priceDifferenceLines(db, bill) {
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
-    if (p?.type !== 'goods' || p.valuation === 'manual_periodic' || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
+    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation')) || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
     let skip = totalQty(prior, p.id) + (used.get(p.id) ?? 0), left = number(l.qty), value = 0;
     const layers = search(db, 'stock.valuation.layer').filter((v) => {
       const picking = read(db, 'stock.picking', v.picking_id);
