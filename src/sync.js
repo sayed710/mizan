@@ -38,6 +38,26 @@ export function diffDb(prev, next) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
+/** A new id this far out is always refused on a fresh database (kept for callers and tests). */
+export const MAX_ID = 2 ** 40;
+/** How far past a model's counter a client may pick a new id (queued offline creates), so one record can't burn the id space. */
+export const ID_WINDOW = 1_000_000;
+
+/** Highest id in a list of records, without spreading the list into Math.max (argument limits on large models). */
+export const maxId = (recs = []) => { let top = 0; for (const r of recs) if (r.id > top) top = r.id; return top; };
+
+/** Reset id counters that are corrupt, behind the stored records, or absurdly far past them (e.g. poisoned by an old client). */
+export function repairSeq(db) {
+  if (!db) return db;
+  let changed = false;
+  const seq = { ...db.seq };
+  for (const [model, n] of Object.entries(seq)) {
+    const top = maxId(db.records[model]);
+    if (!Number.isSafeInteger(n) || n < top || n > top + ID_WINDOW) { seq[model] = top; changed = true; }
+  }
+  return changed ? { ...db, seq } : db;
+}
+
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
@@ -53,8 +73,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
+    const newIdLimit = Math.min(Number.MAX_SAFE_INTEGER, Math.max(db.seq?.[model] ?? 0, maxId(db.records[model])) + ID_WINDOW);
     for (const raw of recs) {
-      if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
+      if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
+      if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
@@ -72,13 +94,14 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
+  // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
   const seq = { ...db.seq };
-  for (const [model, n] of Object.entries(d.seq ?? {})) {
-    if (models[model] && Number.isInteger(n)) seq[model] = Math.max(seq[model] ?? 0, n, ...(records[model] ?? []).map((r) => r.id));
-  }
+  for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
-  const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : []).filter((id) => !kept.has(id)));
+  const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));
+  const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : [])
+    .filter((id) => !kept.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
     .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)))
