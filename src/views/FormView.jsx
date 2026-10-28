@@ -291,6 +291,7 @@ export function FormView({ leaf, id, base, params }) {
     try {
       const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
+      if (res.message) alert(res.message);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);

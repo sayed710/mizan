@@ -233,11 +233,11 @@ export function PublicSite() {
               <article key={j.id} className="shop-item job">
                 <h3>{j.name}</h3>
                 <p>{j.description}</p>
-                {applying === j.id ? (
+                {(applying ?? Number(route.params.get('job'))) === j.id ? (
                   <form className="checkout" onSubmit={async (e) => {
                     e.preventDefault();
                     const f = new FormData(e.currentTarget);
-                    const r = await post('/api/public/apply', { job_id: j.id, name: f.get('name'), email: f.get('email'), phone: f.get('phone'), motivation: f.get('motivation') });
+                    const r = await post('/api/public/apply', { job_id: j.id, name: f.get('name'), email: f.get('email'), phone: f.get('phone'), motivation: f.get('motivation'), ref: route.params.get('ref') || undefined });
                     if (r.ok) setApplied(true); else setError(r.data.error);
                   }}>
                     <label>{t('Name')}<input name="name" required maxLength={120} /></label>

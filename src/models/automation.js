@@ -169,6 +169,18 @@ export const automationModels = {
     groupBys: ['campaign_id', 'state'],
     kanban: { title: 'name', lines: ['email', 'campaign_id'], badge: 'state' },
     list: ['campaign_id', 'name', 'email', 'state'],
-    form: { lockedWhen: () => true, title: 'name', groups: [['campaign_id', 'email'], ['state']], tabs: [{ label: 'Activities', fields: ['traces'] }] },
+    form: {
+      lockedWhen: () => true, title: 'name', groups: [['campaign_id', 'email'], ['state']], tabs: [{ label: 'Activities', fields: ['traces'] }],
+      // Campaign emails are not sent with tracking yet (simulated), so opens, clicks and replies are recorded by hand.
+      buttons: [{
+        label: 'Record Email Event', when: (r) => (r.traces ?? []).some((t) => t.state === 'processed'),
+        ask: [{ label: 'Activity number', type: 'number', default: (r) => String((r.traces.find((t) => t.state === 'processed')?.step ?? 0) + 1) }, { label: 'Event (open, click or reply)', default: () => 'open' }],
+        run: (db, r, [step, event]) => {
+          if (!EVENT_TRIGGER[event]) throw new Error('Enter open, click or reply');
+          if (!(r.traces ?? []).some((t) => t.step === step - 1 && t.state === 'processed')) throw new Error('That activity has not been sent to this participant');
+          return { db: recordEvent(db, r.id, step - 1, event) };
+        },
+      }],
+    },
   },
 };

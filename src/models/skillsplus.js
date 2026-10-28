@@ -20,7 +20,8 @@ const tokenFor = (id) => {
   for (const c of `mizan-referral-v1:${id}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
   return `${id}-${hash.toString(16).padStart(8, '0')}`;
 };
-const linkFor = (employeeId, jobId) => `/jobs/${jobId}?ref=${tokenFor(employeeId)}`;
+// The public jobs page (PublicSite.jsx) reads job and ref from the hash and sends ref with the application.
+const linkFor = (employeeId, jobId) => `/#/shop/jobs?job=${jobId}&ref=${tokenFor(employeeId)}`;
 const skillLevel = (db, typeId, skill, level) => {
   const type = get(db, 'hr.skill.type', typeId);
   if (!(type.skill_ids ?? []).some((s) => s.name === skill)) throw new Error('Select a skill belonging to this skill type');

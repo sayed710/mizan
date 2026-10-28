@@ -170,3 +170,32 @@ test('fiscal years revalue foreign balances from the form (nothing to do leaves 
   const year = create(seed(), 'account.fiscal.year', { name: 'FY 2031', date_from: '2031-01-01', date_to: '2031-12-31' });
   assert.equal(press(year.db, 'account.fiscal.year', year.id, 'Revalue Foreign Currency', ['2031-06-30']).db, year.db);
 });
+
+// MOD-007 (5/5): manual entry where the outside channel is simulated, and links to the public pages.
+test('shares and published jobs give their public links', () => {
+  const share = create(seed(), 'documents.share', { name: 'Board pack' });
+  const token = read(share.db, 'documents.share', share.id).token;
+  assert.equal(press(share.db, 'documents.share', share.id, 'Share Link').message, `/share/${token}`);
+  const job = search(share.db, 'hr.job').find((j) => j.is_published);
+  const employee = search(share.db, 'hr.employee')[0];
+  assert.match(press(share.db, 'hr.job', job.id, 'Referral Link', [employee.name]).message, new RegExp(`^/#/shop/jobs\\?job=${job.id}&ref=`));
+});
+
+test('engagement on a live post is recorded by account and never lowers a counter', () => {
+  const db = seed();
+  const post = search(db, 'social.post').find((p) => p.stage_id === 'posted' && p.live_post_ids?.length);
+  const account = read(db, 'social.account', post.live_post_ids[0].account_id);
+  const out = press(db, 'social.post', post.id, 'Record Engagement', [account.name, 500, 1, 20, 50]).db;
+  const live = read(out, 'social.post', post.id).live_post_ids[0];
+  assert.deepEqual([live.likes, live.comments, live.shares, live.clicks], [500, post.live_post_ids[0].comments, 20, 50]);
+  assert.throws(() => press(db, 'social.post', post.id, 'Record Engagement', ['Nobody', 1, 1, 1, 1]), /not live on that account/);
+});
+
+test('email opens on a processed marketing activity are recorded by activity number', () => {
+  const campaign = create(seed(), 'marketing.campaign', { name: 'Welcome', steps: [{ name: 'Hello', activity_type: 'email' }, { name: 'Follow up', activity_type: 'email', parent: 0, trigger: 'mail_open' }] });
+  const participant = create(campaign.db, 'marketing.participant', { campaign_id: campaign.id, name: 'Lina', email: 'lina@example.com', traces: [{ step: 0, state: 'processed' }] });
+  const out = press(participant.db, 'marketing.participant', participant.id, 'Record Email Event', [1, 'open']).db;
+  assert.deepEqual(read(out, 'marketing.participant', participant.id).traces[0].events, ['open']);
+  assert.throws(() => press(participant.db, 'marketing.participant', participant.id, 'Record Email Event', [2, 'open']), /not been sent/);
+  assert.throws(() => press(participant.db, 'marketing.participant', participant.id, 'Record Email Event', [1, 'bounce']), /open, click or reply/);
+});

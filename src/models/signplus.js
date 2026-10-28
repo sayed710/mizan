@@ -320,11 +320,17 @@ export const signPlusModels = {
       legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r) => (r.tag_ids ?? []).filter((t) => typeof t === 'string') },
     },
     kanban: { ...baseDocument.kanban, tags: 'legacy_tags' },
-    form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b) },
+    form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: [
+      ...baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b),
+    ] },
   },
   'documents.share': {
     label: 'Shares', fields: { name: { type: 'char', label: 'Name', required: true }, folder_id: relation('documents.folder', 'Folder'), document_ids: lines('Documents', { document_id: relation('documents.document', 'Document') }, () => ({ document_id: null })), token: { type: 'char', label: 'Token', readonly: true }, expiration: { type: 'date', label: 'Expiration' }, can_upload: { type: 'boolean', label: 'Allow Upload' } },
     defaults: () => ({ name: 'Shared Documents', token: token(), document_ids: [], can_upload: false }), list: ['name', 'folder_id', 'expiration', 'can_upload'],
-    form: { title: 'name', groups: [['folder_id', 'expiration', 'can_upload', 'token']], tabs: [{ label: 'Documents', fields: ['document_ids'] }], chatter: true },
+    form: {
+      title: 'name', groups: [['folder_id', 'expiration', 'can_upload', 'token']], tabs: [{ label: 'Documents', fields: ['document_ids'] }], chatter: true,
+      // The server serves /share/<token> (server/inbound.js): a read-only list with downloads.
+      buttons: [{ label: 'Share Link', when: (r) => !!r.token, run: (db, r) => ({ db, message: `${globalThis.location?.origin ?? ''}/share/${r.token}` }) }],
+    },
   },
 };
