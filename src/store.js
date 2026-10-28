@@ -70,29 +70,33 @@ async function api(path, body) {
 
 async function pull() {
   const r = await api('/api/db');
-  if (r.ok) { db = confirmed = r.data; notify(); }
   if (r.status === 401) location.reload();
+  if (!r.ok || !r.data) throw new Error(r.data?.error ?? `Could not load the database (HTTP ${r.status})`);
+  db = confirmed = r.data;
+  notify();
 }
 
 const pollFailed = (e) => console.warn('Mizan: refresh failed, will retry', e);
 
 /** Detect the backend; resolves to { mode, user }. A non-JSON answer means no backend (static/dev hosting). */
 export async function initStore() {
+  let session = null;
   try {
-    const r = await api('/api/session');
-    if (r.isJson) {
-      mode = 'server';
-      if (r.ok) {
-        user = r.data;
-        setAuthor(user.name);
-        setActor(user);
-        await pull();
-        setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
-      }
-      return { mode, user };
-    }
+    session = await api('/api/session');
   } catch {
     // no backend reachable: local mode
+  }
+  if (session?.isJson) {
+    mode = 'server';
+    if (session.ok) {
+      user = session.data;
+      setAuthor(user.name);
+      setActor(user);
+      // Never fall back to demo data here: the next save would write it over the real records.
+      await pull();
+      setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
+    }
+    return { mode, user };
   }
   db = loadLocal();
   applyContext();
@@ -137,7 +141,8 @@ export function commit(next) {
 export async function serverAction(path, body) {
   const r = await api(path, body);
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
-  await pull();
+  // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
+  await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
   return r.data;
 }
 
