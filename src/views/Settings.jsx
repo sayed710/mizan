@@ -204,9 +204,10 @@ export function Settings() {
           <div className="field-value">
             <select id="invoice_qr" value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
               <option value="">{t('None')}</option>
-              <option value="zatca">{t('ZATCA (Saudi e-invoicing)')}</option>
+              <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
               <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
             </select>
+            {db.settings?.invoice_qr === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
           </div>
         </div>
         <div className="field">
