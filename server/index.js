@@ -200,9 +200,23 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+function validatePassword(password) {
+  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+}
+
+/** Store a new password hash and end every session of that user except `keepToken`'s, in one audited transaction. */
+function setPassword(userId, password, keepToken = '', actor = 'system') {
+  validatePassword(password);
+  const { salt, hash } = hashPassword(password);
+  withAudit(actor, 'auth.user', userId, 'password', { password: ['***', '***'] }, () => {
+    writeSql('UPDATE users SET salt = ?, hash = ? WHERE id = ?', salt, hash, userId);
+    writeSql('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', userId, sha256(keepToken));
+  });
+}
+
 function createUser({ login, name, password, isAdmin = false, apps = '', companies = '' }, actor = 'system') {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
-  if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
+  validatePassword(password);
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
   const granted = parseCompanies(companies);
@@ -664,9 +678,22 @@ async function api(req, res, path) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
     }
   }
+  const sessionToken = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1] ?? '';
+  if (path === '/api/password' && req.method === 'POST') {
+    const { current, password } = await readJson(req);
+    const limitKey = `password:${user.id}`;
+    if (tooMany(limitKey)) return send(res, 429, { error: 'Too many attempts, try again later' });
+    if (!checkPassword(user.login, current)) { recordFailure(limitKey); return send(res, 403, { error: 'Current password is wrong' }); }
+    try { setPassword(user.id, password, sessionToken, user.login); } catch (e) { return send(res, 400, { error: e.message }); }
+    return send(res, 200, { ok: true });
+  }
+  if (path === '/api/sessions/revoke' && req.method === 'POST') {
+    withAudit(user.login, 'auth.user', user.id, 'revoke_sessions', { sessions: ['others', null] },
+      () => writeSql('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', user.id, sha256(sessionToken)));
+    return send(res, 200, { ok: true });
+  }
   if (path === '/api/logout' && req.method === 'POST') {
-    const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
-    if (token) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
+    if (sessionToken) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(sessionToken));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   const blobPath = /^\/api\/blob\/([0-9a-f]{32})$/.exec(path);
@@ -816,6 +843,21 @@ async function api(req, res, path) {
       }
       return send(res, 201, { ok: true });
     }
+  }
+  if (path === '/api/users/revoke' && req.method === 'POST') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    const { id, password } = await readJson(req);
+    const target = sql.prepare('SELECT id FROM users WHERE id = ?').get(Number(id));
+    if (!target) return send(res, 404, { error: 'User not found' });
+    if (password) { try { validatePassword(password); } catch (e) { return send(res, 400, { error: e.message }); } }
+    const creds = password ? hashPassword(password) : null;
+    // Password, sessions and API keys change together: a revoked user never keeps a usable key.
+    withAudit(user.login, 'auth.user', target.id, 'revoke_access', { sessions: ['all', null], api_keys: ['all', null], ...(creds && { password: ['***', '***'] }) }, () => {
+      if (creds) writeSql('UPDATE users SET salt = ?, hash = ? WHERE id = ?', creds.salt, creds.hash, target.id);
+      writeSql('DELETE FROM sessions WHERE user_id = ?', target.id);
+      writeSql('DELETE FROM api_keys WHERE user_id = ?', target.id);
+    });
+    return send(res, 200, { ok: true });
   }
   return send(res, 404, { error: 'Not found' });
 }
