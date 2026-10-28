@@ -80,3 +80,53 @@ test('chatter messages get the server time, not the one the client sent', async 
     stop();
   }
 });
+
+test('account administration, settings edits and notes are logged without secrets; the log pages back with `before`', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    await admin('POST', '/api/users', { login: 'clerk', name: 'Clerk', password: 'clerk-password-secret' });
+    const key = (await admin('POST', '/api/keys', { name: 'ci' })).body.key;
+    const { body: db } = await admin('GET', '/api/db');
+    const partner = db.records['res.partner'][0];
+    const edited = { ...db, settings: { ...db.settings, lock_date: '2026-01-31' }, messages: [...db.messages, { id: 'm-audit', model: 'res.partner', res_id: partner.id, body: 'call back', kind: 'note' }] };
+    assert.equal((await admin('POST', '/api/diff', diffDb(db, edited))).status, 200);
+    await admin('DELETE', `/api/keys?created=${(await admin('GET', '/api/keys')).body[0].created}`);
+
+    const log = (await admin('GET', '/api/audit?limit=1000')).body;
+    const has = (model, action) => log.some((e) => e.model === model && e.action === action);
+    assert.ok(has('auth.user', 'create') && has('auth.api_key', 'create') && has('auth.api_key', 'delete'));
+    assert.ok(has('settings', 'write') && has('mail.message', 'create'));
+    assert.ok(!JSON.stringify(log).includes('clerk-password-secret') && !JSON.stringify(log).includes(key));
+    assert.equal(log.find((e) => e.model === 'auth.user' && e.changes.login?.[1] === 'clerk').actor, 'admin');
+
+    const first = (await admin('GET', '/api/audit?limit=2')).body;
+    const next = (await admin('GET', `/api/audit?limit=2&before=${first.at(-1).id}`)).body;
+    assert.ok(next.length && next.every((e) => e.id < first.at(-1).id));
+    assert.equal((await admin('GET', '/api/audit?before=abc')).status, 400);
+  } finally {
+    stop();
+  }
+});
+
+test('anonymous blog views change the counter without adding audit rows', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const { body: db } = await admin('GET', '/api/db');
+    const blog = { id: 901, name: 'News' };
+    const made = { id: 900, name: 'Hello', blog_id: 901, is_published: true, visits: 0, content: 'Body', published_date: '2026-01-01' };
+    const saved = await admin('POST', '/api/diff', diffDb(db, { ...db, records: { ...db.records, 'blog.blog': [blog], 'blog.post': [made] } }));
+    assert.equal(saved.status, 200, JSON.stringify(saved.body.error));
+    const post = made;
+    const before = (await admin('GET', '/api/audit?limit=1000')).body.length;
+    const anonymous = client(url);
+    for (let i = 0; i < 3; i++) assert.equal((await anonymous('GET', `/api/public/blog/${post.id}`)).status, 200);
+    assert.equal((await admin('GET', '/api/audit?limit=1000')).body.length, before);
+    assert.equal((await admin('GET', '/api/db')).body.records['blog.post'].find((p) => p.id === post.id).visits, (post.visits ?? 0) + 3);
+  } finally {
+    stop();
+  }
+});

@@ -78,25 +78,31 @@ const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, 
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
  * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
  */
-const commitDb = (next, { full = false, actor = 'system', action = 'replace' } = {}) => {
+const commitDb = (next, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
   const at = new Date().toISOString();
-  const entries = full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
+  const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
+  // The log rows and the data are written in one transaction: a failed save leaves neither behind.
+  storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  db = next;
+};
+/** Log an account-administration step (never a password, hash or key) in the same transaction as the step itself. */
+const withAudit = (actor, model, resId, action, changes, step) => {
   sql.exec('BEGIN');
   try {
-    for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes));
+    const out = step();
+    logChange.run(new Date().toISOString(), actor, model, resId ?? 0, action, JSON.stringify(changes));
     sql.exec('COMMIT');
+    return out;
   } catch (e) {
     sql.exec('ROLLBACK');
     throw e;
   }
-  storage.save(full ? null : db, next);
-  db = next;
 };
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
  */
-const storeFor = (opts, actor) => {
+const storeFor = (opts, actor = opts.author) => {
   let base = db;
   return {
     get: () => { base = db; return db; },
@@ -110,13 +116,16 @@ installCustomFields(db.settings?.customFields);
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-function createUser({ login, name, password, isAdmin = false, apps = '' }) {
+function createUser({ login, name, password, isAdmin = false, apps = '' }, actor = 'system') {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
-  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
+  const apps_ = allowed?.length ? allowed.join(',') : null;
+  const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_ };
+  const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
+    () => sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)').run(login, row.name, salt, hash, row.is_admin, apps_));
+  return made;
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
@@ -284,7 +293,7 @@ async function api(req, res, path) {
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
     const out = (blogRead[1] === 'blog' ? publicBlogPost : publicForumThread)(db, blogRead[2]);
-    if (out.db) commitDb(out.db, { actor: 'public' });
+    if (out.db) commitDb(out.db, { actor: 'public', audit: false }); // view counters only: logging each visit would let crawlers fill the log
     return send(res, out.status, out.body);
   }
   const forumRoutes = { '/api/public/forum/ask': publicAsk, '/api/public/forum/answer': publicAnswer, '/api/public/forum/vote': publicVote };
@@ -455,9 +464,12 @@ async function api(req, res, path) {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     const q = new URL(req.url, 'http://x').searchParams;
     const limit = Math.min(Math.max(Number(q.get('limit')) || 100, 1), 1000);
+    // Newest first; pass the last id received as `before` for the next, older page.
+    const before = q.has('before') ? Number(q.get('before')) : null;
+    if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit);
+      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
+      .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit, before);
     return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
   }
   if (path === '/api/diff' && req.method === 'POST') {
@@ -479,12 +491,16 @@ async function api(req, res, path) {
     if (req.method === 'POST') {
       const { name } = await readJson(req);
       const key = `mzn_${randomBytes(24).toString('base64url')}`;
-      sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
+      const label = String(name || 'API key').slice(0, 60);
+      const created = Date.now();
+      withAudit(user.login, 'auth.api_key', user.id, 'create', { name: [null, label], created: [null, created] },
+        () => sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, label, created));
       return send(res, 201, { key }); // shown once; only the hash is stored
     }
     if (req.method === 'DELETE') {
       const created = Number(new URL(req.url, 'http://x').searchParams.get('created'));
-      sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created);
+      withAudit(user.login, 'auth.api_key', user.id, 'delete', { created: [created, null] },
+        () => sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created));
       return send(res, 200, { ok: true });
     }
   }
@@ -493,7 +509,7 @@ async function api(req, res, path) {
     if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps FROM users ORDER BY id').all());
     if (req.method === 'POST') {
       try {
-        createUser(await readJson(req));
+        createUser(await readJson(req), user.login);
       } catch (e) {
         return send(res, 400, { error: /UNIQUE/.test(e.message) ? 'Login already exists' : e.message });
       }
