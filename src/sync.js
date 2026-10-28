@@ -106,10 +106,13 @@ export const MAX_ID = 2 ** 40;
 export const ID_WINDOW = 1_000_000;
 /**
  * Apply only the fields an edit changed onto the stored record, refusing it when one of them no longer has the value
- * the edit started from. Without a base (a new record, or an older client) the record is taken as sent.
+ * the edit started from. Without a base the record is taken as sent, preserving omitted fields on locked records.
  */
 function merge(model, stored, raw, base) {
-  if (!base || typeof base !== 'object' || Array.isArray(base)) return raw;
+  if (!base || typeof base !== 'object' || Array.isArray(base)) {
+    // Legacy partial updates must not erase the state or content of a locked record.
+    return stored && models[model].form?.lockedWhen?.(stored) ? { ...stored, ...raw } : raw;
+  }
   const label = models[model].label ?? model;
   if (!stored) throw new ConflictError(`${label} #${raw.id} was deleted by someone else; reload and try again`);
   const stale = Object.keys(base).find((k) => same(stored[k]) !== same(base[k]));
@@ -336,8 +339,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
-    const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin })
-      ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author });
+    // Keep specific authorization failures ahead of the generic locked-form error.
+    const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
+      ?? models[model].guard?.(seen, before, rec, { isAdmin });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);
