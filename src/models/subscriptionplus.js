@@ -2,7 +2,7 @@
 import { create, messagesOf, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, today } from './common.js';
 import { moreModels } from './more.js';
-import { payMove, postMove } from './accounting.js';
+import { postMove } from './accounting.js';
 
 const base = moreModels['sale.subscription'];
 const round = (n) => Math.round(n * 100) / 100;
@@ -59,17 +59,25 @@ function billPeriod(db, sub, date) {
   return { db: next, id };
 }
 
+/**
+ * Automatic payment needs a payment provider to charge the customer, and Mizan has none yet: the invoice stays open
+ * with a note to collect it, instead of booking a bank receipt that never happened.
+ */
+const collectNote = (db, sub, invoiceId) => (sub.payment_token
+  ? postNote(db, 'account.move', invoiceId, 'Automatic payment is on for this subscription, but no payment provider is connected: collect the payment, then register it')
+  : db);
+
 function generateInvoice(db, sub) {
   if (sub.stage !== 'progress') throw new Error('Only an in-progress subscription can be invoiced');
   const date = sub.next_invoice_date || today();
   if (sub.end_date && date >= sub.end_date) throw new Error('The subscription term has ended');
   const billed = billPeriod(db, sub, date);
   let next = billed.db;
-  if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, today());
+  next = collectNote(next, sub, billed.id);
   return { db: refresh(next, read(next, 'sale.subscription', sub.id), today()), go: `#/accounting/invoices/${billed.id}` };
 }
 
-/** Post each due period once, with an exclusive contract end date and optional mock auto-payment. */
+/** Post each due period once, with an exclusive contract end date. */
 export function invoiceDue(db, date = today()) {
   checkDate(date);
   let next = db;
@@ -100,7 +108,7 @@ function invoiceOne(db, id, date) {
     if (!invoicesFor(next, sub.id).some((r) => r.invoice_date === at && r.state !== 'cancel')) {
       const billed = billPeriod(next, sub, at);
       next = billed.db;
-      if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, date);
+      next = collectNote(next, sub, billed.id);
     }
     next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: 'progress', close_reason: sub.close_reason });
     sub = read(next, 'sale.subscription', sub.id);
@@ -219,7 +227,7 @@ export const subscriptionPlusModels = {
       renewal_id: { type: 'many2one', relation: 'sale.subscription', label: 'Renewal', readonly: true },
       upsell_ids: relationLines('sale.subscription', 'subscription_id', 'Upsells'),
       invoice_ids: relationLines('account.move', 'invoice_id', 'Invoices'),
-      payment_token: { type: 'boolean', label: 'Automatic Payment' },
+      payment_token: { type: 'boolean', label: 'Automatic Payment (needs a payment provider)' },
       plan_interval: { type: 'integer', label: 'Billing Interval', readonly: true },
       plan_unit: { type: 'selection', label: 'Billing Unit', readonly: true, options: [['week', 'Weeks'], ['month', 'Months'], ['year', 'Years']] },
       overdue: { type: 'boolean', label: 'Has Overdue Invoices', readonly: true },

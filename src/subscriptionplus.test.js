@@ -43,12 +43,15 @@ test('invoiceDue catches up two months, posts linked balanced invoices, stays im
   assert.equal(invoices(invoiceDue(write(billed, model, id, { stage: 'paused' }), '2025-01-01'), id).length, 2);
 });
 
-test('invoiceDue respects custom plans and the exclusive end date, and mock tokens pay through the ledger', () => {
+test('invoiceDue respects custom plans and the exclusive end date; automatic payment books no receipt without a provider', () => {
   const plan = create(baseDb(), 'sale.subscription.plan', { name: 'Two weeks', interval: 2, unit: 'week' });
   const { db, id } = addSub(plan.db, { plan_id: plan.id, payment_token: true, end_date: '2024-01-29' });
   const billed = invoiceDue(db, '2024-03-01');
   assert.deepEqual(invoices(billed, id).map((r) => r.invoice_date), ['2024-01-01', '2024-01-15']);
-  assert.ok(invoices(billed, id).every((r) => r.amount_residual === 0 && r.payment_state === 'paid'));
+  // FLOW-012: no payment provider charges the customer, so the invoices stay due, with a note to collect them.
+  assert.ok(invoices(billed, id).every((r) => r.amount_residual > 0 && r.payment_state === 'not_paid'));
+  assert.equal(search(billed, 'account.payment').length, search(db, 'account.payment').length);
+  assert.ok(invoices(billed, id).every((r) => billed.messages.some((m) => m.res_id === r.id && m.model === 'account.move' && /no payment provider/.test(m.body))));
   assert.equal(read(billed, model, id).stage, 'closed');
   assert.equal(read(billed, model, id).closed_date, '2024-01-29');
   assert.equal(read(billed, model, id).recurring_monthly, mrr({ recurring_amount: 100, recurring_plan: { interval: 2, unit: 'week' } }));
