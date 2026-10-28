@@ -142,6 +142,11 @@ export async function logout() {
 
 export const listUsers = async () => (await api('/api/users')).data ?? [];
 export const listKeys = async () => (await api('/api/keys')).data ?? [];
+/** Server change log for a model (admins only); null when it cannot be read. */
+export async function listAudit(model, limit = 500) {
+  const r = await api(`/api/audit?model=${encodeURIComponent(model)}&limit=${limit}`);
+  return r.ok ? r.data : null;
+}
 export const revokeKey = (created) => fetch(`/api/keys?created=${Number(created)}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' } });
 export async function createKey(name) {
   const r = await api('/api/keys', { name });

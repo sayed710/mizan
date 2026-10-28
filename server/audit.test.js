@@ -19,7 +19,12 @@ async function startServer() {
     child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
     child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
   });
-  return { url, stop: () => { child.kill(); rmSync(dir, { recursive: true, force: true }); } };
+  // Wait for the server to exit before removing its folder: Windows keeps the open database file locked.
+  return { url, stop: async () => {
+    child.kill();
+    if (child.exitCode === null) await new Promise((ok) => child.once('exit', ok));
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } };
 }
 
 const client = (url) => {
@@ -60,7 +65,7 @@ test('an edit through /api/diff is logged with the login, server time and old an
     assert.equal((await clerk('POST', '/api/login', { login: 'clerk', password: 'clerk-password' })).status, 200);
     assert.equal((await clerk('GET', '/api/audit')).status, 403);
   } finally {
-    stop();
+    await stop();
   }
 });
 
@@ -77,7 +82,7 @@ test('chatter messages get the server time, not the one the client sent', async 
     assert.equal(saved.author, 'Admin');
     assert.ok(saved.date > '2026-01-01');
   } finally {
-    stop();
+    await stop();
   }
 });
 
@@ -106,7 +111,7 @@ test('account administration, settings edits and notes are logged without secret
     assert.ok(next.length && next.every((e) => e.id < first.at(-1).id));
     assert.equal((await admin('GET', '/api/audit?before=abc')).status, 400);
   } finally {
-    stop();
+    await stop();
   }
 });
 
@@ -127,6 +132,6 @@ test('anonymous blog views change the counter without adding audit rows', async 
     assert.equal((await admin('GET', '/api/audit?limit=1000')).body.length, before);
     assert.equal((await admin('GET', '/api/db')).body.records['blog.post'].find((p) => p.id === post.id).visits, (post.visits ?? 0) + 3);
   } finally {
-    stop();
+    await stop();
   }
 });

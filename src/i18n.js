@@ -447,7 +447,7 @@ const ar = {
   'Batch Transfers': 'التحويلات المجمعة', 'Batch Transfer': 'تحويل مجمع', Packages: 'الطرود', 'Package Reference': 'مرجع الطرد', 'Package Type': 'نوع الطرد',
   Box: 'صندوق', Pallet: 'منصة', Crate: 'قفص', Content: 'المحتوى',
   'Restrictive Audit Trail': 'سجل التدقيق المقيد', 'The audit trail cannot be disabled once enabled. Continue?': 'لا يمكن تعطيل سجل التدقيق بعد تفعيله. متابعة؟',
-  'Audit Trail': 'سجل التدقيق', Change: 'التغيير', 'Payment reminder': 'تذكير بالدفع',
+  'Audit Trail': 'سجل التدقيق', 'Only administrators can read the audit trail': 'سجل التدقيق متاح للمسؤولين فقط', 'Loading…': 'جارٍ التحميل…', Change: 'التغيير', 'Payment reminder': 'تذكير بالدفع',
   'Payment Terms': 'شروط الدفع', 'Early Discount': 'خصم السداد المبكر', 'Discount Days': 'أيام الخصم', 'Due Terms': 'شروط الاستحقاق',
   'Value Type': 'نوع القيمة', 'Delay Type': 'نوع المهلة', Percent: 'نسبة', Fixed: 'ثابت', 'Days after invoice date': 'أيام بعد تاريخ الفاتورة',
   'Days after end of month': 'أيام بعد نهاية الشهر', 'Cash Discount Gain': 'أرباح خصم السداد', 'Cash Discount Loss': 'خسائر خصم السداد',

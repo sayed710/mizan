@@ -42,3 +42,10 @@ test('settings changes and chatter notes are logged', () => {
   ]);
   assert.deepEqual(auditEntries(next, { ...next, messages: [] }).map((e) => e.action), ['delete', 'delete']);
 });
+
+test('audit summaries read as one line per entry', async () => {
+  const { auditSummary } = await import('./audit.js');
+  assert.equal(auditSummary({ action: 'create', changes: {} }), 'Created');
+  assert.equal(auditSummary({ action: 'delete', changes: {} }), 'Deleted');
+  assert.equal(auditSummary({ action: 'write', changes: { state: ['draft', 'posted'], ref: [null, 'PO-123'] } }), 'state: draft → posted, ref: — → PO-123');
+});
