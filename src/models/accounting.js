@@ -279,7 +279,7 @@ export const accountingModels = {
     label: 'Invoices',
     guard: moveGuard,
     invariant: (db, after, before) => lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
-    protectDelete: (db, m) => moveDeleteGuard(db, m) ?? settledByCreditNote(db, m),
+    protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
@@ -326,6 +326,10 @@ export const accountingModels = {
       },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
+      // Set by fiscal closing and exchange revaluation only.
+      is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
+      revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
+      reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },

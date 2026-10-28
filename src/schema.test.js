@@ -22,8 +22,11 @@ test('every seeded record passes the server sanitizer with nothing stripped', ()
 
 test('workflow fields survive a sync: closing entries, POS costs, rented stock, used gift cards', () => {
   const db = seed();
+  // Only fiscal closing may set this flag now; its persistence is also exercised by closing-sync.test.js.
+  assert.equal(cleanRecord('account.move', { ...db.records['account.move'][0], is_closing: true }).is_closing, true);
+  assert.throws(() => write(db, 'account.move', 1, { is_closing: true }), /closing/);
   const cases = [
-    ['account.move', 1, { is_closing: true }],
+
     ['pos.order', 1, { stock_costs: [{ index: 0, unit_cost: 12.5 }] }],
     ['product', 1, { qty_rented: 2 }],
     ['sale.order', 1, { loyalty_uses: [{ programId: 1, cardCode: 'GIFT-1', gift: true, spent: 50 }] }],

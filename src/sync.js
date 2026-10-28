@@ -298,7 +298,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
     const newIdLimit = Math.min(Number.MAX_SAFE_INTEGER, Math.max(db.seq?.[model] ?? 0, maxId(db.records[model])) + ID_WINDOW);
+    const sent = new Set();
     for (const raw of recs) {
+      if (sent.has(raw?.id)) throw new Error(`${model} #${raw.id} appears twice in one change set`);
+      sent.add(raw?.id);
       if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
       if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
