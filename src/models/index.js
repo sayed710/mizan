@@ -599,6 +599,12 @@ const PRIVATE_FIELDS = {
   },
 };
 
+/** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
+export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year'];
+
+/** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
+export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));
+
 /** Models on the menus of `appIds`, plus the shared basics. */
 export function menuModelsForApps(appIds) {
   const base = new Set(SHARED);

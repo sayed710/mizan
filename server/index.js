@@ -44,7 +44,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
+import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
@@ -214,6 +214,7 @@ const pageUnlocked = (req, p) => {
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
 const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite(db), livechat: livechatInfo(db) });
 
+const readOnlyFor = (u) => (u.isAdmin || !u.apps?.length ? null : readOnlyForApps(u.apps));
 /** Models a session/API user may change (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
 /** Models on a user's own app menus (null = everything): who may share portal links or run booking operations, never via a relation. */
@@ -270,7 +271,7 @@ const visibleDb = (u, { models = true } = {}) => {
 /** The database as a user may read it for server-side work: other companies' records are left out. */
 const scopeFor = (u) => (companiesFor(u) ? visibleDb(u, { models: false }) : db);
 /** Write options for a user: who they are, what they may change, and in which companies. */
-const writeOptions = (u, allowed = allowedFor(u)) => ({ author: u.name, isAdmin: u.isAdmin, login: u.login, allowed, companies: companiesFor(u) });
+const writeOptions = (u, allowed = allowedFor(u)) => ({ author: u.name, isAdmin: u.isAdmin, login: u.login, allowed, readOnly: readOnlyFor(u), companies: companiesFor(u) });
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
 // Stored in SQLite so a restart does not reset an attacker's counter.
@@ -501,7 +502,7 @@ async function api(req, res, path) {
     }
     // Reads see what the web client sees; writes are checked against the stricter write set.
     const reading = req.method === 'GET';
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser), readOnly: readOnlyFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
     if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
     if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);

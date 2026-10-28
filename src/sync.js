@@ -280,13 +280,14 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
  */
-export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null, companies = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
+    if (readOnly?.has(model)) throw new Error(`Only Accounting users can change ${models[model].label}`);
   };
   installCustomFields(db.settings?.customFields);
   // Apply every upsert first, then validate each record against the complete result: a change spanning models

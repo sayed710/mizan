@@ -284,7 +284,7 @@ const describe = (name) => ({
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req
  * @returns {{ status: number, body: unknown, db?: object }} db is set when the request changed data.
  */
-export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null }) {
+export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null, readOnly = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
   if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
@@ -293,7 +293,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, login: user.login, companies }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) });
   const visible = (r) => r && visibleTo(companies, model, r, db);
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const seen = companies ? { ...db, records: restrictRecords(db, companies).records } : db;
