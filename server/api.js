@@ -1,7 +1,7 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
 import { RASTER } from './blobs.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { models } from '../src/models/index.js';
+import { models, uninstalledModels } from '../src/models/index.js';
 import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
@@ -302,9 +302,11 @@ const describe = (name) => ({
  */
 export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null, readOnly = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
-  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
+  const unavailable = uninstalledModels(db.settings?.uninstalled);
+  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !unavailable.has(m) && (!allowed || allowed.has(m))).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
   if (allowed && !allowed.has(model)) return { status: 403, body: { error: `No access to ${model}` } };
+  if (unavailable.has(model)) return { status: 404, body: { error: `The app for ${model} is not installed` } };
   const id = rawId === undefined ? null : Number(rawId);
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 

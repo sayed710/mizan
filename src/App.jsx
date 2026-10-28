@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useDb } from './store.js';
 import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
 import { Navbar } from './Navbar.jsx';
@@ -33,6 +34,7 @@ function parseHash() {
 const PAGES = { analysis: AnalysisPage, dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet };
 
 export function App() {
+  const db = useDb();
   const [route, setRoute] = useState(parseHash);
   useEffect(() => {
     const onHash = () => { setRoute(parseHash()); window.scrollTo(0, 0); };
@@ -55,11 +57,12 @@ export function App() {
   if (route.app === 'print') return <PrintDoc model={route.menu} id={route.id} />;
   if (route.app === 'open') {
     // #/open/<model>/<id>: jump to the record inside whichever app shows that model.
-    location.replace(`${targetOf(route.menu)}/${route.id}`);
+    location.replace(`${targetOf(route.menu, db.settings?.uninstalled)}/${route.id}`);
     return null;
   }
   const app = apps.find((a) => a.id === route.app);
-  if (!app) return <Home />;
+  // An uninstalled app's menus are closed too, not only its home icon.
+  if (!app || (db.settings?.uninstalled ?? []).includes(app.id)) return <Home />;
   const leaf = findLeaf(app, route.menu);
   const base = `#/${app.id}/${leaf.key}`;
   const Page = PAGES[leaf.type];
