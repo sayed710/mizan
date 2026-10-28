@@ -19,6 +19,7 @@ import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
+import { openBlobs, RASTER, referencesBlob } from './blobs.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -135,7 +136,12 @@ const ownLease = () => {
 /** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
 const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
 const storage = openStorage(sql, { beforeWrite: ownLease });
+const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
+{
+  const moved = blobs.externalize(db); // Migrate legacy inline uploads after schema/sequence repair.
+  if (moved !== db) { storage.save(db, moved); db = moved; }
+}
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 let revision = 0;
 const startedAt = Date.now().toString(36);
@@ -144,7 +150,8 @@ const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, 
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
  * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
  */
-const commitDb = (next, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
+const commitDb = (raw, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
+  const next = blobs.externalize(raw);
   const at = new Date().toISOString();
   const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
@@ -334,6 +341,17 @@ const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.h
 // ---- http helpers ----
 // Large JSON answers (the synced database) are gzipped for clients that accept it; level 1 keeps CPU low.
 const GZIP_MIN = 8 * 1024;
+/** A stored file: raster images inline, anything else as a download so it never renders as a page on this origin. */
+function sendBlob(res, row, publicImage) {
+  if (!row || (publicImage && !RASTER.test(row.type))) return send(res, 404, { error: 'Not found' });
+  const inline = RASTER.test(row.type);
+  res.writeHead(200, {
+    ...SECURITY_HEADERS, 'Content-Type': inline ? row.type : 'application/octet-stream',
+    'Cache-Control': 'private, max-age=31536000, immutable', ...(inline ? {} : { 'Content-Disposition': 'attachment' }),
+  });
+  res.end(Buffer.from(row.data));
+}
+
 const send = (res, status, body, headers = {}) => {
   const text = JSON.stringify(body);
   const head = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding', ...headers };
@@ -433,6 +451,9 @@ async function api(req, res, path) {
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, siteOf(req));
+  // Website images by their random id (the id is only shown where the image is shown).
+  const imagePath = /^\/api\/public\/image\/([0-9a-f]{32})$/.exec(path);
+  if (imagePath && req.method === 'GET') return sendBlob(res, blobs.get(imagePath[1]), true);
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
@@ -634,6 +655,12 @@ async function api(req, res, path) {
     const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
     if (token) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
+  }
+  const blobPath = /^\/api\/blob\/([0-9a-f]{32})$/.exec(path);
+  if (blobPath && req.method === 'GET') {
+    // Use the same model, company and field visibility as GET /api/db before returning bytes.
+    if (!referencesBlob(visibleDb(user), blobPath[1])) return send(res, 404, { error: 'Not found' });
+    return sendBlob(res, blobs.get(blobPath[1]), false);
   }
   const stamp = () => ({ 'X-Mizan-Epoch': String(epoch) });
   if (path === '/api/db' && req.method === 'GET') {

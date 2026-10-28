@@ -1,4 +1,5 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
+import { RASTER } from './blobs.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { models } from '../src/models/index.js';
 import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
@@ -14,8 +15,10 @@ import { restrictRecords, visibleTo } from '../src/models/company.js';
 const MAX_LIMIT = 500;
 
 const IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
-/** Only inline raster images reach the website (the CSP allows data: images). */
-export const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data : null);
+const BLOB = /^[0-9a-f]{32}$/;
+/** Only raster images reach the website: inline (the CSP allows data: images) or a stored file served by id. */
+export const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data
+  : BLOB.test(v?.blob ?? '') && RASTER.test(v.type ?? '') ? `/api/public/image/${v.blob}` : null);
 
 /** Products the shop can show or sell, in the field names the shared shop logic (src/models/shop.js) reads. */
 const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) && (!p.variant_of || isSellable(read(db, 'product', p.variant_of)))).map((p) => ({
