@@ -335,6 +335,7 @@ const allApps = [
       { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
       { key: 'allocations', label: 'Allocations', model: 'hr.leave.allocation' },
+      { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
       { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
     ],
   },

@@ -40,9 +40,9 @@ function PortalLink({ model, id }) {
   </span>;
 }
 
-function withComputed(model, vals) {
+function withComputed(model, vals, db) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
-  return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals)])) };
+  return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
 /** Defaults for a new record: model defaults < menu defaults < smart-button parent < `default_<field>` URL params. */
@@ -75,7 +75,7 @@ function SmartButtons({ db, rec, smart }) {
         const value = rec[s.key ?? 'id'];
         const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
         return (
-          <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${value}`}>
+          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${value}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>
@@ -237,7 +237,8 @@ export function FormView({ leaf, id, base, params }) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
-  const current = withComputed(model, { ...(isNew ? initial : rec), ...changes });
+  const values = { ...(isNew ? initial : rec), ...changes };
+  const current = withComputed(model, def.form.prepare?.(values, db) ?? values, db);
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
     setChanges((c) => {

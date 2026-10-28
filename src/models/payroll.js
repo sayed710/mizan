@@ -3,6 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { pad, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { round } from '../money.js';
+import { leaveIntervals } from './timeoff.js';
 
 
 /**
@@ -40,11 +41,18 @@ export function workedDays(db, slip) {
   const schedule = String(contract?.work_days || DEFAULT_WORK_DAYS);
   const weekdays = new Set(schedule.split(',').map((day) => Number(day.trim())).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6));
   const unpaidLeaves = search(db, 'hr.leave').filter((leave) => {
-    const type = String(leave.leave_type?.name ?? leave.leave_type ?? '').toLowerCase();
+    const configured = (db.records['hr.work.entry.type'] ?? []).find((t) => t.id === leave.work_entry_type_id);
+    const type = String(configured?.legacy_code || configured?.name || leave.leave_type?.name || leave.leave_type || '').toLowerCase();
     return leave.employee_id === slip.employee_id && leave.state === 'validate' && (leave.unpaid === true || type.includes('unpaid'));
   });
   const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => weekdays.has(new Date(`${date}T00:00:00Z`).getUTCDay()));
-  const unpaidDays = workingDates.filter((date) => unpaidLeaves.some((leave) => leave.date_from <= date && leave.date_to >= date)).length;
+  const intervals = unpaidLeaves.flatMap((leave) => leaveIntervals(db, leave));
+  const unpaidDays = round(workingDates.reduce((sum, date) => {
+    const occupied = intervals.filter((i) => i.date === date).sort((a, b) => a.from - b.from);
+    let until = -Infinity, hours = 0;
+    for (const i of occupied) { hours += Math.max(0, i.to - Math.max(i.from, until)); until = Math.max(until, i.to); }
+    return sum + (occupied.length ? Math.min(1, hours / occupied[0].dayHours) : 0);
+  }, 0));
   const overtimeHours = search(db, 'hr.attendance')
     .filter((attendance) => attendance.employee_id === slip.employee_id && attendance.date >= slip.date_from && attendance.date <= slip.date_to)
     .reduce((sum, attendance) => sum + Math.max(0, Number(attendance.overtime) || 0), 0);
@@ -231,12 +239,14 @@ export const payrollModels = {
       structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Salary Structure' },
       wage: { type: 'monetary', label: 'Wage' },
       work_days: { type: 'char', label: 'Work Days' },
+      hours_per_day: { type: 'float', label: 'Hours per Day' },
+      hour_from: { type: 'float', label: 'Work Start Hour' },
       date_start: { type: 'date', label: 'Contract Start Date' },
       date_end: { type: 'date', label: 'Contract End Date' },
       contract_type: { type: 'selection', label: 'Contract Type', options: [['permanent', 'Permanent'], ['fixed', 'Fixed Term'], ['intern', 'Internship']] },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'New'], ['running', 'Running'], ['close', 'Expired'], ['cancel', 'Cancelled']] },
     },
-    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today(), work_days: DEFAULT_WORK_DAYS }),
+    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today(), work_days: DEFAULT_WORK_DAYS, hours_per_day: 8, hour_from: 9 }),
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'expiring', label: 'Expiring Soon', fn: (r) => r.state === 'running' && r.date_end && r.date_end <= today().slice(0, 7) + '-31' }]],
     groupBys: ['state', 'structure_id', 'contract_type'],
     kanban: { groupBy: 'state', title: 'name', lines: ['employee_id', 'wage', 'date_end'] },
@@ -245,7 +255,7 @@ export const payrollModels = {
       statusbar: 'state',
       statusbarClickable: true,
       title: 'name',
-      groups: [['employee_id', 'structure_id', 'contract_type'], ['wage', 'date_start', 'date_end']],
+      groups: [['employee_id', 'structure_id', 'contract_type'], ['wage', 'date_start', 'date_end', 'work_days', 'hours_per_day', 'hour_from']],
       chatter: true,
     },
   },
