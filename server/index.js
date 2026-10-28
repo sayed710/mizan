@@ -1,12 +1,10 @@
-// Mizan server: auth + shared database + static frontend. Node 24 built-ins only.
+// Mizan server: auth + shared database + static frontend.
 //   npm run build && npm start        → http://localhost:8069
-// Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS,
-// MIZAN_ALLOW_RESET=1 to allow resetting to demo data when NODE_ENV=production.
-// MIZAN_FORCE_TAKEOVER=1 to take the database over from a crashed server.
+// Environment variables: server/config.js and docs/CONFIGURATION.md.
 import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -60,6 +58,14 @@ import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps,
 import { runScheduledJobs } from '../src/models/scheduler.js';
 import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
+import { checkConfig } from './config.js';
+import { log, redactPath } from './log.js';
+
+const configProblems = checkConfig();
+if (configProblems.length) {
+  for (const problem of configProblems) log('error', 'Invalid configuration', { problem });
+  process.exit(1);
+}
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 // Built client; MIZAN_DIST points elsewhere (tests use a small fixture so they do not depend on a prior build).
@@ -72,7 +78,7 @@ const COOKIE = 'mizan_session';
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_KEY_MAX = 200;
 
-const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
+const DB_PATH = process.env.MIZAN_DB || join(ROOT, 'mizan.sqlite');
 const sql = new DatabaseSync(DB_PATH);
 // Wiping everything back to demo data is off unless MIZAN_ALLOW_RESET=1, or NODE_ENV=development (and not MIZAN_ALLOW_RESET=0).
 const RESET_ALLOWED = process.env.MIZAN_ALLOW_RESET === '1' || (process.env.NODE_ENV === 'development' && process.env.MIZAN_ALLOW_RESET !== '0');
@@ -229,7 +235,7 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
-  const password = process.env.MIZAN_ADMIN_PASSWORD ?? randomBytes(9).toString('base64url');
+  const password = process.env.MIZAN_ADMIN_PASSWORD || randomBytes(9).toString('base64url');
   createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
   if (process.env.MIZAN_ADMIN_PASSWORD) console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
   else {
@@ -432,12 +438,14 @@ async function serveStatic(req, res, status = 200, routeHash) {
 
 // ---- routes ----
 /** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
-const baseUrlOf = (req) => (process.env.MIZAN_PUBLIC_URL ?? `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`).replace(/\/$/, '');
+// A configured address is cut to origin + path, so a query or fragment in it cannot break the links built on it.
+const configuredBase = () => { try { const u = new URL(process.env.MIZAN_PUBLIC_URL); return `${u.origin}${u.pathname.replace(/\/$/, '')}`; } catch { return ''; } };
+const baseUrlOf = (req) => configuredBase() || `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`;
 // No Host allow-list exists: crawler URLs are relative unless the operator configured MIZAN_PUBLIC_URL.
 const websiteOrigin = () => {
   try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
 };
-let lastBaseUrl = process.env.MIZAN_PUBLIC_URL ?? `http://localhost:${PORT}`;
+let lastBaseUrl = configuredBase() || `http://localhost:${PORT}`;
 let mailBaseKnown = false;
 
 async function api(req, res, path) {
@@ -928,17 +936,27 @@ async function website(req, res, path) {
 const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, canSee: (u, model, rec) => visibleTo(companiesFor(u), model, rec, db), clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 const signing = createSigning({ getDb: () => db, commitDb, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
+const LOG_REQUESTS = process.env.MIZAN_LOG_REQUESTS !== '0';
+
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   res.acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
+  const requestId = randomUUID();
+  const started = process.hrtime.bigint();
+  res.setHeader('X-Request-Id', requestId);
+  if (LOG_REQUESTS) {
+    res.on('close', () => log('info', 'request', {
+      requestId, method: req.method, path: redactPath(path), status: res.statusCode, ms: Number((process.hrtime.bigint() - started) / 1000000n),
+    }));
+  }
   try {
     if (await portal.handle(req, res)) return;
     if (await signing(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {
-    console.error(`${req.method} ${path} failed:`, e);
-    if (!res.headersSent) send(res, 500, { error: 'Server error' });
+    log('error', 'request failed', { requestId, method: req.method, path: redactPath(path), error: e });
+    if (!res.headersSent) send(res, 500, { error: 'Server error', requestId });
   }
 }).listen(PORT, () => console.info(`Mizan listening on http://localhost:${server.address().port}`));
 
@@ -949,7 +967,7 @@ const runJobs = () => {
     const next = runScheduledJobs(db, undefined, { onError: (job, e) => console.error(`Scheduled job ${job} failed:`, e) });
     if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
-    console.error('Scheduled job failed:', e);
+    log('error', 'scheduled job failed', { error: e });
   }
 };
 // The first run waits until the server is listening, so a restart answers requests before the jobs finish.
@@ -975,7 +993,7 @@ const runMailJobs = async () => {
     try {
       await job(storeFor({ author: 'Scheduler', isAdmin: true }));
     } catch (e) {
-      console.error('Scheduled mailing failed:', e.message);
+      log('error', 'scheduled mailing failed', { error: e });
     }
   }
 };

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { read, search } from '../src/orm.js';
 import { markBounced, markSent, queueMailing, renderTemplate, trackEvent, unsubscribe } from '../src/models/mailing.js';
 import { sendMail } from './smtp.js';
+import { log } from './log.js';
 
 const TOKEN = /^[\w-]{8,64}$/;
 const LINK = /https?:\/\/[^\s<>"')\]]+/g;
@@ -59,7 +60,7 @@ async function sendTraces(cfg, store, traces, baseUrl) {
       store.commit(markSent(store.get(), trace.token));
       delivered += 1;
     } catch (e) {
-      console.warn(`Mailing ${trace.mailing_id}: ${trace.email} failed: ${e.message}`);
+      log('warn', 'mailing email failed', { mailingId: trace.mailing_id, traceId: trace.id, error: e.message });
       store.commit(markBounced(store.get(), trace.token));
     } finally {
       inFlight.delete(trace.token);

@@ -78,7 +78,7 @@ export function scheduleSnapshots(dbPath, env = process.env, log = console, { on
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   try {
-    const sql = openSource(resolve(process.env.MIZAN_DB ?? join(root, 'mizan.sqlite')));
+    const sql = openSource(resolve(process.env.MIZAN_DB || join(root, 'mizan.sqlite')));
     console.log(snapshot(sql, resolve(process.argv[2] ?? 'backups'), { keep: Math.max(1, Number(process.env.MIZAN_BACKUP_KEEP) || 7) }));
     sql.close();
   } catch (e) {
