@@ -37,6 +37,8 @@ export const accountId = (db, code) => (db.records['account.account'] ?? []).fin
 export const journalId = (db, code) => (db.records['account.journal'] ?? []).find((j) => j.code === code)?.id ?? null;
 
 const round = (n) => Math.round(n * 100) / 100;
+/** Whether any line has a negative debit or credit. */
+export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
 export const isBalanced = (lines = []) =>
   lines.length >= 2 && round(lines.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0)) === 0;
 
@@ -79,7 +81,7 @@ export function invoiceLines(db, move) {
   const foreign = !!move.currency_id && move.currency_id !== own;
   const side = (amount, debit, doc) => {
     const sign = (debit !== refund) !== (amount < 0) ? 1 : -1;
-    return { debit: sign > 0 ? round(Math.abs(amount)) : 0, credit: sign > 0 ? 0 : round(amount), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * Math.abs(doc)) } : {}) };
+    return { debit: sign > 0 ? round(Math.abs(amount)) : 0, credit: sign > 0 ? 0 : round(Math.abs(amount)), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * Math.abs(doc)) } : {}) };
   };
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
@@ -93,9 +95,11 @@ export function invoiceLines(db, move) {
  * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string}[]}} spec
  */
 export function postEntry(db, { journal, date = today(), ref = '', lines, company = null }) {
-  const line_ids = lines.map((l) => ({
-    account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: round(l.debit ?? 0), credit: round(l.credit ?? 0),
-  }));
+  const line_ids = lines.map((l) => {
+    // Keep both columns non-negative: a negative debit is a credit and vice versa.
+    const net = round((l.debit ?? 0) - (l.credit ?? 0));
+    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net) };
+  });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;
   return create(db, 'account.move', {

@@ -1,6 +1,6 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
-import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -51,7 +51,7 @@ export function paymentGuard(db, before, after) {
   if (!Array.isArray(payments) || payments.some((p) => !p || !(Number(p.amount) > 0))) return 'Invalid payments';
   const paid = Number(after.amount_paid) || 0;
   if (round2(payments.reduce((s, p) => s + Number(p.amount), 0)) !== round2(paid)) return 'The paid amount must equal the recorded payments';
-  if (isInvoice(after) && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
+  if (isInvoice(after) && paid > 0 && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
   // A recorded payment keeps pointing at its posted settlement entry (so that entry stays protected); new ones must name one.
   const old = before?.payments ?? [];
   if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
@@ -66,11 +66,13 @@ export function postMove(db, id) {
   const year = (r.invoice_date ?? today()).slice(0, 4);
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
   if (!isInvoice(r)) {
+    if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids)) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     return write(db, 'account.move', id, { state: 'posted', name });
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
+  if (!(total(r) > 0)) throw new Error('The total must be positive; use a credit note or refund instead');
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
@@ -318,7 +320,7 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
-    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after),
+    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     invariant: (db, after, before) => lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     audited: (db) => db.settings?.audit_trail === true,

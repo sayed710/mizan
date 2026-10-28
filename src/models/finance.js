@@ -91,7 +91,8 @@ function postedMoveRule(before, after) {
   if (after.state === 'posted' && before?.state !== 'posted') {
     if (before && before.state !== 'draft') return 'Only draft entries can be posted';
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
-    if (!isBalanced(lines) || lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'A posted entry needs balanced journal items';
+    if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'Debits and credits cannot be negative';
+    if (!isBalanced(lines)) return 'A posted entry needs balanced journal items';
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
   }
   return null;
