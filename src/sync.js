@@ -254,7 +254,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`);
   };
   installCustomFields(db.settings?.customFields);
+  // Apply every upsert first, then validate each record against the complete result: a change spanning models
+  // (an expense and the report it joins) must not be judged against a half-applied diff.
   let records = { ...db.records };
+  const changed = [];
   for (const [model, recs] of Object.entries(d.upserts ?? {})) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
@@ -266,14 +269,18 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
       const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
-      const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
-      const before = current.get(rec.id) ?? null;
-      // Authority rules judge the stored record, not one an earlier step of this same change set already rewrote.
-      const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin }) ?? authorityRules[model]?.(seen, (db.records[model] ?? []).find((x) => x.id === rec.id) ?? null, rec, { isAdmin, login, name: author });
-      if (err) throw new Error(err);
       current.set(rec.id, rec);
+      changed.push([model, rec]);
     }
     records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
+  }
+  const seen = { ...db, records };
+  const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
+  for (const [model, rec] of changed) {
+    const before = stored(model, rec.id);
+    const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin })
+      ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author });
+    if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);
   const numbered = uniqueNumbers(records, d.upserts, db.records, marks);
