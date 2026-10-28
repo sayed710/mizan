@@ -24,7 +24,7 @@ import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quo
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { search } from '../src/orm.js';
 import { createPortal } from './portal.js';
-import { createSigning, remindSigners, sendSignRequest } from './signing.js';
+import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -38,8 +38,9 @@ const ACTIONS = {
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
   // E-signature: email each signer their private link (server/signing.js serves the link).
-  '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store, baseUrl) => sendSignRequest(SMTP, db, b, baseUrl) },
-  '/api/sign/remind': { need: 'smtp', model: () => 'sign.request', run: (b, u, store, baseUrl) => remindSigners(SMTP, db, b, baseUrl) },
+  // Signer links carry private tokens, so they are only built on the configured public address, never from the request's Host header.
+  '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => sendSignRequest(SMTP, store, b, publicOrigin()) },
+  '/api/sign/remind': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => remindSigners(SMTP, store, b, publicOrigin()) },
 };
 
 const SMTP = smtpConfig();

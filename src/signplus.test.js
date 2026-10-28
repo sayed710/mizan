@@ -238,3 +238,16 @@ test('template prompts gather typed fields; cancellation and refusal preserve th
   globalThis.prompt = () => 'Please amend';
   assert.equal(get(button(db, 'sign.request', id, 'Refuse'), id).refusal_reason, 'Please amend');
 });
+
+test('with parallel signing the company signer can sign even when a customer has not yet', (t) => {
+  const db = seed(), r = search(db, 'sign.request').find((s) => s.state === 'sent');
+  globalThis.prompt = () => 'Company Signer';
+  t.after(() => { delete globalThis.prompt; });
+  const people = [{ partner_id: r.partner_id, role: 'customer', signed: false, token: r.token }, { partner_id: r.partner_id, role: 'company', signed: false, token: 'c'.repeat(40) }];
+  const sequential = write(db, 'sign.request', r.id, { signer_ids: people, signing_order: true, item_ids: [] });
+  assert.throws(() => button(sequential, 'sign.request', r.id, 'Sign'), /own signing link/); // the customer is first
+  const parallel = write(sequential, 'sign.request', r.id, { signing_order: false });
+  const signed = get(button(parallel, 'sign.request', r.id, 'Sign'), r.id);
+  assert.deepEqual(signed.signer_ids.map((s) => !!s.signed), [false, true]);
+  assert.equal(signed.signer_ids[1].signature, 'Company Signer');
+});

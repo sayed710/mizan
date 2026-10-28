@@ -234,7 +234,14 @@ export function sendRequest(db, request) {
 }
 
 // Staff sign here only for the company; customers and employees sign through their own link.
-const companyTurn = (r) => r.state === 'sent' && signersOf(r)[nextSigner(r)]?.role === 'company';
+// With sequential signing it is the company's turn only when it is the next signer; otherwise any unsigned company signer may sign.
+const companyIndex = (r) => {
+  if (r.state !== 'sent') return -1;
+  if (r.signing_order === false) return signersOf(r).findIndex((s) => s.role === 'company' && !s.signed);
+  const next = nextSigner(r);
+  return signersOf(r)[next]?.role === 'company' ? next : -1;
+};
+const companyTurn = (r) => companyIndex(r) >= 0;
 
 /** Each unsigned signer's private link, to share by hand when email is not configured. */
 function showLinks(db, r) {
@@ -247,8 +254,8 @@ function showLinks(db, r) {
 const OWN_LINK = 'Customers and employees sign or refuse through their own signing link';
 
 function signPrompt(db, r) {
-  if (!companyTurn(r)) throw new Error(OWN_LINK);
-  const index = nextSigner(r);
+  const index = companyIndex(r);
+  if (index < 0) throw new Error(OWN_LINK);
   const name = prompt('Type your full name to sign for the company', '');
   if (name == null || !name.trim()) return { db };
   const values = {}, templateItems = r.item_ids ?? read(db, 'sign.template', r.template_id)?.item_ids ?? [];
@@ -258,7 +265,7 @@ function signPrompt(db, r) {
     if (value == null) return { db };
     values[i] = item.type === 'checkbox' ? value === 'true' ? true : value === 'false' ? false : value : value;
   }
-  return { db: templateItems.length ? signFields(db, r, index, values) : applySignature(db, current(db, r), name) };
+  return { db: templateItems.length ? signFields(db, r, index, values) : applySignature(db, current(db, r), name, today(), index) };
 }
 
 export const signPlusModels = {
@@ -289,7 +296,7 @@ export const signPlusModels = {
         { label: 'Signing Links', when: (r) => r.state === 'sent', run: showLinks },
         { label: 'Sign', primary: true, when: companyTurn, run: signPrompt },
         { label: 'Sign Now', primary: true, when: companyTurn, run: signPrompt },
-        { label: 'Refuse', when: companyTurn, run: (db, r) => { if (!companyTurn(r)) throw new Error(OWN_LINK); const reason = prompt('Reason for refusing', ''); return { db: reason == null ? db : refuse(db, r, nextSigner(r), reason) }; } },
+        { label: 'Refuse', when: companyTurn, run: (db, r) => { const index = companyIndex(r); if (index < 0) throw new Error(OWN_LINK); const reason = prompt('Reason for refusing', ''); return { db: reason == null ? db : refuse(db, r, index, reason) }; } },
         { label: 'Send Reminder', when: (r) => r.state === 'sent', server: '/api/sign/remind', requires: 'smtp', run: () => { throw new Error('Reminders are emailed: configure email (MIZAN_SMTP_HOST) first'); } },
         { label: 'Cancel', vals: { state: 'canceled' }, when: (r) => ['draft', 'sent'].includes(r.state) },
       ],
