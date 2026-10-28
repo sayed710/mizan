@@ -127,7 +127,14 @@ test('replenishment orders from the best vendor pricelist line', async () => {
   let db = seed();
   const product = search(db, 'product').find((p) => p.type === 'goods');
   const vendor = search(db, 'res.partner').at(-1);
-  db = write(db, 'product', product.id, { vendor_id: null, reorder_min: (Number(product.qty_available) || 0) + 5, reorder_max: 0 });
+  const wh = search(db, 'stock.warehouse').find((w) => w.code === 'WH') ?? search(db, 'stock.warehouse')[0];
+  db = write(db, 'product', product.id, { vendor_id: null });
+  const q = search(db, 'stock.quant').find((x) => x.product_id === product.id && x.location_id === wh.lot_stock_id);
+  const onHand = q ? q.quantity : Number(product.qty_available) || 0;
+  db = create(db, 'stock.warehouse.orderpoint', {
+    product_id: product.id, warehouse_id: wh.id, location_id: wh.lot_stock_id,
+    product_min_qty: onHand + 5, product_max_qty: onHand + 5, trigger: 'auto', route_id: 'buy',
+  }).db;
   db = create(db, 'product.supplierinfo', { partner_id: vendor.id, product_id: product.id, min_qty: 0, price: 7.5 }).db;
   const before = search(db, 'purchase.order').length;
   const rfq = search(replenish(db), 'purchase.order').slice(before).find((po) => po.order_line.some((l) => l.product_id === product.id));
@@ -140,7 +147,14 @@ test('replenishment rounds up to a vendor minimum and skips products without a v
   let db = seed();
   const product = search(db, 'product').find((p) => p.type === 'goods');
   const vendor = search(db, 'res.partner').at(-1);
-  db = write(db, 'product', product.id, { vendor_id: null, qty_available: 0.5, reorder_min: 1, reorder_max: 1 });
+  const wh = search(db, 'stock.warehouse').find((w) => w.code === 'WH') ?? search(db, 'stock.warehouse')[0];
+  db = write(db, 'product', product.id, { vendor_id: null, qty_available: 0.5 });
+  const q = search(db, 'stock.quant').find((x) => x.product_id === product.id && x.location_id === wh.lot_stock_id);
+  if (q) db = write(db, 'stock.quant', q.id, { quantity: 0.5 });
+  db = create(db, 'stock.warehouse.orderpoint', {
+    product_id: product.id, warehouse_id: wh.id, location_id: wh.lot_stock_id,
+    product_min_qty: 1, product_max_qty: 1, trigger: 'auto', route_id: 'buy',
+  }).db;
   db = create(db, 'product.supplierinfo', { partner_id: vendor.id, product_id: product.id, min_qty: 10, price: 4 }).db;
   const before = search(db, 'purchase.order').length;
   const line = search(replenish(db), 'purchase.order').slice(before).flatMap((po) => po.order_line).find((l) => l.product_id === product.id);

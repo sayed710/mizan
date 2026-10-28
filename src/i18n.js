@@ -853,6 +853,22 @@ const ar = {
   'Product (name or internal reference)': 'المنتج (الاسم أو المرجع الداخلي)',
   'On Hand in Packagings': 'المتاح بالعبوات', 'Loose units': 'وحدات منفردة',
   'Signers, as role=contact name separated by ;': 'الموقعون بصيغة الدور=اسم جهة الاتصال مفصولة بـ ;',
+  // Replenishment (stock.warehouse.orderpoint)
+  'Reordering Rules': 'قواعد إعادة الطلب', 'Reordering Rule': 'قاعدة إعادة الطلب', Orderpoint: 'نقطة الطلب',
+  'Min Quantity': 'الحد الأدنى للكمية', 'Max Quantity': 'الحد الأقصى للكمية', 'Daily Demand': 'الطلب اليومي',
+  'Based On': 'بناءً على', 'One Week': 'أسبوع واحد', 'One Month': 'شهر واحد', 'Three Months': 'ثلاثة أشهر',
+  'One Year': 'سنة واحدة', Custom: 'مخصص', 'Based on Factor': 'معامل الأساس',
+  Buy: 'شراء', Manufacture: 'تصنيع', 'Snoozed Until': 'مؤجل حتى',
+  'To Order (to max)': 'للطلب (للحد الأقصى)', 'To Order (Manual)': 'للطلب (يدوي)', 'Quantity to Order': 'الكمية المطلوب طلبها',
+  Automate: 'أتمتة', Snooze: 'تأجيل', 'Forecast Report': 'تقرير التوقعات',
+  'Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)': 'تأجيل لمدة (يوم، أسبوع، شهر، أو YYYY-MM-DD)',
+  'Trigger: Manual': 'المشغل: يدوي', 'Trigger: Auto': 'المشغل: تلقائي', 'To Reorder': 'لإعادة الطلب',
+  Snoozed: 'مؤجل', 'Not Snoozed': 'غير مؤجل',
+  'A reordering rule already exists for this product and location': 'توجد بالفعل قاعدة إعادة طلب لهذا المنتج والموقع',
+  'Select an existing warehouse': 'اختر مستودعاً موجوداً',
+  'Min quantity must be a nonnegative number': 'يجب أن يكون الحد الأدنى للكمية رقماً غير سالب',
+  'Max quantity must be a nonnegative number': 'يجب أن يكون الحد الأقصى للكمية رقماً غير سالب',
+  'Select a stockable product': 'اختر منتجاً قابلاً للتخزين',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
