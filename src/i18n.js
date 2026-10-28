@@ -772,6 +772,11 @@ const ar = {
   'Initialize Locations': 'تهيئة المواقع',
   'Preceding Transfer': 'التحويل السابق',
   'Warehouse Route': 'مسار المستودع',
+  'Order Line': 'بند الطلب',
+  'Analytic Distribution': 'التوزيع التحليلي',
+  'Amount in Currency': 'المبلغ بالعملة',
+  'Reversal of': 'عكس القيد',
+  'This deletes all data and loads the demo database. Type RESET to continue.': 'سيؤدي هذا إلى حذف جميع البيانات وتحميل قاعدة البيانات التجريبية. اكتب RESET للمتابعة.',
   // dashboard & settings
   Payable: 'المستحق للموردين', 'Invoiced this month': 'المفوتر هذا الشهر', 'Overdue invoices': 'فواتير متأخرة',
   'Monthly invoiced': 'الفوترة الشهرية', 'Top customers': 'أكبر العملاء', Language: 'اللغة', Data: 'البيانات',

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Arabic must be active before i18n.js reads the language at import time.
 globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
@@ -26,7 +27,7 @@ function uiStrings() {
     for (const tab of list(def.form?.tabs)) if (tab.label) keys.add(tab.label);
     for (const f of list(def.filters)) if (f.label) keys.add(f.label);
   }
-  const dir = new URL('.', import.meta.url).pathname;
+  const dir = fileURLToPath(new URL('.', import.meta.url));
   const walk = (d) => readdirSync(d).flatMap((n) => {
     const p = join(d, n);
     return statSync(p).isDirectory() ? walk(p) : /\.jsx?$/.test(n) && !n.includes('.test.') ? [p] : [];

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +20,10 @@ async function startServer() {
     child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
     child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
   });
-  return { url, stop: () => { child.kill(); rmSync(dir, { recursive: true, force: true }); } };
+  return { url, stop: async () => {
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    rmSync(dir, { recursive: true, force: true });
+  } };
 }
 
 const client = (url) => {
@@ -59,6 +63,6 @@ test('a signed-in user approves only as the manager linked to their login', asyn
     assert.equal(byManager.status, 200);
     assert.equal(byManager.body.records['hr.leave'].find((l) => l.id === 1).state, 'validate');
   } finally {
-    stop();
+    await stop();
   }
 });

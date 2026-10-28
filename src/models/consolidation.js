@@ -115,6 +115,7 @@ export function consolidate(db, periodId) {
         const account = read(db, 'account.account', item.account_id);
         if (!account) continue;
         const balance = (Number(item.debit) || 0) - (Number(item.credit) || 0);
+        if (!balance) continue;
         const earlier = pnl(account.account_type) && date < period.date_from;
         const kind = earlier ? 'retained' : pnl(account.account_type) ? 'result' : account.account_type === 'equity' ? 'equity' : 'assets';
         const amount = balance * (kind === 'result' ? Number(rate.rate_avg) : kind === 'assets' ? Number(rate.rate_closing) : historical(date)) * factor;

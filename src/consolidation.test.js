@@ -19,8 +19,8 @@ after(() => {
 
 function fixture({ method = 'full', ownership = 100 } = {}) {
   let db = ensureMainCompany(seed());
-  const group = create(db, 'res.currency', { name: 'GROUP', rate_ids: [{ date: '2090-01-01', rate: 1 }] });
-  const source = create(group.db, 'res.currency', { name: 'SOURCE', rate_ids: [{ date: '2090-01-01', rate: 2 }, { date: '2090-01-02', rate: 4 }] });
+  const group = create(db, 'res.currency', { name: 'GROUP', rate_ids: [{ date: '2089-12-31', rate: 1 }] });
+  const source = create(group.db, 'res.currency', { name: 'SOURCE', rate_ids: [{ date: '2089-12-31', rate: 2 }, { date: '2090-01-02', rate: 4 }] });
   db = createCompany(source.db, { name: 'Parent', currency_id: group.id }).db;
   const parent = search(db, 'res.company').at(-1).id;
   const subsidiary = createCompany(db, { name: 'Subsidiary', currency_id: source.id });

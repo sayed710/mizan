@@ -1,5 +1,5 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
-import { postNotes, read, search, writeMany } from '../orm.js';
+import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
