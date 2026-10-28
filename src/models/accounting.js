@@ -1,5 +1,5 @@
 import { create, postNote, read, write } from '../orm.js';
-import { amounts, nextName, productLines, subtotal, today } from './common.js';
+import { amounts, nextName, productLines, promptedAmount, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, accountId, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
@@ -300,9 +300,8 @@ export function payWithDiscount(db, id, amount, date = today()) {
 
 function registerPayment(db, r) {
   const due = Math.round((residual(r) - discountAvailable(db, r)) * 100) / 100;
-  const input = prompt(`Payment amount (due ${money(due)})`, String(due));
-  const amount = Number(input);
-  if (input == null || !(amount > 0)) return { db };
+  const amount = promptedAmount(prompt(`Payment amount (due ${money(due)})`, String(due)));
+  if (amount == null) return { db };
   return { db: payWithDiscount(db, r.id, amount) };
 }
 

@@ -5,6 +5,7 @@ import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
+import { parseAmount } from './models/common.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -15,12 +16,15 @@ export function setCurrency(code) {
   if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
 }
 const docFmts = new Map();
+// In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
+// number and the run does not reorder the surrounding right-to-left text.
+const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null) => {
   const fmt = code && code !== moneyFmt.resolvedOptions().currency
     ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
     : moneyFmt;
-  return fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+  return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
 };
 function safeFormat(code) {
   try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return moneyFmt; }
@@ -36,7 +40,7 @@ export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
     case 'monetary': return money(value, currencyCode(db, rec));
-    case 'float': return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
     case 'boolean': return value ? t('Yes') : '';
@@ -181,6 +185,28 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
   );
 }
 
+/**
+ * Numeric input that accepts Arabic-Indic digits and separators (a type="number" input silently drops them).
+ * The typed text is kept while it is being edited; an entry that is not a number is flagged instead of ignored.
+ */
+function NumberInput({ id, value, onChange, integer }) {
+  const [draft, setDraft] = useState(null);
+  const parsed = draft == null ? null : parseAmount(draft);
+  const invalid = draft != null && draft.trim() !== '' && (Number.isNaN(parsed) || (integer && !Number.isInteger(parsed)));
+  return (
+    <input id={id} type="text" inputMode="decimal" dir="ltr" value={draft ?? (value ?? '')} aria-invalid={invalid || undefined}
+      title={invalid ? t('Enter a number') : undefined} className={invalid ? 'invalid' : undefined}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        const n = parseAmount(raw);
+        if (raw.trim() === '') onChange(null);
+        else if (!Number.isNaN(n) && (!integer || Number.isInteger(n))) onChange(n);
+      }}
+      onBlur={() => { if (!invalid) setDraft(null); }} />
+  );
+}
+
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
@@ -189,9 +215,9 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   );
   switch (field.type) {
     case 'text': return <textarea id={id} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
-    case 'integer': return text('number', { step: '1', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
+    case 'integer': return <NumberInput id={id} value={value} onChange={onChange} integer />;
     case 'monetary':
-    case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
+    case 'float': return <NumberInput id={id} value={value} onChange={onChange} />;
     case 'date': return text('date');
     case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;

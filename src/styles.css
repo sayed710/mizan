@@ -41,6 +41,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 .btn.sm { padding: 3px 9px; }
 .link { background: none; border: 0; color: var(--brand); cursor: pointer; padding: 4px; }
 .link.danger { color: var(--danger); }
+input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .round { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); cursor: pointer; font-size: 16px; line-height: 1; }
 .round:hover { background: var(--brand-soft); color: var(--brand); }
 

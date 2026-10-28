@@ -1,6 +1,7 @@
 // Workflow steps that book accounting records for users whose apps may not write accounting directly.
 // The server recomputes them from its own data, so the client never sends the journal entries or payments.
 import { read } from './orm.js';
+import { promptedAmount } from './models/common.js';
 import { payQuote } from './models/quoteplus.js';
 import { closeSession, payOrder, priceLines, refundOrder } from './models/pos.js';
 import { payWithMethods, refundBill } from './models/posplus.js';
@@ -13,7 +14,7 @@ const record = (db, model, id) => {
 
 /** name -> { model the user must be able to write, run(db, body) -> db | { db, ...reply } } */
 export const OPERATIONS = {
-  'sale.prepay': { model: 'sale.order', run: (db, { id, text, amount = text }) => payQuote(db, record(db, 'sale.order', id).id, Number(amount)) },
+  'sale.prepay': { model: 'sale.order', run: (db, { id, text, amount = text }) => payQuote(db, record(db, 'sale.order', id).id, promptedAmount(amount) ?? Number.NaN) },
   'pos.pay': {
     model: 'pos.order',
     run: (db, { cart = [], method, partner_id = null }) => {

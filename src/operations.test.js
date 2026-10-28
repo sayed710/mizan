@@ -22,6 +22,12 @@ test('a Sales-only user registers a prepayment through the server operation, not
   assert.equal(read(saved, 'account.move', payment.move_id).state, 'posted');
 });
 
+test('sale.prepay accepts an amount typed in Arabic-Indic digits', () => {
+  const made = quote(seed());
+  const saved = apply(made.db, runOperation(made.db, 'sale.prepay', { id: made.id, text: '١٠٠' }, access(['sales'])));
+  assert.equal(search(saved, 'account.payment').find((p) => p.sale_id === made.id)?.amount, 100);
+});
+
 test('a POS-only user pays and closes through server operations, priced from the server catalog', () => {
   const db = startSession(seed(), 0).db;
   const out = runOperation(db, 'pos.pay', { cart: [{ product_id: 1, qty: 2, price_unit: 0.01 }], method: 'cash' }, access(['pos']));
