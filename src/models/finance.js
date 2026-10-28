@@ -66,6 +66,23 @@ export function moveGuard(db, before, after) {
 }
 
 /**
+ * Checked once the whole change set is applied: payments that settle a locked entry must point at posted journal
+ * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
+ */
+export function lockedSettlementInvariant(db, after, before) {
+  const lock = before && lockDateFor(db.settings, before);
+  if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
+  const was = Array.isArray(before.payments) ? before.payments.length : 0;
+  const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  const backed = (p) => {
+    const entry = entries.get(p.move_id);
+    return entry && entry.id !== after.id && entry.state === 'posted' && moveDate(entry) > lock && p.date === moveDate(entry)
+      && (entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id);
+  };
+  return (after.payments ?? []).slice(was).every(backed) ? null : `The period up to ${lock} is locked: payments must be booked after it`;
+}
+
+/**
  * Lock guard for records that carry their own date (payments, reconciled bank lines): once dated on or before the
  * lock they cannot change, and nothing new can be booked into the locked period.
  */
@@ -75,6 +92,12 @@ export const datedLockGuard = (fields, booked) => (db, before, after) => {
   const inLock = (r) => r && booked(r) && String(r.date ?? today()) <= lock;
   if (!inLock(before) && !inLock(after)) return null;
   return !before || changedFields(before, after, fields) ? `The period up to ${lock} is locked` : null;
+};
+
+/** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
+export const datedLockDelete = (booked) => (db, r) => {
+  const lock = lockDateFor(db.settings, {});
+  return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */

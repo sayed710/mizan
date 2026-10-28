@@ -72,6 +72,17 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
+  // Whole-record rules that look across models run once every change is in place.
+  const final = { ...db, records };
+  for (const [model, recs] of Object.entries(d.upserts ?? {})) {
+    const stored = byId(db.records[model]);
+    const kept = byId(records[model]);
+    for (const raw of recs) {
+      const rec = kept.get(raw.id);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null);
+      if (err) throw new Error(err);
+    }
+  }
   const seq = { ...db.seq };
   for (const [model, n] of Object.entries(d.seq ?? {})) {
     if (models[model] && Number.isInteger(n)) seq[model] = Math.max(seq[model] ?? 0, n, ...(records[model] ?? []).map((r) => r.id));
