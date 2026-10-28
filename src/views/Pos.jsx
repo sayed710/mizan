@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { read } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { relationCandidates, viewRecords } from '../companyView.js';
@@ -42,17 +42,31 @@ export function Pos() {
     : [...c, { product_id: id, qty: 1 }]));
   const setQty = (id, qty) => setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
 
-  const pay = (method) => {
-    const { db: booked, id } = payOrder(getDb(), { lines, method, partner_id: Number(partner) || null });
-    commit(booked);
-    setReceipt({ id, name: read(booked, 'pos.order', id).name, total: total.total, method });
+  // On the server the sale is booked there, so a cashier needs no write access to journal entries.
+  const pay = async (method) => {
+    const partner_id = Number(partner) || null;
+    let id;
+    try {
+      if (isServer()) id = (await serverAction('/api/op/pos.pay', { cart, method, partner_id })).id;
+      else {
+        const booked = payOrder(getDb(), { lines, method, partner_id });
+        commit(booked.db);
+        id = booked.id;
+      }
+    } catch (e) {
+      alert(e.message);
+      return;
+    }
+    setReceipt({ id, name: read(getDb(), 'pos.order', id)?.name, total: total.total, method });
     setCart([]);
     setPartner('');
   };
   const close = () => {
     const { expected } = sessionTotals(getDb(), session);
     const counted = prompt(t('Counted cash in the drawer (expected {n})', { n: expected }), String(expected));
-    if (counted != null) commit(closeSession(getDb(), session, counted));
+    if (counted == null) return;
+    if (isServer()) serverAction('/api/op/pos.close', { id: session.id, counted }).catch((e) => alert(e.message));
+    else commit(closeSession(getDb(), session, counted));
   };
 
   if (!session) return <OpenSession />;

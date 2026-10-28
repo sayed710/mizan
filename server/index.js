@@ -11,6 +11,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff, assignIds, diffDb, repairSeq } from '../src/sync.js';
+import { runOperation } from '../src/operations.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -41,7 +42,7 @@ const ACTIONS = {
 };
 
 const SMTP = smtpConfig();
-import { modelsForApps } from '../src/models/index.js';
+import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -150,16 +151,20 @@ const pageUnlocked = (req, p) => {
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
 const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite(db), livechat: livechatInfo(db) });
 
-/** Models a session/API user may touch (null = everything). */
-const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
+/** Models a session/API user may change (null = everything). */
+const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
+/** Models on a user's own app menus (null = everything): who may share portal links or run booking operations, never via a relation. */
+const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsForApps(u.apps));
+/** Models a session/API user may read (null = everything). */
+const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 const visibleDb = (u) => {
-  const allowed = allowedFor(u);
-  if (!allowed) return db;
-  return {
+  const readable = readableFor(u);
+  if (!readable) return db;
+  return redactForApps({
     ...db,
-    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => allowed.has(m))),
-    messages: db.messages.filter((m) => allowed.has(m.model)),
-  };
+    records: Object.fromEntries(Object.entries(db.records).filter(([m]) => readable.has(m))),
+    messages: db.messages.filter((m) => readable.has(m.model)),
+  }, u.apps);
 };
 
 // ---- rate limit: 10 failures per key (ip+login, or ip for API keys) per 15 minutes ----
@@ -389,7 +394,9 @@ async function api(req, res, path) {
       if (prior && prior.model !== path.split('/')[3]) return send(res, 422, { error: 'Idempotency-Key was already used for another model' });
       if (prior) return send(res, 200, read(db, prior.model, prior.record_id) ?? { id: prior.record_id, deleted: true });
     }
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser) });
+    // Reads see what the web client sees; writes are checked against the stricter write set.
+    const reading = req.method === 'GET';
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser) });
     if (out.db) commitDb(out.db);
     if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);
@@ -471,6 +478,18 @@ async function api(req, res, path) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
     return send(res, 200, Object.keys(remapped).length ? { ...visibleDb(user), remapped } : visibleDb(user));
+  }
+  const op = /^\/api\/op\/([\w.]+)$/.exec(path);
+  if (op && req.method === 'POST') {
+    const body = await readJson(req).catch(() => null);
+    if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
+    try {
+      const out = runOperation(db, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
+      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: out.allowed }));
+      return send(res, 200, out.reply);
+    } catch (e) {
+      return send(res, e.status ?? 400, { error: e.message });
+    }
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
@@ -566,7 +585,7 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
-const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;

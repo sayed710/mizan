@@ -62,6 +62,7 @@ export const payModels = {
       memo: { type: 'char', label: 'Memo' },
       invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: STATES },
     },

@@ -654,7 +654,7 @@ export const moreModels = {
     pivot: { row: 'date_order', col: 'payment_method', measure: 'amount_total' },
     form: {
       lockedWhen: () => true,
-      buttons: [{ label: 'Refund', when: (r) => r.state === 'paid' && r.session_id, run: (db, r) => { const out = refundOrder(db, r); return { db: out.db, go: `#/pos/orders/${out.id}` }; } }],
+      buttons: [{ label: 'Refund', server: '/api/op/pos.refund', when: (r) => r.state === 'paid' && r.session_id, run: (db, r) => { const out = refundOrder(db, r); return { db: out.db, go: `#/pos/orders/${out.id}` }; } }],
       ribbon: (r) => (r.state === 'refunded' ? 'Refunded' : r.state === 'refund' ? 'Refund' : null),
       title: 'name',
       groups: [['partner_id', 'payment_method', 'session_id'], ['date_order', 'state', 'refund_of']],
