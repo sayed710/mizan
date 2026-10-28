@@ -62,23 +62,27 @@ function loadLocal() {
   return seed();
 }
 
-async function api(path, body) {
+async function api(path, body, headers = {}) {
   const res = await fetch(path, body === undefined
-    ? { credentials: 'same-origin' }
+    ? { credentials: 'same-origin', headers }
     : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', ...(path === '/api/diff' && epoch ? { 'X-Mizan-Epoch': epoch } : {}) }, body: JSON.stringify(body) });
   const nextEpoch = res.headers.get('x-mizan-epoch') ?? epoch;
   if (epoch && nextEpoch !== epoch) generation++; // drop edits queued against the replaced database
   epoch = nextEpoch;
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const data = isJson ? await res.json() : null;
-  return { ok: res.ok, status: res.status, isJson, data };
+  return { ok: res.ok, status: res.status, isJson, data, etag: res.headers.get('etag') };
 }
 
+// The server's tag for the copy we hold; a poll with nothing new comes back 304 with no body.
+let dbTag = null;
 async function pull() {
-  const r = await api('/api/db');
+  const r = await api('/api/db', undefined, dbTag ? { 'If-None-Match': dbTag } : {});
+  if (r.status === 304) return;
   if (r.status === 401) location.reload();
   if (!r.ok || !r.data) throw new Error(r.data?.error ?? `Could not load the database (HTTP ${r.status})`);
   db = confirmed = r.data;
+  dbTag = r.etag;
   notify();
 }
 
@@ -128,6 +132,7 @@ export function commit(next) {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
     return;
   }
+  dbTag = null;
   const gen = generation;
   const failed = (message) => {
     generation++;
@@ -138,6 +143,7 @@ export function commit(next) {
   enqueue(async () => {
     if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
     const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
+    dbTag = null;
     if (r.ok) {
       const { remapped, ...saved } = r.data;
       db = confirmed = saved;

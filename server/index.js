@@ -3,6 +3,7 @@
 // Env: PORT, MIZAN_DB (sqlite path), MIZAN_ADMIN_PASSWORD (first start), MIZAN_SECURE_COOKIE=1 behind HTTPS,
 // MIZAN_ALLOW_RESET=1 to allow resetting to demo data when NODE_ENV=production.
 import { createServer } from 'node:http';
+import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
@@ -101,6 +102,8 @@ const userOf = (row) => ({
 const storage = openStorage(sql);
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
+let revision = 0;
+const startedAt = Date.now().toString(36);
 const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, action, changes) VALUES (?, ?, ?, ?, ?, ?)');
 /**
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
@@ -112,6 +115,7 @@ const commitDb = (next, { full = false, actor = 'system', action = 'replace', au
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
   storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
   db = next;
+  revision++;
 };
 /** Log an account-administration step (never a password, hash or key) in the same transaction as the step itself. */
 const withAudit = (actor, model, resId, action, changes, step) => {
@@ -291,9 +295,20 @@ setInterval(() => sql.prepare('DELETE FROM rate_events WHERE at <= ?').run(Date.
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
 // ---- http helpers ----
+// Large JSON answers (the synced database) are gzipped for clients that accept it; level 1 keeps CPU low.
+const GZIP_MIN = 8 * 1024;
 const send = (res, status, body, headers = {}) => {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
-  res.end(JSON.stringify(body));
+  const text = JSON.stringify(body);
+  const head = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding', ...headers };
+  if (!res.acceptsGzip || text.length < GZIP_MIN) {
+    res.writeHead(status, head);
+    return res.end(text);
+  }
+  gzip(text, { level: zlibConstants.Z_BEST_SPEED }, (err, zipped) => {
+    if (err) { res.writeHead(status, head); return res.end(text); }
+    res.writeHead(status, { ...head, 'Content-Encoding': 'gzip' });
+    res.end(zipped);
+  });
 };
 
 function readJson(req, limit = MAX_BODY) {
@@ -584,7 +599,12 @@ async function api(req, res, path) {
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   const stamp = () => ({ 'X-Mizan-Epoch': String(epoch) });
-  if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user), stamp());
+  if (path === '/api/db' && req.method === 'GET') {
+    // The visible part depends on the user's apps, so the tag names the user as well as the revision.
+    const tag = `"${startedAt}-${revision}-${sha256(JSON.stringify([user.id, user.apps, user.isAdmin, user.companies, user.selection]))}"`;
+    if (req.headers['if-none-match'] === tag) { res.writeHead(304, { ETag: tag, ...stamp(), 'Cache-Control': 'no-store' }); return res.end(); }
+    return send(res, 200, visibleDb(user), { ETag: tag, ...stamp() });
+  }
   // Audit log: admins only, newest first, optionally narrowed to one model or one record.
   if (path === '/api/audit' && req.method === 'GET') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
@@ -768,6 +788,7 @@ const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allow
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
+  res.acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
   try {
     if (await portal.handle(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
