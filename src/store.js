@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 import { diffDb, isEmptyDiff } from './sync.js';
+import { createQueue } from './queue.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
 import { installCustomFields } from './models/studio.js';
@@ -13,7 +14,9 @@ const listeners = new Set();
 let mode = 'local';
 let user = null;
 let db = null;
-let inflight = Promise.resolve();
+let confirmed = null; // last state the server acknowledged
+let generation = 0; // bumped when a save fails, so saves queued on top of it are dropped
+const enqueue = createQueue(); // saves and polls, in order
 
 const COMPANY_KEY = 'mizan-company';
 const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
@@ -66,9 +69,11 @@ async function api(path, body) {
 
 async function pull() {
   const r = await api('/api/db');
-  if (r.ok) { db = r.data; notify(); }
+  if (r.ok) { db = confirmed = r.data; notify(); }
   if (r.status === 401) location.reload();
 }
+
+const pollFailed = (e) => console.warn('Mizan: refresh failed, will retry', e);
 
 /** Detect the backend; resolves to { mode, user }. A non-JSON answer means no backend (static/dev hosting). */
 export async function initStore() {
@@ -80,7 +85,7 @@ export async function initStore() {
         user = r.data;
         setAuthor(user.name);
         await pull();
-        setInterval(() => { if (document.visibilityState === 'visible') inflight = inflight.then(pull); }, POLL_MS);
+        setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
       }
       return { mode, user };
     }
@@ -107,11 +112,22 @@ export function commit(next) {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
     return;
   }
-  inflight = inflight.then(async () => {
-    if (isEmptyDiff(diff)) return;
+  const gen = generation;
+  const failed = (message) => {
+    generation++;
+    db = confirmed ?? db;
+    notify();
+    alert(`${message} Showing the last saved data; please redo any edits made since.`);
+  };
+  enqueue(async () => {
+    if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
     const r = await api('/api/diff', diff);
-    if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; notify(); }
-    if (!r.ok) alert(r.data?.error ?? 'Could not save changes');
+    if (r.ok) { db = confirmed = r.data; notify(); return; }
+    if (r.data?.db) confirmed = r.data.db;
+    failed(r.data?.error ?? 'Could not save changes.');
+  }, (e) => {
+    failed(`Could not save changes: ${e.message}.`);
+    return pull().catch(pollFailed);
   });
 }
 
