@@ -34,3 +34,13 @@ test('links to records that do not exist are refused; untouched old links do not
   const legacy = { ...db, records: { ...db.records, 'crm.lead': db.records['crm.lead'].map((l) => (l.id === lead.id ? { ...l, partner_id: 88888 } : l)) } };
   assert.doesNotThrow(() => applyDiff(legacy, diffDb(legacy, write(legacy, 'crm.lead', lead.id, { name: 'Renamed' })), clerk));
 });
+
+test('a link is not excused because an unrelated stored line value equals the missing id', () => {
+  const db = seed();
+  const order = search(db, 'sale.order')[0];
+  const patch = (lines) => ({ ...db, records: { ...db.records, 'sale.order': db.records['sale.order'].map((o) => (o.id === order.id ? { ...o, order_line: lines } : o)) } });
+  const stored = patch(order.order_line.map((l, i) => (i === 0 ? { ...l, qty: 99999 } : l)));
+  const lines = stored.records['sale.order'].find((o) => o.id === order.id).order_line.map((l, i) => (i === 0 ? { ...l, product_id: 99999 } : l));
+  const bad = { ...stored, records: { ...stored.records, 'sale.order': stored.records['sale.order'].map((o) => (o.id === order.id ? { ...o, order_line: lines } : o)) } };
+  assert.throws(() => applyDiff(stored, diffDb(stored, bad), clerk), /#99999 does not exist/);
+});

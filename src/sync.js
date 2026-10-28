@@ -56,11 +56,12 @@ function danglingLink(records, upserts, stored) {
         if (f.compute || value == null || value === '' || JSON.stringify(value) === JSON.stringify(old?.[key])) continue;
         if (f.type === 'many2one' && !exists(f.relation, value)) return `${f.label}: ${models[f.relation].label} #${value} does not exist`;
         if (f.type !== 'one2many' || !Array.isArray(value) || !f.fields) continue;
-        const known = new Set((old?.[key] ?? []).flatMap((l) => Object.values(l ?? {})));
+        // Lines have no ids: a link is unchanged only if some stored line holds the same value in the same field.
+        const known = new Set((old?.[key] ?? []).flatMap((l) => Object.entries(l ?? {}).map(([k, v]) => `${k}:${v}`)));
         for (const line of value) {
           for (const [sub, sf] of Object.entries(f.fields)) {
             const v = line?.[sub];
-            if (sf.type === 'many2one' && v != null && v !== '' && !known.has(v) && !exists(sf.relation, v)) return `${f.label} › ${sf.label}: ${models[sf.relation].label} #${v} does not exist`;
+            if (sf.type === 'many2one' && v != null && v !== '' && !known.has(`${sub}:${v}`) && !exists(sf.relation, v)) return `${f.label} › ${sf.label}: ${models[sf.relation].label} #${v} does not exist`;
           }
         }
       }
