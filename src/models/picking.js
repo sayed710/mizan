@@ -16,7 +16,7 @@ export function freeQty(db, productId, exceptPickingId = null, exceptMoId = null
     .filter((p) => p.id !== exceptPickingId && p.picking_type === 'outgoing' && p.state === 'ready')
     .flatMap((p) => p.move_ids ?? []).filter((m) => m.product_id === productId).reduce((s, m) => s + (Number(m.qty) || 0), 0);
   const components = search(db, 'mrp.production')
-    .filter((mo) => mo.id !== exceptMoId && mo.state === 'confirmed' && mo.components_availability === 'available')
+    .filter((mo) => mo.id !== exceptMoId && ['confirmed', 'progress'].includes(mo.state) && mo.components_availability === 'available')
     .flatMap((mo) => mo.move_raw ?? []).filter((m) => m.product_id === productId).reduce((s, m) => s + (Number(m.to_consume) || 0), 0);
   return onHand - reserved - components;
 }
@@ -24,7 +24,9 @@ export function freeQty(db, productId, exceptPickingId = null, exceptMoId = null
 /** 'available' when every goods line of an outgoing transfer is covered by free stock, else 'partial' or 'none'. */
 export function pickingAvailability(db, picking) {
   if (picking.picking_type !== 'outgoing') return 'available';
-  const lines = (picking.move_ids ?? []).filter((l) => isGoods(db, l));
+  const demands = new Map();
+  for (const l of (picking.move_ids ?? []).filter((l) => isGoods(db, l))) demands.set(l.product_id, (demands.get(l.product_id) ?? 0) + (Number(l.qty) || 0));
+  const lines = [...demands].map(([product_id, qty]) => ({ product_id, qty }));
   const covered = lines.filter((l) => freeQty(db, l.product_id, picking.id) >= (Number(l.qty) || 0)).length;
   if (covered === lines.length) return 'available';
   return lines.some((l) => freeQty(db, l.product_id, picking.id) > 0) ? 'partial' : 'none';
@@ -52,7 +54,9 @@ export function validatePicking(db, picking, { backorder = true, apply, date = t
   const sign = picking.picking_type === 'incoming' ? 1 : picking.picking_type === 'outgoing' ? -1 : 0;
   // Stock reserved for other transfers or manufacturing orders cannot be shipped by this one.
   if (sign < 0) {
-    const short = done.find((l) => isGoods(db, l) && l.qty > freeQty(db, l.product_id, picking.id) + 1e-8);
+    const quantities = new Map();
+    for (const l of done.filter((l) => isGoods(db, l))) quantities.set(l.product_id, (quantities.get(l.product_id) ?? 0) + l.qty);
+    const short = [...quantities].map(([product_id, qty]) => ({ product_id, qty })).find((l) => l.qty > freeQty(db, l.product_id, picking.id) + 1e-8);
     if (short) throw new Error(`Not enough free stock for ${read(db, 'product', short.product_id)?.name ?? 'a product'}: the rest is reserved for other operations`);
   }
   let next = write(apply(db, { ...picking, move_ids: done }, sign), 'stock.picking', picking.id, {

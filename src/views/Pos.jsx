@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { read } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
@@ -29,6 +29,9 @@ export function Pos() {
   const [categ, setCateg] = useState(null);
   const [partner, setPartner] = useState('');
   const [receipt, setReceipt] = useState(null);
+  const [pending, setPending] = useState(false);
+  const inFlight = useRef(false);
+  const requestKey = useRef(null);
 
   const session = openSession(db);
   const products = viewRecords(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
@@ -37,27 +40,39 @@ export function Pos() {
   const lines = priceLines(db, cart, Number(partner) || null);
   const total = amounts(lines);
 
-  const add = (id) => setCart((c) => (c.some((l) => l.product_id === id)
-    ? c.map((l) => (l.product_id === id ? { ...l, qty: l.qty + 1 } : l))
-    : [...c, { product_id: id, qty: 1 }]));
-  const setQty = (id, qty) => setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
+  const add = (id) => {
+    if (inFlight.current) return;
+    requestKey.current = null;
+    setCart((c) => c.some((l) => l.product_id === id) ? c.map((l) => l.product_id === id ? { ...l, qty: l.qty + 1 } : l) : [...c, { product_id: id, qty: 1 }]);
+  };
+  const setQty = (id, qty) => {
+    if (inFlight.current) return;
+    requestKey.current = null;
+    setCart((c) => qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => l.product_id === id ? { ...l, qty } : l));
+  };
 
   const pay = async (method) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setPending(true);
+    requestKey.current ??= crypto.randomUUID();
     const partner_id = Number(partner) || null;
     let receipt;
     try {
       if (isServer()) {
-        receipt = await serverAction('/api/pos/pay', { lines: cart, method, partner_id });
+        receipt = await serverAction('/api/pos/pay', { lines: cart, method, partner_id, request_key: requestKey.current });
+        if (receipt?.ok === false) throw new Error(receipt.error);
       } else {
         const { db: booked, id } = payOrder(getDb(), { lines, method, partner_id });
         commit(booked);
-        receipt = { id, name: read(booked, 'pos.order', id).name };
+        receipt = { id, name: read(booked, 'pos.order', id).name, total: read(booked, 'pos.order', id).amount_total };
       }
     } catch (e) {
       alert(e.message);
       return;
-    }
-    setReceipt({ ...receipt, total: total.total, method });
+    } finally { inFlight.current = false; setPending(false); }
+    requestKey.current = null;
+    setReceipt({ ...receipt, method });
     setCart([]);
     setPartner('');
   };
@@ -98,7 +113,7 @@ export function Pos() {
         </div>
         <div className="pos-grid">
           {shown.map((p) => (
-            <button key={p.id} type="button" className="pos-tile" onClick={() => add(p.id)}>
+            <button key={p.id} type="button" className="pos-tile" disabled={pending} onClick={() => add(p.id)}>
               <span className="pos-initial" aria-hidden="true">{p.name[0]}</span>
               <span className="pos-name">{p.name}</span>
               <span className="pos-price">{money(p.list_price)}</span>
@@ -110,9 +125,9 @@ export function Pos() {
       <aside className="pos-cart" aria-label={t('Order')}>
         <div className="row">
           <span className="muted grow">{session.name}</span>
-          <button type="button" className="btn sm" onClick={close}>{t('Close Session')}</button>
+          <button type="button" className="btn sm" disabled={pending} onClick={close}>{t('Close Session')}</button>
         </div>
-        <select aria-label={t('Customer')} value={partner} onChange={(e) => setPartner(e.target.value)}>
+        <select aria-label={t('Customer')} disabled={pending} value={partner} onChange={(e) => { requestKey.current = null; setPartner(e.target.value); }}>
           <option value="">{t('Customer')}…</option>
           {relationCandidates(db, 'res.partner', partner).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
@@ -133,9 +148,9 @@ export function Pos() {
           <div><dt>{t('Taxes')}</dt><dd>{money(total.tax)}</dd></div>
           <div className="grand"><dt>{t('Total')}</dt><dd>{money(total.total)}</dd></div>
         </dl>
-        <div className="pos-pay">
-          <button type="button" className="btn primary" disabled={!lines.length} onClick={() => pay('cash')}>{t('Cash')}</button>
-          <button type="button" className="btn primary" disabled={!lines.length} onClick={() => pay('card')}>{t('Card')}</button>
+        <div className="pos-pay" aria-busy={pending}>
+          <button type="button" className="btn primary" disabled={pending || !lines.length} onClick={() => pay('cash')}>{t('Cash')}</button>
+          <button type="button" className="btn primary" disabled={pending || !lines.length} onClick={() => pay('card')}>{t('Card')}</button>
         </div>
       </aside>
     </main>

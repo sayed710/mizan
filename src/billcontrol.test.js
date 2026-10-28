@@ -19,6 +19,14 @@ const receipt = (db, po, qty) => {
   return run(next, 'stock.picking', picking.id, 'Validate').db;
 };
 
+test('confirmed service orders with a stale receipt policy still offer Create Bill', () => {
+  const service = create(seed(), 'product', { name: 'Consulting', type: 'service', purchase_method: 'receive' });
+  const po = create(service.db, 'purchase.order', { partner_id: 2, state: 'purchase', order_line: [{ product_id: service.id, qty: 1, price_unit: 100, purchase_method: 'receive', qty_delivered: 0 }] });
+  const stored = read(po.db, 'purchase.order', po.id);
+  assert.equal(stored.invoice_status, 'to_invoice');
+  assert.equal(billControlModels['purchase.order'].form.buttons.find((b) => b.label === 'Create Bill').when(stored, po.db), true);
+});
+
 test('bill control: seed loads and overrides retain valuation and purchase agreement definitions', () => {
   const db = seed();
   assert.ok(search(db, 'product').length);

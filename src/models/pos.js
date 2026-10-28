@@ -28,7 +28,7 @@ export const priceLines = (db, cart, partnerId = null) => cart.map((l) => {
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const price = p?.list_price ?? 0;
-  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, discount: Number(l.discount) || 0, ...tax };
+  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, discount: Number(l.discount ?? 0), ...tax };
 });
 
 /**
@@ -42,11 +42,12 @@ function saleEntry(db, lines, { method, split, partner_id, refund }) {
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   };
   const receivable = (db.records['account.account'] ?? []).find((a) => a.code === '121000')?.id;
+  if (!receivable) throw new Error('POS needs a receivable counterpart account (121000)');
   const code = (id) => read(db, 'account.account', id)?.code;
   const pay = method === 'cash' ? CASH : BANK;
   const entries = invoiceLines(db, move).map((l) => ({
     account: l.account_id === receivable ? pay : code(l.account_id), debit: l.debit, credit: l.credit, partner_id, name: l.name,
-    ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_base } : {}),
+    ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_base, ...(l.tax_zero ? { tax_zero: true } : {}), tax_side: 'sale' } : {}),
   }));
   // Income and tax groups are rounded one by one, so their sum can differ by a cent from the tender actually
   // collected (receipt and session totals). The payment account takes the tender; the cent goes to a visible line.
@@ -72,7 +73,7 @@ function reversalEntry(db, original, { partner_id }) {
   const entry = entryOfOrder(db, original);
   if (!entry) return null;
   const code = (id) => read(db, 'account.account', id)?.code;
-  return entry.line_ids.map((l) => ({ account: code(l.account_id), debit: l.credit, credit: l.debit, partner_id: l.partner_id ?? partner_id, name: l.name, ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_base } : {}) }));
+  return entry.line_ids.map((l) => ({ account: code(l.account_id), debit: l.credit, credit: l.debit, partner_id: l.partner_id ?? partner_id, name: l.name, ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_zero ? -l.tax_base : l.tax_base, ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) }));
 }
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
@@ -89,6 +90,10 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
   const session = openSession(db);
   if (!session) throw new Error('Open a session first');
   if (!lines.length) throw new Error('The order is empty');
+  if (lines.some((l) => !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0)) throw new Error('Cart quantity must be finite and positive');
+  if (lines.some((l) => !Number.isFinite(Number(l.discount ?? 0)) || Number(l.discount ?? 0) < 0 || Number(l.discount ?? 0) > 100)) throw new Error('Cart discount must be between 0 and 100');
+  const original = refund_of ? read(db, 'pos.order', refund_of) : null;
+  if (refund_of && (!original || JSON.stringify(lines) !== JSON.stringify(original.lines))) throw new Error('Only a full order refund is supported; partial refunds are not supported');
   const total = amounts(lines);
   const split = (payments ?? []).filter((p) => Number(p.amount) > 0).map((p) => ({ method: p.method === 'cash' ? 'cash' : 'bank', amount: round(Number(p.amount)) }));
   if (split.length && round(split.reduce((s, p) => s + p.amount, 0)) !== round(total.total)) throw new Error('The payments must add up to the order total');
@@ -97,7 +102,6 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
   const sign = refund_of ? -1 : 1;
   let stocked = next;
   const costs = [];
-  const original = refund_of ? read(db, 'pos.order', refund_of) : null;
   for (const [index, l] of lines.entries()) {
     const p = read(stocked, 'product', l.product_id);
     if (p?.type !== 'goods' || !l.qty) continue;
@@ -112,8 +116,23 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
+  if (round(total.total) === 0) return { db: stocked, id };
   const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: (original && reversalEntry(db, original, { partner_id })) ?? saleEntry(stocked, lines, { method, split, partner_id, refund: !!refund_of }) });
   return { db: booked, id };
+}
+
+/** Durable retry identity is stored with the booking; a changed catalog never reprices an already-paid cart. */
+export function payCart(db, { cart = [], method, payments = null, partner_id = null, request_key = null }) {
+  const normalized = cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) }));
+  const fingerprint = JSON.stringify([normalized, method, payments, partner_id]);
+  if (request_key !== null && (typeof request_key !== 'string' || !/^[\w:-]{8,200}$/.test(request_key))) throw new Error('Invalid payment request key');
+  const prior = request_key && search(db, 'pos.order').find((o) => o.request_key === request_key);
+  if (prior) {
+    if (prior.request_fingerprint !== fingerprint) throw new Error('This request key was already used for a different payment');
+    return { db, id: prior.id };
+  }
+  const out = payOrder(db, { lines: priceLines(db, normalized, partner_id), method, payments, partner_id });
+  return request_key ? { ...out, db: write(out.db, 'pos.order', out.id, { request_key, request_fingerprint: fingerprint }) } : out;
 }
 
 /** Refund a paid order in full (stock comes back, money goes out the way it came in). */

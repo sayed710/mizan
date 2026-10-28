@@ -3,7 +3,7 @@
 // write account.move themselves can still complete sales and payslips.
 import { read } from '../src/orm.js';
 import { models } from '../src/models/index.js';
-import { closeSession, payOrder, priceLines } from '../src/models/pos.js';
+import { closeSession, payCart } from '../src/models/pos.js';
 
 const need = (allowed, model) => { if (allowed && !allowed.has(model)) throw new Error(`No access to ${model}`); };
 
@@ -25,12 +25,13 @@ export function runPosting(db, allowed, path, body = {}) {
   }
   if (path === '/api/pos/pay') {
     need(allowed, 'pos.order');
-    const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount) || 0 })) : [];
+    const cart = Array.isArray(body.lines) ? body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty) || 0, uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount ?? 0) })) : [];
     if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || !['cash', 'card', 'bank'].includes(p.method) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
     if (!body.payments && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
     // Prices come from the products, not from the request.
-    const { db: next, id } = payOrder(db, { lines: priceLines(db, cart, Number(body.partner_id) || null), method: body.method, payments: body.payments, partner_id: Number(body.partner_id) || null });
-    return { db: next, body: { id, name: read(next, 'pos.order', id).name } };
+    const { db: next, id } = payCart(db, { cart, method: body.method, payments: body.payments, partner_id: Number(body.partner_id) || null, request_key: body.request_key ?? null });
+    const order = read(next, 'pos.order', id);
+    return { db: next, body: { id, name: order.name, total: order.amount_total } };
   }
   if (path === '/api/pos/close') {
     need(allowed, 'pos.session');

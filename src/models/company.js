@@ -26,9 +26,11 @@ export function setCompanies(db, { current, allowed }) {
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
 }
 
+// Configuration is shared even when older ORM versions stamped it with company 1.
+const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
-  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
 
@@ -41,6 +43,7 @@ export function visibleTo(companies, model, r, db = null) {
   if (!companies) return true;
   if (model === 'res.company') return companies.has(r?.id);
   if (GROUP_WIDE.has(model)) return false;
+  if (CONFIG_MODELS.has(model)) return true;
   if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
   if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
   return companies.has(r.company_id);

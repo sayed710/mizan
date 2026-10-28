@@ -314,7 +314,6 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) });
   const visible = (r) => r && visibleTo(companies, model, r, db);
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
-  const seen = companies ? { ...db, records: restrictRecords(db, companies).records } : db;
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {
@@ -322,6 +321,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
+      const seen = companies && terms.length ? { ...db, records: restrictRecords(db, companies).records } : db;
       const all = search(db, model).filter((r) => visible(r) && matches(seen, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }

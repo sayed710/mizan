@@ -116,6 +116,39 @@ test('account administration, settings edits and notes are logged without secret
   }
 });
 
+test('user creation is discoverable by its generated resource id', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    await admin('POST', '/api/users', { login: 'new-clerk', password: 'clerk-password' });
+    const users = (await admin('GET', '/api/users')).body;
+    const id = users.find((u) => u.login === 'new-clerk').id;
+    const entries = (await admin('GET', `/api/audit?model=auth.user&id=${id}`)).body;
+    assert.equal(entries.filter((e) => e.action === 'create').length, 1);
+  } finally { await stop(); }
+});
+
+test('deleting a nonexistent API key leaves audit history unchanged', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const before = (await admin('GET', '/api/audit')).body;
+    assert.equal((await admin('DELETE', '/api/keys?created=123')).status, 200);
+    assert.deepEqual((await admin('GET', '/api/audit')).body, before);
+  } finally { await stop(); }
+});
+
+test('malformed audit record filters are rejected', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    for (const id of ['abc', '', '-1', '1.5']) assert.equal((await admin('GET', `/api/audit?id=${id}`)).status, 400, id);
+  } finally { await stop(); }
+});
+
 test('anonymous blog views change the counter without adding audit rows', async () => {
   const { url, stop } = await startServer();
   try {
