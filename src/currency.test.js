@@ -15,7 +15,8 @@ test('rate lookup takes the latest rate on or before the date; company currency 
   const db = seed();
   assert.equal(rateAt(db, eur(db), addDays(today(), -30)), 0.92);
   assert.equal(rateAt(db, eur(db), today()), 0.9);
-  assert.equal(rateAt(db, eur(db), addDays(today(), -400)), 0.92);
+  // Before the first rate there is no rate: never borrow a later one.
+  assert.throws(() => rateAt(db, eur(db), addDays(today(), -400)), /No EUR rate on or before/);
   assert.equal(rateAt(db, null), 1);
   assert.equal(toCompany(db, eur(db), 90, today()), 100);
 });

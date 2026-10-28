@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
 import { nextName, subtotal, today } from './common.js';
-import { rateAt } from './currency.js';
+import { companyCurrency, rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
 
 export const ACCOUNT_TYPES = [
@@ -46,7 +46,7 @@ export function invoiceLines(db, move) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
-  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today());
+  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
   const counterpart = accountId(db, sale ? '121000' : '211000');
   const base = accountId(db, sale ? '400000' : '600000');
   // Each line may override the income/expense account; amounts are grouped per account.
@@ -60,7 +60,9 @@ export function invoiceLines(db, move) {
     const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
     byAccount.set(account, (byAccount.get(account) ?? 0) + subtotal(l));
   }
-  const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate)]);
+  // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
+  // journal item is the invoiced one, never reconstructed from the rounded conversion.
+  const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate), round(amount)]);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
   const byTax = new Map();
@@ -68,14 +70,21 @@ export function invoiceLines(db, move) {
     const account = l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc;
     byTax.set(account, (byTax.get(account) ?? 0) + lineTaxOf(l));
   }
-  const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate)]);
+  const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate), round(amount)]);
   const untaxed = round(bases.reduce((s, [, a]) => s + a, 0));
   const total = round(untaxed + taxes.reduce((s, [, a]) => s + a, 0));
-  const side = (amount, debit) => ((debit !== refund) ? { debit: round(amount), credit: 0 } : { debit: 0, credit: round(amount) });
+  const totalDoc = round(bases.reduce((s, [, , d]) => s + d, 0) + taxes.reduce((s, [, , d]) => s + d, 0));
+  // A document is foreign when its currency is not the company's (an equal rate on the day does not change that).
+  const own = companyCurrency(db, move.company_id) ?? (db.records['res.currency'] ?? []).find((c) => c.name === db.settings?.currency)?.id ?? null;
+  const foreign = !!move.currency_id && move.currency_id !== own;
+  const side = (amount, debit, doc) => {
+    const sign = debit !== refund ? 1 : -1;
+    return { debit: sign > 0 ? round(amount) : 0, credit: sign > 0 ? 0 : round(amount), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * doc) } : {}) };
+  };
   return [
-    { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale) },
-    ...bases.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale) })),
-    ...taxes.map(([account_id, amount]) => ({ account_id, partner_id: move.partner_id, name: 'Taxes', ...side(amount, !sale) })),
+    { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
+    ...bases.map(([account_id, amount, doc]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc) })),
+    ...taxes.map(([account_id, amount, doc]) => ({ account_id, partner_id: move.partner_id, name: 'Taxes', ...side(amount, !sale, doc) })),
   ].filter((l) => l.debit || l.credit);
 }
 
@@ -83,14 +92,14 @@ export function invoiceLines(db, move) {
  * Create and post a miscellaneous entry.
  * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string}[]}} spec
  */
-export function postEntry(db, { journal, date = today(), ref = '', lines }) {
+export function postEntry(db, { journal, date = today(), ref = '', lines, company = null }) {
   const line_ids = lines.map((l) => ({
     account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: round(l.debit ?? 0), credit: round(l.credit ?? 0),
   }));
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;
   return create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: journalId(db, journal), invoice_date: date, ref,
+    move_type: 'entry', state: 'posted', journal_id: journalId(db, journal), invoice_date: date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
   });
 }

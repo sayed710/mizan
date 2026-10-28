@@ -101,7 +101,7 @@ export function priceDifferenceLines(db, bill) {
   if (!po) return [];
   const prior = previousBills(db, bill, po).flatMap((m) => m.invoice_line_ids ?? []);
   const used = new Map();
-  const rate = rateAt(db, bill.currency_id, bill.invoice_date ?? today());
+  const rate = rateAt(db, bill.currency_id, bill.invoice_date ?? today(), bill.company_id);
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
