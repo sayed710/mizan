@@ -1,6 +1,6 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
+import { ACCOUNT_TYPES, accountId, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -168,7 +168,9 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
   const bank = toCompany(db, r.currency_id, value, date, r.company_id);
-  const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date, r.company_id);
+  // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
+  const final = value >= residual(r);
+  const open = final ? openBalance(db, r) : toCompany(db, r.currency_id, value, r.invoice_date ?? date, r.company_id);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
   // The bank line converts what was really received once; the credit is whatever remains after the settled part.
@@ -186,19 +188,47 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
-  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove }];
-  const next = write(releaseCashBasis(withPayment, r, value / total(r), date), 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
+  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open }];
+  const next = write(releaseCashBasis(withPayment, r, value / total(r), date, { final }), 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
 }
 
-/** Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account. */
-export function releaseCashBasis(db, r, share, date) {
+/** What the invoice still has on its receivable/payable in company currency: its posted line minus the payments so far. */
+function openBalance(db, r) {
+  const account = accountId(db, isPurchase(r) ? '211000' : '121000');
+  const booked = (r.line_ids ?? []).filter((l) => l.account_id === account).reduce((s, l) => s + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0);
+  const paid = (r.payments ?? []).reduce((s, p) => s + (p.company_amount ?? toCompany(db, r.currency_id, p.amount, r.invoice_date ?? p.date, r.company_id)), 0);
+  return round2(booked - paid);
+}
+
+/** Tax already released for an invoice, per tax account code. */
+const releasedTaxes = (db, r) => {
+  const released = new Map();
+  for (const m of db.records['account.move'] ?? []) {
+    if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
+    for (const l of m.line_ids ?? []) {
+      const code = read(db, 'account.account', l.account_id)?.code;
+      released.set(code, (released.get(code) ?? 0) + (Number(l.debit) || 0) + (Number(l.credit) || 0));
+    }
+  }
+  return released;
+};
+
+/**
+ * Cash-basis taxes become due in proportion to what was paid: moved from the transition account to the tax account.
+ * The final payment releases whatever is left, so the transition account ends at zero.
+ */
+export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const sale = !isPurchase(r);
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
+  const released = final ? releasedTaxes(db, r) : null;
   const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id))
-    .map(([accountId, amount]) => [read(db, 'account.account', accountId)?.code ?? (sale ? '251000' : '131000'), Math.round(amount * share * 100) / 100])
+    .map(([taxAccount, amount]) => {
+      const code = read(db, 'account.account', taxAccount)?.code ?? (sale ? '251000' : '131000');
+      return [code, round2(final ? amount - (released.get(code) ?? 0) : amount * share)];
+    })
     .filter(([, amount]) => amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
@@ -352,7 +382,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, discount: { type: 'boolean', label: 'Early Payment Discount' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, discount: { type: 'boolean', label: 'Early Payment Discount' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,

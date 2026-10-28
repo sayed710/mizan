@@ -23,6 +23,7 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Company Amount': 'المبلغ بعملة الشركة',
   'Early Payment Discount': 'خصم السداد المبكر',
   // shell
   'Search for a menu...': 'ابحث عن قائمة...', 'Reset demo': 'إعادة البيانات التجريبية', 'Home menu': 'القائمة الرئيسية',

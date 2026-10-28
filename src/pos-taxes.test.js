@@ -61,7 +61,7 @@ test('a refund reverses the same accounts', () => {
   assert.equal(sum(entry, refund.db, '101501', 'credit'), 114);
 });
 
-test('a settlement books exactly the tender collected; the rounding cent goes to a visible line', () => {
+test('a settlement books exactly the tender collected after account-bucket rounding', () => {
   const { db: db0 } = withIncludedTax();
   const other = search(db0, 'account.account').find((a) => a.code === '450000');
   const db = write(db0, 'product', 1, { property_account_income_id: other.id });
@@ -72,7 +72,8 @@ test('a settlement books exactly the tender collected; the rounding cent goes to
   const entry = entryOf(cash.db, cash.id);
   assert.ok(isBalanced(entry.line_ids));
   assert.equal(sum(entry, cash.db, '101501', 'debit'), 1.01);
-  assert.equal(sum(entry, cash.db, '690000', 'debit'), 0.01); // revenue booked 1.02, 1.01 collected
+  assert.equal(sum(entry, cash.db, '690000', 'debit'), 0); // the largest revenue bucket absorbs the rounding cent
+  assert.equal(entry.line_ids.reduce((s, l) => s + l.credit, 0), 1.01);
   const card = payOrder(cash.db, { lines, method: 'card' });
   assert.equal(sum(entryOf(card.db, card.id), card.db, '101401', 'debit'), 1.01);
   const refund = refundOrder(card.db, read(card.db, 'pos.order', card.id));
