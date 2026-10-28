@@ -583,3 +583,8 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .appt-done { max-inline-size: 560px; margin-inline: auto; text-align: center; }
 .appt-done a { overflow-wrap: anywhere; }
 @media (max-width: 760px) { .appt-page { grid-template-columns: 1fr; } .appt .appt-side { position: static; order: -1; } .appt h1 { font-size: 24px; } }
+.user-menu > button { padding: 2px; border-radius: 999px; }
+.user-menu .nav-dropdown { inset-inline-start: auto; inset-inline-end: 0; }
+.user-menu .nav-dropdown a, .user-menu .nav-dropdown button { padding: 7px 10px; border-radius: 6px; background: none; border: 0; text-align: start; cursor: pointer; color: inherit; font: inherit; }
+.user-menu .nav-dropdown a:hover, .user-menu .nav-dropdown button:hover { background: var(--brand-soft); }
+.user-menu-name { padding: 6px 10px; font-size: 12px; }
