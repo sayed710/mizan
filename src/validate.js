@@ -32,8 +32,16 @@ export function cleanValue(field, value, where) {
       if (typeof value !== 'number' || !Number.isFinite(value)) fail(where);
       return value;
     case 'many2one':
+      if (typeof value === 'string') {
+        if (field.relation === 'crm.stage' && ['new', 'qualified', 'proposition', 'won'].includes(value)) return value;
+        if (field.relation === 'project.task.type' && ['todo', 'progress', 'review', 'done'].includes(value)) return value;
+        fail(where);
+      }
       if (!Number.isInteger(value) || value < 1) fail(where);
       return value;
+    case 'many2many':
+      if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every((x) => Number.isInteger(x) && x >= 1)) fail(where);
+      return [...new Set(value)];
     case 'boolean':
       if (typeof value !== 'boolean') fail(where);
       return value;

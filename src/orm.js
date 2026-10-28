@@ -129,7 +129,14 @@ function trackingMessages(db, model, before, vals) {
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
       if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking');
-      const label = (x) => fields[k].options?.find((o) => o[0] === x)?.[1] ?? x;
+      const label = (x) => {
+        if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
+        if (fields[k].type === 'many2one' && fields[k].relation) {
+          const relRec = (db.records[fields[k].relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+          if (relRec?.name) return relRec.name;
+        }
+        return x;
+      };
       return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking');
     });
 }
@@ -253,15 +260,36 @@ export function groupLabel(db, field, key) {
  * dates group by month (chronological); others sort by label with "None" last.
  * @returns {{key: any, label: string, records: object[]}[]}
  */
-export function groupRecords(db, model, records, name) {
+export function groupRecords(db, model, records, name, context = {}) {
   const field = models[model].fields[name];
-  const buckets = new Map(field.type === 'selection' ? field.options.map(([k]) => [k, []]) : []);
+  const isStageRel = field.type === 'many2one' && ['crm.stage', 'project.task.type'].includes(field.relation);
+  let stageList = isStageRel
+    ? (db?.records?.[field.relation] ?? []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+    : null;
+  if (isStageRel && stageList) {
+    if (model === 'crm.lead' && context.team_id) {
+      stageList = stageList.filter((s) => !s.team_ids?.length || s.team_ids.includes(context.team_id));
+    } else if (model === 'project.task' && context.project_id) {
+      stageList = stageList.filter((s) => !s.project_ids?.length || s.project_ids.includes(context.project_id));
+    }
+  }
+  const buckets = new Map(
+    field.type === 'selection'
+      ? field.options.map(([k]) => [k, []])
+      : isStageRel
+        ? stageList.map((s) => [s.id, []])
+        : [],
+  );
   for (const r of records) {
-    const k = groupKey(field, r[name]);
+    let k = groupKey(field, r[name]);
+    if (isStageRel && typeof k === 'string') {
+      const match = stageList.find((s) => s.name.toLowerCase() === k.toLowerCase() || (k === 'won' && s.is_won));
+      if (match) k = match.id;
+    }
     buckets.set(k, [...(buckets.get(k) ?? []), r]);
   }
   const groups = [...buckets].map(([key, recs]) => ({ key, label: groupLabel(db, field, key), records: recs }));
-  if (field.type === 'selection') return groups;
+  if (field.type === 'selection' || isStageRel) return groups;
   const rank = (g) => (g.key === false ? '￿' : ['date', 'datetime'].includes(field.type) ? String(g.key) : g.label.toLowerCase());
   return groups.sort((a, b) => rank(a).localeCompare(rank(b)));
 }

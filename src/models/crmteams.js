@@ -6,8 +6,8 @@ import { addDays, today } from './common.js';
 export const MIN_CLOSED_LEADS = 5;
 const FEATURES = ['country', 'medium', 'source', 'stage_id'];
 
-const isWon = (l) => l.stage_id === 'won';
-const isLost = (l) => l.active === false && l.stage_id !== 'won';
+const isWon = (l) => l.stage_id === 'won' || l.stage_id === 4 || l.probability === 100;
+const isLost = (l) => l.active === false && !isWon(l);
 const featuresOf = (l) => [
   ...FEATURES.filter((f) => l[f]).map((f) => `${f}=${String(l[f]).toLowerCase()}`),
   ...(l.tag_ids ?? []).map((t) => `tag=${String(t).toLowerCase()}`),
@@ -27,7 +27,7 @@ function scorer(db) {
   const lostCounts = tally(lost);
   return (lead) => {
     // Work in log-odds so many features do not underflow.
-    const logOdds = featuresOf({ ...lead, stage_id: lead.stage_id === 'won' ? null : lead.stage_id }).reduce(
+    const logOdds = featuresOf({ ...lead, stage_id: isWon(lead) ? null : lead.stage_id }).reduce(
       (s, f) => s + Math.log(((wonCounts.get(f) ?? 0) + 1) / (won.length + 2)) - Math.log(((lostCounts.get(f) ?? 0) + 1) / (lost.length + 2)),
       Math.log(won.length / lost.length),
     );
@@ -45,7 +45,7 @@ export function refreshProbabilities(db) {
   const score = scorer(db);
   if (!score) return db;
   const updates = new Map();
-  for (const l of search(db, 'crm.lead').filter((x) => x.stage_id !== 'won')) {
+  for (const l of search(db, 'crm.lead').filter((x) => !isWon(x))) {
     const p = score(l);
     if (p !== l.automated_probability) updates.set(l.id, { automated_probability: p });
   }
@@ -63,7 +63,7 @@ export function assignLeads(db, team, at = today()) {
   const since = addDays(at, -30);
   const members = (team.member_ids ?? []).filter((m) => m.name);
   if (!members.length) return db;
-  const leads = search(db, 'crm.lead').filter((l) => !l.assign_date && !l.user && l.stage_id !== 'won' && (!l.team_id || l.team_id === team.id) && matchesTeam(team, l));
+  const leads = search(db, 'crm.lead').filter((l) => !l.assign_date && !l.user && !isWon(l) && (!l.team_id || l.team_id === team.id) && matchesTeam(team, l));
   const load = new Map(members.map((m) => [m.name, search(db, 'crm.lead').filter((l) => l.user === m.name && (l.assign_date ?? '') >= since).length]));
   return leads.reduce((acc, lead) => {
     const free = members.filter((m) => !(Number(m.capacity) > 0) || load.get(m.name) < Number(m.capacity))

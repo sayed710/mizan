@@ -24,10 +24,10 @@ test('the batched lead scoring matches scoring each lead on its own', () => {
   let base = seed();
   const leads = base.records['crm.lead'];
   // Enough history to score: three won and three lost leads.
-  base = leads.slice(0, 3).reduce((acc, l) => write(acc, 'crm.lead', l.id, { stage_id: 'won' }), base);
+  base = leads.slice(0, 3).reduce((acc, l) => write(acc, 'crm.lead', l.id, { stage_id: 4 }), base);
   base = leads.slice(3, 6).reduce((acc, l) => write(acc, 'crm.lead', l.id, { active: false }), base);
   const db = refreshProbabilities(base);
-  const open = search(db, 'crm.lead').filter((x) => x.stage_id !== 'won');
+  const open = search(db, 'crm.lead').filter((x) => x.stage_id !== 4 && x.stage_id !== 'won');
   assert.ok(open.length);
   for (const l of open) {
     assert.notEqual(predictiveProbability(base, l), null);

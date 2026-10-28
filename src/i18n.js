@@ -885,6 +885,24 @@ const ar = {
   'Product (name or internal reference)': 'المنتج (الاسم أو المرجع الداخلي)',
   'On Hand in Packagings': 'المتاح بالعبوات', 'Loose units': 'وحدات منفردة',
   'Signers, as role=contact name separated by ;': 'الموقعون بصيغة الدور=اسم جهة الاتصال مفصولة بـ ;',
+  // Configurable CRM and Task stages
+  Stages: 'المراحل',
+  'Stage Name': 'اسم المرحلة',
+  'Is Won Stage': 'مرحلة فوز',
+  'Folded in Pipeline': 'مطوية في المسار',
+  Requirements: 'المتطلبات',
+  'Rotting Threshold (Days)': 'مهلة الركود (بالأيام)',
+  'Lost Reasons': 'أسباب الخسارة',
+  'Closing Note': 'ملاحظة الإغلاق',
+  'Last Stage Update': 'آخر تحديث للمرحلة',
+  Rotting: 'راكدة',
+  'Lost Reason (Legacy)': 'سبب الخسارة (قديم)',
+  'Task Stages': 'مراحل المهام',
+  'Folded in Kanban': 'مطوية في كانبان',
+  'Stage Owner': 'مسؤول المرحلة',
+  'Automatic Validation State': 'حالة الاعتماد التلقائي',
+  Unfold: 'فرد',
+  Fold: 'طي',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
