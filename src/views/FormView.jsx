@@ -9,6 +9,7 @@ import { Avatar, display, FieldInput, money } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
+import { duplicateValues } from '../duplicate.js';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -122,9 +123,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
-    const { id: _id, name, ...vals } = rec;
-    const copy = { ...vals, ...(models[model].fields.name?.readonly ? {} : { name: `${name ?? ''} (copy)` }) };
-    const res = create(getDb(), model, models[model].fields.name?.readonly ? { ...copy, ...models[model].defaults?.(nextId(getDb(), model)) } : copy);
+    const res = create(getDb(), model, duplicateValues(model, rec));
     commit(res.db);
     location.hash = `${base}/${res.id}${query}`;
   };
