@@ -7,6 +7,8 @@
   --bg: #12141a;
   --surface: #1b1e27;
   --border: #2d3241;
+  --border-input: #6b7385;
+  --on-brand: #10142a; /* the light dark-mode brand needs dark text (6.3:1) */
   --text: #e6e8ef;
   --muted: #9aa1b3;
   --danger: #f0786a;
