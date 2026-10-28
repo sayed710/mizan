@@ -320,7 +320,7 @@ export const signPlusModels = {
       tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag'), name: { type: 'char', label: 'Tag Name', hidden: true } }, () => ({ tag_id: null })),
       legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r, db) => (r.tag_ids ?? []).map((t) => (typeof t === 'string' ? t : (db?.records?.['documents.tag'] ?? []).find((x) => x.id === t?.tag_id)?.name ?? t?.name)).filter(Boolean) },
     },
-    kanban: { ...baseDocument.kanban, tags: 'legacy_tags' },
+    kanban: { ...baseDocument.kanban, tags: 'tag_ids' },
     form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b) },
   },
   'documents.share': {

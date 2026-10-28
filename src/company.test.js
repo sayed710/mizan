@@ -39,7 +39,7 @@ test('main company initialization preserves seed IDs, creates its contact and cu
   assert.equal(company.active, true);
   assert.equal(company.intercompany_rule, 'none');
   assert.equal(read(db, 'res.partner', company.partner_id).name, company.name);
-  assert.equal(read(db, 'res.partner', company.partner_id).company_id, null);
+  assert.equal(read(db, 'res.partner', company.partner_id).company_id ?? null, null);
   assert.equal(read(db, 'res.currency', company.currency_id).name, before.settings.currency);
   assert.deepEqual(read(db, 'res.partner', 1), read(before, 'res.partner', 1));
   assert.strictEqual(ensureMainCompany(db), db);

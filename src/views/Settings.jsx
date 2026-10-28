@@ -4,6 +4,7 @@ import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
+import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -129,7 +130,7 @@ export function Settings() {
     }
     if (!isServer()) {
       if (!isDb(data)) { setStatus(t('Invalid backup file.')); return; }
-      if (confirm(t('Replace all data in this browser with the backup?'))) { commit(data); setStatus(t('Backup restored.')); }
+      if (confirm(t('Replace all data in this browser with the backup?'))) { commit(migrate(data)); setStatus(t('Backup restored.')); }
       return;
     }
     try {

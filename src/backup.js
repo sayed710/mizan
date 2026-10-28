@@ -32,7 +32,9 @@ export function checkBackup(data) {
   for (const model of new Set([...Object.keys(top), ...Object.keys(given).filter((m) => Object.hasOwn(models, m))])) {
     seq[model] = Math.max(Number.isSafeInteger(given[model]) ? given[model] : 0, top[model] ?? 0);
   }
+  if (data.schema_version !== undefined && (!Number.isSafeInteger(data.schema_version) || data.schema_version < 0)) throw new Error('Invalid backup schema version');
   return {
+    ...(data.schema_version === undefined ? {} : { schema_version: data.schema_version }),
     records: { ...records },
     seq,
     messages: data.messages.map(cleanMessage).filter(Boolean),

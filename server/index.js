@@ -17,9 +17,7 @@ import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
-import { migrateAppointments } from '../src/models/appointments.js';
-import { migrateDocumentTags } from '../src/models/signplus.js';
-import { migrateWorkorderTimes } from '../src/models/workorder.js';
+import { migrate } from '../src/migrations.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
@@ -100,7 +98,7 @@ const userOf = (row) => ({
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
-let db = loadRepaired(storage, (loaded) => repairSeq(migrateWorkorderTimes(migrateDocumentTags(migrateAppointments(loaded)))));
+let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, action, changes) VALUES (?, ?, ?, ?, ?, ?)');
 /**
@@ -638,7 +636,7 @@ async function api(req, res, path) {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     try {
       const body = await readJson(req, MAX_BACKUP);
-      const restored = checkBackup(body?.backup);
+      const restored = migrate(checkBackup(body?.backup));
       // The company switcher belongs to each user, not to the shared backup being restored.
       for (const key of ['current_company_id', 'allowed_company_ids']) {
         if (key in db.settings) restored.settings[key] = db.settings[key];

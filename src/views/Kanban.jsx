@@ -33,7 +33,12 @@ function Card({ db, model, rec, open, draggable }) {
         return v ? <div key={f} className="card-line">{v}</div> : null;
       })}
       {k.tags && rec[k.tags]?.length > 0 && (
-        <div className="card-tags">{rec[k.tags].map((tag) => <Tag key={tag} name={tag} />)}</div>
+        <div className="card-tags">{rec[k.tags].map((tag, i) => {
+          // Tags are plain names, or lines whose first sub-field points at a tag record.
+          const [sub, subField] = Object.entries(fields[k.tags].fields ?? {})[0] ?? [];
+          const name = typeof tag === 'string' ? tag : display(db, subField, tag?.[sub]);
+          return name ? <Tag key={`${i}-${name}`} name={name} /> : null;
+        })}</div>
       )}
       {counter !== false && counter != null && <div className="card-counter"><b>{counter}</b> {t(k.counter.label)}</div>}
       {(k.priority || k.badge) && (

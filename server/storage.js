@@ -41,7 +41,7 @@ export function openStorage(sql) {
     q.clearMessages.run();
     for (const [model, recs] of Object.entries(db.records)) for (const r of recs) q.upsert.run(model, r.id, JSON.stringify(r));
     for (const m of db.messages) q.addMessage.run(m.id, m.model, m.res_id, JSON.stringify(m));
-    q.setMeta.run(JSON.stringify({ seq: db.seq, settings: db.settings }));
+    q.setMeta.run(JSON.stringify({ seq: db.seq, settings: db.settings, schema_version: db.schema_version }));
   });
 
   return {
@@ -56,10 +56,10 @@ export function openStorage(sql) {
       }
       const meta = q.meta.get();
       if (!meta) return null;
-      const { seq, settings } = JSON.parse(meta.value);
+      const { seq, settings, schema_version } = JSON.parse(meta.value);
       const records = {};
       for (const row of q.allRecords.all()) (records[row.model] ??= []).push(JSON.parse(row.data));
-      return { records, seq, settings, messages: q.allMessages.all().map((row) => JSON.parse(row.data)) };
+      return { records, seq, settings, schema_version, messages: q.allMessages.all().map((row) => JSON.parse(row.data)) };
     },
 
     /** Persist the transition prev → next (full rewrite when prev is null); `alongside` runs in the same transaction. */
@@ -72,7 +72,9 @@ export function openStorage(sql) {
         for (const [model, ids] of Object.entries(d.deletes)) for (const id of ids) q.remove.run(model, id);
         for (const m of d.messages) q.addMessage.run(m.id, m.model, m.res_id, JSON.stringify(m));
         for (const id of d.removedMessages) q.removeMessage.run(id);
-        if (prev.seq !== next.seq || prev.settings !== next.settings) q.setMeta.run(JSON.stringify({ seq: next.seq, settings: next.settings }));
+        if (prev.seq !== next.seq || prev.settings !== next.settings || prev.schema_version !== next.schema_version) {
+          q.setMeta.run(JSON.stringify({ seq: next.seq, settings: next.settings, schema_version: next.schema_version }));
+        }
       });
     },
   };

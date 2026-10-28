@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
 import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
 import { createQueue } from './queue.js';
+import { migrate } from './migrations.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
 import { setActor } from './models/authority.js';
@@ -54,7 +55,7 @@ const notify = () => {
 function loadLocal() {
   try {
     const saved = localStorage.getItem(KEY);
-    if (saved) return JSON.parse(saved);
+    if (saved) return migrate(JSON.parse(saved));
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
