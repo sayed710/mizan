@@ -25,11 +25,37 @@ export function setCompanies(db, { current, allowed }) {
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
 }
 
+// Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
+const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+/** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
+const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
+
 /**
  * Whether a user limited to the `companies` ids (null = every company) may see or change this record: companies by
- * their own id, other records when they are shared (no company) or belong to one of those companies.
+ * their own id; shared master data without a company; anything else when its company (missing = company 1, as in the
+ * ORM) is one of those companies. Pass `db` to also hide the contact record of a company the user may not use.
  */
-export const visibleTo = (companies, model, r) => !companies || (model === 'res.company' ? companies.has(r?.id) : shared(r?.company_id) || companies.has(r?.company_id));
+export function visibleTo(companies, model, r, db = null) {
+  if (!companies) return true;
+  if (model === 'res.company') return companies.has(r?.id);
+  if (GROUP_WIDE.has(model)) return false;
+  if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
+  if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
+  return companies.has(r.company_id);
+}
+
+/** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */
+export function restrictRecords(db, companies) {
+  if (!companies) return { records: db.records, hidden: new Set() };
+  const records = {};
+  const hidden = new Set();
+  for (const [model, list] of Object.entries(db.records)) {
+    records[model] = list.filter((r) => visibleTo(companies, model, r, db));
+    if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r, db)).forEach((r) => hidden.add(`${model}:${r.id}`));
+  }
+  return { records, hidden };
+}
 
 /** Keep shared records and records belonging to an allowed company. */
 export function companyFilter(db, records) {

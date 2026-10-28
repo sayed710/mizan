@@ -33,7 +33,7 @@ const client = (url, auth) => {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     cookie = res.headers.get('set-cookie')?.split(';')[0] ?? cookie;
-    return { status: res.status, body: await res.json() };
+    return { status: res.status, body: await res.json().catch(() => null) };
   };
 };
 
@@ -72,6 +72,63 @@ test('a user limited to one company neither sees nor edits the other, and switch
     const rest = client(url, `Bearer ${key}`);
     assert.equal((await rest('GET', `/api/v1/crm.lead/${lead.id}`)).status, 404);
     assert.ok(!(await rest('GET', '/api/v1/crm.lead?limit=500')).body.records.some((l) => l.id === lead.id));
+  } finally {
+    stop();
+  }
+});
+
+test('limited users get their own company identity, no group reports, no foreign contacts or portal links, and bad grants are refused', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const { body: db } = await admin('GET', '/api/db');
+    const branch = createCompany(db, { name: 'Branch', currency_id: db.records['res.company'][0].currency_id, vat: 'BRANCH-VAT' });
+    const order = create(branch.db, 'sale.order', { partner_id: 1, company_id: 1 });
+    assert.equal((await admin('POST', '/api/diff', { ...diffDb(db, order.db), settings: { company_vat: 'GROUP-VAT', company_iban: 'GROUP-IBAN' } })).status, 200);
+
+    for (const companies of ['abc', '0', '1,x']) {
+      const bad = await admin('POST', '/api/users', { login: `bad${companies.length}`, name: 'Bad', password: 'clerk-password', companies });
+      assert.equal(bad.status, 400, companies);
+    }
+    assert.equal((await admin('POST', '/api/users', { login: 'branchclerk', name: 'B', password: 'clerk-password', companies: String(branch.id) })).status, 201);
+    const clerk = client(url);
+    await clerk('POST', '/api/login', { login: 'branchclerk', password: 'clerk-password' });
+    const { body: seen } = await clerk('GET', '/api/db');
+    assert.equal(seen.settings.company_vat, 'BRANCH-VAT');
+    assert.ok(!JSON.stringify(seen.settings).includes('GROUP-IBAN') && !JSON.stringify(seen.settings).includes('GROUP-VAT'));
+    assert.ok(!seen.records['sale.order']?.some((o) => o.id === order.id));
+    const mainContact = db.records['res.company'][0].partner_id;
+    assert.ok(!seen.records['res.partner'].some((p) => p.id === mainContact), 'the main company contact is hidden');
+    assert.equal((await clerk('GET', `/api/portal-link/sale.order/${order.id}`)).status, 404);
+    assert.equal((await admin('GET', `/api/portal-link/sale.order/${order.id}`)).status, 200);
+
+    // REST: a record created without company_id lands in the key owner's company.
+    const { body: { key } } = await clerk('POST', '/api/keys', { name: 'rest' });
+    const rest = client(url, `Bearer ${key}`);
+    const made = await rest('POST', '/api/v1/crm.lead', { name: 'From REST' });
+    assert.equal(made.status, 201);
+    assert.equal(made.body.company_id, branch.id);
+  } finally {
+    stop();
+  }
+});
+
+test('a rejected change does not keep the company switch that came with it', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const { body: db } = await admin('GET', '/api/db');
+    const branch = createCompany(db, { name: 'Branch', currency_id: db.records['res.company'][0].currency_id });
+    assert.equal((await admin('POST', '/api/diff', diffDb(db, branch.db))).status, 200);
+    assert.equal((await admin('POST', '/api/users', { login: 'both', name: 'Both', password: 'clerk-password', companies: `1,${branch.id}` })).status, 201);
+    const user = client(url);
+    await user('POST', '/api/login', { login: 'both', password: 'clerk-password' });
+    const { body: seen } = await user('GET', '/api/db');
+    const bad = { upserts: { 'crm.lead': [{ id: 1, name: 'x', stage_id: 'not-a-stage' }] }, deletes: {}, messages: [], removedMessages: [], settings: { current_company_id: branch.id, allowed_company_ids: [branch.id] } };
+    assert.equal((await user('POST', '/api/diff', bad)).status, 400);
+    assert.equal((await user('GET', '/api/db')).body.settings.current_company_id, seen.settings.current_company_id);
   } finally {
     stop();
   }

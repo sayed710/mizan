@@ -48,3 +48,43 @@ test("a user limited to one company cannot add or remove chatter on another comp
   const removed = applyDiff(stored, { upserts: {}, deletes: {}, messages: [], removedMessages: ['n-other'] }, onlyMain);
   assert.ok(removed.messages.some((m) => m.id === 'n-other'));
 });
+
+test('records without a company belong to company 1, group reports and other companies\' contacts stay hidden', () => {
+  const { db } = twoCompanies();
+  const only2 = new Set([2]);
+  assert.ok(!visibleTo(only2, 'crm.lead', { id: 9 }), 'a legacy lead with no company is company 1');
+  assert.ok(visibleTo(new Set([1]), 'crm.lead', { id: 9 }));
+  assert.ok(visibleTo(only2, 'res.currency', { id: 1 }), 'shared master data stays shared');
+  assert.ok(!visibleTo(only2, 'consolidation.period', { id: 1, company_id: 2 }));
+  assert.ok(visibleTo(null, 'consolidation.period', { id: 1 }));
+  const mainContact = db.records['res.company'].find((c) => c.id === 1).partner_id;
+  const branchContact = db.records['res.company'].find((c) => c.id === 2).partner_id;
+  assert.ok(!visibleTo(only2, 'res.partner', { id: mainContact, company_id: null }, db));
+  assert.ok(visibleTo(only2, 'res.partner', { id: branchContact, company_id: null }, db));
+  assert.ok(visibleTo(only2, 'res.partner', { id: 9999, company_id: null }, db), 'ordinary shared partners stay visible');
+});
+
+test('chatter cannot be planted on a record that does not exist yet', () => {
+  const { db } = twoCompanies();
+  const orphan = { id: 'n-orphan', model: 'crm.lead', res_id: 424242, body: 'x', kind: 'note', author: 'a', date: '' };
+  const out = applyDiff(db, diffDb(db, { ...db, messages: [...db.messages, orphan] }), { companies: new Set([2]), isAdmin: false, author: 'Clerk' });
+  assert.ok(!out.messages.some((m) => m.id === 'n-orphan'));
+  const lead = create(db, 'crm.lead', { name: 'New', company_id: 2 });
+  const withBoth = { ...lead.db, messages: [...lead.db.messages, { ...orphan, id: 'n-new', res_id: lead.id }] };
+  assert.ok(applyDiff(db, diffDb(db, withBoth), { companies: new Set([2]), isAdmin: false, author: 'Clerk' }).messages.some((m) => m.id === 'n-new'));
+});
+
+test('REST search only matches names the API user can see, and new records go to their company', async () => {
+  const { handleApi } = await import('../server/api.js');
+  const { db } = twoCompanies();
+  const hidden = create(db, 'res.partner', { name: 'Zebra Hidden Contact', company_id: 1 });
+  // Stored directly: the guard refuses new links across companies, but old data can contain them.
+  const lead = { db: { ...hidden.db, records: { ...hidden.db.records, 'crm.lead': [...(hidden.db.records['crm.lead'] ?? []), { id: 800, name: 'Visible lead', partner_id: hidden.id, company_id: 2 }] } } };
+  const user = { name: 'api', isAdmin: false };
+  const only2 = new Set([2]);
+  const found = handleApi({ method: 'GET', path: '/api/v1/crm.lead', query: new URLSearchParams('q=Zebra'), db: lead.db, user, companies: only2 });
+  assert.equal(found.body.total, 0, 'a hidden related name cannot be probed');
+  const made = handleApi({ method: 'POST', path: '/api/v1/crm.lead', query: new URLSearchParams(), body: { name: 'Via REST' }, db: lead.db, user, companies: only2, company: 2 });
+  assert.equal(made.status, 201);
+  assert.equal(made.body.company_id, 2);
+});

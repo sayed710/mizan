@@ -104,7 +104,7 @@ function homePage(db, user, urlFor) {
 }
 
 /** Mountable portal handlers with a durable kv secret and the host server's authentication, headers and rate limiter. */
-export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders, env = process.env }) {
+export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, canSee = () => true, clientIp, tooMany, recordFailure, readRaw, securityHeaders, env = process.env }) {
   sql.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('portal_secret', ?)").run(randomBytes(32).toString('hex'));
   const secret = sql.prepare("SELECT value FROM kv WHERE key = 'portal_secret'").get().value;
   const urlFor = (model, r) => portalUrl(secret, model, r);
@@ -139,7 +139,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, cl
       if (!link || !paths[link[1]]) return error(res, 404, 'Document not found');
       if (allowed && !allowed.has(link[1])) return error(res, 403, 'No access to this document');
       const r = documentOf(getDb(), link[1], Number(link[2]));
-      if (!r) return error(res, 404, 'Document not found');
+      if (!r || !canSee(user, link[1], r)) return error(res, 404, 'Document not found');
       return send(res, 200, JSON.stringify({ url: urlFor(link[1], r) }), { 'Content-Type': 'application/json; charset=utf-8' });
     }
     if (url.pathname !== '/my' && !url.pathname.startsWith('/my/')) return false;

@@ -28,20 +28,20 @@ import { createPortal } from './portal.js';
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
 const ACTIONS = {
-  '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u) => aiDraft(db, u, b) },
-  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b) => digitizeBill(db, b) },
+  '/api/ai/draft': { need: 'ai', model: (b) => b.model, run: (b, u, _store, view) => aiDraft(view, u, b) },
+  '/api/integrations/digitize': { need: 'ai', model: () => 'account.move', run: (b, _u, _store, view) => digitizeBill(view, b) },
   // Sending also logs a WhatsApp message, so the store may write that model on top of the user's own.
   '/api/integrations/whatsapp': { need: 'whatsapp', model: (b) => b.model, extra: ['whatsapp.message'], run: (b, u, store) => sendWhatsApp(ENV, store, u, b) },
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
-  '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
-  '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
-  '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
+  '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b, _u, _store, view) => quoteShipping(ENV, view, b) },
+  '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
+  '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
 };
 
 const SMTP = smtpConfig();
 import { modelsForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
-import { setCompanies, visibleTo } from '../src/models/company.js';
+import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DIST = join(ROOT, 'dist');
@@ -71,8 +71,11 @@ try { sql.exec('ALTER TABLE users ADD COLUMN selection TEXT'); } catch { /* colu
 const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x)) : null);
 /** Comma-separated company ids a user may work in; null/empty = all companies. */
 const parseCompanies = (v) => {
-  const ids = v ? [...new Set(String(v).split(',').map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0))] : [];
-  return ids.length ? ids : null;
+  const parts = String(v ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const ids = [...new Set(parts.map(Number))];
+  // A stored grant that cannot be read must not turn into "every company": it grants none.
+  return ids.every((n) => Number.isInteger(n) && n > 0) ? ids : [];
 };
 const userOf = (row) => ({
   id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps),
@@ -88,11 +91,11 @@ const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : d
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
  */
-const storeFor = (opts) => {
-  let base = db;
+const storeFor = (opts, view = (d) => d) => {
+  let base = view(db);
   return {
-    get: () => { base = db; return db; },
-    commit: (next) => { commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
+    get: () => { base = view(db); return base; },
+    commit: (next) => { commitDb(applyDiff(db, diffDb(base, next), opts)); base = view(db); },
   };
 };
 if (!db) commitDb(seed(), { full: true });
@@ -108,7 +111,7 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
   const granted = parseCompanies(companies);
-  if (granted?.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id))) throw new Error('Allowed companies: select existing companies');
+  if (granted && (!granted.length || granted.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id)))) throw new Error('Allowed companies: select existing companies');
   sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null, granted?.join(',') ?? null);
 }
@@ -174,34 +177,39 @@ const selectionFor = (u) => {
   const current = [saved?.current, db.settings.current_company_id].find((id) => allowed.includes(id)) ?? allowed[0] ?? usable[0] ?? 1;
   return { current_company_id: current, allowed_company_ids: allowed.length ? allowed : [current] };
 };
-/** Validate and store a user's company switcher state; throws when it names a company they may not use. */
-const saveSelection = (u, { current_company_id: current, allowed_company_ids: allowed }) => {
+/** Validate a user's company switcher state without storing it; throws when it names a company they may not use. */
+const checkSelection = (u, { current_company_id: current, allowed_company_ids: allowed }) => {
   const granted = companiesFor(u);
-  if (granted && (!granted.has(current) || !allowed?.every((id) => granted.has(id)))) throw new Error('No access to that company');
+  if (granted && (!granted.has(current) || !Array.isArray(allowed) || !allowed.every((id) => granted.has(id)))) throw new Error('No access to that company');
   setCompanies(db, { current, allowed });
-  const selection = JSON.stringify({ current, allowed: [...new Set(allowed)] });
+  return JSON.stringify({ current, allowed: [...new Set(allowed)] });
+};
+const saveSelection = (u, selection) => {
   sql.prepare('UPDATE users SET selection = ? WHERE id = ?').run(selection, u.id);
   u.selection = selection;
 };
 /** Records a user may read: their apps' models, only their companies' records, and their own company selection. */
-const visibleDb = (u) => {
-  const allowed = allowedFor(u);
+const visibleDb = (u, { models = true } = {}) => {
+  const allowed = models ? allowedFor(u) : null;
   const companies = companiesFor(u);
-  const hidden = new Set();
-  const records = {};
-  for (const [model, list] of Object.entries(db.records)) {
-    if (allowed && !allowed.has(model)) continue;
-    if (!companies) { records[model] = list; continue; }
-    records[model] = list.filter((r) => visibleTo(companies, model, r));
-    if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r)).forEach((r) => hidden.add(`${model}:${r.id}`));
-  }
+  const { records: inCompanies, hidden } = restrictRecords(db, companies);
+  const records = allowed ? Object.fromEntries(Object.entries(inCompanies).filter(([model]) => allowed.has(model))) : inCompanies;
+  const selection = selectionFor(u);
+  // A user limited to some companies gets those companies' identity, not the group-wide VAT number and bank account.
+  const own = companies && (db.records['res.company'] ?? []).find((c) => c.id === selection.current_company_id);
+  const identity = !companies ? {} : {
+    company: own?.name ?? db.settings.company, company_vat: own?.vat ?? '', company_iban: '',
+    ...(Array.isArray(db.settings.companies) ? { companies: db.settings.companies.filter((c) => companies.has(c.id)) } : {}),
+  };
   return {
     ...db,
     records,
     messages: db.messages.filter((m) => (!allowed || allowed.has(m.model)) && !hidden.has(`${m.model}:${m.res_id}`)),
-    settings: { ...db.settings, ...selectionFor(u) },
+    settings: { ...db.settings, ...identity, ...selection },
   };
 };
+/** The database as a user may read it for server-side work: other companies' records are left out. */
+const scopeFor = (u) => (companiesFor(u) ? visibleDb(u, { models: false }) : db);
 /** Write options for a user: who they are, what they may change, and in which companies. */
 const writeOptions = (u, allowed = allowedFor(u)) => ({ author: u.name, isAdmin: u.isAdmin, allowed, companies: companiesFor(u) });
 
@@ -413,7 +421,7 @@ async function api(req, res, path) {
     const keyUser = apiKeyUser(req);
     if (!keyUser) { recordFailure(`key:${ip}`); return send(res, 401, { error: 'Invalid or missing API key' }); }
     const body = ['POST', 'PATCH'].includes(req.method) ? await readJson(req) : null;
-    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser), companies: companiesFor(keyUser) });
+    const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db, user: keyUser, allowed: allowedFor(keyUser), companies: companiesFor(keyUser), company: selectionFor(keyUser).current_company_id });
     if (out.db) commitDb(out.db);
     return send(res, out.status, out.body);
   }
@@ -445,9 +453,9 @@ async function api(req, res, path) {
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
-      const snapshot = db;
+      const snapshot = scopeFor(user);
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor(writeOptions(user, storeAllowed)));
+      const out = await action.run(body, user, storeFor(writeOptions(user, storeAllowed), () => scopeFor(user)), snapshot);
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
@@ -464,10 +472,10 @@ async function api(req, res, path) {
     try {
       lastBaseUrl = baseUrlOf(req);
       mailBaseKnown = true;
-      const snapshot = db;
+      const snapshot = scopeFor(user);
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed)), body, lastBaseUrl)
-        : await sendDocument(SMTP, db, user, body);
+        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), () => scopeFor(user)), body, lastBaseUrl)
+        : await sendDocument(SMTP, snapshot, user, body);
       if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, allowed)));
       return send(res, out.status, out.body);
     } catch (e) {
@@ -483,16 +491,19 @@ async function api(req, res, path) {
   if (path === '/api/diff' && req.method === 'POST') {
     const diff = await readJson(req);
     try {
-      // The company switcher is per user: store it with the user, never in the shared settings.
+      // The company switcher is per user: store it with the user, never in the shared settings. It is checked first
+      // but only stored once the rest of the change has been accepted, so a rejected request changes nothing.
+      let selection = null;
       if (diff?.settings && typeof diff.settings === 'object') {
         const { current_company_id: current, allowed_company_ids: chosen, ...rest } = diff.settings;
         const mine = selectionFor(user);
         if ((current !== undefined && current !== mine.current_company_id) || (chosen !== undefined && JSON.stringify(chosen) !== JSON.stringify(mine.allowed_company_ids))) {
-          saveSelection(user, { current_company_id: current ?? mine.current_company_id, allowed_company_ids: chosen ?? mine.allowed_company_ids });
+          selection = checkSelection(user, { current_company_id: current ?? mine.current_company_id, allowed_company_ids: chosen ?? mine.allowed_company_ids });
         }
         diff.settings = rest;
       }
       commitDb(applyDiff(db, diff, writeOptions(user)));
+      if (selection) saveSelection(user, selection);
     } catch (e) {
       return send(res, 400, { error: e.message, db: visibleDb(user) });
     }
@@ -585,7 +596,7 @@ async function website(req, res, path) {
   return serveStatic(req, res, access || builtIn ? 200 : 404, path === '/' ? undefined : hash);
 }
 
-const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor, canSee: (u, model, rec) => visibleTo(companiesFor(u), model, rec, db), clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;

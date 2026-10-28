@@ -46,7 +46,7 @@ const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the s
  */
 export function applyDiff(db, d, { author, isAdmin = true, allowed = null, companies = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
-  const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r)) ? `No access to this company's ${model} records` : null);
+  const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
     if (!models[model]) throw new Error(`Unknown model ${model}`);
@@ -86,7 +86,12 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, compa
   }
   const known = new Set(db.messages.map((m) => m.id));
   const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
-  const onVisibleRecord = (m) => !companies || !companyError(m.model, storedRecord(m.model, m.res_id), (records[m.model] ?? []).find((r) => r.id === m.res_id));
+  // A limited user may only comment on a record that exists in the result and that they can see.
+  const onVisibleRecord = (m) => {
+    if (!companies) return true;
+    const now = (records[m.model] ?? []).find((r) => r.id === m.res_id);
+    return !!now && !companyError(m.model, storedRecord(m.model, m.res_id), now);
+  };
   const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m)).map((m) => m.id));
   const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : []).filter((id) => !kept.has(id) && !hiddenMessages.has(id)));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
