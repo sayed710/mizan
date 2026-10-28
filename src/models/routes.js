@@ -4,6 +4,7 @@ import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { capitalizeStock } from './valuation.js';
 import { round } from '../money.js';
+import { getForecast, orderOrderpoints } from './orderpoint.js';
 
 
 /**
@@ -60,36 +61,20 @@ export function vendorPrice(db, productId, { partnerId, qty = 1, date = today() 
 }
 
 /**
- * Reordering rules: a bought product whose forecast (on hand + quantities on open RFQs/POs not yet received)
- * falls below its minimum gets one draft RFQ line to its vendor up to the maximum (or the minimum).
+ * Reordering rules: order active auto-triggered rules whose forecast quantity
+ * falls below the rule's minimum, bringing forecast up to the maximum.
  */
-export function replenish(db) {
-  const incoming = new Map();
-  for (const po of search(db, 'purchase.order').filter((p) => p.state !== 'cancel' && !p.receipt_done && !p.dropship_partner_id)) {
-    for (const l of po.order_line ?? []) incoming.set(l.product_id, (incoming.get(l.product_id) ?? 0) + (Number(l.qty) || 0) - (Number(l.qty_delivered) || 0));
-  }
-  const suppliers = (id) => search(db, 'product.supplierinfo').filter((s) => s.product_id === id);
-  const needs = search(db, 'product').filter((p) => p.type === 'goods' && (p.vendor_id || suppliers(p.id).length) && p.purchase_ok !== false && Number(p.reorder_min) > 0)
-    .map((p) => {
-      const forecast = (Number(p.qty_available) || 0) + (incoming.get(p.id) ?? 0);
-      const target = Math.max(Number(p.reorder_max) || 0, Number(p.reorder_min));
-      return forecast < Number(p.reorder_min) ? { p, qty: target - forecast } : null;
-    }).filter(Boolean);
-  const byVendor = new Map();
-  // A vendor pricelist line wins over the product's default vendor and cost.
-  for (const n of needs) {
-    let qty = n.qty;
-    let best = vendorPrice(db, n.p.id, { qty });
-    if (!best && !n.p.vendor_id) {
-      // Without a default vendor, order up to the smallest vendor minimum quantity.
-      qty = Math.max(qty, Math.min(...suppliers(n.p.id).map((s) => Number(s.min_qty) || 0)));
-      best = vendorPrice(db, n.p.id, { qty });
-    }
-    const vendor = best?.partner_id ?? n.p.vendor_id;
-    if (!vendor) continue; // only out-of-date pricelist lines: nothing valid to order from
-    byVendor.set(vendor, [...(byVendor.get(vendor) ?? []), { product_id: n.p.id, qty, price_unit: best?.price ?? n.p.cost, tax: n.p.purchase_tax ?? 14 }]);
-  }
-  return [...byVendor].reduce((acc, [vendor, lines]) => create(acc, 'purchase.order', { partner_id: vendor, order_line: lines, origin: 'Replenishment' }).db, db);
+export function replenish(db, at = today()) {
+  const orderpoints = search(db, 'stock.warehouse.orderpoint').filter(
+    (op) => op.active !== false && op.trigger === 'auto' && (!op.snoozed_until || op.snoozed_until <= at),
+  );
+
+  const toOrder = orderpoints.filter(
+    (op) => getForecast(db, op) < op.product_min_qty || (op.qty_to_order_manual != null && Number(op.qty_to_order_manual) > 0),
+  );
+  if (!toOrder.length) return db;
+
+  return orderOrderpoints(db, toOrder.map((op) => op.id));
 }
 
 /** Distribute landed costs over the received products by quantity and raise their (average) cost. */

@@ -87,11 +87,12 @@ import { documentsPlusModels } from './documentsplus.js';
 import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
 import { appAnalyses } from './analysis.js';
+import { orderpointModels } from './orderpoint.js';
 
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels };
+export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -248,6 +249,7 @@ const allApps = [
     menus: [
       { label: 'Operations', children: [
         { key: 'transfers', label: 'Transfers', model: 'stock.picking' },
+        { key: 'replenishment', label: 'Replenishment', model: 'stock.warehouse.orderpoint' },
         { key: 'scrap', label: 'Scrap', model: 'stock.scrap' },
         { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
         { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },

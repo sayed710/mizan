@@ -148,7 +148,7 @@ export function Overview() {
     ['Receivable', money(sum(db, invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
     ['Net income (year)', money(pnl.net), '#/accounting/pnl'],
     ['Open tickets', String(search(db, 'helpdesk.ticket').filter((x) => x.stage_id !== 'solved').length), '#/helpdesk/tickets'],
-    ['Products below minimum', String(search(db, 'product').filter((p) => p.type === 'goods' && p.qty_available < p.reorder_min).length), '#/inventory/stock?view=list'],
+    ['Products below minimum', String(search(db, 'stock.warehouse.orderpoint').filter((op) => op.active !== false && op.qty_forecast < op.product_min_qty).length), '#/inventory/replenishment?view=list'],
     ['Employees', String(search(db, 'hr.employee').length), '#/employees/employees'],
     ['Open tasks', String(search(db, 'project.task').filter((x) => x.stage_id !== 'done').length), '#/project/tasks'],
   ];

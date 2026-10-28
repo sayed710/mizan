@@ -209,7 +209,7 @@ export function generateVariants(db, template) {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
     type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
-    qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values,
+    qty_available: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
 
@@ -366,6 +366,7 @@ export const salesModels = {
       qty_available: { type: 'float', label: 'On Hand', readonly: true },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       reorder_max: { type: 'float', label: 'Max. Quantity' },
+      below_min: { type: 'boolean', label: 'Below Minimum', compute: (r, db) => (db.records['stock.warehouse.orderpoint'] ?? []).some((op) => op.product_id === r.id && op.active !== false && (op.qty_forecast < op.product_min_qty || Number(r.qty_available) < Number(op.product_min_qty))) },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
     guard: (db, before, r) => {
@@ -375,10 +376,10 @@ export const salesModels = {
       return !stock || !purchase ? 'Select existing stock and purchase units of measure'
         : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
-      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && r.qty_available < r.reorder_min }],
+      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && Boolean(r.below_min) }],
       [{ id: 'sale_ok', label: 'Can be Sold', fn: (r) => r.sale_ok !== false }, { id: 'purchase_ok', label: 'Can be Purchased', fn: (r) => r.purchase_ok !== false }, { id: 'pos', label: 'Available in POS', fn: (r) => r.available_in_pos }],
     ],
     groupBys: ['type', 'categ'],
@@ -409,8 +410,9 @@ export const salesModels = {
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
-        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
+        { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },

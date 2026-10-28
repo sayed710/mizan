@@ -72,8 +72,15 @@ test('a manufacturing order explodes its BoM into components and work orders, th
 
 test('replenishment drafts one RFQ per vendor up to the maximum, counting what is already on order', async () => {
   const { replenish } = await import('./models/routes.js');
-  const base = (seed().records.product ?? []).reduce((db, p) => write(db, 'product', p.id, { reorder_min: 0 }), seed());
-  const db0 = write(base, 'product', 1, { qty_available: 5, reorder_min: 20, reorder_max: 50, vendor_id: 2 });
+  let db0 = write(seed(), 'product', 1, { qty_available: 5, vendor_id: 2 });
+  const wh = search(db0, 'stock.warehouse').find((w) => w.code === 'WH') ?? search(db0, 'stock.warehouse')[0];
+  const q1 = search(db0, 'stock.quant').find((q) => q.product_id === 1);
+  if (q1) db0 = write(db0, 'stock.quant', q1.id, { quantity: 5 });
+  const locId = q1?.location_id ?? wh.lot_stock_id;
+  db0 = create(db0, 'stock.warehouse.orderpoint', {
+    product_id: 1, warehouse_id: wh.id, location_id: locId,
+    product_min_qty: 20, product_max_qty: 50, trigger: 'auto', route_id: 'buy',
+  }).db;
   const once = replenish(db0);
   const rfq = search(once, 'purchase.order').find((p) => p.origin === 'Replenishment');
   assert.deepEqual(rfq.order_line.map((l) => [l.product_id, l.qty]), [[1, 45]]);

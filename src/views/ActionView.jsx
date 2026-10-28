@@ -136,7 +136,18 @@ export function ActionView({ leaf, base, params }) {
             if (name && !user) throw new Error(t('Select an existing counter'));
             options = { date, user_id: user?.id ?? null };
           }
-          commit(action.run(getDb(), ids, options));
+          if (action.label === 'Snooze') {
+            const duration = prompt(t('Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)'), '1 day');
+            if (duration == null) return;
+            options = duration;
+          }
+          const res = action.run(getDb(), ids, options);
+          if (res?.go) {
+            if (res.db) commit(res.db);
+            location.hash = res.go;
+            return;
+          }
+          if (res) commit(res.db ?? res);
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>

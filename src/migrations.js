@@ -7,6 +7,7 @@ import { migrateDocumentTags } from './models/signplus.js';
 import { migrateWorkorderTimes } from './models/workorder.js';
 import { ensureQuants } from './models/quant.js';
 import { migrateTimeOff } from './models/timeoff.js';
+import { migrateOrderpoints } from './models/orderpoint.js';
 
 /** Tag lists stored as names (['Tax']) become lines pointing at documents.tag records, creating missing tags. */
 function documentTagLines(db) {
@@ -39,7 +40,8 @@ export const MIGRATIONS = [
   { version: 3, name: 'Work orders: date-only times to datetimes', up: migrateWorkorderTimes },
   { version: 4, name: 'Stock: initialize located quants from done transfers and opening stock', up: ensureQuants },
   { version: 5, name: 'Time off: request units and leave types', up: migrateTimeOff },
-  { version: 6, name: 'Employees: random referral tokens invalidate forgeable legacy links', up: (db) => ({
+  { version: 6, name: 'Stock: migrate product reorder_min and reorder_max into warehouse orderpoints', up: migrateOrderpoints },
+  { version: 7, name: 'Employees: random referral tokens invalidate forgeable legacy links', up: (db) => ({
     ...db, records: { ...db.records, 'hr.employee': (db.records['hr.employee'] ?? []).map((e) => ({ ...e, referral_token: /^[0-9a-f]{32}$/.test(e.referral_token ?? '') ? e.referral_token : crypto.randomUUID().replaceAll('-', '') })) },
   }) },
 ];
