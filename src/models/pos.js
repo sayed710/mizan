@@ -36,7 +36,7 @@ export const priceLines = (db, cart, partnerId = null) => cart.map((l) => {
  * tax per tax account (both through the fiscal position), with the drawer or bank instead of the receivable.
  * The customer pays on the spot, so cash-basis taxes are due at once.
  */
-function saleEntry(db, lines, { method, partner_id, refund }) {
+function saleEntry(db, lines, { method, split, partner_id, refund }) {
   const move = {
     move_type: refund ? 'out_refund' : 'out_invoice', partner_id, fiscal_position_id: fiscalPositionFor(db, partner_id), name: 'POS',
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
@@ -54,10 +54,14 @@ function saleEntry(db, lines, { method, partner_id, refund }) {
   const paid = entries.find((e) => e.account === pay);
   const booked = paid ? paid.debit || paid.credit : 0;
   const diff = round(tender - booked);
-  if (!paid || !diff) return entries;
+  const tenderLines = (entries) => !split?.length ? entries : [
+    ...entries.filter((e) => e !== paid && e.account !== pay),
+    ...split.map((p) => ({ account: p.method === 'cash' ? CASH : BANK, debit: refund ? 0 : p.amount, credit: refund ? p.amount : 0, partner_id })),
+  ];
+  if (!paid || !diff) return tenderLines(entries);
   const collectedMore = refund ? diff < 0 : diff > 0; // more cash in (or less out) than revenue: other income
   const gap = collectedMore ? { account: '450000', credit: Math.abs(diff), name: 'Rounding' } : { account: '690000', debit: Math.abs(diff), name: 'Rounding' };
-  return [...entries.map((e) => (e === paid ? { ...e, debit: paid.debit ? tender : 0, credit: paid.credit ? tender : 0 } : e)), { ...gap, partner_id }];
+  return tenderLines([...entries.map((e) => (e === paid ? { ...e, debit: paid.debit ? tender : 0, credit: paid.credit ? tender : 0 } : e)), { ...gap, partner_id }]);
 }
 
 /** The posted POS entry of an order, when it exists. */
@@ -72,11 +76,23 @@ function reversalEntry(db, original, { partner_id }) {
 }
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
-export function payOrder(db, { lines, method, partner_id = null, refund_of = null }) {
+/** How an order was paid, per method ('cash' or 'card'): its split tender when it has one, else the whole total. */
+export const tendersOf = (order) => (order.payment_ids?.length
+  ? order.payment_ids.map((p) => ({ method: p.method === 'cash' ? 'cash' : 'card', amount: Number(p.amount) || 0 }))
+  : [{ method: order.payment_method, amount: amounts(order.lines).total }]);
+
+/**
+ * Book a paid (or refunded) order: stock out (in), one entry with the money per method, the revenue and the tax.
+ * `payments` splits the money between methods ([{method, amount}] summing to the total); otherwise all goes to `method`.
+ */
+export function payOrder(db, { lines, method, payments = null, partner_id = null, refund_of = null }) {
   const session = openSession(db);
   if (!session) throw new Error('Open a session first');
   if (!lines.length) throw new Error('The order is empty');
-  const { db: next, id } = create(db, 'pos.order', { partner_id, payment_method: method, lines, session_id: session.id, state: refund_of ? 'refund' : 'paid', refund_of });
+  const total = amounts(lines);
+  const split = (payments ?? []).filter((p) => Number(p.amount) > 0).map((p) => ({ method: p.method === 'cash' ? 'cash' : 'bank', amount: round(Number(p.amount)) }));
+  if (split.length && round(split.reduce((s, p) => s + p.amount, 0)) !== round(total.total)) throw new Error('The payments must add up to the order total');
+  const { db: next, id } = create(db, 'pos.order', { partner_id, payment_method: method, lines, session_id: session.id, state: refund_of ? 'refund' : 'paid', refund_of, ...(split.length ? { payment_ids: split } : {}) });
   const name = read(next, 'pos.order', id).name;
   const sign = refund_of ? -1 : 1;
   let stocked = next;
@@ -96,7 +112,7 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
     }
   }
   stocked = write(stocked, 'pos.order', id, { stock_costs: costs });
-  const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: (original && reversalEntry(db, original, { partner_id })) ?? saleEntry(stocked, lines, { method, partner_id, refund: !!refund_of }) });
+  const { db: booked } = postEntry(stocked, { journal: 'POSS', ref: name, lines: (original && reversalEntry(db, original, { partner_id })) ?? saleEntry(stocked, lines, { method, split, partner_id, refund: !!refund_of }) });
   return { db: booked, id };
 }
 
@@ -104,14 +120,14 @@ export function payOrder(db, { lines, method, partner_id = null, refund_of = nul
 export function refundOrder(db, order) {
   if (order.state !== 'paid') throw new Error('Only paid orders can be refunded');
   if (search(db, 'pos.order').some((o) => o.refund_of === order.id)) throw new Error('This order was already refunded');
-  const { db: next, id } = payOrder(db, { lines: order.lines, method: order.payment_method, partner_id: order.partner_id, refund_of: order.id });
+  const { db: next, id } = payOrder(db, { lines: order.lines, method: order.payment_method, payments: order.payment_ids?.length ? order.payment_ids : null, partner_id: order.partner_id, refund_of: order.id });
   return { db: write(next, 'pos.order', order.id, { state: 'refunded' }), id };
 }
 
 /** Session totals by payment method (refunds negative) and the cash expected in the drawer. */
 export function sessionTotals(db, session) {
   const orders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
-  const sum = (method) => round(orders.filter((o) => o.payment_method === method).reduce((s, o) => s + (o.state === 'refund' ? -1 : 1) * amounts(o.lines).total, 0));
+  const sum = (method) => round(orders.reduce((s, o) => s + (o.state === 'refund' ? -1 : 1) * tendersOf(o).filter((t) => t.method === method).reduce((a, t) => a + t.amount, 0), 0));
   const cash = sum('cash');
   return { orders: orders.length, cash, card: sum('card'), expected: round((Number(session.cash_start) || 0) + cash) };
 }

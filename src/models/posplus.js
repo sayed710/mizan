@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts } from './common.js';
 import { moreModels } from './more.js';
-import { openSession, payOrder, refundOrder } from './pos.js';
+import { openSession, payOrder, refundOrder, tendersOf } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -156,33 +156,11 @@ export function payWithMethods(db, orderId, payments) {
       points += earned;
     }
   }
-  const methods = Object.entries(byMethod).filter(([, amount]) => amount > 0);
-  if (!methods.length) methods.push(['cash', 0]);
-  const allocated = order.lines.map(() => 0);
-  let allocatedTax = 0;
-  let allocatedTip = 0;
-  let allocatedDiscount = 0;
-  for (let i = 0; i < methods.length; i++) {
-    const [method, amount] = methods[i];
-    const lines = order.lines.map((l, index) => {
-      const qty = i === methods.length - 1 ? l.qty - allocated[index] : l.qty * amount / total;
-      allocated[index] += qty;
-      return { ...l, qty };
-    });
-    const subtotal = amounts(lines);
-    const tax = i === methods.length - 1 ? round(amounts(order.lines).tax - allocatedTax) : subtotal.tax;
-    const taxDifference = round(tax - subtotal.tax);
-    const difference = round(amount - tax - subtotal.untaxed);
-    if (difference || taxDifference) lines.push({ product_id: null, name: 'Payment rounding', qty: 1, price_unit: difference, tax: taxDifference, tax_type: 'fixed', payment_rounding: true });
-    allocatedTax += tax;
-    const last = i === methods.length - 1;
-    const tip = last ? round(order.tip_amount - allocatedTip) : round(order.tip_amount * amount / total);
-    const discount = last ? round(discountsOf(order.lines) - allocatedDiscount) : round(discountsOf(order.lines) * amount / total);
-    allocatedTip += tip;
-    allocatedDiscount += discount;
-    const paid = payOrder(next, { lines, method: method === 'bank' ? 'card' : 'cash', partner_id: order.partner_id });
-    next = write(paid.db, 'pos.order', paid.id, { config_id: order.config_id, settlement_of: orderId, tip_amount: tip, discount_total: discount, payment_ids: [{ method, amount }] });
-  }
+  // One settlement with the whole bill, its money split by method (FLOW-017: quantities are never split).
+  const tenders = Object.entries(byMethod).filter(([, amount]) => amount > 0).map(([method, amount]) => ({ method, amount }));
+  const main = tenders.reduce((best, t) => (t.amount > (best?.amount ?? -1) ? t : best), null)?.method ?? 'cash';
+  const paid = payOrder(next, { lines: order.lines, method: main === 'bank' ? 'card' : 'cash', payments: tenders.length > 1 ? tenders : null, partner_id: order.partner_id });
+  next = write(paid.db, 'pos.order', paid.id, { config_id: order.config_id, settlement_of: orderId, tip_amount: order.tip_amount, discount_total: discountsOf(order.lines), payment_ids: tenders });
   next = write(next, 'pos.order', orderId, { state: 'paid', session_id: null, payment_ids: payments.map((p) => ({ ...p })), change, loyalty_points_earned: round(points) });
   return { db: next, change };
 }
@@ -196,7 +174,7 @@ export function zReport(db, sessionId) {
     const sign = order.state === 'refund' ? -1 : 1;
     const totals = amounts(order.lines);
     if (sign < 0) report.refunds++;
-    report.byMethod[order.payment_method === 'cash' ? 'cash' : 'bank'] += sign * totals.total;
+    for (const tender of tendersOf(order)) report.byMethod[tender.method === 'cash' ? 'cash' : 'bank'] += sign * tender.amount;
     report.taxes += sign * totals.tax;
     const source = order.refund_of ? read(db, 'pos.order', order.refund_of) : order;
     report.tips += sign * (source?.settlement_of ? source.tip_amount : amounts(order.lines.filter((l) => l.is_tip)).total);
