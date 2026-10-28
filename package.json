@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server/index.js",
+    "backup": "node server/backup.js",
     "pretest": "vite build",
     "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
     "test:future": "node --import ./scripts/fake-now.mjs --test \"src/**/*.test.js\" \"server/**/*.test.js\"",

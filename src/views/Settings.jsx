@@ -112,12 +112,13 @@ export function Settings() {
   const company = (db.records['res.company'] ?? []).find((c) => c.id === currentCompany(db).id);
   const total = Object.values(db.records).reduce((s, recs) => s + recs.length, 0);
 
+  // On a server the backup is the server's full database (admins only); the browser copy may be filtered.
   const download = () => {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(getDb(), null, 2)], { type: 'application/json' }));
+    a.href = isServer() ? '/api/backup' : URL.createObjectURL(new Blob([JSON.stringify(getDb(), null, 2)], { type: 'application/json' }));
     a.download = `mizan-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-    URL.revokeObjectURL(a.href);
+    if (!isServer()) URL.revokeObjectURL(a.href);
   };
   const restore = async (file) => {
     setStatus(null);
@@ -250,7 +251,7 @@ export function Settings() {
         <h3>{t('Data')}</h3>
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">
-          <button type="button" className="btn" onClick={download}>⬇ {t('Download backup')}</button>
+          {canReplaceData && <button type="button" className="btn" onClick={download}>⬇ {t('Download backup')}</button>}
           {canReplaceData && (
             <label className="btn">
               ⬆ {t('Restore backup')}

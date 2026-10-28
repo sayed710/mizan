@@ -48,6 +48,19 @@ including a plain `npm start` and the Docker image; turn it on with `MIZAN_ALLOW
 `NODE_ENV=development` (then `MIZAN_ALLOW_RESET=0` switches it off again). It needs RESET typed and saves the
 previous data, readable by the server's user only, to `<MIZAN_DB>.before-reset-<time>.json` first.
 
+### Backups
+
+- `npm run backup -- /path/to/dir` writes a consistent snapshot of `MIZAN_DB` (`mizan-<time>.sqlite`, made with
+  SQLite `VACUUM INTO`) while the server keeps running. It holds everything: records, messages, users, sessions and API keys.
+- Set `MIZAN_BACKUP_DIR` and the server takes one on start and every `MIZAN_BACKUP_HOURS` (24), keeping the newest
+  `MIZAN_BACKUP_KEEP` (7). Copy that folder off the machine.
+- To restore a snapshot, stop the server and put the file in place of `MIZAN_DB` (remove any `-wal`/`-shm` files next to it).
+  Do not copy the live `mizan.sqlite` itself: in WAL mode recent commits may still sit in the `-wal` file.
+- **Settings → Download backup** (admins) downloads the server's business data as JSON. **Restore backup** validates and migrates this JSON, then replaces business data after an admin dry run and typed RESTORE confirmation.
+  Users and API keys are not included. Use the SQLite snapshot for a full restore.
+- Snapshots are written owner-only (folder `0700`, files `0600`) and copied by a separate process, so a large database does not
+  stall requests. `npm run backup` refuses a path that is not an existing Mizan database.
+
 Development: `NODE_ENV=development npm start` in one terminal and `npm run dev` in another — Vite proxies `/api` to the server.
 Without a server the frontend runs as a browser-only demo (data in `localStorage`).
 
