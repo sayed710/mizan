@@ -22,4 +22,8 @@ test('pipeline stages and ordinary fields stay draggable', () => {
   assert.equal(canDropOn('project.task', 'stage_id'), true);
   assert.equal(canDropOn('crm.lead', 'team_id'), true);
   assert.equal(canDropOn('crm.lead', 'missing_field'), false);
+  // Talks have no stage actions: the stage is picked freely in the form, so dragging between stage columns works too.
+  assert.equal(canDropOn('event.track', 'stage'), true);
+  // Booths become sold only through invoicing, so their state column still refuses drops.
+  assert.equal(canDropOn('event.booth', 'state'), false);
 });
