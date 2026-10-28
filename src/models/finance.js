@@ -60,8 +60,9 @@ export function moveGuard(db, before, after) {
 }
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
-export function moveDeleteGuard(db, move) {
-  if (isYearEntry(db, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
+export function moveDeleteGuard(db, move, staged = db) {
+  // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
+  if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';

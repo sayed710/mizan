@@ -56,8 +56,12 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
+    const sent = new Set();
     for (const raw of recs) {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
+      // Guards judge each record once against its stored version, so a second version of it could slip past them.
+      if (sent.has(raw.id)) throw new Error(`${model} #${raw.id} appears twice in one change set`);
+      sent.add(raw.id);
       const rec = cleanRecord(model, raw);
       current.set(rec.id, rec);
       changed.push([model, rec]);
@@ -75,7 +79,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     if (!Array.isArray(ids)) throw new Error(`Invalid ${model} ids`);
     const drop = new Set(ids);
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
-    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
+    const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r, { ...db, records })).find(Boolean);
     if (blocked) throw new Error(blocked);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
