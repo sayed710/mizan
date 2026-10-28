@@ -5,7 +5,7 @@ import { validate } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { setCompanies } from './models/company.js';
-import { authorityRules } from './models/authority.js';
+import { authorityDeleteRules, authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 /** A submitted lock date if it is a date or null (cleared), else the current one. */
@@ -62,7 +62,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
       const rec = cleanRecord(model, raw);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const before = current.get(rec.id) ?? null;
-      const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin }) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author });
+      // Authority rules judge the stored record, not one an earlier step of this same change set already rewrote.
+      const err = validate(model, rec) ?? models[model].guard?.(seen, before, rec, { isAdmin }) ?? authorityRules[model]?.(seen, (db.records[model] ?? []).find((x) => x.id === rec.id) ?? null, rec, { isAdmin, login, name: author });
       if (err) throw new Error(err);
       current.set(rec.id, rec);
     }
@@ -75,6 +76,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     // Judge deletes on the stored version too, so a diff cannot first rewrite a record into a deletable one.
     const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
+    const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
+    if (unauthorized) throw new Error(unauthorized);
     records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
   }
   const seq = { ...db.seq };
