@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, groupRecords, write } from '../orm.js';
+import { create, groupRecords, write } from '../orm.js';
 import { viewRecords as search } from '../companyView.js';
 import { commit, getDb } from '../store.js';
 import { canDropOn } from './kanbanDrop.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';
+import { companySum } from '../models/money.js';
 
 function Card({ db, model, rec, open, draggable }) {
   const k = models[model].kanban;
@@ -25,7 +26,7 @@ function Card({ db, model, rec, open, draggable }) {
         <strong>{rec[k.title]}</strong>
       </div>
       {k.lines.map((f) => {
-        const v = display(db, fields[f], rec[f]);
+        const v = display(db, fields[f], rec[f], rec);
         return v ? <div key={f} className="card-line">{v}</div> : null;
       })}
       {k.tags && rec[k.tags]?.length > 0 && (
@@ -112,7 +113,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
               <div className="progress" aria-hidden="true">
                 {pr && recs.length > 0 && pr.map((n, i) => <span key={i} className={`p${3 - i}`} style={{ flexGrow: n }} />)}
               </div>
-              {k.sum && <b>{money(aggregate(recs, k.sum))}</b>}
+              {k.sum && <b>{money(companySum(db, recs, k.sum))}</b>}
             </div>
             {quick === key && <QuickCreate model={model} vals={{ ...defaults, [groupBy]: value }} onDone={() => setQuick(null)} />}
             {recs.map((r) => <Card key={r.id} db={db} model={model} rec={r} open={() => open(r.id)} draggable={canDrop} />)}

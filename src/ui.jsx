@@ -4,6 +4,7 @@ import { models } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
+import { currencyCode } from './models/money.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -13,15 +14,26 @@ export function setCurrency(code) {
   const c = CURRENCIES.includes(code) ? code : 'USD';
   if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
 }
-export const money = (n) => moneyFmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+const docFmts = new Map();
+/** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
+export const money = (n, code = null) => {
+  const fmt = code && code !== moneyFmt.resolvedOptions().currency
+    ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
+    : moneyFmt;
+  return fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+};
+function safeFormat(code) {
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return moneyFmt; }
+}
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
-export function display(db, field, value) {
+/** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
+export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
-    case 'monetary': return money(value);
+    case 'monetary': return money(value, currencyCode(db, rec));
     case 'float': return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
@@ -135,11 +147,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
               {cols.map(([k, f]) => (
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
-                    ? display(db, f, l[k])
+                    ? display(db, f, l[k], record)
                     : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
-              {priced && <td className="num">{money(lineSubtotal(l))}</td>}
+              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
               {!readonly && (
                 <td>
                   <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
@@ -162,7 +174,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
-  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
+  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
   const text = (type = 'text', extra = {}) => (
     <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );

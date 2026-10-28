@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, groupRecords } from '../orm.js';
+import { groupRecords } from '../orm.js';
 import { t } from '../i18n.js';
 import { display, isNumeric, money } from '../ui.jsx';
+import { companySum, unratedCount } from '../models/money.js';
 
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
@@ -16,9 +17,12 @@ function sortRecords(db, fields, records, sort) {
   });
 }
 
-const Totals = ({ cols, fields, records }) =>
+// Footer sums are in the company currency: foreign-currency documents are converted at their date.
+const Totals = ({ db, cols, fields, records }) =>
   cols.map((f) => (
-    <td key={f} className="num">{fields[f].type === 'monetary' ? money(aggregate(records, f)) : ''}</td>
+    <td key={f} className="num" title={fields[f].type === 'monetary' && unratedCount(db, records) ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedCount(db, records) }) : undefined}>
+      {fields[f].type === 'monetary' ? <>{money(companySum(db, records, f))}{unratedCount(db, records) ? ' *' : ''}</> : ''}
+    </td>
   ));
 
 export function List({ db, model, records, open, selected, setSelected, groupBy }) {
@@ -39,7 +43,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
       </td>
-      {cols.map((f) => <td key={f} className={isNumeric(fields[f]) ? 'num' : ''}>{display(db, fields[f], r[f])}</td>)}
+      {cols.map((f) => <td key={f} className={isNumeric(fields[f]) ? 'num' : ''}>{display(db, fields[f], r[f], r)}</td>)}
     </tr>
   );
 
@@ -61,7 +65,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
             <td colSpan={2} style={{ paddingInlineStart: 10 + depth * 18 }}>
               <span className="caret">{isOpen ? '▾' : '▸'}</span> {t(g.label)} <span className="count">({g.records.length})</span>
             </td>
-            <Totals cols={cols.slice(1)} fields={fields} records={g.records} />
+            <Totals db={db} cols={cols.slice(1)} fields={fields} records={g.records} />
           </tr>,
           ...(isOpen ? groupRows(g.records, levels.slice(1), id, depth + 1) : []),
         ];
@@ -93,7 +97,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
         <tfoot>
           <tr>
             <td />
-            <Totals cols={cols} fields={fields} records={records} />
+            <Totals db={db} cols={cols} fields={fields} records={records} />
           </tr>
         </tfoot>
       </table>

@@ -3,6 +3,7 @@ import { postNote, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { journalItems } from './ledger.js';
 import { lineTaxOf, lineUntaxed } from './taxes.js';
+import { companySum } from './money.js';
 
 const round = (n) => Math.round(n * 100) / 100;
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
@@ -136,7 +137,7 @@ export function journalCards(db, at = today()) {
       const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
         journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
-        unpaidAmount: round(unpaid.reduce((s, m) => s + m.amount_residual, 0)), late: unpaid.filter((m) => m.invoice_date_due < at).length,
+        unpaidAmount: companySum(db, unpaid, 'amount_residual'), late: unpaid.filter((m) => m.invoice_date_due < at).length,
       };
     }
     if (['bank', 'cash'].includes(j.type)) {
