@@ -130,7 +130,7 @@ test('anonymous blog views change the counter without adding audit rows', async 
     const anonymous = client(url);
     for (let i = 0; i < 3; i++) assert.equal((await anonymous('GET', `/api/public/blog/${post.id}`)).status, 200);
     assert.equal((await admin('GET', '/api/audit?limit=1000')).body.length, before);
-    assert.equal((await admin('GET', '/api/db')).body.records['blog.post'].find((p) => p.id === post.id).visits, (post.visits ?? 0) + 3);
+    assert.equal((await admin('GET', '/api/db')).body.records['blog.post'].find((p) => p.id === post.id).visits, (post.visits ?? 0) + 1); // one visitor per hour
   } finally {
     await stop();
   }

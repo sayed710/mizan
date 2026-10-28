@@ -18,7 +18,7 @@ import { installCustomFields } from '../src/models/studio.js';
 import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
-import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
+import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
 import { smtpConfig } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { recordSent, sendDocument, sendMailing } from './mail.js';
@@ -130,6 +130,7 @@ const withAudit = (actor, model, resId, action, changes, step) => {
 let epoch = Date.now();
 const RESTORED = 'The data was restored while this was running; nothing was saved, reload and try again';
 const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
+const visitors = createVisitTracker();
 /**
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
@@ -383,8 +384,12 @@ async function api(req, res, path) {
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
-    const out = (blogRead[1] === 'blog' ? publicBlogPost : publicForumThread)(db, blogRead[2]);
-    if (out.db) commitDb(out.db, { actor: 'public', audit: false }); // view counters only: logging each visit would let crawlers fill the log
+    // A visitor counts once per post per hour, so reloads and bots cannot turn reads into a stream of saves.
+    // The key uses the numeric id (so /1 and /01 are one post) and is remembered only once the visit is saved.
+    const key = visitKey(ip, blogRead[1], blogRead[2]);
+    const read = blogRead[1] === 'blog' ? publicBlogPost : publicForumThread;
+    const out = read(db, blogRead[2], { count: !visitors.seen(key) });
+    if (out.db) { commitDb(out.db, { actor: 'public', audit: false }); visitors.mark(key); }
     return send(res, out.status, out.body);
   }
   const forumRoutes = { '/api/public/forum/ask': publicAsk, '/api/public/forum/answer': publicAnswer, '/api/public/forum/vote': publicVote };

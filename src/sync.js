@@ -31,6 +31,8 @@ export function diffDb(prev, next) {
   const bases = {};
   const created = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
+    // Untouched models keep the same array, so a save costs what changed rather than the whole database.
+    if (prev.records[model] === next.records[model]) continue;
     const before = byId(prev.records[model]);
     const after = byId(next.records[model]);
     const changed = [...after.values()].filter((r) => before.get(r.id) !== r);
@@ -122,6 +124,13 @@ function merge(model, stored, raw, base) {
 /** Models whose `name` is a legal document number from `nextName`. */
 const SEQUENCED = ['account.move', 'account.payment', 'account.batch.payment', 'pos.session', 'stock.inventory.count', 'stock.picking.batch'];
 const SEQUENCE_NAME = /^(.*\D)(\d+)$/;
+// Serialized size per db snapshot, measured once and then carried forward by what each diff adds or removes.
+const sizes = new WeakMap();
+const json = (v) => (v === undefined ? 0 : JSON.stringify(v).length);
+export const dbSize = (db) => {
+  if (!sizes.has(db)) sizes.set(db, json(db));
+  return sizes.get(db);
+};
 
 /** Highest number ever seen per model and prefix: the stored mark, raised by the records now in `records`. */
 function highWater(numbering = {}, records) {
@@ -293,6 +302,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   // Apply every upsert first, then validate each record against the complete result: a change spanning models
   // (an expense and the report it joins) must not be judged against a half-applied diff.
   let records = { ...db.records };
+  let growth = 0;
   const changed = [];
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
@@ -301,6 +311,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
     const newIdLimit = Math.min(Number.MAX_SAFE_INTEGER, Math.max(db.seq?.[model] ?? 0, maxId(db.records[model])) + ID_WINDOW);
+    if (!(model in records)) growth += json(model) + 4;
+    const list = [...current.values()];
+    const position = new Map(list.map((r, i) => [r.id, i]));
     const sent = new Set();
     for (const raw of recs) {
       if (sent.has(raw?.id)) throw new Error(`${model} #${raw.id} appears twice in one change set`);
@@ -310,10 +323,14 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
       const rec = cleanRecord(model, merge(model, current.get(raw.id), raw, d.bases?.[model]?.[raw.id]));
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
+      const old = current.get(rec.id);
+      growth += json(rec) - json(old) + (old ? 0 : 1);
       current.set(rec.id, rec);
+      if (position.has(rec.id)) list[position.get(rec.id)] = rec;
+      else position.set(rec.id, list.push(rec) - 1);
       changed.push([model, rec]);
     }
-    records = { ...records, [model]: [...current.values()].sort((a, b) => a.id - b.id) };
+    records = { ...records, [model]: list.sort((a, b) => a.id - b.id) };
   }
   const seen = { ...db, records };
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
@@ -325,6 +342,9 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   }
   const marks = highWater(db.numbering, db.records);
   const numbered = uniqueNumbers(records, d.upserts, db.records, marks);
+  for (const [model, id] of numbered.renamed) {
+    growth += json(numbered.records[model].find((r) => r.id === id)) - json(records[model].find((r) => r.id === id));
+  }
   records = numbered.records;
   for (const [model, ids] of Object.entries(d.deletes ?? {})) {
     check(model);
@@ -335,7 +355,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
     if (blocked) throw new Error(blocked);
     const unauthorized = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => authorityDeleteRules[model]?.(db, r, { isAdmin, login, name: author })).find(Boolean);
     if (unauthorized) throw new Error(unauthorized);
-    records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
+    growth -= (records[model] ?? []).filter((r) => drop.has(r.id)).reduce((n, r) => n + json(r) + 1, 0);
+    if (model in records) records = { ...records, [model]: records[model].filter((r) => !drop.has(r.id)) };
   }
   // Whole-record rules that look across models run once every change is in place.
   const final = { ...db, records };
@@ -410,6 +431,12 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null, login
   for (const [model, id, from, to] of numbered.renamed) {
     if (models[model].audited?.(db)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`);
   }
-  if (JSON.stringify(next).length > MAX_DB_CHARS) throw new Error('Database size limit reached');
+  growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
+  if (settings !== db.settings) growth += json(settings) - json(db.settings);
+  if (seq !== db.seq) growth += json(seq) - json(db.seq);
+  growth += json(next.numbering) - json(db.numbering) + (db.numbering === undefined ? json('numbering') + 1 : 0);
+  const size = dbSize(db) + growth;
+  if (size > MAX_DB_CHARS) throw new Error('Database size limit reached');
+  sizes.set(next, size);
   return next;
 }

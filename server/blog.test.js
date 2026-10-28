@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { read, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
-import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote, voterKey } from './blog.js';
+import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote, voterKey, createVisitTracker, visitKey } from './blog.js';
 
 const visitor = { name: 'Sara', email: 'sara@example.com', content: 'Which desk fits a small room?' };
 
@@ -59,4 +59,31 @@ test('votes count once per voter key (IP + post)', () => {
   assert.equal(publicVote(once.db, { post_id: 2, delta: 1 }, '10.0.0.1').status, 200, 'another post is another key');
   assert.notEqual(voterKey('10.0.0.1', 1), voterKey('10.0.0.1', 2));
   assert.ok(!read(once.db, 'forum.post', 1).voter_keys.includes('10.0.0.1'), 'no raw IP stored');
+});
+
+test('a repeated read within the hour reports the stored visit count and saves nothing', () => {
+  const first = publicBlogPost(seed(), '1');
+  const again = publicBlogPost(first.db, '1', { count: false });
+  assert.equal(again.db, undefined);
+  assert.equal(again.body.visits, first.body.visits);
+  assert.equal(publicForumThread(seed(), '1', { count: false }).db, undefined);
+});
+
+test('visitor keys use the numeric id and are remembered only after mark()', () => {
+  assert.equal(visitKey('1.2.3.4', 'blog', '01'), visitKey('1.2.3.4', 'blog', '1'));
+  assert.notEqual(visitKey('1.2.3.4', 'blog', '1'), visitKey('1.2.3.4', 'forum', '1'));
+  const t = createVisitTracker();
+  assert.equal(t.seen('k'), false);
+  assert.equal(t.seen('k'), false, 'checking does not remember (a failed save can be retried)');
+  t.mark('k');
+  assert.equal(t.seen('k'), true);
+});
+
+test('the visitor map stays bounded and expires old entries', () => {
+  const t = createVisitTracker({ max: 5, window: 1000 });
+  for (let i = 0; i < 50; i++) t.mark(`k${i}`, 100 + i);
+  assert.ok(t.size() <= 5);
+  assert.equal(t.seen('k49', 150), true);
+  assert.equal(t.seen('k0', 150), false);
+  assert.equal(t.seen('k49', 2000), false);
 });
