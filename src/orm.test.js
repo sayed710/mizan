@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { aggregate, applyFilters, create, groupRecords, matches, messagesOf, read, search, unlink, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
+import { postEntry } from './models/ledger.js';
 
 const runButton = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -100,7 +101,8 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   const posted = read(db, 'account.move', inv.id);
   assert.match(posted.name, /^INV\/\d{4}\/00003$/);
   assert.equal(posted.payment_state, 'not_paid');
-  db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: '2026-01-01', amount: posted.amount_total, move_id: null }] });
+  const settled = postEntry(db, { journal: 'BNK1', ref: 'pay', lines: [{ account: '101401', debit: posted.amount_total }, { account: '121000', credit: posted.amount_total }] });
+  db = write(settled.db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: '2026-01-01', amount: posted.amount_total, move_id: settled.id }] });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
 });

@@ -53,10 +53,14 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
-    for (const raw of recs) {
+    const cleaned = recs.map((raw) => {
       if (!raw || !Number.isInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
-      const rec = cleanRecord(model, raw);
-      const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
+      return cleanRecord(model, raw);
+    });
+    for (const rec of cleaned) {
+      // Records created by this same change set are visible to every guard whatever their order in the diff.
+      const created = cleaned.filter((c) => c.id !== rec.id && !current.has(c.id));
+      const seen = { ...db, records: { ...records, [model]: [...current.values(), ...created] } };
       const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
       if (err) throw new Error(err);
       current.set(rec.id, rec);

@@ -36,12 +36,27 @@ export function paymentGuard(db, before, after) {
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
   if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
   if (leavesPosted && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
-  if (before && JSON.stringify(before.payments ?? []) === JSON.stringify(after.payments ?? []) && Number(before.amount_paid || 0) === Number(after.amount_paid || 0)) return null;
+  // The books of a settlement entry are fixed once an invoice records it as a payment.
+  if (before?.state === 'posted' && settlingEntries(db).has(before.id)
+    && ['line_ids', 'journal_id', 'partner_id'].some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) {
+    return 'This entry settles an invoice payment and cannot be changed';
+  }
+  const unchanged = before && JSON.stringify(before.payments ?? []) === JSON.stringify(after.payments ?? []) && Number(before.amount_paid || 0) === Number(after.amount_paid || 0);
+  // Older data is left alone while its payments are untouched, unless the total moved below what was paid.
+  if (unchanged) {
+    const reduced = isInvoice(after) && round2(total(after)) !== round2(total(before)) && (Number(after.amount_paid) || 0) > round2(total(after)) + 0.005;
+    return reduced ? 'The paid amount cannot exceed the invoice total' : null;
+  }
   const payments = after.payments ?? [];
   if (!Array.isArray(payments) || payments.some((p) => !p || !(Number(p.amount) > 0))) return 'Invalid payments';
   const paid = Number(after.amount_paid) || 0;
   if (round2(payments.reduce((s, p) => s + Number(p.amount), 0)) !== round2(paid)) return 'The paid amount must equal the recorded payments';
   if (isInvoice(after) && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
+  // A recorded payment keeps pointing at its posted settlement entry (so that entry stays protected); new ones must name one.
+  const old = before?.payments ?? [];
+  if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
+  const bad = payments.slice(old.length).find((p) => read(db, 'account.move', p.move_id)?.state !== 'posted');
+  if (bad) return 'A payment must point at a posted journal entry';
   return null;
 }
 
@@ -98,7 +113,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const open = toCompany(db, r.currency_id, value, r.invoice_date ?? date);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
-  const extra = excess > 0 ? toCompany(db, r.currency_id, excess, date) : 0;
+  // The bank line converts what was really received once; the credit is whatever remains after the settled part.
+  const extra = excess > 0 ? Math.round((toCompany(db, r.currency_id, value + excess, date) - bank) * 100) / 100 : 0;
   const credit = extra ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit' } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit' }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: via.code, date, ref: `Payment ${r.name}`,
@@ -106,7 +122,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       ? [{ account: via.account, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: via.account, credit: bank + extra, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', move_id: paymentMove, journal_id: journalId(db, via.code), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: excess, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const record = { state: 'posted', move_id: paymentMove, journal_id: journalId(db, via.code), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -271,7 +287,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, discount: { type: 'boolean', label: 'Early Payment Discount' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
