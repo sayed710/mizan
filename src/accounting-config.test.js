@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
-import { ACCOUNTING_CONFIG, modelsForApps, readOnlyForApps } from './models/index.js';
+import { modelsForApps, readOnlyForApps } from './models/index.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 

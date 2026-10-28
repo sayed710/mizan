@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { creditNote, payMove, postMove } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';

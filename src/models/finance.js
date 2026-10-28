@@ -3,7 +3,6 @@ import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
 import { accountId, isBalanced, journalItems } from './ledger.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, lineUntaxed } from './taxes.js';
 import { companySum } from './money.js';
 import { round } from '../money.js';
 

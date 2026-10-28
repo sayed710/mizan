@@ -18,6 +18,6 @@ test('every app has an explicit home-screen position (unordered apps would jump 
 test('the README app list matches the registry', () => {
   const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
   const section = readme.slice(readme.indexOf('## Apps'), readme.indexOf('POS includes'));
-  assert.match(section, new RegExp(`\(${apps.length} apps\)`));
+  assert.match(section, new RegExp(`\\(${apps.length} apps\\)`));
   for (const a of apps) assert.ok(section.includes(a.name), `${a.name} is missing from README.md`);
 });

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { getDb, getUser, useDb } from './store.js';
+import { getUser, useDb } from './store.js';
 import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
 import { appOpen } from './access.js';

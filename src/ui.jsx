@@ -87,7 +87,7 @@ export function useDismiss(open, close, ref) {
       document.removeEventListener('keydown', escape);
       el.removeEventListener('focusout', leave);
     };
-  }, [open]);
+  }, [open, close, ref]);
 }
 
 /** Arrow-key movement between the items of a role="menu". */
