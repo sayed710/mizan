@@ -33,6 +33,7 @@ import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/we
 import { read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
+import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -46,6 +47,10 @@ const ACTIONS = {
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
   '/api/barcode/count': { model: () => 'product', extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => ({ db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company: b.company }) }) },
+  // E-signature: email each signer their private link (server/signing.js serves the link).
+  // Signer links carry private tokens, so they are only built on the configured public address, never from the request's Host header.
+  '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => sendSignRequest(SMTP, store, b, publicOrigin()) },
+  '/api/sign/remind': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => remindSigners(SMTP, store, b, publicOrigin()) },
 };
 
 const SMTP = smtpConfig();
@@ -583,7 +588,7 @@ async function api(req, res, path) {
   if (path === '/api/session' && req.method === 'GET') return send(res, 200, { ...user, selection: undefined, canReset: user.isAdmin && RESET_ALLOWED, smtp: !!SMTP, integrations: { ...integrationStatus(), smtp: !!SMTP } });
   const action = ACTIONS[path];
   if (action && req.method === 'POST') {
-    if (action.need && !integrationStatus()[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
+    if (action.need && !{ ...integrationStatus(), smtp: !!SMTP }[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
     if (action.admin && !user.isAdmin) return send(res, 403, { error: 'Admins only' });
     const body = await readJson(req);
     const model = action.model(body);
@@ -829,12 +834,14 @@ async function website(req, res, path) {
 }
 
 const portal = createPortal({ sql, getDb: () => db, commitDb, sessionUser, allowedFor: menuModelsFor, canSee: (u, model, rec) => visibleTo(companiesFor(u), model, rec, db), clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
+const signing = createSigning({ getDb: () => db, commitDb, clientIp, tooMany, recordFailure, readRaw, securityHeaders: SECURITY_HEADERS });
 
 const server = createServer(async (req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   res.acceptsGzip = /\bgzip\b/.test(req.headers['accept-encoding'] ?? '');
   try {
     if (await portal.handle(req, res)) return;
+    if (await signing(req, res)) return;
     if (path.startsWith('/api/')) await api(req, res, path);
     else await website(req, res, path);
   } catch (e) {

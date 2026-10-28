@@ -781,6 +781,7 @@ const ar = {
   'Analytic Distribution': 'التوزيع التحليلي',
   'Amount in Currency': 'المبلغ بالعملة',
   'Subscription Period': 'فترة الاشتراك',
+  'Signing Links': 'روابط التوقيع',
   'Reversal of': 'عكس القيد',
   'Reversed': 'معكوس',
   'Reverse': 'عكس',
