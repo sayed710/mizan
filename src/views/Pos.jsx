@@ -34,7 +34,7 @@ export function Pos() {
   const products = viewRecords(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
   const categories = [...new Set(products.map((p) => p.categ).filter(Boolean))];
   const shown = products.filter((p) => (!categ || p.categ === categ) && p.name.toLowerCase().includes(query.toLowerCase()));
-  const lines = priceLines(db, cart);
+  const lines = priceLines(db, cart, Number(partner) || null);
   const total = amounts(lines);
 
   const add = (id) => setCart((c) => (c.some((l) => l.product_id === id)
