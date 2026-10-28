@@ -280,10 +280,16 @@ export function FormView({ leaf, id, base, params }) {
       if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
       return;
     }
+    const answers = [];
+    for (const q of b.ask ?? []) {
+      const text = prompt(t(q.label), q.default?.(current) ?? '');
+      if (text == null) return;
+      answers.push(q.type === 'number' ? Number(text) : text.trim());
+    }
     const savedId = save();
     if (savedId == null) return;
     try {
-      const res = b.run(getDb(), read(getDb(), model, savedId));
+      const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
       if (res.go) location.hash = res.go;
     } catch (e) {

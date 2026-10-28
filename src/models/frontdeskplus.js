@@ -182,7 +182,19 @@ export const frontdeskPlusModels = {
     form: {
       title: 'name', groups: [['host_selection', 'self_check_in'], ['ask_phone', 'ask_email', 'ask_company'], ['notify_host', 'theme_color', 'drink_offer']], tabs: [{ label: 'Drinks', fields: ['drink_ids'] }],
       // End of day: everyone still on site is checked out now.
-      buttons: [{ label: 'Check Out All Visitors', run: (db) => ({ db: checkOutAll(db, now()) }) }],
+      buttons: [
+        {
+          label: 'Plan Visit', primary: true,
+          ask: [{ label: 'Visitor name' }, { label: 'Host (employee name)' }, { label: 'Date (YYYY-MM-DD)', default: () => now().slice(0, 10) }, { label: 'Time (HH:MM)', default: () => '09:00' }],
+          run: (db, r, [name, hostName, date, time]) => {
+            const host = search(db, 'hr.employee').find((e) => e.name.toLowerCase() === hostName.toLowerCase());
+            if (!host) throw new Error('No employee with that name');
+            const res = planVisit(db, { name, hostId: host.id, date, time, stationId: r.id });
+            return { db: res.db, go: `#/frontdesk/visitors/${res.id}` };
+          },
+        },
+        { label: 'Check Out All Visitors', run: (db) => ({ db: checkOutAll(db, now()) }) },
+      ],
     },
   },
   [MODEL]: {

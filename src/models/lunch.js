@@ -40,6 +40,13 @@ export function canOrder(db, product, at = new Date()) {
   return { ok: true, reason: null };
 }
 
+/** Refuse when the wallet, less the open orders other than `ignoreId`, would go below -overdraft (setting lunch_overdraft, default 0). */
+function checkWallet(db, employeeId, price, ignoreId = null) {
+  const pending = search(db, 'lunch.order').filter((o) => o.id !== ignoreId && o.employee_id === employeeId && OPEN.includes(o.stage_id)).reduce((s, o) => s + orderPrice(db, o), 0);
+  const overdraft = Number(db.settings?.lunch_overdraft) || 0;
+  if (balance(db, employeeId) - pending - price < -overdraft) throw new Error('Your lunch account does not have enough money for this order');
+}
+
 /**
  * Place an order in state 'new'; returns { db, id }. Refuses when the vendor cannot take it or when the wallet,
  * less the orders not paid yet, would go below -overdraft (setting lunch_overdraft, default 0).
@@ -49,9 +56,7 @@ export function orderLunch(db, { employeeId, productId, quantity = 1, note = '',
   const check = canOrder(db, product, at);
   if (!check.ok) throw new Error(check.reason);
   const price = round((Number(product.price) || 0) * Number(quantity));
-  const pending = search(db, 'lunch.order').filter((o) => o.employee_id === employeeId && OPEN.includes(o.stage_id)).reduce((s, o) => s + orderPrice(db, o), 0);
-  const overdraft = Number(db.settings?.lunch_overdraft) || 0;
-  if (balance(db, employeeId) - pending - price < -overdraft) throw new Error('Your lunch account does not have enough money for this order');
+  checkWallet(db, employeeId, price);
   return create(db, 'lunch.order', {
     product_id: productId, employee_id: employeeId, date: dateOf(at), quantity: Number(quantity), note, price,
     supplier_id: supplierOf(db, product)?.id ?? null, stage_id: 'new',
@@ -197,6 +202,7 @@ export const lunchModels = {
           run: (db, r) => {
             const check = canOrder(db, read(db, 'lunch.product', r.product_id));
             if (!check.ok) throw new Error(check.reason);
+            checkWallet(db, r.employee_id, orderPrice(db, r), r.id);
             return { db: write(db, 'lunch.order', r.id, { stage_id: 'ordered' }) };
           },
         },

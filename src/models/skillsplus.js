@@ -217,6 +217,17 @@ export const skillsPlusModels = {
     defaults: () => ({ cost: 10, quantity: 1, active: true }),
     guard: (db, before, r) => !Number.isInteger(r.cost) || r.cost <= 0 || !Number.isInteger(r.quantity) || r.quantity < 0 ? 'Reward cost must be a positive integer and stock a non-negative integer' : null,
     list: ['name', 'cost', 'quantity', 'active'],
-    form: { title: 'name', groups: [['cost', 'quantity'], ['active']] },
+    form: {
+      title: 'name', groups: [['cost', 'quantity'], ['active']],
+      buttons: [{
+        label: 'Redeem', primary: true, when: (r) => r.active !== false && r.quantity > 0,
+        ask: [{ label: 'Employee name' }],
+        run: (db, r, [name]) => {
+          const employee = search(db, 'hr.employee').find((e) => e.name.toLowerCase() === name.toLowerCase());
+          if (!employee) throw new Error('No employee with that name');
+          return { db: buyReward(db, employee.id, r.id) };
+        },
+      }],
+    },
   },
 };

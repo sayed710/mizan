@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
+import { recordAnalyses } from './models/analysis.js';
+import { parseSplit } from './models/posplus.js';
+import { valuationReport } from './models/valuation.js';
 
 // MOD-007: functions that were only reachable from tests now have a form button.
 const button = (model, label) => {
@@ -51,4 +54,119 @@ test('expense sheets re-invoice once posted, and front desk can check everyone o
   assert.equal(reinvoice.when({ state: 'draft' }), false);
   const db = seed();
   assert.ok(button('frontdesk.station', 'Check Out All Visitors').run(db, {}).db.records);
+});
+
+// MOD-007 (4/4): buttons that ask for their input before running.
+const press = (db, model, id, label, answers = []) => button(model, label).run(db, read(db, model, id), answers);
+
+test('restaurant tables open, take tips, move, split and merge from the forms', () => {
+  const config = create(seed(), 'pos.config', { name: 'Bistro', module_restaurant: true });
+  const floor = create(config.db, 'restaurant.floor', { name: 'Main', config_id: config.id, table_ids: [{ name: 'T1', seats: 4 }, { name: 'T2', seats: 2 }, { name: 'T3', seats: 2 }] });
+  const opened = press(floor.db, 'restaurant.floor', floor.id, 'Open Table', ['T1', 3]);
+  const orderId = Number(opened.go.split('/').at(-1));
+  let db = create(opened.db, 'pos.order', { config_id: config.id, table_id: `${floor.id}:T2`, state: 'draft' }).db;
+  const other = search(db, 'pos.order').find((o) => o.table_id === `${floor.id}:T2`).id;
+  db = (withLines(db, orderId));
+  db = press(db, 'pos.order', orderId, 'Add Tip', [5]).db;
+  assert.equal(read(db, 'pos.order', orderId).tip_amount, 5);
+  assert.throws(() => press(db, 'pos.order', orderId, 'Transfer Table', ['T2']), /already has a draft order/);
+  db = press(db, 'pos.order', orderId, 'Transfer Table', ['T3']).db;
+  assert.equal(read(db, 'pos.order', orderId).table_id, `${floor.id}:T3`);
+  const split = press(db, 'pos.order', orderId, 'Split Bill', ['1x1']);
+  const splitId = Number(split.go.split('/').at(-1));
+  assert.equal(read(split.db, 'pos.order', splitId).lines[0].qty, 1);
+  assert.equal(read(split.db, 'pos.order', orderId).lines[0].qty, 1);
+  const merged = press(split.db, 'pos.order', other, 'Merge Into Table', ['T3']);
+  assert.equal(read(merged.db, 'pos.order', other).state, 'cancel');
+  assert.equal(searchStatus(merged.db, floor.id).find((t) => t.table === 'T3').orderId > 0, true);
+});
+
+function withLines(db, orderId) {
+  const order = read(db, 'pos.order', orderId);
+  return write(db, 'pos.order', orderId, { lines: [{ product_id: 1, name: 'Desk', qty: 2, price_unit: 10, tax: 0, discount: 0 }, { product_id: 2, name: 'Chair', qty: 1, price_unit: 5, tax: 0, discount: 0 }], customer_count: order.customer_count });
+}
+const searchStatus = (db, floorId) => recordAnalyses['restaurant.floor'][0].run(db, read(db, 'restaurant.floor', floorId));
+
+test('split bill input reads line numbers and quantities', () => {
+  assert.deepEqual(parseSplit('1x2, 3'), [{ index: 0, qty: 2 }, { index: 2, qty: 1 }]);
+});
+
+test('products can be revalued and stock valuation follows the layers', () => {
+  const db = seed();
+  const p = search(db, 'product').find((x) => x.type === 'goods' && x.qty_available > 0);
+  const out = press(db, 'product', p.id, 'Revalue', [Number(p.cost) + 10]);
+  assert.equal(read(out.db, 'product', p.id).cost, Number(p.cost) + 10);
+  assert.equal(valuationReport(out.db)[p.id].value, Math.round(p.qty_available * (Number(p.cost) + 10) * 100) / 100);
+});
+
+test('the lunch Order button refuses an order the wallet cannot pay', () => {
+  const db = seed();
+  const made = create(db, 'lunch.order', { product_id: 1, employee_id: 1, quantity: 100 });
+  assert.throws(() => press(made.db, 'lunch.order', made.id, 'Order'), /not have enough money|does not deliver|close at/);
+});
+
+test('stations plan visits with a badge for a named host', () => {
+  const station = create(seed(), 'frontdesk.station', { name: 'Lobby' });
+  const host = search(station.db, 'hr.employee')[0];
+  const out = press(station.db, 'frontdesk.station', station.id, 'Plan Visit', ['Laila', host.name.toUpperCase(), '2027-01-05', '10:30']);
+  const visitor = read(out.db, 'frontdesk.visitor', Number(out.go.split('/').at(-1)));
+  assert.deepEqual([visitor.stage_id, visitor.host_id, visitor.planned_time], ['planned', host.id, '10:30']);
+  assert.ok(visitor.badge_code);
+  assert.throws(() => press(station.db, 'frontdesk.station', station.id, 'Plan Visit', ['Laila', 'Nobody', '2027-01-05', '10:30']), /No employee/);
+});
+
+test('planning shifts auto-plan and publish their week', () => {
+  const made = create(seed(), 'planning.slot', { name: 'Open shift', start: '2027-03-03', allocated_hours: 8, state: 'draft' });
+  const planned = press(made.db, 'planning.slot', made.id, 'Auto Plan Week').db;
+  assert.ok(read(planned, 'planning.slot', made.id).employee_id);
+  const published = press(planned, 'planning.slot', made.id, 'Publish Week').db;
+  assert.equal(read(published, 'planning.slot', made.id).state, 'published');
+});
+
+test('project updates made in the form are published with a task summary', () => {
+  const made = create(seed(), 'project.update', { project_id: 1, name: 'Week 1', status: 'at_risk', progress: 40 });
+  const out = press(made.db, 'project.update', made.id, 'Publish').db;
+  assert.match(read(out, 'project.update', made.id).summary, /tasks/);
+  assert.equal(read(out, 'project.project', 1).last_update_status, 'at_risk');
+});
+
+test('rentals hold a deposit that can be partly withheld for damage', () => {
+  const db = seed();
+  const rental = search(db, 'sale.rental').find((r) => ['reserved', 'picked'].includes(r.state));
+  const held = press(db, 'sale.rental', rental.id, 'Hold Deposit', [200]);
+  const depositId = Number(held.go.split('/').at(-1));
+  const out = press(held.db, 'rental.deposit', depositId, 'Withhold for Damage', [50, 'Scratched']).db;
+  assert.deepEqual([read(out, 'rental.deposit', depositId).state, read(out, 'rental.deposit', depositId).withheld_amount], ['withheld', 50]);
+});
+
+test('referral rewards are redeemed for a named employee, never beyond their points', () => {
+  const reward = create(seed(), 'hr.referral.reward', { name: 'Mug', cost: 10, quantity: 2 });
+  const name = search(reward.db, 'hr.employee')[0].name;
+  assert.throws(() => press(reward.db, 'hr.referral.reward', reward.id, 'Redeem', [name]), /Insufficient referral points/);
+  assert.throws(() => press(reward.db, 'hr.referral.reward', reward.id, 'Redeem', ['Nobody']), /No employee/);
+});
+
+test('warehouses create an internal resupply from another warehouse', () => {
+  const second = create(seed(), 'stock.warehouse', { name: 'Alex Depot', code: 'ALX' });
+  const product = search(second.db, 'product').find((p) => p.type === 'goods');
+  const before = search(second.db, 'stock.picking').length;
+  const out = press(second.db, 'stock.warehouse', second.id, 'Resupply From Warehouse', ['wh', product.name, 3]).db;
+  const picking = search(out, 'stock.picking').at(-1);
+  assert.equal(search(out, 'stock.picking').length, before + 1);
+  assert.deepEqual([picking.picking_type, picking.move_ids[0].qty], ['internal', 3]);
+});
+
+test('signature templates create a request with one signer per role', () => {
+  const tpl = create(seed(), 'sign.template', { name: 'NDA', item_ids: [{ type: 'signature', role: 'customer', page: 1, required: true }] });
+  const partner = search(tpl.db, 'res.partner')[0];
+  const b = button('sign.template', 'Request Signature');
+  assert.equal(b.ask[0].default(read(tpl.db, 'sign.template', tpl.id)), 'customer=');
+  const out = press(tpl.db, 'sign.template', tpl.id, 'Request Signature', [`customer=${partner.name}`]);
+  const request = read(out.db, 'sign.request', Number(out.go.split('/').at(-1)));
+  assert.deepEqual(request.signer_ids.map((s) => [s.role, s.partner_id]), [['customer', partner.id]]);
+});
+
+test('fiscal years revalue foreign balances from the form (nothing to do leaves the books unchanged)', () => {
+  const year = create(seed(), 'account.fiscal.year', { name: 'FY 2031', date_from: '2031-01-01', date_to: '2031-12-31' });
+  assert.equal(press(year.db, 'account.fiscal.year', year.id, 'Revalue Foreign Currency', ['2031-06-30']).db, year.db);
 });

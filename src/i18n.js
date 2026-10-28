@@ -795,6 +795,23 @@ const ar = {
   // buttons for previously unreachable functions (MOD-007)
   'Invoice Registrations': 'فوترة التسجيلات', 'Check Out All Visitors': 'تسجيل خروج كل الزوار', 'Apply Vendor Prices': 'تطبيق أسعار المورد',
   'Re-invoice to Sales Orders': 'إعادة الفوترة على أوامر البيع', 'Every priced registration is already invoiced': 'كل التسجيلات المدفوعة مفوترة بالفعل',
+  // buttons that ask for input (MOD-007 4/4)
+  'Add Tip': 'إضافة بقشيش', 'Tip amount': 'مبلغ البقشيش', 'Transfer Table': 'نقل الطاولة', 'Move to table': 'نقل إلى الطاولة',
+  'Merge Into Table': 'دمج في طاولة', 'Merge this bill into the bill at table': 'دمج هذه الفاتورة في فاتورة الطاولة',
+  'Split Bill': 'تقسيم الفاتورة', 'Lines to move to a new bill, as line x quantity (for example 1x2, 3)': 'البنود المنقولة لفاتورة جديدة، بصيغة رقم البند x الكمية (مثال 1x2, 3)',
+  'Open Table': 'فتح طاولة', Table: 'الطاولة', Guests: 'الضيوف', 'Table Status': 'حالة الطاولات',
+  'Revalue Foreign Currency': 'إعادة تقييم العملات الأجنبية', 'Revaluation date (YYYY-MM-DD)': 'تاريخ إعادة التقييم (YYYY-MM-DD)',
+  Revalue: 'إعادة تقييم', 'New unit cost': 'تكلفة الوحدة الجديدة',
+  'Plan Visit': 'تخطيط زيارة', 'Visitor name': 'اسم الزائر', 'Host (employee name)': 'المضيف (اسم الموظف)',
+  'Date (YYYY-MM-DD)': 'التاريخ (YYYY-MM-DD)', 'Time (HH:MM)': 'الوقت (HH:MM)',
+  'Auto Plan Week': 'تخطيط الأسبوع تلقائيًا', 'Publish Week': 'نشر الأسبوع', Publish: 'نشر',
+  'Hold Deposit': 'حجز تأمين', 'Deposit amount': 'مبلغ التأمين', 'Withhold for Damage': 'خصم مقابل التلف',
+  'Damage amount to keep': 'مبلغ التلف المخصوم', Note: 'ملاحظة', 'Best Price': 'أفضل سعر',
+  Redeem: 'استبدال', 'Employee name': 'اسم الموظف', 'Employees per Skill': 'الموظفون لكل مهارة', 'Referral Points': 'نقاط الإحالة',
+  'Resupply From Warehouse': 'إمداد من مستودع', 'Source warehouse (name or code)': 'المستودع المصدر (الاسم أو الرمز)',
+  'Product (name or internal reference)': 'المنتج (الاسم أو المرجع الداخلي)', Quantity: 'الكمية',
+  'On Hand in Packagings': 'المتاح بالعبوات', 'Loose units': 'وحدات منفردة',
+  'Request Signature': 'طلب توقيع', 'Signers, as role=contact name separated by ;': 'الموقعون بصيغة الدور=اسم جهة الاتصال مفصولة بـ ;',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

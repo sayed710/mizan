@@ -251,7 +251,22 @@ export const signPlusModels = {
     label: 'Templates',
     fields: { name: { type: 'char', label: 'Name', required: true }, attachment: { type: 'binary', label: 'Attachment' }, item_ids: items, active: { type: 'boolean', label: 'Active' }, tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag') }, () => ({ tag_id: null })) },
     defaults: () => ({ active: true, item_ids: [], tag_ids: [] }), kanban: { title: 'name', lines: ['active'] }, list: ['name', 'active'],
-    form: { title: 'name', groups: [['attachment', 'active', 'tag_ids']], tabs: [{ label: 'Items', fields: ['item_ids'] }] },
+    form: {
+      title: 'name', groups: [['attachment', 'active', 'tag_ids']], tabs: [{ label: 'Items', fields: ['item_ids'] }],
+      buttons: [{
+        label: 'Request Signature', primary: true, when: (r) => r.active !== false && r.item_ids?.length,
+        ask: [{ label: 'Signers, as role=contact name separated by ;', default: (r) => [...new Set(r.item_ids.map((i) => i.role))].map((role) => `${role}=`).join('; ') }],
+        run: (db, r, [text]) => {
+          const signers = String(text).split(';').map((pair) => pair.split('=').map((v) => v.trim())).filter(([role]) => role).map(([role, name = '']) => {
+            const partner = search(db, 'res.partner').find((p) => p.name.toLowerCase() === name.toLowerCase());
+            if (!partner) throw new Error(`No contact named "${name}" for role ${role}`);
+            return { role, partner_id: partner.id };
+          });
+          const res = requestFromTemplate(db, r.id, { signers });
+          return { db: res.db, go: `#/sign/documents/${res.id}` };
+        },
+      }],
+    },
   },
   'sign.request': {
     ...baseSign,

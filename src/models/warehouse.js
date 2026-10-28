@@ -203,7 +203,20 @@ export const warehouseModels = {
         : !['one_step', 'two_steps', 'three_steps'].includes(r.reception_steps) || !['ship_only', 'pick_ship', 'pick_pack_ship'].includes(r.delivery_steps) ? 'Select valid warehouse steps' : null,
     list: ['name', 'code', 'partner_id', 'reception_steps', 'delivery_steps', 'active'],
     form: { title: 'name', groups: [['code', 'partner_id', 'active'], ['reception_steps', 'delivery_steps'], locations.map(([field]) => field)],
-      buttons: [{ label: 'Initialize Locations', primary: true, run: (db, r) => ({ db: ensureWarehouseLocations(db, r.id) }) }], chatter: true },
+      buttons: [
+        { label: 'Initialize Locations', primary: true, run: (db, r) => ({ db: ensureWarehouseLocations(db, r.id) }) },
+        {
+          label: 'Resupply From Warehouse',
+          ask: [{ label: 'Source warehouse (name or code)' }, { label: 'Product (name or internal reference)' }, { label: 'Quantity', type: 'number' }],
+          run: (db, r, [source, productName, qty]) => {
+            const from = search(db, 'stock.warehouse').find((w) => [w.name, w.code].some((v) => v && v.toLowerCase() === source.toLowerCase()));
+            const product = search(db, 'product').find((p) => [p.name, p.default_code].some((v) => v && v.toLowerCase() === productName.toLowerCase()));
+            if (!from) throw new Error('No warehouse with that name or code');
+            if (!product) throw new Error('No product with that name or reference');
+            return { db: resupplyTransfer(db, from.id, r.id, [{ product_id: product.id, qty }]) };
+          },
+        },
+      ], chatter: true },
   },
   get 'stock.picking'() {
     const base = salesModels['stock.picking'];

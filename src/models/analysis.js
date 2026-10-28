@@ -18,14 +18,15 @@ import { planTasks, technicianLoad } from './fsm.js';
 import { teamStats } from './helpdesk.js';
 import { activeAlerts, vendorSummary } from './lunch.js';
 import { calendarLoad, equipmentStats } from './maintplus.js';
-import { zReport } from './posplus.js';
+import { tableStatus, zReport } from './posplus.js';
 import { qualityStats } from './qualityplus.js';
 import { applicantScore, duplicateApplicants, jobPipeline } from './recruitplus.js';
-import { rentalSchedule } from './rentalplus.js';
+import { bestPrice, rentalHours, rentalSchedule } from './rentalplus.js';
 import { repairAnalysis, repairTotal } from './repairplus.js';
 import { customerStatement } from './reports.js';
-import { certificationsExpiring, skillMatrix } from './skillsplus.js';
+import { certificationsExpiring, employeesWithSkill, points, skillMatrix } from './skillsplus.js';
 import { employeeUtilization, weeklyGrid } from './timesheetplus.js';
+import { packagingSuggestion } from './uom.js';
 import { warehouseQty } from './warehouse.js';
 import { workcenterLoad } from './workorder.js';
 
@@ -46,6 +47,7 @@ export const recordAnalyses = {
     { label: 'Utilization This Month', run: (db, r) => employeeUtilization(db, r.id, monthOf()) },
     { label: 'Field Service Hours Today', run: (db, r) => ({ hours: technicianLoad(db, r.id, today()) }) },
     { label: 'Maintenance Load This Month', run: (db, r) => calendarLoad(db, r.id, monthOf()) },
+    { label: 'Referral Points', run: (db, r) => points(db, r.id) },
   ],
   'marketing.campaign': [{ label: 'Activity Statistics', run: (db, r) => stepStats(db, r) }],
   'stock.quant.package': [{ label: 'Package Contents', run: (db, r) => packageContents(db, r.id) }],
@@ -60,14 +62,25 @@ export const recordAnalyses = {
   'hr.applicant': [{ label: 'Applicant Score', when: (r) => !!r.job_id, run: (db, r) => applicantScore(r, read(db, 'hr.job', r.job_id) ?? {}) }],
   'repair.order': [{ label: 'Repair Total', run: (db, r) => repairTotal(db, r.id) }],
   'res.partner': [{ label: 'Customer Statement This Year', run: (db, r) => customerStatement(db, r.id, yearOf()) }],
-  'hr.skill.type': [{ label: 'Skill Matrix', run: (db, r) => skillMatrix(db, r.id) }],
+  'hr.skill.type': [
+    { label: 'Skill Matrix', run: (db, r) => skillMatrix(db, r.id) },
+    { label: 'Employees per Skill', run: (db, r) => (r.skill_ids ?? []).map((s) => ({ skill: s.name, employees: employeesWithSkill(db, { typeId: r.id, skill: s.name }).map((e) => e.name).join(', ') })) },
+  ],
   'mrp.workcenter': [{ label: 'Load This Month', run: (db, r) => workcenterLoad(db, r.id, monthOf()) }],
   'pos.session': [{ label: 'Z Report', run: (db, r) => zReport(db, r.id) }],
+  'sale.rental': [{ label: 'Best Price', run: (db, r) => bestPrice(db, r.product_id, rentalHours(r.pickup_date, r.return_date)) }],
+  'restaurant.floor': [{ label: 'Table Status', run: (db, r) => tableStatus(db, r.id) }],
   'account.analytic.account': [{ label: 'Balance This Year', run: (db, r) => analyticBalance(db, r.id, yearOf()) }],
   'account.move': [{ label: 'Purchase Order Matching', when: (r) => r.move_type === 'in_invoice' && !!r.purchase_id, run: (db, r) => matchBill(db, r.id) }],
   product: [{
     label: 'Stock per Warehouse', when: (r) => r.type === 'goods',
     run: (db, r) => search(db, 'stock.warehouse').map((w) => ({ warehouse: w.name, quantity: warehouseQty(db, r.id, w.id) })),
+  }, {
+    label: 'On Hand in Packagings', when: (r) => r.type === 'goods',
+    run: (db, r) => {
+      const { packages, remainder } = packagingSuggestion(db, r.id, Number(r.qty_available) || 0);
+      return [...packages.map((p) => ({ packaging: p.packaging.name, count: p.count })), ...(remainder ? [{ packaging: 'Loose units', count: remainder }] : [])];
+    },
   }],
 };
 

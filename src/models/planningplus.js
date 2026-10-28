@@ -99,6 +99,12 @@ export function autoPlan(db, { from, to }) {
   return next;
 }
 
+/** Monday to Sunday around a date, the period the week buttons act on. */
+const weekOf = (date) => {
+  const from = addDays(date, -((new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7));
+  return { from, to: addDays(from, 6) };
+};
+
 function publishSlots(db, slots, from, to) {
   let next = db;
   for (const slot of slots) next = write(next, 'planning.slot', slot.id, { state: 'published' });
@@ -192,6 +198,8 @@ export const planningPlusModels = {
           return { ...copied, db: write(copied.db, 'planning.slot', id, { was_copied: true, swap_requested: false }) };
         } }),
         { label: 'Publish', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: publishSlots(db, [r], r.start, r.end || r.start) }) },
+        { label: 'Auto Plan Week', when: (r) => !!r.start, run: (db, r) => ({ db: autoPlan(db, weekOf(r.start)) }) },
+        { label: 'Publish Week', when: (r) => !!r.start, run: (db, r) => { const w = weekOf(r.start); return { db: publishPeriod(db, w.from, w.to) }; } },
         { label: 'Ask to Switch', when: (r) => r.state === 'published' && !!r.employee_id && !r.swap_requested, run: (db, r) => ({ db: requestSwap(db, r.id, r.employee_id) }) },
         { label: 'Accept Switch', when: (r) => r.swap_requested, run: (db, r) => ({ db: acceptSwap(db, r.id, r.swap_employee_id) }) },
         { label: 'Repeat', when: (r) => r.repeat, run: (db, r) => ({ db: generateRecurringSlots(db, r, r.repeat_until || addDays(today(), 90)) }) },

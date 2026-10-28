@@ -1,7 +1,7 @@
-// Fiscal closing, comparative reports and reversing exchange adjustments.
+// Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
 import { create, read, search, updateSettings, write } from '../orm.js';
 import { addDays, today } from './common.js';
-import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
+import { accountId, balances, journalItems, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 
 const round = (n) => Math.round(n * 100) / 100;
@@ -30,13 +30,6 @@ function getYear(db, id) {
   const error = yearGuard(db, year, year);
   if (error) throw new Error(error);
   return year;
-}
-
-/** Fiscal year containing a date, falling back to its calendar year. */
-export function fiscalYearOf(db, date) {
-  checkDate(date);
-  return search(db, 'account.fiscal.year').find((y) => y.date_from <= date && date <= y.date_to)
-    ?? { date_from: `${date.slice(0, 4)}-01-01`, date_to: `${date.slice(0, 4)}-12-31` };
 }
 
 /** Close P&L balances into retained earnings and lock the fiscal year. */
@@ -74,53 +67,6 @@ export function reopenFiscalYear(db, yearId) {
     lines: closing.line_ids.map((l) => ({ account: read(next, 'account.account', l.account_id).code, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
   });
   return write(write(entry.db, 'account.move', entry.id, { is_closing: true }), 'account.fiscal.year', yearId, { state: 'open', opening_move_id: entry.id });
-}
-
-const pnlRows = [['revenue', 'Revenue'], ['cost', 'Cost of Revenue'], ['gross', 'Gross Profit'], ['expense', 'Expenses'],
-  ['operating', 'Net Operating Income'], ['otherIncome', 'Other Income'], ['otherExpense', 'Other Expenses'], ['net', 'Net Income']];
-const sheetRows = [['totalAssets', 'Assets'], ['totalLiabilities', 'Liabilities'], ['equity', 'Equity'],
-  ['earnings', 'Current Year Earnings'], ['liabilitiesEquity', 'Liabilities + Equity']];
-
-function comparison(columns, reports, definitions) {
-  const rows = definitions.map(([key, label]) => ({ key, label, values: reports.map((r) => r[key]) }));
-  const variance = rows.map(({ key, values }) => {
-    const previous = values.at(-2);
-    const amount = values.length < 2 ? null : round(values.at(-1) - previous);
-    return { key, amount, percent: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
-  });
-  return { columns, rows, variance };
-}
-
-/** P&L comparison in caller order; variance compares the last two columns. */
-export function compareProfitAndLoss(db, periods) {
-  return comparison(periods, periods.map((period) => profitAndLoss(db, period)), pnlRows);
-}
-
-/** Balance sheet comparison using the totals displayed by Reports. */
-export function compareBalanceSheet(db, dates) {
-  return comparison(dates, dates.map((date) => {
-    checkDate(date);
-    const sheet = balanceSheet(db, date);
-    return { ...sheet, equity: round(sheet.totalEquity - sheet.earnings), liabilitiesEquity: round(sheet.totalLiabilities + sheet.totalEquity) };
-  }), sheetRows);
-}
-
-function shiftMonth(date, months) {
-  const source = new Date(`${date}T00:00:00Z`);
-  const target = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + months, 1));
-  const end = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  const sourceEnd = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(source.getUTCDate() === sourceEnd ? end : Math.min(source.getUTCDate(), end));
-  return target.toISOString().slice(0, 10);
-}
-
-/** Previous periods, oldest first, excluding the supplied period and preserving month ends. */
-export function comparePeriods(period, { count = 1, unit = 'month' } = {}) {
-  checkDate(period.from);
-  checkDate(period.to);
-  const months = { month: 1, quarter: 3, year: 12 }[unit];
-  if (!months || !Number.isInteger(count) || count < 0 || period.from > period.to) throw new Error('Choose a valid comparison unit, count and period');
-  return Array.from({ length: count }, (_, i) => ({ from: shiftMonth(period.from, -(count - i) * months), to: shiftMonth(period.to, -(count - i) * months) }));
 }
 
 /** Open foreign invoices/bills at a date; positive difference increases the absolute balance. */
@@ -193,6 +139,11 @@ export const closingModels = {
       buttons: [
         { label: 'Close Year', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: closeFiscalYear(db, r.id) }) },
         { label: 'Reopen', when: (r) => r.state === 'closed', run: (db, r) => ({ db: reopenFiscalYear(db, r.id) }) },
+        {
+          label: 'Revalue Foreign Currency', when: (r) => r.state === 'open',
+          ask: [{ label: 'Revaluation date (YYYY-MM-DD)', default: (r) => (today() < r.date_to ? today() : r.date_to) }],
+          run: (db, r, [date]) => ({ db: revalueForeignBalances(db, date) }),
+        },
       ],
       chatter: true,
     },

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { accountId, isBalanced } from './models/ledger.js';
+import { extraModels } from './models/extra.js';
 import { availability, bestPrice, holdDeposit, pickupPicking, rentalHours, rentalPlusModels, rentalSchedule, returnPicking, settleDeposit } from './models/rentalplus.js';
 import { seed } from './seed.js';
 
@@ -146,8 +147,12 @@ test('schedule groups overlapping rentals by product, sorts them and preserves a
   assert.deepEqual(rentalSchedule(d.db, { from: '2036-01-01', to: '2036-01-02' }), []);
 });
 
-test('new model definitions expose forms and lists without replacing sale.rental', () => {
-  assert.deepEqual(Object.keys(rentalPlusModels), ['rental.pricing', 'rental.deposit']);
+test('new model definitions expose forms and lists, and sale.rental only gains a deposit button', () => {
+  assert.deepEqual(Object.keys(rentalPlusModels), ['rental.pricing', 'rental.deposit', 'sale.rental']);
+  const base = extraModels['sale.rental'];
+  const rental = rentalPlusModels['sale.rental'];
+  assert.equal(rental.fields, base.fields);
+  assert.deepEqual(rental.form.buttons.map((b) => b.label), [...base.form.buttons.map((b) => b.label), 'Hold Deposit']);
   for (const model of Object.values(rentalPlusModels)) {
     assert.ok(model.form.title);
     assert.ok(model.list.every((field) => model.fields[field]));

@@ -3,6 +3,7 @@ import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
+import { valuationReport } from '../models/valuation.js';
 import { useDb } from '../store.js';
 import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
@@ -249,10 +250,11 @@ function AuditTrail({ db, period }) {
   );
 }
 
-/** Current stock value per product (on hand × cost), largest first. */
+/** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
 function Valuation({ db }) {
-  const rows = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available))
-    .map((p) => ({ p, value: (Number(p.qty_available) || 0) * (Number(p.cost) || 0) })).sort((a, b) => b.value - a.value);
+  const report = valuationReport(db);
+  const rows = Object.entries(report).filter(([, v]) => v.qty)
+    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
       {rows.map(({ p, value }) => (
