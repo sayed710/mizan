@@ -4,7 +4,7 @@ import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { checkCreditLimit } from './finance.js';
-import { pickingAvailability, reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
+import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';

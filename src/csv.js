@@ -7,7 +7,7 @@ export const toCsv = (rows) => rows.map((r) => r.map(quote).join(',')).join('\r\
 
 /** @returns {string[][]} */
 export function fromCsv(text) {
-  const src = text.replace(/^﻿/, '');
+  const src = text.replace(/^\uFEFF/, '');
   const rows = [];
   let row = [];
   let cell = '';

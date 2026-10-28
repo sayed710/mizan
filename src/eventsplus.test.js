@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, emptyDb, read, write } from './orm.js';
+import { create, emptyDb, read } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import {

@@ -1,7 +1,7 @@
 // Apps (install/uninstall), the Attendance kiosk and the cap table.
 import { useState } from 'react';
 import { apps, APP_INFO } from '../models/index.js';
-import { create, read, search, updateSettings, write } from '../orm.js';
+import { read, search, updateSettings } from '../orm.js';
 import { workedHours } from '../models/apps2.js';
 import { checkIn, checkOut, kioskScan } from '../models/attendanceplus.js';
 import { capTable } from '../models/apps4.js';

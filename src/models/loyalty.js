@@ -85,7 +85,7 @@ export function generateCoupons(db, programId, { count, partnerIds = [], points 
 }
 
 /** Return the active programs whose context and at least one rule match this order. */
-export function applicablePrograms(db, order, { lines, partnerId, code, date, channel = 'sale' } = {}) {
+export function applicablePrograms(db, order, { lines, code, date, channel = 'sale' } = {}) {
   const orderLines = linesOf(order, lines);
   const on = date ?? order?.date_order ?? today();
   return programsOf(db).filter((program) => {

@@ -446,7 +446,7 @@ export const financeModels = {
     form: {
       statusbar: 'state',
       statusbarClickable: true,
-      buttons: [{ label: 'Budget vs Actual', run: (db, r) => ({ db, go: '#/accounting/budget-report' }) }],
+      buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
       groups: [['date_from'], ['date_to']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
