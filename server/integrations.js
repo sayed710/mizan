@@ -77,9 +77,9 @@ async function callClaude(params) {
     if (response.stop_reason === 'refusal') throw new Error('The AI declined this request.');
     return response;
   } catch (e) {
-    if (e instanceof Anthropic.AuthenticationError) throw new Error('AI credentials are invalid (ANTHROPIC_API_KEY).');
-    if (e instanceof Anthropic.RateLimitError) throw new Error('The AI is busy, try again in a moment.');
-    if (e instanceof Anthropic.APIError) throw new Error(`AI service error ${e.status}.`);
+    if (e instanceof Anthropic.AuthenticationError) throw new Error('AI credentials are invalid (ANTHROPIC_API_KEY).', { cause: e });
+    if (e instanceof Anthropic.RateLimitError) throw new Error('The AI is busy, try again in a moment.', { cause: e });
+    if (e instanceof Anthropic.APIError) throw new Error(`AI service error ${e.status}.`, { cause: e });
     throw e;
   }
 }
@@ -195,7 +195,7 @@ export async function sendWhatsApp(env, store, user, { model, id, text, template
     store.commit(markWhatsApp(store.get(), msg.id, { waMessageId: out?.messages?.[0]?.id ?? '' }));
   } catch (e) {
     store.commit(markWhatsApp(store.get(), msg.id, { error: e.message }));
-    throw new Error(`WhatsApp message failed: ${e.message}`);
+    throw new Error(`WhatsApp message failed: ${e.message}`, { cause: e });
   }
   return { message: 'WhatsApp message sent' };
 }

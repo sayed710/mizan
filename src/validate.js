@@ -1,3 +1,4 @@
+// @ts-check
 // Type checks for untrusted record values, so one bad write can't break rendering for every user.
 import { models } from './models/index.js';
 

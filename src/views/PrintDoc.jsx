@@ -69,11 +69,12 @@ export function PrintDoc({ model, id }) {
   const def = models[model];
   const layout = LAYOUTS[model];
   const rec = read(db, model, Number(id));
+  const recId = rec?.id;
   useEffect(() => {
-    if (!rec) return undefined;
+    if (!recId) return undefined;
     const timer = setTimeout(() => window.print(), 300);
     return () => clearTimeout(timer);
-  }, [rec?.id]);
+  }, [recId]);
   if (rec && model === 'account.batch.payment') return <Checks db={db} batch={rec} />;
   if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
 

@@ -164,31 +164,31 @@ const ar = {
   "Action": "الإجراء",
   "Action Proposed": "إجراء مقترح",
   "Add Tag": "إضافة وسم",
-  "Address": "العنوان",
+  
   "Advanced": "متقدم",
   "After (days)": "بعد (أيام)",
   "Allow Reconciliation": "السماح بالتسوية",
-  "Answer": "الإجابة",
-  "Appointment": "الموعد",
-  "Appointment Title": "عنوان الموعد",
+  
+  
+  
   "Appraisal Date": "تاريخ التقييم",
   "Appraisal Sent": "تم إرسال التقييم",
   "Approver": "المعتمِد",
-  "Attendee Name": "اسم الحاضر",
+  
   "Backend": "النظام",
   "Bank": "البنك",
-  "Batch Name": "اسم الدفعة",
+  
   "Beginner": "مبتدئ",
   "Bill of Materials": "قائمة المواد",
-  "Booked by": "محجوز بواسطة",
+  
   "Borrow Items": "استعارة أغراض",
   "Business Trip": "رحلة عمل",
-  "Campaign": "الحملة",
+  
   "Candidate": "المرشح",
   "Candidate Name": "اسم المرشح",
-  "Capacity": "السعة",
+  
   "Characters": "الأحرف",
-  "Checked In": "حاضر",
+  
   "Checked-In": "تم الدخول",
   "Checked-Out": "تم الخروج",
   "Choices (comma separated)": "الخيارات (مفصولة بفواصل)",
@@ -196,43 +196,43 @@ const ar = {
   "Component": "المكوّن",
   "Components": "المكونات",
   "Computers": "أجهزة الكمبيوتر",
-  "Configuration": "الإعدادات",
-  "Content": "المحتوى",
+  
+  
   "Corrective": "تصحيحية",
-  "Course Title": "عنوان الدورة",
-  "Delivered": "تم التسليم",
+  
+  
   "Description of Change": "وصف التغيير",
   "Details": "التفاصيل",
   "Diesel": "ديزل",
   "Diesel (L)": "ديزل (لتر)",
   "Document Content": "محتوى المستند",
-  "Document ID": "رقم المستند",
-  "Document Model": "نوع المستند",
+  
+  
   "Done on": "أُنجز في",
   "Downgraded": "خارج الخدمة",
-  "Drinks": "مشروبات",
-  "Driver": "السائق",
+  
+  
   "Duration (days)": "المدة (أيام)",
-  "Duration (min)": "المدة (دقائق)",
+  
   "Effective": "سارٍ",
   "Electric": "كهربائي",
   "Electricity (kWh)": "كهرباء (كيلوواط ساعة)",
   "Emission Factor (kg CO2e/unit)": "معامل الانبعاث (كجم CO2e/وحدة)",
   "Emissions (t CO2e)": "الانبعاثات (طن CO2e)",
-  "Equipment Name": "اسم المعدة",
+  
   "Evaluation": "التقييم",
-  "Event": "الفعالية",
+  
   "Event Name": "اسم الفعالية",
-  "Expected Salary": "الراتب المتوقع",
+  
   "Expense Date": "تاريخ المصروف",
   "Expert": "خبير",
-  "Failed": "راسب",
-  "Favorite": "مفضل",
-  "Feedback": "الملاحظات",
+  
+  
+  
   "File": "الملف",
-  "Final Rating": "التقييم النهائي",
+  
   "Finance": "المالية",
-  "Finished on": "انتهى في",
+  
   "Flights (km)": "رحلات طيران (كم)",
   "Fuel": "وقود",
   "Fuel Type": "نوع الوقود",
@@ -240,133 +240,133 @@ const ar = {
   "Gasoline (L)": "بنزين (لتر)",
   "General Approval": "موافقة عامة",
   "HR": "الموارد البشرية",
-  "Hired": "تم التعيين",
+  
   "Host": "المضيف",
   "Hybrid": "هجين",
-  "In Conversation": "في محادثة",
+  
   "Installer": "فني تركيب",
-  "Instructions": "التعليمات",
-  "Insurance": "تأمين",
+  
+  
   "Intermediate": "متوسط",
-  "Internal Notes": "ملاحظات داخلية",
+  
   "Interviewing": "في المقابلات",
   "Introduction Message": "رسالة تعريفية",
   "Job Position": "الوظيفة",
   "Job Summary": "ملخص الوظيفة",
   "Kitchen": "المطبخ",
   "Languages": "اللغات",
-  "Last Edited": "آخر تعديل",
+  
   "Last Odometer (km)": "آخر قراءة للعداد (كم)",
   "Legal": "الشؤون القانونية",
-  "Lesson": "الدرس",
-  "Level": "المستوى",
+  
+  
   "License Plate": "رقم اللوحة",
   "Likes": "الإعجابات",
   "Lunch Orders": "طلبات الغداء",
   "Lunch Products": "أصناف الغداء",
   "Machines": "الآلات",
-  "Mail Body": "نص الرسالة",
-  "Mailing List": "قائمة البريد",
-  "Max Tolerance": "الحد الأقصى المسموح",
+  
+  
+  
   "Maximum Attendees": "أقصى عدد للحضور",
   "Menu Order": "ترتيب القائمة",
-  "Min Tolerance": "الحد الأدنى المسموح",
+  
   "Miscellaneous": "متنوعة",
   "Multiple choice": "اختيار من متعدد",
   "Natural Gas (m³)": "غاز طبيعي (م³)",
   "New Request": "طلب جديد",
   "Next Invoice": "الفاتورة القادمة",
-  "Next Preventive Maintenance": "الصيانة الوقائية القادمة",
-  "No Show": "لم يحضر",
+  
+  
   "Not Selected": "لم يُختر",
-  "Note": "ملاحظة",
-  "Open Shifts": "ورديات متاحة",
+  
+  
   "Opened": "فُتحت",
-  "Operator": "الموظف",
-  "Opted Out": "ألغى الاشتراك",
+  
+  
   "Order Ref": "مرجع الطلب",
   "Order Reference": "مرجع الطلب",
   "Ordered": "تم الطلب",
   "Organizer": "المنظم",
   "Other Income": "إيرادات أخرى",
   "Owner": "المالك",
-  "Page Title": "عنوان الصفحة",
-  "Parent Article": "المقال الأب",
+  
+  
   "Participants": "المشاركون",
-  "Parts": "قطع الغيار",
+  
   "Pass - Fail": "ناجح - راسب",
-  "Passed": "ناجح",
+  
   "Payment Method": "طريقة الدفع",
   "Pick up Date": "تاريخ الاستلام",
   "Pizza": "بيتزا",
-  "Planned Date": "التاريخ المخطط",
-  "Points": "النقاط",
+  
+  
   "Preventive": "وقائية",
-  "Price": "السعر",
+  
   "Price per Day": "السعر اليومي",
   "Product to Repair": "المنتج المطلوب إصلاحه",
-  "Progress (%)": "التقدم (%)",
-  "Published": "منشور",
+  
+  
   "Quantity To Produce": "الكمية المطلوب إنتاجها",
   "Question Type": "نوع السؤال",
-  "Questions": "الأسئلة",
+  
   "Quiz": "اختبار",
-  "Rating": "التقييم",
+  
   "Rating 1-5": "تقييم من 1 إلى 5",
-  "Recurring Plan": "خطة التكرار",
+  
   "Recurring Price": "السعر المتكرر",
   "Referred": "مُرشَّح",
   "Referred by": "رشّحه",
   "Registration Date": "تاريخ التسجيل",
   "Repair": "إصلاح",
   "Repair Reference": "مرجع الإصلاح",
-  "Repaired": "تم الإصلاح",
+  
   "Replied": "ردود",
   "Request Owner": "صاحب الطلب",
   "Resource": "المورد",
   "Respondent": "المجيب",
   "Responses": "الردود",
-  "Responsible": "المسؤول",
+  
   "Return Date": "تاريخ الإرجاع",
-  "Role": "الدور",
-  "Room": "القاعة",
+  
+  
   "Room Name": "اسم القاعة",
-  "Running": "جارية",
+  
   "SMS Content": "نص الرسالة",
   "Salad": "سلطة",
   "Sandwich": "ساندوتش",
   "Scheduled": "مجدول",
-  "Scheduled Date": "التاريخ المجدول",
-  "Scheduled for": "مجدول في",
+  
+  
   "Scope": "النطاق",
   "Scope 1 (direct)": "النطاق 1 (مباشر)",
   "Scope 2 (energy)": "النطاق 2 (الطاقة)",
   "Scope 3 (value chain)": "النطاق 3 (سلسلة القيمة)",
-  "Scrap": "خردة",
-  "Section": "القسم",
+  
+  
   "Send Email": "إرسال بريد",
   "Send SMS": "إرسال رسالة",
-  "Sent": "مُرسل",
-  "Sent on": "أُرسل في",
-  "Serial Number": "الرقم التسلسلي",
+  
+  
+  
   "Served": "تم التقديم",
-  "Service Type": "نوع الخدمة",
-  "Shares": "المشاركات",
+  
+  
   "Shift": "الوردية",
   "Shifts": "الورديات",
   "Short Summary": "ملخص قصير",
-  "Signature": "التوقيع",
-  "Signed on": "وُقّع في",
-  "Signer": "الموقِّع",
+  
+  
+  
   "Skill": "المهارة",
   "Skill Type": "نوع المهارة",
   "Soft Skills": "مهارات شخصية",
   "Sold Online": "يُباع أونلاين",
-  "Source": "المصدر",
-  "State": "الحالة",
-  "Stop": "إيقاف",
+  
+  
+  
   "Stopped": "متوقفة",
-  "Subscribed": "مشترك",
+  
   "Support": "الدعم",
   "Survey": "الاستبيان",
   "Survey Answers": "إجابات الاستبيان",
@@ -374,31 +374,31 @@ const ar = {
   "Target": "المستهدف",
   "Task": "المهمة",
   "Technical": "تقنية",
-  "Technician": "الفني",
+  
   "Time Off Type": "نوع الإجازة",
-  "Title": "العنوان",
+  
   "To Order": "للطلب",
-  "To Pay": "للدفع",
-  "To Review": "للمراجعة",
+  
+  
   "To Start": "لم يبدأ",
   "To do": "للتنفيذ",
-  "Transcript": "نص المحادثة",
-  "URL": "الرابط",
+  
+  
   "Under Repair": "قيد الإصلاح",
-  "Used in location": "مكان الاستخدام",
-  "User": "المستخدم",
+  
+  
   "Valid Until": "صالح حتى",
   "Validation": "الاعتماد",
-  "Vehicle": "المركبة",
+  
   "Venue": "المكان",
   "Version": "الإصدار",
   "Video": "فيديو",
-  "Visitor": "الزائر",
+  
   "Visitor Company": "شركة الزائر",
-  "Visitor Name": "اسم الزائر",
+  
   "Wait": "انتظار",
-  "Waiting": "في الانتظار",
-  "Warehouse": "المستودع",
+  
+  
   "Worked Hours": "ساعات العمل",
   "Workflow": "مسار العمل",
   Revoke: 'إلغاء',

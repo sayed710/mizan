@@ -1,3 +1,4 @@
+// @ts-check
 // Record-level diff between two db snapshots, applied server-side so concurrent edits
 // to different records don't overwrite each other.
 import { models } from './models/index.js';
@@ -13,7 +14,9 @@ const lockValue = (value, current) => (value === null || isRealDate(value) ? val
 
 /** @returns {{upserts: Record<string, object[]>, deletes: Record<string, number[]>, messages: object[], removedMessages: string[], seq: object, settings: object}} */
 export function diffDb(prev, next) {
+  /** @type {Record<string, object[]>} */
   const upserts = {};
+  /** @type {Record<string, number[]>} */
   const deletes = {};
   for (const model of new Set([...Object.keys(prev.records), ...Object.keys(next.records)])) {
     const before = byId(prev.records[model]);
@@ -40,7 +43,12 @@ export const isEmptyDiff = (d) =>
 
 const MAX_DB_CHARS = 200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
-/** Apply an untrusted diff to the authoritative db. Throws on invalid input. */
+/**
+ * Apply an untrusted diff to the authoritative db. Throws on invalid input.
+ * @param {object} db
+ * @param {any} d
+ * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null }} [options]
+ */
 export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}) {
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const check = (model) => {
