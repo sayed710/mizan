@@ -1,0 +1,12 @@
+Copyright (c) 2026 the owner of github.com/sayed710/mizan. All rights reserved.
+
+This source code is made available for viewing only. No permission is granted to
+use, copy, modify, merge, publish, distribute, sublicense or sell copies of it,
+in whole or in part, without prior written permission from the copyright holder.
+
+Third-party components keep their own licences (see their packages under
+node_modules and the notices that ship with them).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
