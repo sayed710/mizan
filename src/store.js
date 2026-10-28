@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
-import { diffDb, isEmptyDiff } from './sync.js';
+import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
 import { createQueue } from './queue.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
@@ -107,11 +107,15 @@ export const getDb = () => db;
 export const getUser = () => user;
 export const isServer = () => mode === 'server';
 
+/** Id reassignments from the server, in arrival order. */
+const remaps = [];
+
 /** Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local). */
 export function commit(next) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
+  const known = remaps.length;
   db = next;
   notify();
   if (mode === 'local') {
@@ -127,8 +131,17 @@ export function commit(next) {
   };
   enqueue(async () => {
     if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
-    const r = await api('/api/diff', diff);
-    if (r.ok) { db = confirmed = r.data; notify(); return; }
+    const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
+    if (r.ok) {
+      const { remapped, ...saved } = r.data;
+      db = confirmed = saved;
+      if (remapped) {
+        remaps.push(remapped);
+        window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: remapped }));
+      }
+      notify();
+      return;
+    }
     if (r.data?.db) confirmed = r.data.db;
     failed(r.data?.error ?? 'Could not save changes.');
   }, (e) => {
