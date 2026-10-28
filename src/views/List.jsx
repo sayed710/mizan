@@ -4,6 +4,7 @@ import { groupRecords } from '../orm.js';
 import { t } from '../i18n.js';
 import { display, isNumeric, money } from '../ui.jsx';
 import { companySum, unratedCount } from '../models/money.js';
+import { PAGE_SIZE } from './paging.js';
 
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
@@ -25,13 +26,17 @@ const Totals = ({ db, cols, fields, records }) =>
     </td>
   ));
 
-export function List({ db, model, records, open, selected, setSelected, groupBy }) {
+export function List({ db, model, records, open, selected, setSelected, groupBy, page }) {
   const def = models[model];
   const cols = def.list;
   const fields = def.fields;
   const [sort, setSort] = useState(null);
   const [expanded, setExpanded] = useState(() => new Set());
-  const allOn = records.length > 0 && records.every((r) => selected.has(r.id));
+  const [shown, setShown] = useState(() => ({}));
+  // Ungrouped lists render one page (sorted across all records first); grouped lists cap each open group.
+  const pageRecords = groupBy.length || !page ? null : sortRecords(db, fields, records, sort).slice(page.start, page.end);
+  const visible = pageRecords ?? records;
+  const allOn = visible.length > 0 && visible.every((r) => selected.has(r.id));
   const toggleRow = (id) => {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -49,7 +54,19 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
 
   // Recursive grouped rows: header row per group, children only when expanded.
   const groupRows = (recs, levels, path, depth) => {
-    if (!levels.length) return sortRecords(db, fields, recs, sort).map((r) => row(r, depth));
+    if (!levels.length) {
+      const limit = shown[path] ?? PAGE_SIZE;
+      const rows = sortRecords(db, fields, recs, sort).slice(0, limit).map((r) => row(r, depth));
+      if (recs.length <= limit) return rows;
+      return [...rows,
+        <tr key={`${path}/more`} className="more-row">
+          <td colSpan={cols.length + 1} style={{ paddingInlineStart: 10 + depth * 18 }}>
+            <button type="button" className="link" onClick={() => setShown({ ...shown, [path]: limit + PAGE_SIZE })}>
+              {t('Load more ({n} remaining)', { n: recs.length - limit })}
+            </button>
+          </td>
+        </tr>];
+    }
     return groupRecords(db, model, recs, levels[0])
       .filter((g) => g.records.length)
       .flatMap((g) => {
@@ -79,7 +96,11 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
           <tr>
             <th className="check">
               <input type="checkbox" aria-label="Select all" checked={allOn}
-                onChange={() => setSelected(allOn ? new Set() : new Set(records.map((r) => r.id)))} />
+                onChange={() => {
+                  const next = new Set(selected);
+                  for (const r of visible) if (allOn) next.delete(r.id); else next.add(r.id);
+                  setSelected(next);
+                }} />
             </th>
             {cols.map((f) => (
               <th key={f} className={isNumeric(fields[f]) ? 'num' : ''} aria-sort={sort?.[0] === f ? (sort[1] > 0 ? 'ascending' : 'descending') : 'none'}>
@@ -91,7 +112,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy 
           </tr>
         </thead>
         <tbody>
-          {groupRows(records, groupBy, '', 0)}
+          {pageRecords ? pageRecords.map((r) => row(r, 0)) : groupRows(records, groupBy, '', 0)}
           {!records.length && <tr><td colSpan={cols.length + 1} className="empty">{t('No record found. Create one with “New”.')}</td></tr>}
         </tbody>
         <tfoot>
