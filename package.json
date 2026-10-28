@@ -13,7 +13,8 @@
     "pretest": "vite build",
     "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
     "test:future": "node --import ./scripts/fake-now.mjs --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
-    "test:fields": "node scripts/check-fields.mjs"
+    "test:fields": "node scripts/check-fields.mjs",
+    "coverage": "node scripts/coverage.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "~1.3.0",
