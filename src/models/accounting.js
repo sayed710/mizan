@@ -1,7 +1,7 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, subtotal, today } from './common.js';
 import { ACCOUNT_TYPES, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
-import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard } from './finance.js';
+import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
@@ -278,7 +278,7 @@ export const accountingModels = {
   'account.move': {
     label: 'Invoices',
     guard: moveGuard,
-    invariant: lockedSettlementInvariant,
+    invariant: (db, after, before) => lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m) => moveDeleteGuard(db, m) ?? settledByCreditNote(db, m),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),

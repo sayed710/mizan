@@ -4,16 +4,17 @@ import { create, read, search } from './orm.js';
 import { companyAmount, companySum, currencyCode } from './models/money.js';
 import { journalCards } from './models/finance.js';
 import { seed } from './seed.js';
+import { postMove } from './models/accounting.js';
 
 const sarInvoice = () => {
   const db0 = seed();
   const sar = search(db0, 'res.currency').find((c) => c.name === 'SAR');
   const journal_id = search(db0, 'account.journal').find((j) => j.code === 'INV').id;
   const { db, id } = create(db0, 'account.move', {
-    journal_id, move_type: 'out_invoice', state: 'posted', partner_id: 3, currency_id: sar.id, invoice_date: '2026-10-01',
+    journal_id, move_type: 'out_invoice', state: 'draft', partner_id: 3, currency_id: sar.id, invoice_date: '2026-10-01',
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 37500, discount: 0, tax: 0 }],
   });
-  return { db, id, sar };
+  return { db: postMove(db, id), id, sar };
 };
 
 test('a foreign-currency document reports its own currency code', () => {

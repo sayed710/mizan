@@ -78,8 +78,8 @@ export function invoiceLines(db, move) {
   const own = companyCurrency(db, move.company_id) ?? (db.records['res.currency'] ?? []).find((c) => c.name === db.settings?.currency)?.id ?? null;
   const foreign = !!move.currency_id && move.currency_id !== own;
   const side = (amount, debit, doc) => {
-    const sign = debit !== refund ? 1 : -1;
-    return { debit: sign > 0 ? round(amount) : 0, credit: sign > 0 ? 0 : round(amount), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * doc) } : {}) };
+    const sign = (debit !== refund) !== (amount < 0) ? 1 : -1;
+    return { debit: sign > 0 ? round(Math.abs(amount)) : 0, credit: sign > 0 ? 0 : round(amount), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * Math.abs(doc)) } : {}) };
   };
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },

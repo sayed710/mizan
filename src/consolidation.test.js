@@ -7,6 +7,9 @@ import { createCompany, ensureMainCompany } from './models/company.js';
 import { postEntry } from './models/ledger.js';
 import { closePeriod, consolidate, consolidatePeriod, consolidationModels, periodRates } from './models/consolidation.js';
 
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
+
 const previous = Object.fromEntries(Object.keys(consolidationModels).map((key) => [key, models[key]]));
 Object.assign(models, consolidationModels);
 after(() => {
@@ -42,7 +45,7 @@ function fixture({ method = 'full', ownership = 100 } = {}) {
 
 function entry(db, company_id, date, lines) {
   const posted = postEntry(db, { journal: 'MISC', date, lines });
-  return write(posted.db, 'account.move', posted.id, { company_id });
+  return force(posted.db, 'account.move', posted.id, { company_id });
 }
 
 const row = (result, code) => result.lines.find((line) => line.group_code === code);
