@@ -30,15 +30,31 @@ const tolerant = (step) => (db, ...args) => {
   }
 };
 
-/** Apply every scheduled action due at `at`; returns the same db object when nothing changed. */
-export function runScheduledJobs(db, at = today()) {
-  const accrued = (db.records['hr.leave.allocation'] ?? [])
-    .filter((a) => a.state === 'validate' && a.allocation_type === 'accrual')
-    .reduce((acc, a) => accrue(acc, a, at), db);
-  const depreciated = (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
-    .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), accrued);
-  const ran = tolerant(appraisalJobs)(tolerant(generateRecurringTasks)(tolerant(helpdeskJobs)(refreshProbabilities(assignAllTeams(publishDue(tolerant(processDue)(autoReconcile(runFollowUps(replenish(schedulePreventive(tolerant(subscriptionJobs)(depreciated, at), at)), at)), at), at), at)), at), at), at);
-  const checkedOut = tolerant((d) => autoCheckout(d, `${at}T00:00`))(tolerant(expireQuotes)(ran, at));
+// [app, job] in run order; a job runs only while its app is installed.
+const JOBS = [
+  ['timeoff', (db, at) => (db.records['hr.leave.allocation'] ?? []).filter((a) => a.state === 'validate' && a.allocation_type === 'accrual').reduce((acc, a) => accrue(acc, a, at), db)],
+  ['accounting', (db, at) => (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
+    .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
+  ['subscriptions', tolerant(subscriptionJobs)],
+  ['maintenance', schedulePreventive],
+  ['inventory', (db) => replenish(db)],
+  ['accounting', runFollowUps],
+  ['accounting', (db) => autoReconcile(db)],
+  ['automation', tolerant(processDue)],
+  ['social', publishDue],
+  ['crm', (db) => assignAllTeams(db)],
+  ['crm', refreshProbabilities],
+  ['helpdesk', tolerant(helpdeskJobs)],
+  ['project', tolerant(generateRecurringTasks)],
+  ['appraisals', tolerant(appraisalJobs)],
+  ['sales', tolerant(expireQuotes)],
+  ['attendances', tolerant((d, at) => autoCheckout(d, `${at}T00:00`))],
   // Referral stages follow their applicants (recruitment has no after-write hook).
-  return (checkedOut.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), checkedOut);
+  ['referral', (db) => (db.records['hr.referral'] ?? []).filter((r) => r.applicant_id).reduce((d, r) => tolerant(syncFromApplicant)(d, r.applicant_id), db)],
+];
+
+/** Apply every scheduled action due at `at` for installed apps; returns the same db object when nothing changed. */
+export function runScheduledJobs(db, at = today()) {
+  const uninstalled = new Set(db.settings?.uninstalled ?? []);
+  return JOBS.filter(([app]) => !uninstalled.has(app)).reduce((acc, [, job]) => job(acc, at), db);
 }

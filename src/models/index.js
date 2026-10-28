@@ -576,6 +576,13 @@ export function modelsForApps(appIds) {
   return out;
 }
 
+/** Models only uninstalled apps use (none of the installed apps reaches them); the REST API refuses them. */
+export function uninstalledModels(uninstalled = []) {
+  if (!uninstalled.length) return new Set();
+  const reachable = modelsForApps(apps.map((a) => a.id).filter((id) => !uninstalled.includes(id)));
+  return new Set(Object.keys(models).filter((m) => !reachable.has(m)));
+}
+
 /** "#/app/menu" of the first unfiltered menu showing `model` (used to open any record from anywhere). */
 export function targetOf(model) {
   for (const app of apps) {

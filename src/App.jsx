@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getDb } from './store.js';
 import { apps, findLeaf, targetOf } from './models/index.js';
 import { Home } from './Home.jsx';
 import { Navbar } from './Navbar.jsx';
@@ -46,7 +47,8 @@ export function App() {
     return null;
   }
   const app = apps.find((a) => a.id === route.app);
-  if (!app) return <Home />;
+  // An uninstalled app's menus are closed too, not only its home icon.
+  if (!app || (getDb().settings?.uninstalled ?? []).includes(app.id)) return <Home />;
   const leaf = findLeaf(app, route.menu);
   const base = `#/${app.id}/${leaf.key}`;
   const Page = PAGES[leaf.type];
