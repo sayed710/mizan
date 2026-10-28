@@ -13,6 +13,7 @@ import { seed } from '../src/seed.js';
 import { applyDiff, assignIds, diffDb, repairSeq } from '../src/sync.js';
 import { runOperation } from '../src/operations.js';
 import { backupSummary, checkBackup } from '../src/backup.js';
+import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -70,6 +71,8 @@ sql.exec(`
   CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL, created INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS idempotency (user_id INTEGER NOT NULL, key TEXT NOT NULL, model TEXT NOT NULL, record_id INTEGER NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (user_id, key));
+  CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, model TEXT NOT NULL, res_id INTEGER NOT NULL, action TEXT NOT NULL, changes TEXT NOT NULL);
+  CREATE INDEX IF NOT EXISTS audit_log_record ON audit_log (model, res_id);
 `);
 
 try { sql.exec('ALTER TABLE users ADD COLUMN apps TEXT'); } catch { /* column already exists */ }
@@ -81,7 +84,31 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 const storage = openStorage(sql);
 let db = loadRepaired(storage, (loaded) => repairSeq(migrateAppointments(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
-const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
+const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, action, changes) VALUES (?, ?, ?, ?, ?, ?)');
+/**
+ * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
+ * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
+ */
+const commitDb = (next, { full = false, actor = 'system', action = 'replace', audit = true } = {}) => {
+  const at = new Date().toISOString();
+  const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
+  // The log rows and the data are written in one transaction: a failed save leaves neither behind.
+  storage.save(full ? null : db, next, () => { for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  db = next;
+};
+/** Log an account-administration step (never a password, hash or key) in the same transaction as the step itself. */
+const withAudit = (actor, model, resId, action, changes, step) => {
+  sql.exec('BEGIN');
+  try {
+    const out = step();
+    logChange.run(new Date().toISOString(), actor, model, resId ?? 0, action, JSON.stringify(changes));
+    sql.exec('COMMIT');
+    return out;
+  } catch (e) {
+    sql.exec('ROLLBACK');
+    throw e;
+  }
+};
 /** Changes whenever the whole database is replaced (restore, reset): work started before cannot be applied after. */
 let epoch = Date.now();
 const RESTORED = 'The data was restored while this was running; nothing was saved, reload and try again';
@@ -90,28 +117,31 @@ const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
  * Live db access for long-running work: get() is the current db, commit(next) applies what changed between the
  * db get() returned and `next` to whatever the db is now, so concurrent edits are never reverted.
  */
-const storeFor = (opts) => {
+const storeFor = (opts, actor = opts.author) => {
   let base = db;
   let at = epoch;
   return {
     get: () => { base = db; at = epoch; return db; },
-    commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
+    commit: (next) => { sameEpoch(at); commitDb(applyDiff(db, diffDb(base, next), opts), { actor }); base = db; },
   };
 };
-if (!db) commitDb(seed(), { full: true });
+if (!db) commitDb(seed(), { full: true, action: 'seed' });
 installCustomFields(db.settings?.customFields);
 
 // ---- users & sessions ----
 const hashPassword = (password, salt = randomBytes(16).toString('hex')) => ({ salt, hash: scryptSync(password, salt, 64).toString('hex') });
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-function createUser({ login, name, password, isAdmin = false, apps = '' }) {
+function createUser({ login, name, password, isAdmin = false, apps = '' }, actor = 'system') {
   if (!/^[\w.@-]{3,64}$/.test(login ?? '')) throw new Error('Login must be 3-64 letters, digits or . @ - _');
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
-  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
+  const apps_ = allowed?.length ? allowed.join(',') : null;
+  const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_ };
+  const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
+    () => sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)').run(login, row.name, salt, hash, row.is_admin, apps_));
+  return made;
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
@@ -261,7 +291,7 @@ async function api(req, res, path) {
     recordFailure(`track:${ip}`);
     const out = trackingResponse(db, path, undefined, req.method);
     if (!out) return send(res, 404, { error: 'Not found' });
-    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }));
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), { author: 'Mailing tracker', isAdmin: false, allowed: new Set(['mailing.trace', 'mailing.mailing', 'mailing.contact', 'mail.blacklist']) }), { actor: 'public' });
     res.writeHead(out.status, out.headers);
     return res.end(out.body);
   }
@@ -277,7 +307,7 @@ async function api(req, res, path) {
     let raw;
     try { raw = await readRaw(req, MAX_WEBHOOK_BODY); } catch { return send(res, 413, { error: 'Request too large' }); }
     const out = handleWebhook(ENV, db, raw, req.headers['x-hub-signature-256']);
-    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), WEBHOOK_WRITE));
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), WEBHOOK_WRITE), { actor: 'whatsapp' });
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, siteOf(req));
@@ -285,7 +315,7 @@ async function api(req, res, path) {
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
     const out = (blogRead[1] === 'blog' ? publicBlogPost : publicForumThread)(db, blogRead[2]);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public', audit: false }); // view counters only: logging each visit would let crawlers fill the log
     return send(res, out.status, out.body);
   }
   const forumRoutes = { '/api/public/forum/ask': publicAsk, '/api/public/forum/answer': publicAnswer, '/api/public/forum/vote': publicVote };
@@ -296,7 +326,7 @@ async function api(req, res, path) {
     recordFailure(limitKey); // counts every post or vote: max 10 per client per 15 minutes
     const body = await readJson(req);
     const out = forumRoutes[path](db, body, ip);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   if (path === '/api/iot/ingest' && req.method === 'POST') {
@@ -307,7 +337,7 @@ async function api(req, res, path) {
     if (!body) { recordFailure(`iot:${ip}`); return send(res, 400, { error: 'Invalid JSON' }); }
     const next = ingestIot(db, token, body);
     if (!next) { recordFailure(`iot:${ip}`); return send(res, 401, { error: 'Unknown device token' }); }
-    commitDb(applyDiff(db, diffDb(db, next), { author: 'IoT', isAdmin: false }));
+    commitDb(applyDiff(db, diffDb(db, next), { author: 'IoT', isAdmin: false }), { actor: 'iot' });
     return send(res, 200, { ok: true });
   }
   if (path === '/api/public/apply' && req.method === 'POST') {
@@ -316,7 +346,7 @@ async function api(req, res, path) {
     recordFailure(`apply:${ip}`);
     const body = await readJson(req);
     const out = publicApply(db, body);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   // Event registrations and appointment bookings: same CSRF header and per-client limit as job applications.
@@ -327,7 +357,7 @@ async function api(req, res, path) {
     recordFailure(`form:${ip}`);
     const body = await readJson(req);
     const out = publicForms[path](db, body);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   // Live chat: starts count like public forms; messages, polls and ratings are limited on wrong tokens.
@@ -337,7 +367,7 @@ async function api(req, res, path) {
     recordFailure(`chat:${ip}`);
     const body = await readJson(req);
     const out = livechatStart(db, body);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   const chatRoutes = { 'POST /api/public/livechat/message': livechatMessage, 'POST /api/public/livechat/rate': livechatRate, 'GET /api/public/livechat/poll': livechatPoll };
@@ -353,7 +383,7 @@ async function api(req, res, path) {
     }
     const out = chatRoute(db, input);
     if (out.denied) recordFailure(`chatauth:${ip}`);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/order' && req.method === 'POST') {
@@ -362,7 +392,7 @@ async function api(req, res, path) {
     recordFailure(`order:${ip}`); // counts every order: max 10 per client per 15 minutes
     const body = await readJson(req);
     const out = publicOrder(db, body);
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: 'public' });
     return send(res, out.status, out.body);
   }
   // Cart prices are read-only (computed server-side); order status is limited on wrong tokens like live chat.
@@ -404,7 +434,7 @@ async function api(req, res, path) {
     // Reads see what the web client sees; writes are checked against the stricter write set.
     const reading = req.method === 'GET';
     const out = handleApi({ method: req.method, path, query: new URL(req.url, 'http://x').searchParams, body, db: reading ? visibleDb(keyUser) : db, user: keyUser, allowed: reading ? readableFor(keyUser) : allowedFor(keyUser) });
-    if (out.db) commitDb(out.db);
+    if (out.db) commitDb(out.db, { actor: `api:${keyUser.login}` });
     if (idemKey && out.status === 201) sql.prepare('INSERT INTO idempotency VALUES (?, ?, ?, ?, ?)').run(keyUser.id, idemKey, path.split('/')[3], out.body.id, Date.now());
     return send(res, out.status, out.body);
   }
@@ -442,10 +472,10 @@ async function api(req, res, path) {
       const snapshot = db;
       const at = epoch;
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
-      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: storeAllowed }));
+      const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: storeAllowed }, user.login));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
       sameEpoch(at);
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }), { actor: user.login });
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
@@ -463,12 +493,12 @@ async function api(req, res, path) {
       const snapshot = db;
       const at = epoch;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }), body, lastBaseUrl)
+        ? await sendMailing(SMTP, storeFor({ author: user.name, isAdmin: user.isAdmin, login: user.login, allowed }, user.login), body, lastBaseUrl)
         : await sendDocument(SMTP, db, user, body);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
       const stored = recordSent(db, snapshot, out.db, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed });
-      commitDb(stored.db);
+      commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);
     } catch (e) {
       return send(res, 502, { error: `Email could not be sent: ${e.message}` });
@@ -481,6 +511,19 @@ async function api(req, res, path) {
   }
   const stamp = () => ({ 'X-Mizan-Epoch': String(epoch) });
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user), stamp());
+  // Audit log: admins only, newest first, optionally narrowed to one model or one record.
+  if (path === '/api/audit' && req.method === 'GET') {
+    if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    const limit = Math.min(Math.max(Number(q.get('limit')) || 100, 1), 1000);
+    // Newest first; pass the last id received as `before` for the next, older page.
+    const before = q.has('before') ? Number(q.get('before')) : null;
+    if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
+    const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes FROM audit_log
+      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
+      .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit, before);
+    return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
+  }
   if (path === '/api/diff' && req.method === 'POST') {
     const body = await readJson(req);
     let remapped;
@@ -490,7 +533,7 @@ async function api(req, res, path) {
     try {
       const assigned = assignIds(db, body);
       remapped = assigned.remapped;
-      commitDb(applyDiff(db, assigned.diff, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: allowedFor(user) }));
+      commitDb(applyDiff(db, assigned.diff, { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: allowedFor(user) }), { actor: user.login });
     } catch (e) {
       return send(res, e.conflict ? 409 : 400, { error: e.message, db: visibleDb(user) }, stamp());
     }
@@ -502,7 +545,7 @@ async function api(req, res, path) {
     if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
     try {
       const out = runOperation(db, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
-      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: out.allowed }));
+      commitDb(applyDiff(db, diffDb(db, out.db), { author: user.name, isAdmin: user.isAdmin, login: user.login, allowed: out.allowed }), { actor: user.login });
       return send(res, 200, out.reply);
     } catch (e) {
       return send(res, e.status ?? 400, { error: e.message });
@@ -516,7 +559,7 @@ async function api(req, res, path) {
       const summary = backupSummary(db, restored);
       // A dry run only reports what would change; the real restore needs the typed confirmation.
       if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
-      commitDb(restored, { full: true });
+      commitDb(restored, { full: true, actor: user.login, action: 'restore' });
       epoch = Math.max(epoch + 1, Date.now());
       console.info(`Backup restored by ${user.login}: ${summary.restored} records (was ${summary.current})`);
       return send(res, 200, { ok: true, ...summary });
@@ -533,7 +576,7 @@ async function api(req, res, path) {
     const saved = `${DB_PATH}.before-reset-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
     console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
-    commitDb(seed(), { full: true });
+    commitDb(seed(), { full: true, actor: user.login, action: 'reset' });
     epoch = Math.max(epoch + 1, Date.now());
     return send(res, 200, db, { 'X-Mizan-Epoch': String(epoch) });
   }
@@ -542,12 +585,16 @@ async function api(req, res, path) {
     if (req.method === 'POST') {
       const { name } = await readJson(req);
       const key = `mzn_${randomBytes(24).toString('base64url')}`;
-      sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
+      const label = String(name || 'API key').slice(0, 60);
+      const created = Date.now();
+      withAudit(user.login, 'auth.api_key', user.id, 'create', { name: [null, label], created: [null, created] },
+        () => sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, label, created));
       return send(res, 201, { key }); // shown once; only the hash is stored
     }
     if (req.method === 'DELETE') {
       const created = Number(new URL(req.url, 'http://x').searchParams.get('created'));
-      sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created);
+      withAudit(user.login, 'auth.api_key', user.id, 'delete', { created: [created, null] },
+        () => sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created));
       return send(res, 200, { ok: true });
     }
   }
@@ -556,7 +603,7 @@ async function api(req, res, path) {
     if (req.method === 'GET') return send(res, 200, sql.prepare('SELECT id, login, name, is_admin AS isAdmin, apps FROM users ORDER BY id').all());
     if (req.method === 'POST') {
       try {
-        createUser(await readJson(req));
+        createUser(await readJson(req), user.login);
       } catch (e) {
         return send(res, 400, { error: /UNIQUE/.test(e.message) ? 'Login already exists' : e.message });
       }
@@ -638,7 +685,7 @@ const JOB_INTERVAL_MS = 60 * 60 * 1000;
 const runJobs = () => {
   try {
     const next = runScheduledJobs(db, undefined, { onError: (job, e) => console.error(`Scheduled job ${job} failed:`, e) });
-    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }));
+    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler' }), { actor: 'scheduler' });
   } catch (e) {
     console.error('Scheduled job failed:', e);
   }

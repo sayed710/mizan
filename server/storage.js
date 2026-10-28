@@ -35,7 +35,8 @@ export function openStorage(sql) {
     }
   };
 
-  const writeAll = (db) => transaction(() => {
+  const writeAll = (db, alongside = () => {}) => transaction(() => {
+    alongside();
     q.clearRecords.run();
     q.clearMessages.run();
     for (const [model, recs] of Object.entries(db.records)) for (const r of recs) q.upsert.run(model, r.id, JSON.stringify(r));
@@ -61,11 +62,12 @@ export function openStorage(sql) {
       return { records, seq, settings, messages: q.allMessages.all().map((row) => JSON.parse(row.data)) };
     },
 
-    /** Persist the transition prev → next (full rewrite when prev is null). */
-    save(prev, next) {
-      if (!prev) return writeAll(next);
+    /** Persist the transition prev → next (full rewrite when prev is null); `alongside` runs in the same transaction. */
+    save(prev, next, alongside = () => {}) {
+      if (!prev) return writeAll(next, alongside);
       const d = diffDb(prev, next);
       transaction(() => {
+        alongside();
         for (const [model, recs] of Object.entries(d.upserts)) for (const r of recs) q.upsert.run(model, r.id, JSON.stringify(r));
         for (const [model, ids] of Object.entries(d.deletes)) for (const id of ids) q.remove.run(model, id);
         for (const m of d.messages) q.addMessage.run(m.id, m.model, m.res_id, JSON.stringify(m));
