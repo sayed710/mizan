@@ -13,6 +13,7 @@ export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
+export const getActiveCompany = () => activeCompany;
 const inCompany = (model, r) => !activeCompany || SHARED_MODELS.has(model) || (r.company_id ?? 1) === activeCompany;
 
 const withComputed = (fields, r, db) => {

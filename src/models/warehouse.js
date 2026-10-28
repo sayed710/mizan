@@ -6,6 +6,7 @@ import { canValidatePicking } from './qualityplus.js';
 import { locationStock } from './routes.js';
 import { lineToStockQty } from './uom.js';
 import { pad } from './common.js';
+import { transferQuants } from './quant.js';
 
 const locations = [
   ['lot_stock_id', 'Stock'], ['wh_input_stock_loc_id', 'Input'],
@@ -155,7 +156,7 @@ export function validateWarehousePicking(db, picking) {
   const before = new Set(search(db, 'stock.picking').map((p) => p.id));
   const baseValidate = salesModels['stock.picking'].form.buttons.find((b) => b.label === 'Validate');
   let next = r.picking_type === 'internal'
-    ? validatePicking(db, r, { apply: (d) => d }).db
+    ? validatePicking(db, r, { apply: (d, p) => transferQuants(d, p) }).db
     : baseValidate.run(db, r).db;
   const done = read(next, 'stock.picking', r.id).move_ids;
   if (suffix.length) next = write(next, 'stock.picking', suffix[0].id, { state: 'ready', move_ids: done.map((l) => ({ ...l })) });

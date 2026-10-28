@@ -5,6 +5,7 @@ import { create, search } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
 import { migrateDocumentTags } from './models/signplus.js';
 import { migrateWorkorderTimes } from './models/workorder.js';
+import { ensureQuants } from './models/quant.js';
 
 /** Tag lists stored as names (['Tax']) become lines pointing at documents.tag records, creating missing tags. */
 function documentTagLines(db) {
@@ -35,6 +36,7 @@ export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
   { version: 3, name: 'Work orders: date-only times to datetimes', up: migrateWorkorderTimes },
+  { version: 4, name: 'Stock: initialize located quants from done transfers and opening stock', up: ensureQuants },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

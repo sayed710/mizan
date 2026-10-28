@@ -3,6 +3,7 @@ import { adjustQuantity, moveValued, revalue } from './valuation.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
+import { moveQuantStock } from './quant.js';
 import { checkCreditLimit } from './finance.js';
 import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
@@ -15,11 +16,7 @@ import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, product
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
 export function moveStock(db, lines = [], sign) {
-  return lines.reduce((acc, l) => {
-    const p = read(acc, 'product', l.product_id);
-    if (!p || p.type !== 'goods') return acc;
-    return write(acc, 'product', p.id, { qty_available: (Number(p.qty_available) || 0) + sign * (Number(l.qty) || 0) });
-  }, db);
+  return moveQuantStock(db, lines, sign);
 }
 
 /** Create a ready transfer (delivery or receipt) for the stockable lines of an order; no-op when nothing to move. */
@@ -305,7 +302,8 @@ export const salesModels = {
                   : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
                 return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
               });
-              return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id });
+              return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
+                stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
             } });
             let next = out.db;
             if (r.purchase_id && !r.return_of && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
@@ -403,7 +401,8 @@ export const salesModels = {
         },
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
-      smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' }],
+      smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
+        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' }],
       groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
