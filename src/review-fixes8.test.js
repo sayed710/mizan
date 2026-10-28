@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
+import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { accountId, invoiceLines, postEntry, profitAndLoss } from './models/ledger.js';
@@ -49,13 +50,13 @@ test('Update Quantity and rentals keep stock valuation usable', () => {
     delete globalThis.prompt;
   }
   assert.equal(read(db, 'product', goods.id).qty_available, before + 2);
-  assert.doesNotThrow(() => receive(db, goods.id, 1, 10, { date: '2026-12-01' }));
+  assert.doesNotThrow(() => receive(db, goods.id, 1, 10, { date: addDays(today(), 1) }));
   assert.equal(read(adjustQuantity(db, goods.id, 0), 'product', goods.id).qty_available, 0);
   const rental = create(db, 'sale.rental', { product_id: goods.id, partner_id: 1, qty: 2, state: 'reserved' });
   const pickup = models['sale.rental'].form.buttons.find((b) => b.label === 'Pickup');
   const picked = pickup.run(rental.db, read(rental.db, 'sale.rental', rental.id)).db;
   assert.equal(read(picked, 'product', goods.id).qty_rented, 2);
-  assert.doesNotThrow(() => receive(picked, goods.id, 1, 10, { date: '2026-12-01' }));
+  assert.doesNotThrow(() => receive(picked, goods.id, 1, 10, { date: addDays(today(), 1) }));
 });
 
 test('posting a vendor bill refuses billing more than was received unless forced', async () => {

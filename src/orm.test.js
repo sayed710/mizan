@@ -98,7 +98,10 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   assert.equal(inv.state, 'draft');
   db = runButton(db, 'account.move', inv.id, 'Confirm').db;
   const posted = read(db, 'account.move', inv.id);
-  assert.match(posted.name, /^INV\/\d{4}\/00003$/);
+  // Numbering restarts each year; the seed's invoices may belong to the previous one.
+  const year = posted.invoice_date.slice(0, 4);
+  const numbered = search(db, 'account.move').filter((m) => m.id !== inv.id && m.name?.startsWith(`INV/${year}/`)).length;
+  assert.equal(posted.name, `INV/${year}/${String(numbered + 1).padStart(5, '0')}`);
   assert.equal(posted.payment_state, 'not_paid');
   db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');

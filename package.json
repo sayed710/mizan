@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "start": "node server/index.js",
     "pretest": "vite build",
-    "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\""
+    "test": "node --test \"src/**/*.test.js\" \"server/**/*.test.js\"",
+    "test:future": "node --import ./scripts/fake-now.mjs --test \"src/**/*.test.js\" \"server/**/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
