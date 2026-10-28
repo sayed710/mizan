@@ -5,9 +5,14 @@ import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
-import { Avatar, display, FieldInput, money } from '../ui.jsx';
+import { Avatar, display, FieldInput, money, SimulatedNote } from '../ui.jsx';
+import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
+import { duplicateValues } from '../duplicate.js';
+
+/** Integrations whose buttons fall back to only recording a send when not configured. */
+const SENDING = { smtp: 'Email', sms: 'SMS' };
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -47,13 +52,13 @@ function newDefaults(db, model, leaf, params) {
   return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
 }
 
-function Field({ db, model, name, value, onChange, readonly }) {
+function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
   return (
     <div className="field">
       <label htmlFor={id}>{t(field.label)}{field.required && <span className="req" aria-hidden="true">*</span>}</label>
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} /></div>
+      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} record={record} /></div>
     </div>
   );
 }
@@ -121,9 +126,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
-    const { id: _id, name, ...vals } = rec;
-    const copy = { ...vals, ...(models[model].fields.name?.readonly ? {} : { name: `${name ?? ''} (copy)` }) };
-    const res = create(getDb(), model, models[model].fields.name?.readonly ? { ...copy, ...models[model].defaults?.(nextId(getDb(), model)) } : copy);
+    const res = create(getDb(), model, duplicateValues(model, rec));
     commit(res.db);
     location.hash = `${base}/${res.id}${query}`;
   };
@@ -249,16 +252,21 @@ export function FormView({ leaf, id, base, params }) {
   };
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
-  const runButton = (b) => {
+  const runButton = async (b) => {
     const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
     const need = b.requires ?? (b.email ? 'smtp' : 'server');
-    if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
+    const live = endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need]);
+    // Without the integration the button only records the send: say so, ask first and leave a trace.
+    const channel = !live && endpoint && SENDING[need];
+    if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
+    const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
+    if (live) {
       const savedId = save();
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
-        .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
+        .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
       if (b.prompt) {
-        const text = prompt(t(b.prompt), '');
+        const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
         if (text != null && text.trim()) send({ text });
         return;
       }
@@ -276,14 +284,22 @@ export function FormView({ leaf, id, base, params }) {
     }
     if (b.upload) { fail(new Error(t('This needs the server with AI enabled'))); return; }
     if (!b.run) {
-      if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
+      const id = save(b.vals);
+      if (id != null) noteUnsent(id);
+      if (id != null && b.vals.active === false) location.hash = backHash;
       return;
     }
     const savedId = save();
     if (savedId == null) return;
     try {
+      if (b.posts && isServer()) {
+        const out = await serverAction('/api/button', { model, id: savedId, label: b.label });
+        if (out.go) location.hash = out.go;
+        return;
+      }
       const res = b.run(getDb(), read(getDb(), model, savedId));
       commit(res.db);
+      noteUnsent(savedId);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
@@ -296,7 +312,7 @@ export function FormView({ leaf, id, base, params }) {
 
   const statusKey = def.form.statusbar;
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current)));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const resolve = (v) => (typeof v === 'function' ? v(current) : v);
@@ -359,6 +375,7 @@ export function FormView({ leaf, id, base, params }) {
           )}
 
           {error && <div className="alert" role="alert">{error}</div>}
+          <SimulatedNote text={def.simulated} />
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
@@ -373,7 +390,7 @@ export function FormView({ leaf, id, base, params }) {
             <div className="groups">
               {def.form.groups.map((g, i) => (
                 <div key={i} className="group">
-                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} />)}
+                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
                 </div>
               ))}
             </div>
@@ -391,13 +408,13 @@ export function FormView({ leaf, id, base, params }) {
                         readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
                     )
                     // Plain fields in a tab get a label, like fields in the header groups.
-                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} />))}
+                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}
                   {footer.length > 0 && tab === 0 && (
                     <dl className="totals">
                       {footer.map((f) => (
                         <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
                           <dt>{t(def.fields[f].label)}</dt>
-                          <dd>{display(db, def.fields[f], current[f]) || money(0)}</dd>
+                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
                         </div>
                       ))}
                     </dl>

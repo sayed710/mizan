@@ -1,4 +1,5 @@
 // Model registry + application menus. Every view is rendered from these definitions.
+import { read } from '../orm.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
 import { accountingModels } from './accounting.js';
@@ -79,13 +80,36 @@ import { companyModels, withCompany } from './company.js';
 import { warehouseModels } from './warehouse.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { declareWorkflowFields } from './workflowFields.js';
 
 export { today } from './common.js';
 
 export const models = withCompany({ ...crmModels, ...salesModels, ...accountingModels, ...workModels, ...moreModels, ...mailModels, ...payrollModels, ...extraModels, ...mailingModels, ...apps2Models, ...apps3Models, ...bankModels, ...pricelistModels, ...apps4Models, ...logisticsModels, ...routeModels, ...financeModels, ...currencyModels, ...batchModels, ...termModels, ...deferredModels, ...paymentModels, ...helpdeskModels, ...timeoffModels, ...posModels, ...assetModels, ...reconcileModels, ...taxModels, ...payModels, ...elearningModels, ...surveyModels, ...smsModels, ...automationModels, ...socialModels, ...spreadsheetModels, ...loanModels, ...mrpModels, ...crmTeamModels, ...projectPlusModels, ...fsmModels, ...fleetPlusModels, ...qualityPlusModels, ...maintPlusModels, ...eventsPlusModels, ...recruitPlusModels, ...rentalPlusModels, ...loyaltyModels, ...approvalsPlusModels, ...posPlusModels, ...planningPlusModels, ...signPlusModels, ...documentsPlusModels, ...analyticPlusModels, ...timesheetPlusModels, ...appraisalPlusModels, ...workorderModels, ...expensePlusModels, ...purchasePlusModels, ...subscriptionPlusModels, ...valuationModels, ...attendancePlusModels, ...skillsPlusModels, ...closingModels, ...websitePlusModels, ...repairPlusModels, ...billControlModels, ...frontdeskPlusModels, ...uomModels, ...knowledgeModels, ...lunchModels, ...livechatModels, ...ecommerceModels, ...quotePlusModels, ...blogModels, ...appointmentModels, ...whatsappModels, ...companyModels, ...warehouseModels, ...consolidationModels });
-models['hr.leave'].guard = leaveGuard;
 
-export const viewsOf = (model) => models[model].views ?? ['kanban', 'list'];
+// A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
+// a server action) runs through this check, so a hidden transition cannot run.
+// The record is judged as stored, so a stale copy cannot pass for its old state.
+for (const [name, model] of Object.entries(models)) {
+  for (const b of model.form?.buttons ?? []) {
+    if (!b.when || !b.run || b.run.checked) continue;
+    const run = b.run;
+    b.run = Object.assign((db, rec, ...rest) => {
+      const current = (rec?.id && read(db, name, rec.id)) || rec;
+      if (!b.when(current, db)) throw new Error(`${b.label} is not available for this record in its current state`);
+      return run(db, current, ...rest);
+    }, { checked: true });
+  }
+}
+models['hr.leave'].guard = leaveGuard;
+declareWorkflowFields(models);
+
+// Views that need their own spec are offered only when the model has one (a missing kanban spec used to crash the screen).
+const SPEC_VIEWS = ['kanban', 'calendar', 'gantt'];
+export const viewsOf = (model) => {
+  const def = models[model];
+  const views = (def.views ?? ['kanban', 'list']).filter((v) => !SPEC_VIEWS.includes(v) || def[v]);
+  return views.length ? views : ['list'];
+};
 
 const customers = { key: 'customers', label: 'Customers', model: 'res.partner' };
 const vendors = { key: 'vendors', label: 'Vendors', model: 'res.partner' };
@@ -527,7 +551,7 @@ const allApps = [
 
 // Home-screen order: communication, sales, finance, services, supply chain, HR, settings.
 const ORDER = ['discuss', 'calendar', 'appointments', 'todo', 'knowledge', 'contacts', 'crm', 'sales', 'dashboards', 'subscriptions', 'rental',
-  'pos', 'kitchen', 'accounting', 'documents', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
+  'pos', 'kitchen', 'accounting', 'documents', 'spreadsheet', 'project', 'timesheets', 'planning', 'helpdesk', 'website', 'marketing', 'events', 'purchase', 'inventory',
   'manufacturing', 'shopfloor', 'barcode', 'quality', 'maintenance', 'repairs', 'fieldservice', 'sign', 'employees', 'attendances',
   'recruitment', 'timeoff', 'appraisals', 'payroll', 'expenses', 'fleet', 'lunch', 'approvals', 'frontdesk', 'surveys', 'elearning', 'livechat', 'whatsapp', 'sms', 'social', 'automation', 'plm', 'rooms', 'referral', 'skills', 'esg', 'equity', 'recycle', 'phone', 'iot', 'studio', 'apps', 'settings'];
 
@@ -537,7 +561,7 @@ export const APP_INFO = {
   todo: ['Productivity', 'Organize your work'], knowledge: ['Productivity', 'Centralize your knowledge'], contacts: ['Sales', 'Centralize your address book'],
   crm: ['Sales', 'Track leads and close opportunities'], sales: ['Sales', 'From quotations to invoices'], dashboards: ['Productivity', 'Key figures across apps'],
   subscriptions: ['Sales', 'Recurring revenue and renewals'], rental: ['Sales', 'Rental contracts, pickups and returns'], pos: ['Sales', 'Shop checkout and payments'], kitchen: ['Sales', 'Send POS orders to the kitchen screen'],
-  accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'],
+  accounting: ['Accounting', 'Invoices, payments and financial reports'], documents: ['Productivity', 'Collect and organize documents'], spreadsheet: ['Productivity', 'Spreadsheets on live business data'],
   project: ['Services', 'Tasks and projects'], timesheets: ['Services', 'Track time on tasks'], planning: ['Services', 'Employee schedules'],
   helpdesk: ['Services', 'Solve customer tickets'], website: ['Website', 'Website builder and online shop'], marketing: ['Marketing', 'Design, send and track emails'],
   events: ['Marketing', 'Organize events and registrations'], purchase: ['Supply Chain', 'Purchase orders and vendor bills'], inventory: ['Supply Chain', 'Stock and logistics'],
@@ -559,13 +583,58 @@ export const apps = [...allApps].sort((a, b) => ORDER.indexOf(a.id) - ORDER.inde
 export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
+/** Accounting, HR and company records: only an app that shows them in its menus may change them. */
+const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
+  'account.bank.statement.line', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
+/** Private employee fields, and the menu models whose users may see them. */
+const PRIVATE_FIELDS = {
+  'hr.employee': {
+    ...Object.fromEntries(['wage', 'private_email', 'private_phone', 'private_address', 'birthday', 'place_of_birth', 'gender', 'marital', 'children',
+      'nationality', 'identification_id', 'passport_id', 'visa_no', 'permit_no', 'visa_expire', 'bank_account', 'emergency_contact', 'emergency_phone',
+      'departure_reason'].map((f) => [f, HR_OWNERS])),
+    // ponytail: the attendance kiosk still checks PINs in the browser; move that check to the server.
+    pin: [...HR_OWNERS, 'hr.attendance'],
+    badge_id: [...HR_OWNERS, 'hr.attendance'],
+  },
+};
 
-/** Models a user restricted to `appIds` may read/write: their menus' models, related models, shared basics. */
-export function modelsForApps(appIds) {
+/** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
+export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year'];
+
+/** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
+export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));
+
+/** Models on the menus of `appIds`, plus the shared basics. */
+export function menuModelsForApps(appIds) {
   const base = new Set(SHARED);
   for (const app of apps.filter((a) => appIds.includes(a.id))) {
     for (const leaf of leavesOf(app)) if (leaf.model) base.add(leaf.model);
   }
+  return base;
+}
+
+/** Models a user restricted to `appIds` may write: the readable ones, minus accounting, HR and company records their apps don't show. */
+export function writableModelsForApps(appIds) {
+  const base = menuModelsForApps(appIds);
+  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
+}
+
+/** `db` without the private employee fields the apps in `appIds` may not see. */
+export function redactForApps(db, appIds) {
+  const base = menuModelsForApps(appIds);
+  let records = db.records;
+  for (const [model, fields] of Object.entries(PRIVATE_FIELDS)) {
+    const hidden = Object.keys(fields).filter((f) => !fields[f].some((m) => base.has(m)));
+    if (!hidden.length || !records[model]) continue;
+    records = { ...records, [model]: records[model].map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !hidden.includes(k)))) };
+  }
+  return records === db.records ? db : { ...db, records };
+}
+
+/** Models a user restricted to `appIds` may read: their menus' models, related models, shared basics. */
+export function modelsForApps(appIds) {
+  const base = menuModelsForApps(appIds);
   const out = new Set(base);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {

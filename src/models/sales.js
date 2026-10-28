@@ -4,11 +4,12 @@ import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { checkCreditLimit } from './finance.js';
-import { pickingAvailability, reservePicking, returnPicking, validatePicking } from './picking.js';
+import { pickingAvailability, reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
+import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, productLines, today } from './common.js';
 
@@ -26,32 +27,128 @@ export function createPicking(db, args) {
   return createOrderTransfers(db, args);
 }
 
+const stockUnitOf = (db, l) => {
+  const p = read(db, 'product', l.product_id);
+  return p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+};
+/** An order-line quantity in the product's stock unit (and back), unrounded. */
+const toStock = (db, l, qty) => (l.uom_id ? convert(db, qty, l.uom_id, stockUnitOf(db, l), { round: false }) : qty);
+const fromStock = (db, l, qty) => (l.uom_id ? convert(db, qty, stockUnitOf(db, l), l.uom_id, { round: false }) : qty);
+/** The order line a stock move came from (moves of order transfers carry `so_line`), when it still matches. */
+const sourceLine = (order, m) => (Number.isInteger(m.so_line) && order.order_line[m.so_line]?.product_id === m.product_id ? m.so_line : null);
+
 /**
- * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced), filling lines in order.
- * ponytail: matches by product, so two lines of the same product share the quantity first-come.
+ * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced). A delivered move goes to the
+ * line it came from; everything else fills the matching lines in order.
+ * ponytail: invoices carry no line link, so two invoiced lines of the same product share the quantity first-come.
  */
 function addLineQty(db, model, order, field, moves) {
   const left = new Map();
-  const stockUnit = (l) => {
-    const p = read(db, 'product', l.product_id);
-    return p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
-  };
-  const stockQty = (l, qty) => l.uom_id ? convert(db, qty, l.uom_id, stockUnit(l), { round: false }) : qty;
+  const lines = order.order_line.map((l) => ({ ...l }));
+  const room = (l) => toStock(db, l, (Number(l.qty) || 0) - (Number(l[field]) || 0));
+  const put = (l, take) => { l[field] = (Number(l[field]) || 0) + fromStock(db, l, take); };
   for (const m of moves) {
     const qty = Number(m.qty) || 0;
-    left.set(m.product_id, (left.get(m.product_id) ?? 0) + (field === 'qty_invoiced' ? stockQty(m, qty) : qty));
+    const ix = field === 'qty_delivered' ? sourceLine(order, m) : null;
+    if (ix == null) { left.set(m.product_id, (left.get(m.product_id) ?? 0) + (field === 'qty_invoiced' ? toStock(db, m, qty) : qty)); continue; }
+    const take = Math.max(0, Math.min(room(lines[ix]), qty));
+    if (take) put(lines[ix], take);
+    if (qty - take > 1e-9) left.set(m.product_id, (left.get(m.product_id) ?? 0) + qty - take);
   }
-  const order_line = order.order_line.map((l) => {
-    const room = stockQty(l, (Number(l.qty) || 0) - (Number(l[field]) || 0));
-    const take = Math.max(0, Math.min(room, left.get(l.product_id) ?? 0));
+  for (const l of lines) {
+    const take = Math.max(0, Math.min(room(l), left.get(l.product_id) ?? 0));
     left.set(l.product_id, (left.get(l.product_id) ?? 0) - take);
-    const qty = l.uom_id ? convert(db, take, stockUnit(l), l.uom_id, { round: false }) : take;
-    return take ? { ...l, [field]: (Number(l[field]) || 0) + qty } : l;
-  });
-  return write(db, model, order.id, { order_line });
+    if (take) put(l, take);
+  }
+  return write(db, model, order.id, { order_line: lines });
+}
+
+/**
+ * Take returned quantities (stock units) back off the order lines' `field`: from the line each move came from, and
+ * anything unlinked from the last matching line backwards.
+ */
+function removeLineQty(db, model, order, field, moves) {
+  const left = new Map();
+  const lines = order.order_line.map((l) => ({ ...l }));
+  const have = (l) => toStock(db, l, Number(l[field]) || 0);
+  const take = (l, qty) => { l[field] = (Number(l[field]) || 0) - fromStock(db, l, qty); };
+  for (const m of moves) {
+    const qty = Number(m.qty) || 0;
+    const ix = sourceLine(order, m);
+    const here = ix == null ? 0 : Math.min(have(lines[ix]), qty);
+    if (here) take(lines[ix], here);
+    if (qty - here > 1e-9) left.set(m.product_id, (left.get(m.product_id) ?? 0) + qty - here);
+  }
+  for (const l of [...lines].reverse()) {
+    const n = Math.min(have(l), left.get(l.product_id) ?? 0);
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) - n);
+    if (n) take(l, n);
+  }
+  return write(db, model, order.id, { order_line: lines });
+}
+
+/** Per product, the order quantity not delivered yet, in stock units. */
+function undelivered(db, order) {
+  const left = new Map();
+  for (const l of order.order_line ?? []) {
+    const p = read(db, 'product', l.product_id);
+    const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
+    const qty = Math.max(0, (Number(l.qty) || 0) - (Number(l.qty_delivered) || 0));
+    left.set(l.product_id, (left.get(l.product_id) ?? 0) + (l.uom_id ? convert(db, qty, l.uom_id, stock) : qty)); // rounded up like the transfer demand
+  }
+  return left;
+}
+
+/**
+ * Why a transfer cannot be validated with these done quantities: a delivery may not ship more than its sales order
+ * still has to deliver, and returns of one transfer may not exceed what it moved.
+ */
+export function overDeliveryError(db, picking) {
+  const done = new Map();
+  for (const l of picking.move_ids ?? []) {
+    const qty = l.quantity == null || l.quantity === '' ? Number(l.qty) || 0 : Number(l.quantity) || 0;
+    done.set(l.product_id, (done.get(l.product_id) ?? 0) + qty);
+  }
+  const name = (id) => read(db, 'product', id)?.name ?? `#${id}`;
+  if (picking.return_of) {
+    const original = read(db, 'stock.picking', picking.return_of);
+    const left = original ? returnableQty(db, original) : new Map();
+    // returnableQty already counts this return's demand; its done quantity must fit what that leaves plus the demand.
+    for (const l of picking.move_ids ?? []) left.set(l.product_id, (left.get(l.product_id) ?? 0) + (Number(l.qty) || 0));
+    const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
+    return over ? `Returning ${over[1]} ${name(over[0])} is more than ${original?.name ?? 'the original transfer'} has left to return (${left.get(over[0]) ?? 0})` : null;
+  }
+  const order = picking.picking_type === 'outgoing' && picking.sale_id && read(db, 'sale.order', picking.sale_id);
+  if (!order) return null;
+  const left = undelivered(db, order);
+  const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
+  return over ? `Delivering ${over[1]} ${name(over[0])} is more than ${order.name} still has to deliver (${left.get(over[0]) ?? 0})` : null;
 }
 
 /** Recompute an order's invoiced quantities from its invoices/bills that are not cancelled (`move` is one of them). */
+/**
+ * Cancel a sale or purchase order, also once confirmed (FLOW-017): its open transfers and draft invoices or bills are
+ * cancelled with it. Delivered or received goods must be returned, and posted invoices or bills credited, first.
+ */
+export function cancelOrder(db, model, order) {
+  const field = model === 'sale.order' ? 'sale_id' : 'purchase_id';
+  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0)) {
+    throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
+  }
+  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
+  // Credit notes point at their invoice by name (invoice_origin), not at the order.
+  const invoices = moves.filter((m) => m.state === 'posted');
+  const names = new Set(invoices.map((m) => m.name));
+  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_refund', 'in_refund'].includes(m.move_type) && (m[field] === order.id || names.has(m.invoice_origin)));
+  const totalOf = (list) => list.reduce((sum, m) => sum + amounts(m.invoice_line_ids ?? []).total, 0);
+  const posted = totalOf(invoices.filter((m) => !['out_refund', 'in_refund'].includes(m.move_type))) - totalOf(refunds);
+  if (Math.abs(posted) > 0.005) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
+  const open = search(db, 'stock.picking').filter((p) => p[field] === order.id && ['draft', 'waiting', 'ready'].includes(p.state));
+  let next = open.reduce((acc, p) => write(acc, 'stock.picking', p.id, { state: 'cancel' }), db);
+  next = moves.filter((m) => m.state === 'draft').reduce((acc, m) => write(acc, 'account.move', m.id, { state: 'cancel' }), next);
+  return write(next, model, order.id, { state: 'cancel' });
+}
+
 export function syncInvoicedQty(db, move) {
   const [model, field] = move.sale_id ? ['sale.order', 'sale_id'] : move.purchase_id ? ['purchase.order', 'purchase_id'] : [];
   const order = model && read(db, model, move[field]);
@@ -67,7 +164,7 @@ function invoiceFrom(db, order, moveType, originField) {
   const lines = order.order_line
     .map((l) => ({ ...l, qty: invoiceable(l) - (Number(l.qty_invoiced) || 0) }))
     .filter((l) => l.qty > 0)
-    .map(({ qty_invoiced, qty_delivered, ...l }) => l);
+    .map(({ qty_invoiced, qty_delivered, purchase_method, ...l }) => l);
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {
@@ -78,6 +175,7 @@ function invoiceFrom(db, order, moveType, originField) {
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     fiscal_position_id: order.fiscal_position_id ?? null,
+    ...(order.currency_id ? { currency_id: order.currency_id } : {}),
     [originField]: order.id,
     invoice_line_ids: lines,
   });
@@ -148,7 +246,7 @@ export const salesModels = {
         type: 'one2many',
         label: 'Operations',
         // qty is the demand; quantity is what was actually done (empty = all of the demand).
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' } },
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, so_line: { type: 'integer', label: 'Order Line', hidden: true } },
         newLine: () => ({ product_id: null, qty: 1, quantity: null, lot_name: '' }),
       },
     },
@@ -176,17 +274,21 @@ export const salesModels = {
           run: (db, r) => {
             const quality = canValidatePicking(db, r);
             if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
+            const over = overDeliveryError(db, r);
+            if (over) throw new Error(over);
             const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
             const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
             const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
               const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
               const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
+              // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
+              const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
               const purchase = (po?.order_line ?? []).map((l) => {
                 const product = read(d, 'product', l.product_id);
                 const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
                 const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
                 return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
-                  price_unit: l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : l.price_unit };
+                  price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
               });
               const lines = p.move_ids.map((m) => {
                 const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
@@ -201,14 +303,15 @@ export const salesModels = {
                 }
                 const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
                   : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200', actualCost: true } : {} };
+                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
               });
               return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id });
             } });
             let next = out.db;
-            if (r.purchase_id && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
+            if (r.purchase_id && !r.return_of && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
             const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
-            if (order) next = addLineQty(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
+            // A return takes its quantities back off the order; anything else adds to what was delivered.
+            if (order) next = (r.return_of ? removeLineQty : addLineQty)(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
             return { db: next };
           },
         },
@@ -396,7 +499,7 @@ export const salesModels = {
           },
         },
         { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale' && invoiceStatus(r, 'sale') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
+        { label: 'Cancel', when: (r) => r.state !== 'cancel', run: (db, r) => ({ db: cancelOrder(db, 'sale.order', r) }) },
       ],
       smart: [
         { label: 'Delivery', model: 'stock.picking', field: 'sale_id', target: 'inventory/transfers' },
@@ -420,6 +523,7 @@ export const salesModels = {
       state: orderState([['draft', 'RFQ'], ['sent', 'RFQ Sent'], ['purchase', 'Purchase Order'], ['cancel', 'Cancelled']]),
       receipt_done: { type: 'boolean', label: 'Received', readonly: true },
       payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       invoice_status: { type: 'selection', label: 'Billing Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'purchase') },
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
@@ -454,7 +558,7 @@ export const salesModels = {
           },
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase' && invoiceStatus(r, 'purchase') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'purchase'].includes(r.state) },
+        { label: 'Cancel', when: (r) => r.state !== 'cancel', run: (db, r) => ({ db: cancelOrder(db, 'purchase.order', r) }) },
       ],
       smart: [
         { label: 'Receipt', model: 'stock.picking', field: 'purchase_id', target: 'inventory/transfers' },

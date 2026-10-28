@@ -18,10 +18,10 @@ const signersOf = (r) => ((r.signer_ids ?? []).length ? r.signer_ids : [{ partne
 export const nextSigner = (r) => signersOf(r).findIndex((s) => !s.signed);
 
 /** The next signer types their name; the document is signed once everyone has. */
-export function applySignature(db, r, name, date = today()) {
+export function applySignature(db, r, name, date = today(), at = nextSigner(r)) {
   if (r.state !== 'sent') throw new Error('Send the document before signing');
   if (r.deadline && date > r.deadline) throw new Error('This signature request has expired');
-  const i = nextSigner(r);
+  const i = at;
   if (i < 0 || !name?.trim()) return db;
   const signer_ids = signersOf(r).map((s, k) => (k === i ? { ...s, signed: true, signature: name.trim(), sign_date: date } : s));
   const done = signer_ids.every((s) => s.signed);
@@ -30,7 +30,8 @@ export function applySignature(db, r, name, date = today()) {
 
 function signDocument(db, r) {
   const signer = signersOf(r)[nextSigner(r)];
-  const name = prompt('Type your full name to sign', read(db, 'res.partner', signer?.partner_id)?.name ?? '');
+  // Typed by whoever signs, never prefilled with the signer's name.
+  const name = prompt(`Type your full name to sign${signer?.partner_id ? ` (signer: ${read(db, 'res.partner', signer.partner_id)?.name ?? ''})` : ''}`, '');
   return { db: name == null ? db : applySignature(db, r, name) };
 }
 

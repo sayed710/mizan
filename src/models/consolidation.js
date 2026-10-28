@@ -89,44 +89,85 @@ export function consolidate(db, periodId) {
   const mapping = new Map((chart.account_ids ?? []).flatMap((a, i) => codes(a).map((code) => [code, lines[i]])));
   const partners = new Map(chart.company_ids.map((c) => [read(db, 'res.company', c.company_id).partner_id, c]));
   const unmapped = new Set();
+  let fxElimination = 0;
+  // Group lines the method adds itself; the EQUITY: namespace is reserved for them.
+  const systemLine = (code, name) => {
+    let line = lines.find((l) => l.group_code === code);
+    if (!line) lines.push(line = { group_code: code, name, by_company: {}, eliminations: 0, total: 0 });
+    return line;
+  };
+  const add = (line, companyId, amount) => { if (amount) line.by_company[companyId] = (line.by_company[companyId] ?? 0) + amount; };
   for (const member of chart.company_ids) {
     const company = read(db, 'res.company', member.company_id);
     const rate = rates.find((r) => r.company_id === company.id);
-    const factor = member.method === 'full' || !member.method ? 1 : Number(member.ownership ?? 100) / 100;
+    const share = Number(member.ownership ?? 100) / 100;
+    const factor = member.method === 'full' || !member.method ? 1 : share;
+    // Equity and earlier results keep the rate of the day they were booked (historical rate).
+    const historical = (date) => rateAt(db, chart.currency_id, date) / rateAt(db, company.currency_id, date);
     const balances = new Map();
-    let investment = 0;
+    // Translated totals: net assets at the closing rate, equity and earlier results historical, the period's result at the average rate.
+    const sums = { assets: 0, equity: 0, retained: 0, result: 0 };
+    const pending = [];
     for (const move of db.records['account.move'] ?? []) {
       const date = move.invoice_date ?? move.date;
       if ((move.company_id ?? 1) !== company.id || move.state !== 'posted' || !date || date > period.date_to) continue;
       for (const item of move.line_ids ?? []) {
         const account = read(db, 'account.account', item.account_id);
-        if (!account || (pnl(account.account_type) && date < period.date_from)) continue;
+        if (!account) continue;
         const balance = (Number(item.debit) || 0) - (Number(item.credit) || 0);
-        const amount = balance * Number(pnl(account.account_type) ? rate.rate_avg : rate.rate_closing) * factor;
-        if (member.method === 'equity') {
-          if (account.account_type.startsWith('asset') || account.account_type.startsWith('liability')) investment += amount;
-          continue;
-        }
+        if (!balance) continue;
+        const earlier = pnl(account.account_type) && date < period.date_from;
+        const kind = earlier ? 'retained' : pnl(account.account_type) ? 'result' : account.account_type === 'equity' ? 'equity' : 'assets';
+        const amount = balance * (kind === 'result' ? Number(rate.rate_avg) : kind === 'assets' ? Number(rate.rate_closing) : historical(date)) * factor;
+        sums[kind] += amount;
+        if (member.method === 'equity') continue;
+        if (earlier) continue;
         balances.set(account.code, (balances.get(account.code) ?? 0) + balance);
         const line = mapping.get(account.code);
         if (!line) continue;
-        line.by_company[company.id] = (line.by_company[company.id] ?? 0) + amount;
+        pending.push([line, kind, amount]);
         const other = partners.get(item.partner_id ?? move.partner_id);
         if (other && other.company_id !== company.id && other.method !== 'equity'
-          && (pnl(account.account_type) || ['asset_receivable', 'liability_payable'].includes(account.account_type))) line.eliminations -= amount;
+          && (pnl(account.account_type) || ['asset_receivable', 'liability_payable'].includes(account.account_type))) {
+          line.eliminations -= amount;
+          // Both sides of a pair match at the rate of the day they were booked; what closing/average rates add on top is
+          // a translation difference, not a mismatch, and is carried to its own line below.
+          fxElimination += amount - balance * historical(date) * factor;
+        }
       }
     }
+    // The translation difference closes the company's translated trial balance (local books always balance).
+    const cta = -(sums.assets + sums.equity + sums.retained + sums.result);
+    if (member.method === 'equity') {
+      const investment = sums.assets;
+      add(systemLine(`EQUITY:${company.id}`, `Investment in ${company.name}`), company.id, investment);
+      add(systemLine(`EQUITY:${company.id}:RESULT`, `Share of result of ${company.name}`), company.id, sums.result);
+      add(systemLine(`EQUITY:${company.id}:RESERVE`, `Share of reserves of ${company.name}`), company.id, -(investment + sums.result));
+      continue;
+    }
+    // Full consolidation below 100%: the minority's share of equity and result goes to non-controlling interest.
+    const parentShare = member.method === 'full' || !member.method ? share : 1;
+    for (const [line, kind, amount] of pending) add(line, company.id, kind === 'equity' ? amount * parentShare : amount);
+    add(systemLine('EQUITY:RE', 'Retained Earnings (prior periods)'), company.id, sums.retained * parentShare);
+    add(systemLine('EQUITY:CTA', 'Translation Difference'), company.id, cta * parentShare);
+    if (parentShare < 1) {
+      add(systemLine('EQUITY:NCI', 'Non-controlling Interest'), company.id, (1 - parentShare) * (sums.equity + sums.retained + cta + sums.result));
+      add(systemLine('EQUITY:NCI_RESULT', 'Result attributable to Non-controlling Interest'), company.id, -(1 - parentShare) * sums.result);
+    }
     for (const [code, balance] of balances) if (round(balance) && !mapping.has(code)) unmapped.add(code);
-    if (member.method === 'equity') lines.push({ group_code: `EQUITY:${company.id}`, name: `Investment in ${company.name}`, by_company: { [company.id]: investment }, eliminations: 0, total: 0 });
   }
-  return {
-    lines: lines.map((line) => {
-      const by_company = Object.fromEntries(Object.entries(line.by_company).map(([id, amount]) => [id, round(amount)]));
-      const eliminations = round(line.eliminations);
-      return { ...line, by_company, eliminations, total: round(Object.values(by_company).reduce((s, a) => s + a, 0) + eliminations) };
-    }),
-    unmapped: [...unmapped].sort(),
-  };
+  if (round(fxElimination)) systemLine('EQUITY:ELIM_FX', 'Translation Difference on Eliminations').eliminations += fxElimination;
+  const rounded = lines.map((line) => {
+    const by_company = Object.fromEntries(Object.entries(line.by_company).map(([id, amount]) => [id, round(amount)]));
+    const eliminations = round(line.eliminations);
+    return { ...line, by_company, eliminations, total: round(Object.values(by_company).reduce((s, a) => s + a, 0) + eliminations) };
+  });
+  // Lines are rounded one by one: when the unrounded balances offset, the cents lost to rounding go to their own line
+  // so the stored report adds up exactly. A real imbalance is left alone and still blocks closing.
+  const exact = lines.reduce((s, l) => s + Object.values(l.by_company).reduce((t, a) => t + a, 0) + l.eliminations, 0);
+  const drift = round(rounded.reduce((s, l) => s + l.total, 0));
+  if (Math.abs(exact) < 0.005 && drift) rounded.push({ group_code: 'EQUITY:ROUNDING', name: 'Rounding Difference', by_company: {}, eliminations: -drift, total: -drift });
+  return { lines: rounded, unmapped: [...unmapped].sort() };
 }
 
 /** Store a fresh draft report and its effective rates through the ORM. */
@@ -140,7 +181,12 @@ export function consolidatePeriod(db, periodId) {
 
 /** Recompute, store and permanently close a consolidation snapshot. */
 export function closePeriod(db, periodId) {
-  return write(consolidatePeriod(db, periodId), 'consolidation.period', periodId, { state: 'closed' });
+  const stored = consolidatePeriod(db, periodId);
+  const { lines, unmapped } = read(stored, 'consolidation.period', periodId);
+  if (unmapped?.length) throw new Error(`Map these accounts before closing: ${unmapped.join(', ')}`);
+  const off = round((lines ?? []).reduce((s, l) => s + l.total, 0));
+  if (off) throw new Error(`The consolidated balances do not add up (difference ${off}); check eliminations and mappings`);
+  return write(stored, 'consolidation.period', periodId, { state: 'closed' });
 }
 
 export const consolidationModels = {

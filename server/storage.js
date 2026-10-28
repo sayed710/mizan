@@ -1,8 +1,45 @@
 // SQLite persistence: one row per record and per message, plus a meta row (sequences, settings).
 // Saves are incremental (only the records that changed), inside one transaction.
+import { randomUUID } from 'node:crypto';
 import { diffDb } from '../src/sync.js';
 
-export function openStorage(sql) {
+const LEASE_MS = 30 * 1000;
+
+/**
+ * One server per database file: each keeps the whole database in memory, so a second process would silently
+ * overwrite the first one's saves. The running server holds a lease (kv 'writer') and renews it; a new server refuses
+ * to start while it is fresh, unless `force` (after a crash). `assert` throws when another server took the lease.
+ */
+export function claimWriter(sql, { force = false, now = Date.now, id = `${process.pid}@${randomUUID()}`, busyMs = 5000 } = {}) {
+  sql.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const get = sql.prepare("SELECT value FROM kv WHERE key = 'writer'");
+  const set = sql.prepare("INSERT INTO kv (key, value) VALUES ('writer', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+  const drop = sql.prepare("DELETE FROM kv WHERE key = 'writer' AND json_extract(value, '$.id') = ?");
+  const renewLease = sql.prepare("UPDATE kv SET value = ? WHERE key = 'writer' AND json_extract(value, '$.id') = ?");
+  const holder = () => { try { return JSON.parse(get.get()?.value ?? 'null'); } catch { return null; } };
+  const mine = () => holder()?.id === id;
+  sql.exec(`PRAGMA busy_timeout = ${Math.max(0, Number(busyMs) | 0)}`);
+  sql.exec('BEGIN IMMEDIATE');
+  try {
+    const current = holder();
+    if (current && current.id !== id && now() - current.at < LEASE_MS && !force) {
+      throw new Error(`Another Mizan server (pid ${current.id.split('@')[0]}) is using this database. Stop it first; if it crashed, wait ${LEASE_MS / 1000} seconds or start with MIZAN_FORCE_TAKEOVER=1.`);
+    }
+    set.run(JSON.stringify({ id, at: now() }));
+    sql.exec('COMMIT');
+  } catch (e) {
+    sql.exec('ROLLBACK');
+    throw e;
+  }
+  return {
+    // One conditional UPDATE: a takeover that lands between a check and a write can never be overwritten.
+    renew: () => { renewLease.run(JSON.stringify({ id, at: now() }), id); },
+    assert: () => { if (!mine()) throw new Error('Another Mizan server took over this database; this one stops writing'); },
+    release: () => drop.run(id),
+  };
+}
+
+export function openStorage(sql, { beforeWrite = () => {} } = {}) {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS records (model TEXT NOT NULL, id INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (model, id));
@@ -25,8 +62,9 @@ export function openStorage(sql) {
   };
 
   const transaction = (fn) => {
-    sql.exec('BEGIN');
+    sql.exec('BEGIN IMMEDIATE');
     try {
+      beforeWrite();
       fn();
       sql.exec('COMMIT');
     } catch (e) {
@@ -35,12 +73,13 @@ export function openStorage(sql) {
     }
   };
 
-  const writeAll = (db) => transaction(() => {
+  const writeAll = (db, alongside = () => {}) => transaction(() => {
+    alongside();
     q.clearRecords.run();
     q.clearMessages.run();
     for (const [model, recs] of Object.entries(db.records)) for (const r of recs) q.upsert.run(model, r.id, JSON.stringify(r));
     for (const m of db.messages) q.addMessage.run(m.id, m.model, m.res_id, JSON.stringify(m));
-    q.setMeta.run(JSON.stringify({ seq: db.seq, settings: db.settings }));
+    q.setMeta.run(JSON.stringify({ seq: db.seq, settings: db.settings, schema_version: db.schema_version }));
   });
 
   return {
@@ -50,28 +89,40 @@ export function openStorage(sql) {
       if (legacy && !q.meta.get()) {
         const db = JSON.parse(legacy.value);
         writeAll(db);
-        q.dropLegacy.run();
+        transaction(() => q.dropLegacy.run());
         return db;
       }
       const meta = q.meta.get();
       if (!meta) return null;
-      const { seq, settings } = JSON.parse(meta.value);
+      const { seq, settings, schema_version } = JSON.parse(meta.value);
       const records = {};
       for (const row of q.allRecords.all()) (records[row.model] ??= []).push(JSON.parse(row.data));
-      return { records, seq, settings, messages: q.allMessages.all().map((row) => JSON.parse(row.data)) };
+      return { records, seq, settings, schema_version, messages: q.allMessages.all().map((row) => JSON.parse(row.data)) };
     },
 
-    /** Persist the transition prev → next (full rewrite when prev is null). */
-    save(prev, next) {
-      if (!prev) return writeAll(next);
+    /** Persist the transition prev → next (full rewrite when prev is null); `alongside` runs in the same transaction. */
+    save(prev, next, alongside = () => {}) {
+      if (!prev) return writeAll(next, alongside);
       const d = diffDb(prev, next);
       transaction(() => {
+        alongside();
         for (const [model, recs] of Object.entries(d.upserts)) for (const r of recs) q.upsert.run(model, r.id, JSON.stringify(r));
         for (const [model, ids] of Object.entries(d.deletes)) for (const id of ids) q.remove.run(model, id);
         for (const m of d.messages) q.addMessage.run(m.id, m.model, m.res_id, JSON.stringify(m));
         for (const id of d.removedMessages) q.removeMessage.run(id);
-        if (prev.seq !== next.seq || prev.settings !== next.settings) q.setMeta.run(JSON.stringify({ seq: next.seq, settings: next.settings }));
+        if (prev.seq !== next.seq || prev.settings !== next.settings || prev.schema_version !== next.schema_version) {
+          q.setMeta.run(JSON.stringify({ seq: next.seq, settings: next.settings, schema_version: next.schema_version }));
+        }
       });
     },
   };
+}
+
+/** Load the stored db and run startup repairs/migrations on it, writing back whatever they changed. */
+export function loadRepaired(storage, repair) {
+  const loaded = storage.load();
+  if (!loaded) return loaded;
+  const db = repair(loaded);
+  if (db !== loaded) storage.save(loaded, db);
+  return db;
 }

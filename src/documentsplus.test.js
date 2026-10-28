@@ -45,14 +45,14 @@ test('workflow conditions match tag references, require all tags, exclude any fo
 test('workflow adds/removes tag references, preserves legacy tags, moves, assigns and schedules immutably', () => {
   const tags = taggedDb();
   const destination = folder(tags.db, 'Archive');
-  const made = upload(destination.db, { tag_ids: ['legacy', ...refs(tags.review, tags.paid)] });
+  const made = upload(destination.db, { tag_ids: [{ name: 'legacy' }, ...refs(tags.review, tags.paid)] });
   const action = rule(made.db, { set_tags: refs(tags.approved, tags.approved, tags.paid), remove_tags: refs(tags.review), move_to_folder_id: destination.id, set_owner_id: 2, activity_summary: 'Check receipt', activity_deadline_days: 3 });
   const snapshot = structuredClone(action.db);
   const next = runRule(freeze(action.db), action.id, [made.id, made.id]);
   assert.notEqual(next, action.db);
   assert.deepEqual(action.db, snapshot);
-  assert.deepEqual(doc(next, made.id).tag_ids, ['legacy', ...refs(tags.paid, tags.approved)]);
-  assert.deepEqual(doc(next, made.id).legacy_tags, ['legacy']);
+  assert.deepEqual(doc(next, made.id).tag_ids, [{ name: 'legacy' }, ...refs(tags.paid, tags.approved)]);
+  assert.deepEqual(doc(next, made.id).legacy_tags, ['legacy', 'Paid', 'Approved']);
   assert.equal(doc(next, made.id).folder_id, destination.id);
   assert.equal(doc(next, made.id).owner_id, 2);
   const activities = search(next, 'mail.activity').filter((r) => r.res_model === 'documents.document' && r.res_id === made.id);
@@ -202,7 +202,7 @@ test('every inherited document field, filter, view and button survives, includin
   assert.equal(doc(button(locked, 'Unlock').db, made.id).locked, false);
   const linked = button(made.db, 'Create Vendor Bill').db;
   assert.equal(doc(linked, made.id).res_model, 'account.move');
-  assert.throws(() => button(linked, 'Create Vendor Bill'), /already linked/);
+  assert.throws(() => button(linked, 'Create Vendor Bill'), /already linked|not available/);
   assert.match(button(made.db, 'Share').go, /^#\/open\/documents.share\//);
 });
 

@@ -126,7 +126,7 @@ test('agy review 2: empty measures fail, archived points ignored, timers and tic
   const fsm = create(t.db, 'fsm.task', { name: 'Visit', helpdesk_ticket_id: t.id });
   assert.equal(read(markDone(fsm.db, read(fsm.db, 'fsm.task', fsm.id)), 'helpdesk.ticket', t.id).stage_id, 'cancelled');
   const job = create(seed(), 'hr.job', { name: 'Dev' });
-  const ap = create(job.db, 'hr.applicant', { name: 'A', partner_name: 'A', job_id: job.id, stage_id: 'hired', active: false });
+  const ap = create(job.db, 'hr.applicant', { name: 'A', job_id: job.id, stage_id: 'hired', active: false });
   assert.equal(jobPipeline(ap.db, job.id).hired, 0);
   assert.equal(applicantScore({ priority: 0, salary_expected: 0, expected_salary: 900 }, { salary_max: 1000 }), 20);
 });

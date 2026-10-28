@@ -1,4 +1,5 @@
 import { create, read, updateSettings, write } from '../orm.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -23,6 +24,38 @@ export function setCompanies(db, { current, allowed }) {
   const ids = [...new Set(allowed)];
   if (ids.some((id) => !Number.isInteger(id) || !record(db, 'res.company', id) || record(db, 'res.company', id).active === false)) throw new Error('Select existing active companies');
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
+}
+
+// Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
+const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+/** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
+const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
+
+/**
+ * Whether a user limited to the `companies` ids (null = every company) may see or change this record: companies by
+ * their own id; shared master data without a company; anything else when its company (missing = company 1, as in the
+ * ORM) is one of those companies. Pass `db` to also hide the contact record of a company the user may not use.
+ */
+export function visibleTo(companies, model, r, db = null) {
+  if (!companies) return true;
+  if (model === 'res.company') return companies.has(r?.id);
+  if (GROUP_WIDE.has(model)) return false;
+  if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
+  if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
+  return companies.has(r.company_id);
+}
+
+/** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */
+export function restrictRecords(db, companies) {
+  if (!companies) return { records: db.records, hidden: new Set() };
+  const records = {};
+  const hidden = new Set();
+  for (const [model, list] of Object.entries(db.records)) {
+    records[model] = list.filter((r) => visibleTo(companies, model, r, db));
+    if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r, db)).forEach((r) => hidden.add(`${model}:${r.id}`));
+  }
+  return { records, hidden };
 }
 
 /** Keep shared records and records belonging to an allowed company. */
@@ -57,7 +90,7 @@ export function withCompany(models) {
       ...model,
       fields: { ...model.fields, ...link, company_id: { ...companyField, ...model.fields.company_id, ...(sharedScoped.has(name) ? {} : { default: currentCompany }) } },
       defaults: sharedScoped.has(name) ? model.defaults : (id, db) => ({ ...model.defaults?.(id, db), company_id: db ? currentCompany(db) : 1 }),
-      guard: (db, before, r) => model.guard?.(db, before, r) ?? checkCompany(db, model.fields, r, r.company_id),
+      guard: (db, before, r, opts) => model.guard?.(db, before, r, opts) ?? checkCompany(db, model.fields, r, r.company_id),
     }];
   }));
 }
@@ -85,7 +118,7 @@ export function createCompany(db, vals) {
   const values = { ...vals, ...(parent ? { currency_id: parent.currency_id } : {}) };
   let next = db;
   if (!values.partner_id) {
-    const partner = create(next, 'res.partner', { name: values.name, is_company: true, company_id: null,
+    const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
     return create(next, 'res.company', { ...values, partner_id: partner.id });
@@ -108,11 +141,40 @@ export function ensureMainCompany(db) {
   return createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
 }
 
+/** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
+export function renameCompany(db, companyId, name) {
+  const next = write(db, 'res.company', companyId, { name });
+  return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
+}
+
 /** Set a company's currency by code, creating the currency record when missing. */
 export function setCompanyCurrency(db, companyId, code) {
   const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);
   const currency = found ? { db, id: found.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
+}
+
+const TAX_KEYS = Object.keys(taxSnapshot(null));
+
+/**
+ * The buyer's purchase line for a sold line: same product, quantity, discount and net price,
+ * but the buyer's purchase tax (through the seller's fiscal position) instead of the seller's output VAT.
+ */
+function purchaseLine(db, line, fpId) {
+  const { qty_delivered, qty_invoiced, ...rest } = line;
+  const kept = Object.fromEntries(Object.entries(rest).filter(([k]) => !TAX_KEYS.includes(k)));
+  const qty = Number(line.qty) || 0;
+  const factor = qty * (1 - (Number(line.discount) || 0) / 100);
+  const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
+  const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
+  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId) ?? taxSnapshot(null);
+  // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
+  // inside the discounted price, so the discount is undone for it).
+  const kept_share = 1 - (Number(line.discount) || 0) / 100;
+  const price_unit = !tax.tax_include ? net
+    : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
+      : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
+  return { ...kept, price_unit, ...tax };
 }
 
 /** Draft one linked purchase in the enabled customer company after sale confirmation. */
@@ -127,9 +189,10 @@ export function interCompanyRules(db, saleOrderId) {
   if (!seller?.partner_id) throw new Error('Set the selling company and its contact first');
   const existing = (db.records['purchase.order'] ?? []).find((p) => p.auto_sale_id === sale.id);
   if (existing) return write(db, 'sale.order', sale.id, { auto_purchase_id: existing.id });
+  const fpId = fiscalPositionFor(db, seller.partner_id);
   const purchase = create(db, 'purchase.order', {
-    company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name,
-    order_line: (sale.order_line ?? []).map(({ qty_delivered, qty_invoiced, ...line }) => ({ ...line })),
+    company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name, fiscal_position_id: fpId ?? null,
+    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId)),
     ...(sale.currency_id ? { currency_id: sale.currency_id } : {}),
   });
   return write(purchase.db, 'sale.order', sale.id, { auto_purchase_id: purchase.id });

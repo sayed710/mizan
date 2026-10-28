@@ -88,14 +88,14 @@ test('discount codes and coupon codes apply, while unknown, used, and expired co
     reward_ids: [{ reward_type: 'discount', discount: 5, discount_mode: 'per_order', discount_applicability: 'order' }],
   });
   db = generateCoupons(coupon.db, coupon.program.id, {
-    count: 1, partnerIds: [4], points: 1, expiration: '2026-12-31', codeFn: () => 'WELCOME',
+    count: 1, partnerIds: [4], points: 1, expiration: '2099-12-31', codeFn: () => 'WELCOME',
   });
   const applied = applyCode(db, { partner_id: 4, order_line: lines }, 'WELCOME', { date: '2026-10-25' });
   assert.equal(applied.card.partner_id, 4);
   assert.equal(applied.lines.at(-1).price_unit, -5);
   db = confirmProgramUsage(db, coupon.program.id, { cardCode: 'WELCOME', partnerId: 4 });
   assert.equal(read(db, 'loyalty.card', applied.card.id).state, 'used');
-  assert.throws(() => applyCode(db, { partner_id: 4, order_line: lines }, 'WELCOME'), /already been used/);
+  assert.throws(() => applyCode(db, { partner_id: 4, order_line: lines }, 'WELCOME', { date: '2026-10-25' }), /already been used/);
 
   db = generateCoupons(db, coupon.program.id, {
     count: 1, points: 1, expiration: '2025-12-31', codeFn: () => 'OLD-CODE',

@@ -5,13 +5,14 @@ import { seed } from './seed.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { salesModels } from './models/sales.js';
 import { applyCount, costMethod, deliver, postValuation, receive, revalue, startCount, valuationModels, valuationReport } from './models/valuation.js';
+import { addDays } from './models/common.js';
 
 const date = '2026-10-01';
 const setup = (method = 'fifo', valuation = 'real_time') => create(seed(), 'product', {
   name: 'Valued widget', type: 'goods', cost: 10, qty_available: 0, cost_method: method, valuation,
 });
 const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
-const report = (db, id, at = '2026-12-31') => valuationReport(db, { at })[id];
+const report = (db, id, at = addDays(date, 365)) => valuationReport(db, { at })[id];
 const entryFor = (db, layer) => read(db, 'account.move', layer.move_id);
 const balance = (db, entry, code) => entry.line_ids.filter((l) => l.account_id === accountId(db, code)).reduce((s, l) => s + l.debit - l.credit, 0);
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
@@ -202,10 +203,16 @@ test('seed loads with preserved product fields, defaults, opening quantities and
   assert.equal(valuationModels.product.defaults(1).cost_method, 'standard');
   assert.equal(valuationModels.product.defaults(1).valuation, 'real_time');
   for (const p of search(base, 'product').filter((p) => p.type === 'goods')) close(report(base, p.id).qty, p.qty_available);
-  const p = search(base, 'product').find((p) => p.type === 'goods' && p.qty_available > 0 && !layers(base, p.id).length);
-  const db = receive(base, p.id, 3, p.cost, { date });
-  assert.equal(layers(db, p.id)[0].opening, true);
-  assert.ok(!layers(db, p.id)[0].move_id);
-  assert.equal(report(db, p.id, '2026-09-30').qty, p.qty_available);
-  assert.equal(report(db, p.id).qty, read(db, 'product', p.id).qty_available);
+  // Seeded stock is opened and posted: the report total equals the stock account.
+  const stock = (d) => search(d, 'account.move').filter((m) => m.state === 'posted').flatMap((m) => m.line_ids).filter((l) => l.account_id === accountId(d, '110100')).reduce((s, l) => s + l.debit - l.credit, 0);
+  close(Object.values(valuationReport(base)).reduce((s, r) => s + r.value, 0), stock(base));
+  // Quantities typed in outside valuation are opened, and posted against equity, on the next movement.
+  const typed = create(base, 'product', { name: 'Typed in', type: 'goods', cost: 4, qty_available: 10 });
+  const db = receive(typed.db, typed.id, 3, 4, { date });
+  const [opening] = layers(db, typed.id);
+  assert.equal(opening.opening, true);
+  const entry = entryFor(db, opening);
+  assert.deepEqual([balance(db, entry, '110100'), balance(db, entry, '301000')], [40, -40]);
+  assert.equal(report(db, typed.id, '2026-09-30').qty, 10);
+  assert.equal(report(db, typed.id).qty, read(db, 'product', typed.id).qty_available);
 });

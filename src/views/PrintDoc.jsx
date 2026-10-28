@@ -6,6 +6,7 @@ import { t } from '../i18n.js';
 import { display, formatDate, money } from '../ui.jsx';
 import { amountInWords } from '../models/payments.js';
 import { subtotal } from '../models/common.js';
+import { currencyCode } from '../models/money.js';
 import { invoiceQrPayload, qrMatrix } from '../models/qr.js';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -101,7 +102,7 @@ export function PrintDoc({ model, id }) {
         <h1>{layout.title(rec)} {rec.name && rec.name !== '/' ? rec.name : ''}</h1>
         <dl className="paper-info">
           {layout.info.filter((f) => rec[f]).map((f) => (
-            <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f])}</dd></div>
+            <div key={f}><dt>{t(def.fields[f].label)}</dt><dd>{def.fields[f].type === 'date' ? formatDate(rec[f]) : display(db, def.fields[f], rec[f], rec)}</dd></div>
           ))}
         </dl>
         <table className="paper-lines">
@@ -109,15 +110,15 @@ export function PrintDoc({ model, id }) {
           <tbody>
             {(rec[layout.lines] ?? []).map((l, i) => (
               <tr key={i}>
-                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{display(db, f, l[k])}</td>)}
-                {priced && <td className="num">{money(subtotal(l))}</td>}
+                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{display(db, f, l[k], rec)}</td>)}
+                {priced && <td className="num">{money(subtotal(l), currencyCode(db, rec))}</td>}
               </tr>
             ))}
           </tbody>
         </table>
         <dl className="totals paper-totals">
           {layout.totals.map((f) => (
-            <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{money(rec[f])}</dd></div>
+            <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{money(rec[f], currencyCode(db, rec))}</dd></div>
           ))}
         </dl>
         {model === 'account.move' && <PaymentQr db={db} company={currentCompany(db)} move={rec} />}

@@ -68,6 +68,7 @@ function writeOff(db, rule, line) {
 /** Apply a rule to a statement line: match the first candidate invoice/bill, or post its write-off entry. */
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
+  if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.rule_type === 'invoice_matching') {
     // Only an exact amount match, and from the line's partner when it has one: never pay someone else's invoice.
     const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && round(m.amount_residual) === round(Math.abs(line.amount)));

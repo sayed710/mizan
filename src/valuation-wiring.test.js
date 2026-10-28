@@ -72,7 +72,7 @@ test('duplicate PO product lines keep their individual purchase costs through pa
   db = run(db, 'stock.picking', rest.id, 'Validate');
   assert.deepEqual(layers(db, f.id).at(-1).unit_cost, 17);
   assert.equal(qty(db, f.id), 5);
-  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line });
+  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line.map(({ purchase_method, qty_delivered, ...l }) => l) });
   assert.equal(delta(f.db, postMove(bill.db, bill.id), '110200'), 0);
 });
 
@@ -152,7 +152,7 @@ test('split POS tenders deliver exactly the original quantity and preserve the t
 
 test('production transfers actual FIFO component value into finished stock with no interim debt', () => {
   const component = product();
-  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99, cost_method: 'standard' });
+  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99 });
   const bom = create(finished.db, 'mrp.bom', { name: 'Wiring BOM', product_id: finished.id, product_qty: 1, components: [{ product_id: component.id, qty: 2 }] });
   const mo = create(bom.db, 'mrp.production', { product_id: finished.id, bom_id: bom.id, product_qty: 2 });
   const confirmed = confirmMo(mo.db, read(mo.db, 'mrp.production', mo.id));

@@ -6,6 +6,9 @@ import { models } from './models/index.js';
 import { billableLines, billControlModels, matchBill, checkBillMatch, priceDifferenceLines } from './models/billcontrol.js';
 import { accountId, invoiceLines, isBalanced } from './models/ledger.js';
 
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
+
 const run = (db, model, id, label) => (billControlModels[model] ?? models[model]).form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 const line = (product_id, qty = 10, price_unit = 20) => ({ product_id, qty, price_unit, tax: 0 });
 const order = (lines = [line(1)]) => create(seed(), 'purchase.order', { partner_id: 2, order_line: lines });
@@ -82,7 +85,7 @@ test('three-way match reports exact, excess quantity and price mismatch, includi
   assert.deepEqual(matchBill(exact.db, exact.id), [{ product_id: 1, billedQty: 3, receivedQty: 5, orderedQty: 10, priceDifference: 0, status: 'ok' }]);
   const excess = bill(out.db, out.id, [line(1, 6)]);
   assert.equal(matchBill(excess.db, excess.id)[0].status, 'qty_exceeds_received');
-  const price = create(out.db, 'account.move', { move_type: 'in_invoice', origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
+  const price = create(out.db, 'account.move', { move_type: 'in_invoice', invoice_origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
   assert.equal(matchBill(price.db, price.id)[0].status, 'price_differs');
   assert.equal(checkBillMatch(price.db, read(price.db, 'account.move', price.id))[0].priceDifference, 6);
   assert.throws(() => matchBill(out.db, -1), /not found/);
@@ -91,7 +94,7 @@ test('three-way match reports exact, excess quantity and price mismatch, includi
 test('matching guard rejects cumulative excess across duplicate lines and posted bills; force post overrides', () => {
   const out = order([{ ...line(1), qty_delivered: 5 }]);
   const first = bill(out.db, out.id, [line(1, 3)]);
-  const posted = write(first.db, 'account.move', first.id, { state: 'posted' });
+  const posted = force(first.db, 'account.move', first.id, { state: 'posted' });
   const second = bill(posted, out.id, [line(1, 1), line(1, 2)]);
   const record = read(second.db, 'account.move', second.id);
   assert.equal(matchBill(second.db, second.id)[1].status, 'qty_exceeds_received');
@@ -130,7 +133,7 @@ test('price adjustments consume receipt values once across partial bills and ign
   const received = receipt(run(configured, 'purchase.order', out.id, 'Confirm Order').db, out.id);
   const first = bill(received, out.id, [line(1, 2, 22)]);
   const firstRecord = read(first.db, 'account.move', first.id);
-  const posted = write(first.db, 'account.move', first.id, { state: 'posted' });
+  const posted = force(first.db, 'account.move', first.id, { state: 'posted' });
   const second = bill(posted, out.id, [line(1, 2, 22)]);
   const secondRecord = read(second.db, 'account.move', second.id);
   const balance = (db, record) => [...invoiceLines(db, record), ...priceDifferenceLines(db, record)].filter((l) => l.account_id === accountId(db, '110200')).reduce((s, l) => s + l.debit - l.credit, 0);

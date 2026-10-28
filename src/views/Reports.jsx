@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
-import { useDb } from '../store.js';
+import { agedBalance, analyticActuals, followUps, followUpText, logManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { commit, getDb, isServer, listAudit, useDb } from '../store.js';
+import { auditSummary } from '../audit.js';
 import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
@@ -180,13 +181,16 @@ function FollowUps({ db }) {
     <tbody>
       {followUps(db).map((f) => {
         const email = read(db, 'res.partner', f.partner_id)?.email;
-        const body = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${Number(m.amount_residual).toFixed(2)}`).join('\n');
+        const body = followUpText(db, f);
         return (
           <tr key={f.partner_id} className="rep-detail">
             <td>
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              {email && <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}>{t('Send Reminder')}</a>}
+              {email && (
+                <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                  onClick={() => commit(logManualFollowUp(getDb(), f.partner_id))}>{t('Open Reminder in Mail App')}</a>
+              )}
             </td>
             <td className="num">{f.oldest}</td>
             <td className="num">{money(f.total)}</td>
@@ -232,10 +236,26 @@ function Analytic({ db, period }) {
 
 const AUDIT_ROWS = 500;
 
+const inPeriod = (date, period) => (!period.from || date.slice(0, 10) >= period.from) && date.slice(0, 10) <= period.to;
+
 function AuditTrail({ db, period }) {
+  // With a server, the trail is the server's change log (its time and user), not messages the browser wrote.
+  const [serverLog, setServerLog] = useState(undefined);
+  useEffect(() => { if (isServer()) listAudit('account.move').then(setServerLog); }, []);
+  if (isServer()) {
+    if (serverLog === undefined) return <tbody><tr><td className="muted">{t('Loading…')}</td></tr></tbody>;
+    if (serverLog === null) return <tbody><tr><td className="muted">{t('Only administrators can read the audit trail')}</td></tr></tbody>;
+    const rows = serverLog.filter((e) => inPeriod(e.at, period)).slice(0, AUDIT_ROWS)
+      .map((e) => ({ id: e.id, res_id: e.res_id, body: auditSummary(e), author: e.actor, date: e.at }));
+    return <AuditRows db={db} rows={rows} />;
+  }
   const rows = db.messages
-    .filter((m) => m.model === 'account.move' && (!period.from || m.date.slice(0, 10) >= period.from) && m.date.slice(0, 10) <= period.to)
+    .filter((m) => m.model === 'account.move' && inPeriod(m.date, period))
     .sort((a, b) => b.date.localeCompare(a.date)).slice(0, AUDIT_ROWS);
+  return <AuditRows db={db} rows={rows} />;
+}
+
+function AuditRows({ db, rows }) {
   return (
     <tbody>
       {rows.map((m) => (

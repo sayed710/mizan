@@ -4,6 +4,16 @@ import { models } from './models/index.js';
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
 const MAX_FILE = 3 * 1024 * 1024; // data URL of a ≤ 2 MB file
+/** True when `v` survives a JSON round trip unchanged: finite numbers, strings, booleans, null, arrays, plain objects. */
+function losslessJson(v, depth = 0) {
+  if (depth > 20) return false;
+  if (v === null || typeof v === 'string' || typeof v === 'boolean') return true;
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (Array.isArray(v)) return v.every((x) => losslessJson(x, depth + 1));
+  return isPlain(v) && Object.values(v).every((x) => losslessJson(x, depth + 1));
+}
+/** The calendar day exists (Date.parse would roll 2026-02-30 over into March). */
+const realDay = (day) => new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
 const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 const fail = (where) => { throw new Error(`Invalid value for ${where}`); };
 
@@ -29,12 +39,33 @@ export function cleanValue(field, value, where) {
     case 'date':
       if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) fail(where);
       return value;
+    case 'datetime':
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?$/.test(value) || !Number.isFinite(Date.parse(value)) || !realDay(value.slice(0, 10))) fail(where);
+      return value;
     case 'tags':
       if (!Array.isArray(value) || value.length > 50 || !value.every((x) => typeof x === 'string')) fail(where);
       return value.map((x) => x.slice(0, 50));
     case 'binary':
-      if (!isPlain(value) || typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
+      // Inline upload (data URL) or a file the server already stored ({ blob: id }).
+      if (!isPlain(value)) fail(where);
+      if (typeof value.blob === 'string' && /^[0-9a-f]{32}$/.test(value.blob)) return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, blob: value.blob };
+      if (typeof value.data !== 'string' || !value.data.startsWith('data:') || value.data.length > MAX_FILE) fail(where);
       return { name: String(value.name ?? 'file').slice(0, 200), type: String(value.type ?? '').slice(0, 100), size: Number(value.size) || 0, data: value.data };
+    case 'distribution': {
+      // { [analytic account id]: percentage }
+      const entries = isPlain(value) ? Object.entries(value) : null;
+      if (!entries || entries.length > 50 || !entries.every(([k, n]) => /^[1-9]\d*$/.test(k) && typeof n === 'number' && n >= 0 && n <= 100)) fail(where);
+      return Object.fromEntries(entries);
+    }
+    case 'json': {
+      // Structured workflow data (costs, applied programs, distributions): plain JSON, bounded in size.
+      // Rejected rather than converted: JSON.stringify would turn NaN into null and drop undefined members, so the
+      // client's local copy and the synchronized one would disagree.
+      if (!(isPlain(value) || Array.isArray(value)) || !losslessJson(value)) fail(where);
+      const text = JSON.stringify(value);
+      if (text.length > MAX_TEXT * 5) fail(where);
+      return JSON.parse(text);
+    }
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
       return value.map((line, i) => Object.fromEntries(

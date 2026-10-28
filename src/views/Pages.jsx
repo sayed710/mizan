@@ -1,13 +1,15 @@
 // Barcode scanning, Shop Floor and the cross-app Overview dashboard.
 import { useRef, useState } from 'react';
 import { models, today } from '../models/index.js';
-import { postNote, read, search, write } from '../orm.js';
+import { postNote, read, search } from '../orm.js';
+import { countProduct } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, currentCompany, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { companyViewDb } from '../companyView.js';
+import { companySum } from '../models/money.js';
 
 /** Scan (or type) a product reference/name, then count stock — mirrors a warehouse scanner flow. */
 export function Barcode() {
@@ -30,12 +32,18 @@ export function Barcode() {
     else { setProductId(found.id); setCounted(1); }
     setMessage(null);
   };
-  const apply = () => {
-    const before = product.qty_available;
-    const next = write(getDb(), 'product', product.id, { qty_available: counted });
-    commit(postNote(next, 'product', product.id, `Inventory adjustment: ${before} → ${counted}`));
-    setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
-    setProductId(null);
+  const apply = async () => {
+    const count = { productId: product.id, counted, observed: product.qty_available, company: currentCompany(db)?.id };
+    try {
+      // A count is a valued adjustment (layer + journal entry). On a server it runs there, on the current stock and
+      // company, so a Barcode-only user needs no accounting access and two counters cannot overwrite each other.
+      if (isServer()) await serverAction('/api/barcode/count', count);
+      else commit(countProduct(getDb(), count));
+      setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
+      setProductId(null);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    }
     input.current?.focus();
   };
 
@@ -106,7 +114,8 @@ export function ShopFloor() {
   );
 }
 
-const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
+// Foreign-currency documents are converted to the company currency before they are added up.
+const sum = (db, recs, f) => companySum(db, recs, f);
 
 /** One page of headline numbers across apps; every tile links to the underlying list. */
 export function Overview() {
@@ -117,9 +126,9 @@ export function Overview() {
   const invoices = search(db, 'account.move').filter((m) => m.move_type === 'out_invoice' && m.state === 'posted');
   const pnl = profitAndLoss(db, { from: today().slice(0, 4) + '-01-01', to: today().slice(0, 4) + '-12-31' });
   const tiles = [
-    ['Sales this month', money(sum(orders.filter((o) => o.date_order?.startsWith(month)), 'amount_total')), '#/sales/orders?view=list'],
-    ['Open pipeline', money(sum(leads, 'expected_revenue')), '#/crm/pipeline'],
-    ['Receivable', money(sum(invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
+    ['Sales this month', money(sum(db, orders.filter((o) => o.date_order?.startsWith(month)), 'amount_total')), '#/sales/orders?view=list'],
+    ['Open pipeline', money(sum(db, leads, 'expected_revenue')), '#/crm/pipeline'],
+    ['Receivable', money(sum(db, invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
     ['Net income (year)', money(pnl.net), '#/accounting/pnl'],
     ['Open tickets', String(search(db, 'helpdesk.ticket').filter((x) => x.stage_id !== 'solved').length), '#/helpdesk/tickets'],
     ['Products below minimum', String(search(db, 'product').filter((p) => p.type === 'goods' && p.qty_available < p.reorder_min).length), '#/inventory/stock?view=list'],

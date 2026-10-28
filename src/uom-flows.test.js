@@ -73,7 +73,8 @@ test('product guard refuses purchase units in another category, including legacy
 
 test('POS dozen sales and refunds move 24 units and reverse the original stock value', () => {
   const base = seed();
-  const made = product(base, { uom_id: unit(base, 'Units') });
+  // FIFO: the refund comes back at the original cost (standard-cost products come back at standard).
+  const made = product(base, { uom_id: unit(base, 'Units'), cost_method: 'fifo' });
   const opened = startSession(made.db).db;
   const lines = priceLines(opened, [{ product_id: made.id, qty: 2, uom_id: unit(base, 'Dozens') }]);
   assert.equal(lines[0].price_unit, 60);

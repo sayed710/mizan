@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { apps } from './models/index.js';
-import { getUser, useDb } from './store.js';
+import { currentCompany, getUser, useDb } from './store.js';
 import { t } from './i18n.js';
 import { Avatar, Icon } from './ui.jsx';
 
@@ -16,7 +16,7 @@ export function Home() {
       <header className="home-top">
         <span className="brand">Mizan</span>
         <span className="spacer" />
-        <a className="company" href="#/settings/general">{db.settings?.company}</a>
+        <a className="company" href="#/settings/general">{currentCompany(db).name}</a>
         <Avatar name="Admin" />
       </header>
       <input

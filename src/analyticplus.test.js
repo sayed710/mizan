@@ -5,6 +5,9 @@ import { seed } from './seed.js';
 import { moreModels } from './models/more.js';
 import { analyticPlusModels, normalizeDistribution, distributionOfLine, analyticLinesForMove, postAnalytic, removeAnalytic, analyticBalance, budgetReport, checkMandatoryPlans } from './models/analyticplus.js';
 
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
+
 const setup = () => {
   const first = create(seed(), 'account.analytic.account', { name: 'Consulting' });
   const second = create(first.db, 'account.analytic.account', { name: 'Support' });
@@ -80,7 +83,9 @@ test('analytic allocations respect tax-included prices and explicit general acco
 
 test('analytic posting is immutable, idempotent and removable without deleting linked timesheets', () => {
   const { db: base, a, b } = setup();
-  const { db, id } = create(base, 'account.move', moveValues(a, b));
+  const draft0 = create(base, 'account.move', { ...moveValues(a, b), state: 'draft' });
+  const { id } = draft0;
+  const db = force(draft0.db, 'account.move', id, { state: 'posted' });
   const before = JSON.stringify(db);
   const posted = postAnalytic(db, id);
   assert.equal(search(posted, 'account.analytic.line').filter((r) => r.move_id === id).length, 2);

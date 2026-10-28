@@ -7,7 +7,23 @@ const token = () => crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID(
 const roles = [['customer', 'Customer'], ['employee', 'Employee'], ['company', 'Company']];
 const relation = (model, label) => ({ type: 'many2one', relation: model, label });
 const lines = (label, fields, newLine) => ({ type: 'one2many', label, fields, newLine });
-const signersOf = (r) => r.signer_ids?.length ? r.signer_ids : [{ partner_id: r.partner_id, role: 'signer', signed: r.state === 'signed', signature: r.signature, sign_date: r.sign_date, token: r.token }];
+
+/**
+ * Turn plain-text document tags (older data) into tag lines, creating the missing documents.tag records. The server
+ * only accepts tag lines, so documents still holding text tags could not be saved at all.
+ */
+export function migrateDocumentTags(db) {
+  const docs = db?.records?.['documents.document'] ?? [];
+  if (!docs.some((d) => (d.tag_ids ?? []).some((t) => typeof t === 'string'))) return db;
+  const tags = [...(db.records['documents.tag'] ?? [])];
+  let seq = Math.max(db.seq?.['documents.tag'] ?? 0, ...tags.map((t) => t.id));
+  const tagFor = (name) => tags.find((t) => t.name === name) ?? (tags.push({ id: ++seq, name, facet: '' }), tags.at(-1));
+  const documents = docs.map((d) => (!(d.tag_ids ?? []).some((t) => typeof t === 'string') ? d : {
+    ...d, tag_ids: d.tag_ids.map((t) => (typeof t === 'string' ? { tag_id: tagFor(t).id, name: t } : t)),
+  }));
+  return { ...db, records: { ...db.records, 'documents.document': documents, 'documents.tag': tags }, seq: { ...db.seq, 'documents.tag': seq } };
+}
+export const signersOf = (r) => r.signer_ids?.length ? r.signer_ids : [{ partner_id: r.partner_id, role: 'signer', signed: r.state === 'signed', signature: r.signature, sign_date: r.sign_date, token: r.token }];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
 const requireDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid ISO date (YYYY-MM-DD)'); };
 const current = (db, r) => {
@@ -76,7 +92,7 @@ function eligible(db, request, index) {
 }
 
 /** Validate indexed role fields and record a sequential or parallel signature. */
-export function signFields(db, request, signerIndex, values = {}) {
+export function signFields(db, request, signerIndex, values = {}, typedName = null) {
   const r = eligible(db, request, signerIndex);
   if (r.signing_order !== false && nextSigner(r) !== signerIndex) throw new Error('Wait for the next signer in signing order');
   const signers = signersOf(r), signer = signers[signerIndex];
@@ -95,7 +111,7 @@ export function signFields(db, request, signerIndex, values = {}) {
     if (!empty && item.type !== 'checkbox' && typeof value !== 'string') throw new Error('Enter a text field value');
     return empty ? [] : [{ signer_index: signerIndex, item_index, value }];
   });
-  const name = fields.find((v) => ['signature', 'name'].includes(items[v.item_index].type))?.value ?? read(db, 'res.partner', signer.partner_id)?.name;
+  const name = fields.find((v) => ['signature', 'name'].includes(items[v.item_index].type))?.value ?? typedName ?? read(db, 'res.partner', signer.partner_id)?.name;
   if (!name?.trim()) throw new Error('Enter the signer name');
   const order = [signerIndex, ...signers.map((_, i) => i).filter((i) => i !== signerIndex)];
   const next = applySignature(db, { ...r, signer_ids: order.map((i) => signers[i]) }, name);
@@ -221,7 +237,8 @@ const items = lines('Items', {
   role: { type: 'selection', label: 'Role', options: roles }, page: { type: 'integer', label: 'Page' }, required: { type: 'boolean', label: 'Required' },
 }, () => ({ type: 'signature', role: 'customer', page: 1, required: true }));
 
-function send(db, request) {
+/** Draft → sent: every signer gets a private token. Signers sign through their link (see server/signing.js). */
+export function sendRequest(db, request) {
   const r = current(db, request);
   if (r.state !== 'draft') throw new Error('Only draft requests may be sent');
   if (r.deadline && r.deadline < today()) throw new Error('Set a future signature deadline');
@@ -232,9 +249,30 @@ function send(db, request) {
   return { db: write(db, 'sign.request', r.id, { state: 'sent', sent_date: today(), signer_ids }) };
 }
 
+// Staff sign here only for the company; customers and employees sign through their own link.
+// With sequential signing it is the company's turn only when it is the next signer; otherwise any unsigned company signer may sign.
+const companyIndex = (r) => {
+  if (r.state !== 'sent') return -1;
+  if (r.signing_order === false) return signersOf(r).findIndex((s) => s.role === 'company' && !s.signed);
+  const next = nextSigner(r);
+  return signersOf(r)[next]?.role === 'company' ? next : -1;
+};
+const companyTurn = (r) => companyIndex(r) >= 0;
+
+/** Each unsigned signer's private link, to share by hand when email is not configured. */
+function showLinks(db, r) {
+  const origin = globalThis.location?.origin ?? '';
+  const links = signersOf(r).map((s, i) => (s.signed || !s.token ? null : `${read(db, 'res.partner', s.partner_id)?.name ?? `Signer ${i + 1}`}: ${origin}${signingLink(r, i)}`)).filter(Boolean);
+  prompt('Signing links: give each signer only their own link', links.join('  |  '));
+  return { db };
+}
+
+const OWN_LINK = 'Customers and employees sign or refuse through their own signing link';
+
 function signPrompt(db, r) {
-  const index = nextSigner(r);
-  const name = prompt('Type your full name to sign', read(db, 'res.partner', signersOf(r)[index]?.partner_id)?.name ?? '');
+  const index = companyIndex(r);
+  if (index < 0) throw new Error(OWN_LINK);
+  const name = prompt('Type your full name to sign for the company', '');
   if (name == null || !name.trim()) return { db };
   const values = {}, templateItems = r.item_ids ?? read(db, 'sign.template', r.template_id)?.item_ids ?? [];
   for (const [i, item] of templateItems.entries()) {
@@ -243,7 +281,7 @@ function signPrompt(db, r) {
     if (value == null) return { db };
     values[i] = item.type === 'checkbox' ? value === 'true' ? true : value === 'false' ? false : value : value;
   }
-  return { db: templateItems.length ? signFields(db, r, index, values) : applySignature(db, current(db, r), name) };
+  return { db: templateItems.length ? signFields(db, r, index, values) : applySignature(db, current(db, r), name, today(), index) };
 }
 
 export const signPlusModels = {
@@ -269,11 +307,13 @@ export const signPlusModels = {
       ...baseSign.form, lockedWhen: (r) => r.state !== 'draft', groups: [...baseSign.form.groups, ['template_id', 'attachment', 'signing_order', 'reminder_days', 'last_reminder_date', 'refusal_reason']],
       tabs: [...baseSign.form.tabs, { label: 'CC Contacts', fields: ['cc_partner_ids'] }, { label: 'Field Values', fields: ['field_values'] }],
       buttons: [
-        { label: 'Send', primary: true, when: (r) => r.state === 'draft', run: send },
-        { label: 'Sign', primary: true, when: (r) => r.state === 'sent', run: signPrompt },
-        { label: 'Sign Now', primary: true, when: (r) => r.state === 'sent', run: signPrompt },
-        { label: 'Refuse', when: (r) => r.state === 'sent', run: (db, r) => { const reason = prompt('Reason for refusing', ''); return { db: reason == null ? db : refuse(db, r, nextSigner(r), reason) }; } },
-        { label: 'Send Reminder', when: (r) => r.state === 'sent', run: (db, r) => ({ db: dueReminders(db, today()).some((d) => d.id === r.id) ? postNote(write(db, 'sign.request', r.id, { last_reminder_date: today() }), 'sign.request', r.id, `Signature reminder sent on ${today()}`) : db }) },
+        // With email configured the server sends each signer their link; otherwise the links are shared by hand.
+        { label: 'Send', primary: true, when: (r) => r.state === 'draft', server: '/api/sign/send', requires: 'smtp', run: (db, r) => sendRequest(db, r) },
+        { label: 'Signing Links', when: (r) => r.state === 'sent', run: showLinks },
+        { label: 'Sign', primary: true, when: companyTurn, run: signPrompt },
+        { label: 'Sign Now', primary: true, when: companyTurn, run: signPrompt },
+        { label: 'Refuse', when: companyTurn, run: (db, r) => { const index = companyIndex(r); if (index < 0) throw new Error(OWN_LINK); const reason = prompt('Reason for refusing', ''); return { db: reason == null ? db : refuse(db, r, index, reason) }; } },
+        { label: 'Send Reminder', when: (r) => r.state === 'sent', server: '/api/sign/remind', requires: 'smtp', run: () => { throw new Error('Reminders are emailed: configure email (MIZAN_SMTP_HOST) first'); } },
         { label: 'Cancel', vals: { state: 'canceled' }, when: (r) => ['draft', 'sent'].includes(r.state) },
       ],
     },
@@ -301,13 +341,14 @@ export const signPlusModels = {
     ...baseDocument,
     fields: {
       ...baseDocument.fields, folder_id: relation('documents.folder', 'Folder'), locked_by: relation('hr.employee', 'Locked By'),
-      tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag') }, () => ({ tag_id: null })),
-      legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r) => (r.tag_ids ?? []).filter((t) => typeof t === 'string') },
+      tag_ids: lines('Tags', { tag_id: relation('documents.tag', 'Tag'), name: { type: 'char', label: 'Tag Name', hidden: true } }, () => ({ tag_id: null })),
+      legacy_tags: { type: 'tags', label: 'Legacy Tags', readonly: true, compute: (r, db) => (r.tag_ids ?? []).map((t) => (typeof t === 'string' ? t : (db?.records?.['documents.tag'] ?? []).find((x) => x.id === t?.tag_id)?.name ?? t?.name)).filter(Boolean) },
     },
-    kanban: { ...baseDocument.kanban, tags: 'legacy_tags' },
+    kanban: { ...baseDocument.kanban, tags: 'tag_ids' },
     form: { ...baseDocument.form, groups: [...baseDocument.form.groups, ['folder_id', 'locked_by', 'legacy_tags']], buttons: baseDocument.form.buttons.map((b) => ['Lock', 'Unlock'].includes(b.label) ? { label: b.label, when: b.when, run: (db, r) => ({ db: (b.label === 'Lock' ? lockDocument : unlockDocument)(db, r.id, db.settings?.user_id ?? 1) }) } : b) },
   },
   'documents.share': {
+    simulated: 'Share links are not served yet: there is no public page that opens them.',
     label: 'Shares', fields: { name: { type: 'char', label: 'Name', required: true }, folder_id: relation('documents.folder', 'Folder'), document_ids: lines('Documents', { document_id: relation('documents.document', 'Document') }, () => ({ document_id: null })), token: { type: 'char', label: 'Token', readonly: true }, expiration: { type: 'date', label: 'Expiration' }, can_upload: { type: 'boolean', label: 'Allow Upload' } },
     defaults: () => ({ name: 'Shared Documents', token: token(), document_ids: [], can_upload: false }), list: ['name', 'folder_id', 'expiration', 'can_upload'],
     form: { title: 'name', groups: [['folder_id', 'expiration', 'can_upload', 'token']], tabs: [{ label: 'Documents', fields: ['document_ids'] }], chatter: true },

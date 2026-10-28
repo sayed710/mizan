@@ -129,7 +129,8 @@ export function createInvoice(db, id, beforeRepair = false) {
   if (!r.partner_id) throw new Error('Select a customer before invoicing');
   checkParts(db, { ...r, parts: [] });
   const lines = billable(r);
-  const invoice_line_ids = [...lines.parts, ...lines.operations];
+  // Invoice lines keep only invoice fields; the repair's own line flags stay on the repair.
+  const invoice_line_ids = [...lines.parts, ...lines.operations].map(({ type, hours, warranty_free, warranty_applied, ...l }) => l);
   if (!invoice_line_ids.length) throw new Error('There are no billable repair lines');
   const result = create(db, 'account.move', { move_type: 'out_invoice', state: 'draft', partner_id: r.partner_id,
     invoice_origin: r.name, repair_id: id, invoice_date: today(), invoice_date_due: addDays(today(), 15), invoice_line_ids });

@@ -6,7 +6,8 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
-import { moveValued } from './models/valuation.js';
+import { moveValued, postOpeningStock } from './models/valuation.js';
+import { SCHEMA_VERSION } from './migrations.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -101,7 +102,8 @@ export function seed() {
     tax_ids: [{ tax_src_id: vatSale, tax_dest_id: zeroExport }, { tax_src_id: vatPurchase, tax_dest_id: zeroImport }], account_ids: [],
   });
   db = postEntry(db, {
-    journal: 'MISC', date: today().slice(0, 4) + '-01-01', ref: 'Opening balance',
+    // Start of the year, but never after the seeded history (invoices go back 45 days).
+    journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
     lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
@@ -249,8 +251,9 @@ export function seed() {
   add('sign.request', { name: 'Distributor Agreement — Gulf Interiors', partner_id: 4, state: 'sent', body: 'The parties agree on exclusive distribution in the UAE for 12 months.' });
   add('sign.request', { name: 'NDA — Atlas Workspace', partner_id: 6, state: 'signed', signature: 'Atlas Workspace', sign_date: addDays(today(), -3) });
 
+  const docTag = Object.fromEntries(['Tax', 'Policy', 'Contract'].map((name) => [name, add('documents.tag', { name, facet: '' })]));
   [['Q3 VAT return.pdf', 'finance', ['Tax']], ['Employee handbook.pdf', 'hr', ['Policy']], ['Brand guidelines.pdf', 'marketing', []], ['Lease contract.pdf', 'legal', ['Contract']]]
-    .forEach(([name, folder, tag_ids]) => add('documents.document', { name, folder, tag_ids }));
+    .forEach(([name, folder, tags]) => add('documents.document', { name, folder, tag_ids: tags.map((tag) => ({ tag_id: docTag[tag], name: tag })) }));
 
   [[2, 'sales', 0, 8], [3, 'sales', 1, 8], [5, 'support', 0, 6], [6, 'support', 2, 8], [null, 'install', 3, 4]]
     .forEach(([employee_id, role, d, allocated_hours]) => add('planning.slot', { name: role === 'install' ? 'Install at Atlas' : 'Shift', employee_id, role, start: addDays(today(), d), end: addDays(today(), d + (role === 'install' ? 2 : 4)), allocated_hours, state: employee_id ? 'published' : 'draft' }));
@@ -418,5 +421,8 @@ export function seed() {
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
 
   const seeded = { ...db, messages: [] };
-  return postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(seeded))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
+  const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
+  const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
+  return { ...ready, schema_version: SCHEMA_VERSION };
 }

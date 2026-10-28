@@ -6,6 +6,7 @@ import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { companyViewDb } from '../companyView.js';
+import { companyAmount, companySum } from '../models/money.js';
 
 const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
 
@@ -29,7 +30,8 @@ function JournalCard({ card }) {
   );
 }
 
-const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
+// Documents in other currencies are converted to the company currency before they are added up.
+const sum = (db, recs, f) => companySum(db, recs, f);
 
 /** Invoicing overview: KPI tiles (each links to the matching list) + monthly invoiced chart. */
 export function Dashboard() {
@@ -40,13 +42,13 @@ export function Dashboard() {
   const month = today().slice(0, 7);
   const overdue = invoices.filter((m) => m.payment_state !== 'paid' && m.invoice_date_due < today());
   const byPartner = Object.entries(
-    invoices.reduce((acc, m) => ({ ...acc, [m.partner_id]: (acc[m.partner_id] ?? 0) + m.amount_total }), {}),
+    invoices.reduce((acc, m) => ({ ...acc, [m.partner_id]: (acc[m.partner_id] ?? 0) + companyAmount(db, m, 'amount_total') }), {}),
   ).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
   const tiles = [
-    ['Invoiced this month', money(sum(invoices.filter((m) => m.invoice_date?.startsWith(month)), 'amount_total')), '#/accounting/invoices?view=list'],
-    ['Receivable', money(sum(invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
-    ['Payable', money(sum(bills, 'amount_residual')), '#/accounting/bills?view=list'],
+    ['Invoiced this month', money(sum(db, invoices.filter((m) => m.invoice_date?.startsWith(month)), 'amount_total')), '#/accounting/invoices?view=list'],
+    ['Receivable', money(sum(db, invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
+    ['Payable', money(sum(db, bills, 'amount_residual')), '#/accounting/bills?view=list'],
     ['Overdue invoices', String(overdue.length), '#/accounting/invoices?view=list'],
     ['To reconcile', String(search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length), '#/accounting/bank'],
   ];

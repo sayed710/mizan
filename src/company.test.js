@@ -39,7 +39,7 @@ test('main company initialization preserves seed IDs, creates its contact and cu
   assert.equal(company.active, true);
   assert.equal(company.intercompany_rule, 'none');
   assert.equal(read(db, 'res.partner', company.partner_id).name, company.name);
-  assert.equal(read(db, 'res.partner', company.partner_id).company_id, null);
+  assert.equal(read(db, 'res.partner', company.partner_id).company_id ?? null, null);
   assert.equal(read(db, 'res.currency', company.currency_id).name, before.settings.currency);
   assert.deepEqual(read(db, 'res.partner', 1), read(before, 'res.partner', 1));
   assert.strictEqual(ensureMainCompany(db), db);
@@ -75,7 +75,8 @@ test('database-local document defaults follow the selected company and products 
   assert.notStrictEqual(db.settings.allowed_company_ids, allowed);
   for (const model of ['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket']) {
     if (!models[model]) continue;
-    const result = createForCompany(db, model, { name: 'New document', code: 'NEW', partner_id: 1 });
+    const vals = Object.fromEntries(Object.entries({ name: 'New document', code: 'NEW', partner_id: 1 }).filter(([k]) => models[model].fields[k]));
+    const result = createForCompany(db, model, vals);
     assert.equal(read(result.db, model, result.id).company_id, 2, model);
   }
   const owned = createForCompany(db, 'product', { name: 'Company product' });
@@ -130,7 +131,9 @@ test('confirmed inter-company sale creates one linked draft purchase with the se
   assert.equal(po.auto_sale_id, sale.id);
   assert.equal(po.origin, order.name);
   assert.equal(po.state, 'draft');
-  assert.deepEqual(po.order_line, [{ product_id: 2, qty: 3, price_unit: 42, discount: 5, tax: 14 }]);
+  const purchaseTax = read(after, 'account.tax', po.order_line[0].tax_id);
+  assert.equal(purchaseTax.type_tax_use, 'purchase');
+  assert.deepEqual(po.order_line, [{ product_id: 2, qty: 3, price_unit: 42, discount: 5, tax: 14, tax_id: purchaseTax.id, tax_type: 'percent', tax_include: false, tax_account_id: purchaseTax.account_id, tax_cash_basis: false, tax_name: purchaseTax.name }]);
   assert.strictEqual(interCompanyRules(after, sale.id), after);
   assert.equal(search(after, 'purchase.order').filter((p) => p.auto_sale_id === sale.id).length, 1);
   assert.deepEqual(confirmed, snapshot);

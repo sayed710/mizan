@@ -7,6 +7,9 @@ import { createCompany, ensureMainCompany } from './models/company.js';
 import { postEntry } from './models/ledger.js';
 import { closePeriod, consolidate, consolidatePeriod, consolidationModels, periodRates } from './models/consolidation.js';
 
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
+
 const previous = Object.fromEntries(Object.keys(consolidationModels).map((key) => [key, models[key]]));
 Object.assign(models, consolidationModels);
 after(() => {
@@ -19,8 +22,8 @@ after(() => {
 
 function fixture({ method = 'full', ownership = 100 } = {}) {
   let db = ensureMainCompany(seed());
-  const group = create(db, 'res.currency', { name: 'GROUP', rate_ids: [{ date: '2090-01-01', rate: 1 }] });
-  const source = create(group.db, 'res.currency', { name: 'SOURCE', rate_ids: [{ date: '2090-01-01', rate: 2 }, { date: '2090-01-02', rate: 4 }] });
+  const group = create(db, 'res.currency', { name: 'GROUP', rate_ids: [{ date: '2089-12-31', rate: 1 }] });
+  const source = create(group.db, 'res.currency', { name: 'SOURCE', rate_ids: [{ date: '2089-12-31', rate: 2 }, { date: '2090-01-02', rate: 4 }] });
   db = createCompany(source.db, { name: 'Parent', currency_id: group.id }).db;
   const parent = search(db, 'res.company').at(-1).id;
   const subsidiary = createCompany(db, { name: 'Subsidiary', currency_id: source.id });
@@ -42,7 +45,7 @@ function fixture({ method = 'full', ownership = 100 } = {}) {
 
 function entry(db, company_id, date, lines) {
   const posted = postEntry(db, { journal: 'MISC', date, lines });
-  return write(posted.db, 'account.move', posted.id, { company_id });
+  return force(posted.db, 'account.move', posted.id, { company_id });
 }
 
 const row = (result, code) => result.lines.find((line) => line.group_code === code);
@@ -159,4 +162,84 @@ test('overridden rates, date onchange, validation and seed remain usable', () =>
   ] }), /only once/);
   assert.throws(() => consolidate(db, 99999), /not found/);
   assert.ok(search(seed(), 'account.move').length > 0);
+});
+
+const sumOf = (result) => Math.round(result.lines.reduce((s, l) => s + l.total, 0) * 100) / 100;
+// Last year's sale, this period's sale and capital, booked on days with different rates.
+const history = (f) => {
+  let db = entry(f.db, f.child, '2089-12-31', sale(80));
+  db = entry(db, f.child, '2090-01-01', [{ account: '101401', debit: 200 }, { account: '301000', credit: 200 }]);
+  db = entry(db, f.child, '2090-01-02', sale(100));
+  return entry(db, f.parent, '2090-01-01', sale(20));
+};
+const fullChart = (f) => {
+  const chart = read(f.db, 'consolidation.chart', f.chart);
+  return write(f.db, 'consolidation.chart', f.chart, { account_ids: [...chart.account_ids, { code: 'EQ', name: 'Capital', account_type: 'equity', source_codes: '301000' }] });
+};
+
+test('every method gives balances that add up to zero, with translation difference and prior results', () => {
+  for (const [method, ownership] of [['full', 100], ['full', 60], ['proportional', 60], ['equity', 30]]) {
+    const f = fixture({ method, ownership });
+    const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+    assert.equal(sumOf(result), 0, `${method} ${ownership}%`);
+    assert.deepEqual(result.unmapped, []);
+  }
+});
+
+test('full consolidation below 100% gives the minority its share of equity and result', () => {
+  const f = fixture({ method: 'full', ownership: 60 });
+  const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+  const all = consolidate(history({ ...fixture(), db: fullChart(fixture()) }), f.id);
+  // Assets and the P&L stay at 100%.
+  assert.equal(row(result, 'CASH').by_company[f.child], row(all, 'CASH').by_company[f.child]);
+  assert.equal(row(result, 'SALES').by_company[f.child], row(all, 'SALES').by_company[f.child]);
+  const childEquity = ['EQ', 'EQUITY:RE', 'EQUITY:CTA'].reduce((s, code) => s + (row(all, code)?.by_company[f.child] ?? 0), 0);
+  const childResult = row(all, 'SALES').by_company[f.child];
+  assert.equal(row(result, 'EQUITY:NCI').by_company[f.child], Math.round(0.4 * (childEquity + childResult) * 100) / 100);
+  assert.equal(row(result, 'EQUITY:NCI_RESULT').by_company[f.child], Math.round(-0.4 * childResult * 100) / 100);
+});
+
+test('the equity method books the investment against the share of result and reserves', () => {
+  const f = fixture({ method: 'equity', ownership: 30 });
+  const result = consolidate(history({ ...f, db: fullChart(f) }), f.id);
+  const investment = row(result, `EQUITY:${f.child}`).total;
+  assert.ok(investment > 0);
+  assert.equal(Math.round((investment + row(result, `EQUITY:${f.child}:RESULT`).total + row(result, `EQUITY:${f.child}:RESERVE`).total) * 100) / 100, 0);
+});
+
+test('a period that does not add up or has unmapped accounts cannot be closed', () => {
+  const f = fixture();
+  const db = entry(f.db, f.child, '2090-01-01', [{ account: '101401', debit: 200 }, { account: '301000', credit: 200 }]);
+  assert.throws(() => closePeriod(db, f.id), /Map these accounts before closing: 301000/);
+});
+
+test('cents lost to rounding of individual lines do not block closing a balanced period', () => {
+  const f = fixture({ method: 'proportional', ownership: 60 });
+  let db = entry(f.db, f.child, '2090-01-01', [{ account: '101401', debit: 0.07 }, { account: '600000', debit: 0.07 }, { account: '400000', credit: 0.14 }]);
+  const closed = closePeriod(db, f.id);
+  const lines = read(closed, 'consolidation.period', f.id).lines;
+  assert.equal(Math.round(lines.reduce((s, l) => s + l.total, 0) * 100), 0);
+});
+
+test('a matched cross-currency inter-company pair closes; the rate difference is its own line', () => {
+  const f = fixture();
+  const seller = read(f.db, 'res.company', f.parent).partner_id;
+  const buyer = read(f.db, 'res.company', f.child).partner_id;
+  let db = entry(f.db, f.parent, '2090-01-01', [{ account: '121000', debit: 100, partner_id: buyer }, { account: '400000', credit: 100, partner_id: buyer }]);
+  db = entry(db, f.child, '2090-01-01', [{ account: '600000', debit: 200, partner_id: seller }, { account: '211000', credit: 200, partner_id: seller }]);
+  const closed = closePeriod(db, f.id);
+  const lines = read(closed, 'consolidation.period', f.id).lines;
+  assert.ok(lines.find((l) => l.group_code === 'EQUITY:ELIM_FX'));
+  assert.equal(Math.round(lines.reduce((s, l) => s + l.total, 0) * 100), 0);
+});
+
+test('the minority keeps its share of a subsidiary result even when that result is an inter-company sale', () => {
+  const f = fixture({ method: 'full', ownership: 60 });
+  const parentPartner = read(f.db, 'res.company', f.parent).partner_id;
+  const childPartner = read(f.db, 'res.company', f.child).partner_id;
+  let db = entry(f.db, f.child, '2090-01-01', [{ account: '121000', debit: 200, partner_id: parentPartner }, { account: '400000', credit: 200, partner_id: parentPartner }]);
+  db = entry(db, f.parent, '2090-01-01', [{ account: '600000', debit: 100, partner_id: childPartner }, { account: '211000', credit: 100, partner_id: childPartner }]);
+  const lines = read(closePeriod(db, f.id), 'consolidation.period', f.id).lines;
+  const own = lines.find((l) => l.group_code === 'SALES').by_company[f.child];
+  assert.equal(lines.find((l) => l.group_code === 'EQUITY:NCI_RESULT').by_company[f.child], Math.round(-0.4 * own * 100) / 100);
 });

@@ -1,5 +1,6 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { today } from './common.js';
+import { currentActor, employeeFor } from './authority.js';
 
 const MODEL = 'approval.request';
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -111,7 +112,8 @@ export function pendingFor(db, employeeId) {
 }
 
 function promptAction(db, r, action) {
-  const selected = prompt('Approver employee ID', String(pendingLines(r)[0]?.employee_id ?? ''));
+  // Signed in: act as your own employee; the server checks the line is yours.
+  const selected = employeeFor(db, currentActor()?.login)?.id ?? prompt('Approver employee ID', String(pendingLines(r)[0]?.employee_id ?? ''));
   if (selected === null) return { db };
   if (action === approve) return { db: approve(db, r, Number(selected)) };
   const reason = prompt('Refusal reason', '');

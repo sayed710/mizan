@@ -1,5 +1,5 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
-import { create, read, search, write } from '../orm.js';
+import { create, postNote, read, search, setActiveCompany, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
@@ -27,12 +27,39 @@ function prepare(db, id, date) {
   if (ls.length && Math.abs(quantity(ls) - owned) > 1e-8) throw new Error('Stock changed outside valuation; reconcile quantities first');
   if (ls.length || !p.qty_available) return db;
   if (p.qty_available < 0) throw new Error('Reconcile negative opening stock before valuation');
-  return create(db, 'stock.valuation.layer', {
-    product_id: id, date: '0001-01-01', quantity: p.qty_available, unit_cost: Number(p.cost) || 0,
-    value: round(p.qty_available * (Number(p.cost) || 0)), remaining_qty: p.qty_available,
-    remaining_value: round(p.qty_available * (Number(p.cost) || 0)), kind: 'adjustment',
-    description: 'Opening stock', reference: 'Opening stock', opening: true,
-  }).db;
+  return openingStock(db, [id], date);
+}
+
+const OPENING_EQUITY = '301000';
+
+/**
+ * Value stock that exists without layers (seeded, imported or typed in) as opening layers, and post their value
+ * once to the stock account against opening equity so the valuation report and the ledger agree.
+ */
+function openingStock(db, ids, date) {
+  let next = db;
+  const opened = [];
+  for (const id of ids) {
+    const p = product(next, id);
+    const value = round(p.qty_available * (Number(p.cost) || 0));
+    const res = create(next, 'stock.valuation.layer', {
+      product_id: id, date: '0001-01-01', quantity: p.qty_available, unit_cost: Number(p.cost) || 0,
+      value, remaining_qty: p.qty_available, remaining_value: value, kind: 'adjustment',
+      description: 'Opening stock', reference: 'Opening stock', opening: true,
+    });
+    next = res.db;
+    if (p.valuation !== 'manual_periodic' && value) opened.push([res.id, value]);
+  }
+  const total = round(opened.reduce((s, [, v]) => s + v, 0));
+  if (!total || !accountId(next, '110100') || !accountId(next, OPENING_EQUITY)) return next;
+  const entry = postEntry(next, { journal: 'MISC', date, ref: 'Opening stock', lines: [{ account: '110100', debit: total }, { account: OPENING_EQUITY, credit: total }] });
+  return opened.reduce((acc, [layerId]) => write(acc, 'stock.valuation.layer', layerId, { move_id: entry.id }), entry.db);
+}
+
+/** Open (and post) the stock of every stockable product that has quantities but no valuation layers yet. */
+export function postOpeningStock(db, date = today()) {
+  const ids = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available) > 0 && !layers(db, p.id).length).map((p) => p.id);
+  return ids.length ? openingStock(db, ids, date) : db;
 }
 
 /** Product costing policy; categories are free text, so policy lives on the product. */
@@ -42,7 +69,7 @@ export function costMethod(db, productId) {
   return method;
 }
 
-/** Post a layer once; periodic valuation and legacy opening balances create no entry. */
+/** Post a layer once; periodic valuation creates no entry, and opening layers are posted when they are opened. */
 export function postValuation(db, layerId) {
   const l = read(db, 'stock.valuation.layer', layerId);
   if (!l) throw new Error('Valuation layer not found');
@@ -63,24 +90,28 @@ function addLayer(db, vals) {
   return postValuation(result.db, result.id);
 }
 
-/** Receive and increase stock; standard costing expenses the purchase price difference. */
-export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, actualCost = false, pickingId } = {}) {
+/**
+ * Receive and increase stock. Standard costing always values at the standard price and books the gap to the
+ * actual cost (purchase price, production cost, refund cost) as a variance, so the standard never drifts.
+ */
+export function receive(db, productId, qty, unitCost, { date = today(), reference = '', counterpart, pickingId } = {}) {
   nonnegative(qty, 'Quantity');
   nonnegative(unitCost, 'Unit cost');
   if (!qty) throw new Error('Receive a positive quantity');
   let next = prepare(db, productId, date);
   const p = product(next, productId);
   const method = costMethod(next, productId);
-  const cost = method === 'standard' && !actualCost ? Number(p.cost) || 0 : unitCost;
+  const standard = method === 'standard';
+  const cost = standard ? Number(p.cost) || 0 : unitCost;
   const value = round(qty * cost);
   const onHand = Number(p.qty_available) || 0;
-  if (method !== 'standard' || actualCost) next = write(next, 'product', productId, {
-    cost: method === 'average' || method === 'standard' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
+  if (!standard) next = write(next, 'product', productId, {
+    cost: method === 'average' ? (valueOf(layers(next, productId)) + value) / (onHand + qty) : unitCost,
   });
   next = moveStock(next, [{ product_id: productId, qty }], 1);
   return addLayer(next, { product_id: productId, date, reference, description: reference || 'Receipt',
     quantity: qty, unit_cost: cost, value, remaining_qty: qty, remaining_value: value,
-    price_difference: method === 'standard' && !actualCost ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
+    price_difference: standard ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId });
 }
 
 function consume(db, productId, qty, method) {
@@ -128,7 +159,11 @@ export function moveValued(db, lines, sign, options = {}) {
     const p = read(next, 'product', l.product_id);
     const qty = Number(l.qty) || 0;
     if (!p || p.type !== 'goods' || !qty || !sign) return next;
-    if (p.valuation === 'manual_periodic') return moveStock(next, [l], sign);
+    if (p.valuation === 'manual_periodic') {
+      // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
+      if (sign < 0 && qty * -sign > (Number(p.qty_available) || 0) + 1e-8) throw new Error('Not enough stock to deliver');
+      return moveStock(next, [l], sign);
+    }
     const spec = { ...options, ...l.valuation_options };
     return sign > 0 ? receive(next, p.id, qty, l.unit_cost ?? p.cost ?? 0, spec) : deliver(next, p.id, qty, spec).db;
   }, db);
@@ -208,6 +243,22 @@ export function adjustQuantity(db, productId, newQty, { date = today(), referenc
     line_ids: count.line_ids.map((l) => ({ ...l, counted_qty: Number(newQty) })),
   });
   return applyCount(counted, started.id);
+}
+
+/**
+ * A scanner count of one product: refuses when the stock moved since `observed` was read, and books the count,
+ * valuation layer and journal entry under `company` (the one the counter works in), not the default company.
+ */
+export function countProduct(db, { productId, counted, observed, company }) {
+  const p = product(db, productId);
+  if (observed != null && Number(observed) !== p.qty_available) throw new Error(`Stock of ${p.name} changed to ${p.qty_available} since you started counting; scan it again`);
+  const before = p.qty_available;
+  setActiveCompany(company);
+  try {
+    return postNote(adjustQuantity(db, productId, counted), 'product', productId, `Inventory adjustment: ${before} → ${counted}`);
+  } finally {
+    setActiveCompany(null);
+  }
 }
 
 export function applyCount(db, countId) {

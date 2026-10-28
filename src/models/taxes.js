@@ -40,15 +40,25 @@ export function productTax(db, product, side, fpId) {
   return taxSnapshot(read(db, 'account.tax', mapTax(db, fpId, legacy)));
 }
 
-/** Cash-basis tax per final account (company currency) carried by an invoice's lines. */
-export function cashBasisTaxes(lines, rate = 1) {
+/** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
+export const taxLabel = (l) => l.tax_name || `${Number(l.tax) || 0}%`;
+
+/** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
+export function taxGroups(lines, accountOf, rate = 1) {
   const by = new Map();
   for (const l of lines ?? []) {
-    if (!l.tax_cash_basis) continue;
-    by.set(l.tax_account_id, (by.get(l.tax_account_id) ?? 0) + lineTaxOf(l) / rate);
+    const account_id = accountOf(l);
+    const tax_name = taxLabel(l);
+    const key = `${account_id}|${tax_name}`;
+    const g = by.get(key) ?? { account_id, tax_name, amount: 0, base: 0, document_amount: 0 };
+    by.set(key, { ...g, amount: g.amount + lineTaxOf(l) / rate, base: g.base + lineUntaxed(l) / rate, document_amount: g.document_amount + lineTaxOf(l) });
   }
-  return [...by].map(([account_id, amount]) => [account_id, round(amount)]).filter(([, a]) => a);
+  return [...by.values()].map((g) => ({ ...g, amount: round(g.amount), base: round(g.base), document_amount: round(g.document_amount) }));
 }
+
+/** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
+export const cashBasisTaxes = (lines, rate = 1) =>
+  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis), (l) => l.tax_account_id, rate).filter((g) => g.amount);
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */

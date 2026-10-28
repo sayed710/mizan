@@ -1,8 +1,11 @@
 import { useSyncExternalStore } from 'react';
 import { seed } from './seed.js';
-import { diffDb, isEmptyDiff } from './sync.js';
+import { diffDb, isEmptyDiff, rebaseDiff } from './sync.js';
+import { createQueue } from './queue.js';
+import { migrate } from './migrations.js';
 import { setActiveCompany, setAuthor, updateSettings } from './orm.js';
 import { setCompanies } from './models/company.js';
+import { setActor } from './models/authority.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 
@@ -13,7 +16,11 @@ const listeners = new Set();
 let mode = 'local';
 let user = null;
 let db = null;
-let inflight = Promise.resolve();
+let confirmed = null; // last state the server acknowledged
+let generation = 0; // bumped when a save fails, so saves queued on top of it are dropped
+const enqueue = createQueue(); // saves and polls, in order
+// Which database generation this browser last synced with; the server refuses edits made before a restore.
+let epoch = null;
 
 const COMPANY_KEY = 'mizan-company';
 const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KEY)) || 1; } catch { return 1; } };
@@ -48,44 +55,58 @@ const notify = () => {
 function loadLocal() {
   try {
     const saved = localStorage.getItem(KEY);
-    if (saved) return JSON.parse(saved);
+    if (saved) return migrate(JSON.parse(saved));
   } catch {
     // corrupt or blocked storage: fall back to demo data
   }
   return seed();
 }
 
-async function api(path, body) {
+async function api(path, body, headers = {}) {
   const res = await fetch(path, body === undefined
-    ? { credentials: 'same-origin' }
-    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify(body) });
+    ? { credentials: 'same-origin', headers }
+    : { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', ...(path === '/api/diff' && epoch ? { 'X-Mizan-Epoch': epoch } : {}) }, body: JSON.stringify(body) });
+  const nextEpoch = res.headers.get('x-mizan-epoch') ?? epoch;
+  if (epoch && nextEpoch !== epoch) generation++; // drop edits queued against the replaced database
+  epoch = nextEpoch;
   const isJson = res.headers.get('content-type')?.includes('application/json');
   const data = isJson ? await res.json() : null;
-  return { ok: res.ok, status: res.status, isJson, data };
+  return { ok: res.ok, status: res.status, isJson, data, etag: res.headers.get('etag') };
 }
 
+// The server's tag for the copy we hold; a poll with nothing new comes back 304 with no body.
+let dbTag = null;
 async function pull() {
-  const r = await api('/api/db');
-  if (r.ok) { db = r.data; notify(); }
+  const r = await api('/api/db', undefined, dbTag ? { 'If-None-Match': dbTag } : {});
+  if (r.status === 304) return;
   if (r.status === 401) location.reload();
+  if (!r.ok || !r.data) throw new Error(r.data?.error ?? `Could not load the database (HTTP ${r.status})`);
+  db = confirmed = r.data;
+  dbTag = r.etag;
+  notify();
 }
+
+const pollFailed = (e) => console.warn('Mizan: refresh failed, will retry', e);
 
 /** Detect the backend; resolves to { mode, user }. A non-JSON answer means no backend (static/dev hosting). */
 export async function initStore() {
+  let session = null;
   try {
-    const r = await api('/api/session');
-    if (r.isJson) {
-      mode = 'server';
-      if (r.ok) {
-        user = r.data;
-        setAuthor(user.name);
-        await pull();
-        setInterval(() => { if (document.visibilityState === 'visible') inflight = inflight.then(pull); }, POLL_MS);
-      }
-      return { mode, user };
-    }
+    session = await api('/api/session');
   } catch {
     // no backend reachable: local mode
+  }
+  if (session?.isJson) {
+    mode = 'server';
+    if (session.ok) {
+      user = session.data;
+      setAuthor(user.name);
+      setActor(user);
+      // Never fall back to demo data here: the next save would write it over the real records.
+      await pull();
+      setInterval(() => { if (document.visibilityState === 'visible') enqueue(pull, pollFailed); }, POLL_MS);
+    }
+    return { mode, user };
   }
   db = loadLocal();
   applyContext();
@@ -96,36 +117,78 @@ export const getDb = () => db;
 export const getUser = () => user;
 export const isServer = () => mode === 'server';
 
+/** Id reassignments from the server, in arrival order. */
+const remaps = [];
+
 /** Apply a pure ORM transition: optimistic locally, then synced (server) or persisted (local). */
 export function commit(next) {
   // Diff against the snapshot this transition was computed from, so a poll landing in between
   // can't turn other users' newer changes into reverts.
   const diff = mode === 'server' ? diffDb(db, next) : null;
+  const known = remaps.length;
   db = next;
   notify();
   if (mode === 'local') {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
     return;
   }
-  inflight = inflight.then(async () => {
-    if (isEmptyDiff(diff)) return;
-    const r = await api('/api/diff', diff);
-    if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; notify(); }
-    if (!r.ok) alert(r.data?.error ?? 'Could not save changes');
+  dbTag = null;
+  const gen = generation;
+  const failed = (message) => {
+    generation++;
+    db = confirmed ?? db;
+    notify();
+    alert(`${message} Showing the last saved data; please redo any edits made since.`);
+  };
+  enqueue(async () => {
+    if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
+    const r = await api('/api/diff', remaps.slice(known).reduce(rebaseDiff, diff));
+    dbTag = null;
+    if (r.ok) {
+      const { remapped, ...saved } = r.data;
+      db = confirmed = saved;
+      if (remapped) {
+        remaps.push(remapped);
+        window.dispatchEvent(new CustomEvent('mizan:remapped', { detail: remapped }));
+      }
+      notify();
+      return;
+    }
+    if (r.data?.db) confirmed = r.data.db;
+    failed(r.data?.error ?? 'Could not save changes.');
+  }, (e) => {
+    failed(`Could not save changes: ${e.message}.`);
+    return pull().catch(pollFailed);
   });
 }
 
 /** Run a server-side action (e.g. send email) and refresh the shared database. */
 export async function serverAction(path, body) {
-  const r = await api(path, body);
+  // Queued behind pending saves, so the server sees the record as the user just saved it.
+  const request = inflight.then(() => api(path, body));
+  inflight = request.catch(() => {});
+  const r = await request;
   if (!r.ok) throw new Error(r.data?.error ?? 'Action failed');
-  await pull();
+  // The action already happened: a failed refresh must not look like a failed action (users would retry and send twice).
+  await pull().catch((e) => { pollFailed(e); enqueue(pull, pollFailed); });
   return r.data;
+}
+
+/** Admin restore on the server: without `confirm` it only reports what would change; with 'RESTORE' it replaces the data. */
+export async function restoreBackup(backup, confirm) {
+  const restore = async () => {
+    const r = await api('/api/restore', { backup, confirm });
+    if (!r.ok) throw new Error(r.data?.error ?? 'Restore failed');
+    if (confirm) await pull();
+    return r.data;
+  };
+  // Serialize replacement and refresh with saves; the new epoch discards edits queued during the restore.
+  return confirm ? enqueue(restore, (e) => { throw e; }) : restore();
 }
 
 export async function resetDemo() {
   if (mode === 'local') return commit(seed());
-  const r = await api('/api/reset', {});
+  const r = await api('/api/reset', { confirm: 'RESET' });
   if (r.ok) { db = r.data; notify(); } else alert(r.data?.error ?? 'Reset failed');
 }
 
@@ -142,6 +205,11 @@ export async function logout() {
 
 export const listUsers = async () => (await api('/api/users')).data ?? [];
 export const listKeys = async () => (await api('/api/keys')).data ?? [];
+/** Server change log for a model (admins only); null when it cannot be read. */
+export async function listAudit(model, limit = 500) {
+  const r = await api(`/api/audit?model=${encodeURIComponent(model)}&limit=${limit}`);
+  return r.ok ? r.data : null;
+}
 export const revokeKey = (created) => fetch(`/api/keys?created=${Number(created)}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' } });
 export async function createKey(name) {
   const r = await api('/api/keys', { name });

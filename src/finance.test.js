@@ -91,9 +91,10 @@ test('sales and purchase lock dates only lock their side; the hard lock locks ev
   assert.equal(lockDateFor({ sale_lock_date: '2026-03-31' }, { move_type: 'in_invoice' }), '');
   assert.equal(lockDateFor({ purchase_lock_date: '2026-02-28', lock_date: '2026-01-31' }, { move_type: 'in_refund' }), '2026-02-28');
   assert.equal(lockDateFor({ hard_lock_date: '2026-04-30', sale_lock_date: '2026-03-31' }, { move_type: 'entry' }), '2026-04-30');
-  const db = { settings: { sale_lock_date: '2026-03-31' } };
-  assert.match(moveGuard(db, null, { move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
-  assert.equal(moveGuard(db, null, { move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
+  const db = { settings: { sale_lock_date: '2026-03-31' }, records: { 'account.account': [{ id: 1 }, { id: 2 }] } };
+  const entry = { name: 'BILL/2026/0001', line_ids: [{ account_id: 1, debit: 10, credit: 0 }, { account_id: 2, debit: 0, credit: 10 }] };
+  assert.match(moveGuard(db, null, { ...entry, move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
+  assert.equal(moveGuard(db, null, { ...entry, move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
 });
 
 test('journal cards count drafts, unpaid and late invoices, and bank balance with lines to reconcile', () => {
@@ -107,4 +108,17 @@ test('journal cards count drafts, unpaid and late invoices, and bank balance wit
   const bank = cards.find((c) => c.journal.code === 'BNK1');
   assert.ok(bank.balance > 0);
   assert.equal(bank.toReconcile, search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length);
+});
+
+test('a reminder opened in the mail app is logged on the customer with each amount in its currency', async () => {
+  const { followUpText, logManualFollowUp } = await import('./models/finance.js');
+  const { messagesOf } = await import('./orm.js');
+  const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
+  const f = followUps(db).find((x) => x.partner_id === 5);
+  assert.match(followUpText(db, f), /\d \S+$/m);
+  const next = logManualFollowUp(db, 5);
+  assert.equal(read(next, 'res.partner', 5).followup_date, today());
+  assert.equal(read(next, 'res.partner', 5).followup_level_delay, 15);
+  assert.ok(messagesOf(next, 'res.partner', 5).some((m) => /Payment reminder sent by email/.test(m.body)));
+  assert.throws(() => logManualFollowUp(seed(), 5), /no overdue/);
 });

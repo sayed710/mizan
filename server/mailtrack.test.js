@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from '../src/orm.js';
-import { queueMailing } from '../src/models/mailing.js';
-import { deliverMailing, emailFor, linksOf, trackingResponse } from './mailtrack.js';
+import { markBounced, markSent, queueMailing } from '../src/models/mailing.js';
+import { deliverMailing, emailFor, linksOf, resumeQueued, trackingResponse } from './mailtrack.js';
 import { seed } from '../src/seed.js';
 
 const queued = () => {
@@ -73,4 +73,29 @@ test('delivery commits the queue first and keeps changes made while emails go ou
   assert.equal(out.delivered, 0);
   assert.equal(read(current, 'mailing.mailing', id).bounced, out.sent);
   assert.equal(read(current, 'mailing.contact', contact.id).phone, 'changed meanwhile');
+});
+
+test('server-queued traces count as delivered only once sent, and a bounce of a queued trace does not undercount', () => {
+  const base = seed();
+  const { db: start, id } = create(base, 'mailing.mailing', { subject: 'Hi', list_id: search(base, 'mailing.list')[0].id, body: 'Hello' });
+  const db = queueMailing(start, read(start, 'mailing.mailing', id), { queued: true });
+  const [a, b] = search(db, 'mailing.trace').filter((t) => t.mailing_id === id);
+  assert.equal(a.state, 'queued');
+  assert.equal(read(db, 'mailing.mailing', id).delivered, 0);
+  const sent = markSent(db, a.token);
+  assert.equal(read(sent, 'mailing.trace', a.id).state, 'sent');
+  assert.equal(markSent(sent, a.token), sent);
+  const bounced = markBounced(sent, b.token);
+  assert.deepEqual([read(bounced, 'mailing.mailing', id).delivered, read(bounced, 'mailing.mailing', id).bounced], [1, 1]);
+});
+
+test('resume sends traces left queued by an interrupted delivery', async () => {
+  const base = seed();
+  const { db: start, id } = create(base, 'mailing.mailing', { subject: 'Hi', list_id: search(base, 'mailing.list')[0].id, body: 'Hello' });
+  let current = queueMailing(start, read(start, 'mailing.mailing', id), { queued: true });
+  const store = { get: () => current, commit: (next) => { current = next; } };
+  const delivered = await resumeQueued({ host: '127.0.0.1', port: 9, from: 'a@x.example' }, store, 'https://erp.example');
+  assert.equal(delivered, 0);
+  assert.equal(search(current, 'mailing.trace').filter((t) => t.state === 'queued').length, 0);
+  assert.equal(read(current, 'mailing.mailing', id).delivered, 0);
 });

@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react';
 import { updateSettings } from '../orm.js';
-import { companiesOf, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, revokeKey, useDb } from '../store.js';
+import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
-import { createCompany, setCompanyCurrency } from '../models/company.js';
+import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
+import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
 function Users() {
   const [users, setUsers] = useState([]);
-  const [form, setForm] = useState({ login: '', name: '', password: '', apps: '' });
+  const [form, setForm] = useState({ login: '', name: '', password: '', apps: '', companies: '' });
   const [error, setError] = useState(null);
   const refresh = () => listUsers().then(setUsers);
   useEffect(() => { refresh(); }, []);
@@ -17,7 +18,7 @@ function Users() {
     e.preventDefault();
     try {
       await addUser(form);
-      setForm({ login: '', name: '', password: '', apps: '' });
+      setForm({ login: '', name: '', password: '', apps: '', companies: '' });
       setError(null);
       refresh();
     } catch (err) {
@@ -33,7 +34,7 @@ function Users() {
       <h3>{t('Users')}</h3>
       <table className="list">
         <tbody>
-          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td></tr>)}
+          {users.map((u) => <tr key={u.id}><td>{u.name}</td><td>{u.login}</td><td>{u.isAdmin ? t('Administrator') : ''}</td><td className="muted">{u.apps || t('All apps')}</td><td className="muted">{u.companies || t('All companies')}</td></tr>)}
         </tbody>
       </table>
       <form className="row user-form" onSubmit={submit}>
@@ -41,6 +42,7 @@ function Users() {
         {input('login', { label: 'Login' })}
         {input('password', { label: 'Password', type: 'password' })}
         <input aria-label={t('Allowed apps')} placeholder={t('Allowed apps (e.g. crm,sales) — empty = all')} value={form.apps} onChange={(e) => setForm({ ...form, apps: e.target.value })} />
+        <input aria-label={t('Allowed companies')} placeholder={t('Allowed company ids (e.g. 1,2) — empty = all')} value={form.companies} onChange={(e) => setForm({ ...form, companies: e.target.value })} />
         <button type="submit" className="btn primary">{t('Add user')}</button>
       </form>
       {error && <div className="alert" role="alert">{error}</div>}
@@ -107,25 +109,43 @@ function ApiKeys() {
 export function Settings() {
   const db = useDb();
   const [status, setStatus] = useState(null);
+  const company = (db.records['res.company'] ?? []).find((c) => c.id === currentCompany(db).id);
   const total = Object.values(db.records).reduce((s, recs) => s + recs.length, 0);
 
+  // On a server the backup is the server's full database (admins only); the browser copy may be filtered.
   const download = () => {
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(getDb(), null, 2)], { type: 'application/json' }));
+    a.href = isServer() ? '/api/backup' : URL.createObjectURL(new Blob([JSON.stringify(getDb(), null, 2)], { type: 'application/json' }));
     a.download = `mizan-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-    URL.revokeObjectURL(a.href);
+    if (!isServer()) URL.revokeObjectURL(a.href);
   };
   const restore = async (file) => {
+    setStatus(null);
+    let data;
     try {
-      const data = JSON.parse(await file.text());
-      if (!isDb(data)) throw new Error('shape');
-      commit(data);
-      setStatus(t('Backup restored.'));
+      data = JSON.parse(await file.text());
     } catch {
       setStatus(t('Invalid backup file.'));
+      return;
+    }
+    if (!isServer()) {
+      if (!isDb(data)) { setStatus(t('Invalid backup file.')); return; }
+      if (confirm(t('Replace all data in this browser with the backup?'))) { commit(migrate(data)); setStatus(t('Backup restored.')); }
+      return;
+    }
+    try {
+      // Ask the server what would change, then require a typed confirmation before anything is replaced.
+      const plan = await restoreBackup(data);
+      const typed = prompt(`${t('Restoring replaces all data for every user.')}\n${t('Now')}: ${plan.current} · ${t('Backup')}: ${plan.restored} (${t('removed')}: ${plan.removed}, ${t('added')}: ${plan.added}, ${t('changed')}: ${plan.changed})\n${t('Messages')}: ${plan.messages.current} → ${plan.messages.restored} · ${t('Settings')}: ${plan.settingsChanged ? t('replaced') : t('unchanged')}\n${t('Type RESTORE to continue.')}`);
+      if (typed !== 'RESTORE') return;
+      await restoreBackup(data, 'RESTORE');
+      setStatus(t('Backup restored.'));
+    } catch (e) {
+      setStatus(`${t('Backup not restored')}: ${e.message}`);
     }
   };
+  const canReplaceData = !isServer() || getUser()?.isAdmin;
 
   return (
     <main className="action settings">
@@ -134,15 +154,28 @@ export function Settings() {
         <div className="field">
           <label htmlFor="company">{t('Company Name')}</label>
           <div className="field-value">
-            <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />
+            {/* One source of truth: the current company record, which the navbar, documents and QR codes all read. */}
+            {company
+              ? <input id="company" key={`${company.id}:${company.name}`} defaultValue={company.name}
+                  onBlur={(e) => { const name = e.target.value.trim(); if (!name) e.target.value = company.name; else if (name !== company.name) commit(renameCompany(getDb(), company.id, name)); }} />
+              : <input id="company" value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />}
           </div>
         </div>
         <div className="field">
           <label htmlFor="currency">{t('Currency')}</label>
           <div className="field-value">
-            <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
-              {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            {company
+              ? (
+                <>
+                  <span id="currency" className="readonly">{currentCompany(db).currency}</span>
+                  <p className="muted">{t('The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.')} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></p>
+                </>
+              )
+              : (
+                <select id="currency" value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
+                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
           </div>
         </div>
         <div className="field">
@@ -190,9 +223,10 @@ export function Settings() {
           <div className="field-value">
             <select id="invoice_qr" value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
               <option value="">{t('None')}</option>
-              <option value="zatca">{t('ZATCA (Saudi e-invoicing)')}</option>
+              <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
               <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
             </select>
+            {db.settings?.invoice_qr === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
           </div>
         </div>
         <div className="field">
@@ -217,14 +251,16 @@ export function Settings() {
         <h3>{t('Data')}</h3>
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">
-          <button type="button" className="btn" onClick={download}>⬇ {t('Download backup')}</button>
-          <label className="btn">
-            ⬆ {t('Restore backup')}
-            <input type="file" accept="application/json" hidden onChange={(e) => e.target.files[0] && restore(e.target.files[0])} />
-          </label>
-          <button type="button" className="btn danger" onClick={() => { if (confirm(t('Reset all data to the demo database?'))) resetDemo(); }}>
+          {canReplaceData && <button type="button" className="btn" onClick={download}>⬇ {t('Download backup')}</button>}
+          {canReplaceData && (
+            <label className="btn">
+              ⬆ {t('Restore backup')}
+              <input type="file" accept="application/json" hidden onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; if (f) restore(f); }} />
+            </label>
+          )}
+          {(!isServer() || getUser()?.canReset) && <button type="button" className="btn danger" onClick={() => { if (prompt(t('This deletes all data and loads the demo database. Type RESET to continue.')) === 'RESET') resetDemo(); }}>
             {t('Reset demo')}
-          </button>
+          </button>}
         </div>
         {status && <p role="status">{status}</p>}
         {!isServer() && <p className="muted">{t('Browser-only demo mode: data is stored in this browser.')}</p>}

@@ -1,8 +1,8 @@
 // Recurring plans, billing, upsells, renewals and subscription metrics.
-import { create, read, search, write } from '../orm.js';
+import { create, messagesOf, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, today } from './common.js';
 import { moreModels } from './more.js';
-import { payMove, postMove } from './accounting.js';
+import { postMove } from './accounting.js';
 
 const base = moreModels['sale.subscription'];
 const round = (n) => Math.round(n * 100) / 100;
@@ -49,50 +49,72 @@ function refresh(db, sub, date) {
   return Object.entries(vals).every(([key, value]) => JSON.stringify(stored[key]) === JSON.stringify(value)) ? db : write(db, 'sale.subscription', sub.id, vals);
 }
 
-function billPeriod(db, sub, date) {
-  const following = nextDate(date, planFor(db, sub));
+/** Bill the period starting on `period`; a late (catch-up) period is issued on `issued`, never back-dated. */
+function billPeriod(db, sub, period, issued = period) {
+  const following = nextDate(period, planFor(db, sub));
   const generated = base.form.buttons.find((b) => b.label === 'Generate Invoice').run(db, sub);
   const id = Number(generated.go.split('/').at(-1));
-  let next = write(generated.db, 'account.move', id, { invoice_date: date, invoice_date_due: addDays(date, 15), company_id: sub.company_id });
+  let next = write(generated.db, 'account.move', id, { invoice_date: issued, invoice_date_due: addDays(issued, 15), subscription_period: period, company_id: sub.company_id });
   next = postMove(next, id);
   next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: sub.stage, close_reason: sub.close_reason });
   return { db: next, id };
 }
 
+/**
+ * Automatic payment needs a payment provider to charge the customer, and Mizan has none yet: the invoice stays open
+ * with a note to collect it, instead of booking a bank receipt that never happened.
+ */
+const collectNote = (db, sub, invoiceId) => (sub.payment_token
+  ? postNote(db, 'account.move', invoiceId, 'Automatic payment is on for this subscription, but no payment provider is connected: collect the payment, then register it')
+  : db);
+
 function generateInvoice(db, sub) {
   if (sub.stage !== 'progress') throw new Error('Only an in-progress subscription can be invoiced');
   const date = sub.next_invoice_date || today();
   if (sub.end_date && date >= sub.end_date) throw new Error('The subscription term has ended');
-  const billed = billPeriod(db, sub, date);
+  const billed = billPeriod(db, sub, date, date < today() ? today() : date);
   let next = billed.db;
-  if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, today());
+  next = collectNote(next, sub, billed.id);
   return { db: refresh(next, read(next, 'sale.subscription', sub.id), today()), go: `#/accounting/invoices/${billed.id}` };
 }
 
-/** Post each due period once, with an exclusive contract end date and optional mock auto-payment. */
+/** Post each due period once, with an exclusive contract end date. */
 export function invoiceDue(db, date = today()) {
   checkDate(date);
   let next = db;
   for (const initial of search(db, 'sale.subscription')) {
-    let sub = read(next, 'sale.subscription', initial.id);
-    while (sub.stage === 'progress' && sub.next_invoice_date && sub.next_invoice_date <= date) {
-      const at = sub.next_invoice_date;
-      if (sub.end_date && at >= sub.end_date) {
-        next = write(next, 'sale.subscription', sub.id, { stage: 'closed', closed_date: sub.end_date });
-        break;
-      }
-      const following = nextDate(at, planFor(next, sub));
-      if (!invoicesFor(next, sub.id).some((r) => r.invoice_date === at && r.state !== 'cancel')) {
-        const billed = billPeriod(next, sub, at);
-        next = billed.db;
-        if (sub.payment_token) next = payMove(next, billed.id, read(next, 'account.move', billed.id).amount_residual, date);
-      }
-      next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: 'progress', close_reason: sub.close_reason });
-      sub = read(next, 'sale.subscription', sub.id);
+    const before = next;
+    try {
+      next = invoiceOne(next, initial.id, date);
+    } catch (e) {
+      // One failing contract (e.g. a locked period) must not stop the others; say why on the contract, once.
+      const body = `Recurring invoicing failed: ${e.message}`;
+      next = messagesOf(before, 'sale.subscription', initial.id).some((m) => m.body === body) ? before : postNote(before, 'sale.subscription', initial.id, body);
     }
-    next = refresh(next, read(next, 'sale.subscription', initial.id), date);
   }
   return next;
+}
+
+/** Bill every due period of one contract. */
+function invoiceOne(db, id, date) {
+  let next = db;
+  let sub = read(next, 'sale.subscription', id);
+  while (sub.stage === 'progress' && sub.next_invoice_date && sub.next_invoice_date <= date) {
+    const at = sub.next_invoice_date;
+    if (sub.end_date && at >= sub.end_date) {
+      next = write(next, 'sale.subscription', sub.id, { stage: 'closed', closed_date: sub.end_date });
+      break;
+    }
+    const following = nextDate(at, planFor(next, sub));
+    if (!invoicesFor(next, sub.id).some((r) => (r.subscription_period ?? r.invoice_date) === at && r.state !== 'cancel')) {
+      const billed = billPeriod(next, sub, at, date);
+      next = billed.db;
+      next = collectNote(next, sub, billed.id);
+    }
+    next = write(next, 'sale.subscription', sub.id, { next_invoice_date: following, stage: 'progress', close_reason: sub.close_reason });
+    sub = read(next, 'sale.subscription', sub.id);
+  }
+  return refresh(next, read(next, 'sale.subscription', id), date);
 }
 
 /** Close running contracts whose oldest posted unpaid invoice has exceeded the plan's grace days. */
@@ -100,7 +122,7 @@ export function autoClose(db, date = today()) {
   checkDate(date);
   return search(db, 'sale.subscription').reduce((next, sub) => {
     const limit = Number(planFor(next, sub).auto_close_days ?? 15);
-    const oldest = unpaid(invoicesFor(next, sub.id)).map((r) => r.invoice_date).filter(Boolean).sort()[0];
+    const oldest = unpaid(invoicesFor(next, sub.id)).map((r) => r.invoice_date_due || r.invoice_date).filter(Boolean).sort()[0];
     if (sub.stage === 'progress' && oldest && days(oldest, date) > limit) next = write(next, 'sale.subscription', sub.id, { stage: 'closed', close_reason: 'unpaid', closed_date: date });
     return refresh(next, read(next, 'sale.subscription', sub.id), date);
   }, db);
@@ -206,7 +228,7 @@ export const subscriptionPlusModels = {
       renewal_id: { type: 'many2one', relation: 'sale.subscription', label: 'Renewal', readonly: true },
       upsell_ids: relationLines('sale.subscription', 'subscription_id', 'Upsells'),
       invoice_ids: relationLines('account.move', 'invoice_id', 'Invoices'),
-      payment_token: { type: 'boolean', label: 'Automatic Payment' },
+      payment_token: { type: 'boolean', label: 'Automatic Payment (needs a payment provider)' },
       plan_interval: { type: 'integer', label: 'Billing Interval', readonly: true },
       plan_unit: { type: 'selection', label: 'Billing Unit', readonly: true, options: [['week', 'Weeks'], ['month', 'Months'], ['year', 'Years']] },
       overdue: { type: 'boolean', label: 'Has Overdue Invoices', readonly: true },
@@ -227,7 +249,11 @@ export const subscriptionPlusModels = {
         { label: 'Upsell', when: (r) => r.stage === 'progress', run: (db, r) => { const result = upsell(db, r.id, linesFor(r).map((l) => ({ ...l, qty: 1 })), today()); return { db: result.db, go: `#/subscriptions/subscriptions/${result.id}` }; } },
         { label: 'Renew', when: (r) => ['progress', 'closed'].includes(r.stage) && !r.renewal_id, run: (db, r) => { const result = renew(db, r.id, { date: today() }); return { db: result.db, go: `#/subscriptions/subscriptions/${result.id}` }; } },
         { ...base.form.buttons.find((b) => b.label === 'Close'), run: (db, r) => { const result = base.form.buttons.find((b) => b.label === 'Close').run(db, r); return { db: result.db === db ? db : write(result.db, 'sale.subscription', r.id, { closed_date: today() }) }; } },
-        { label: 'Reopen', when: (r) => r.stage === 'closed' && !r.renewal_id, vals: { stage: 'progress', close_reason: null, closed_date: null, end_date: null } },
+        // Billing resumes from the reopen date: the months it was closed are not invoiced.
+        { label: 'Reopen', when: (r) => r.stage === 'closed' && !r.renewal_id, run: (db, r) => ({ db: write(db, 'sale.subscription', r.id, {
+          stage: 'progress', close_reason: null, closed_date: null, end_date: null,
+          next_invoice_date: r.next_invoice_date && r.next_invoice_date > today() ? r.next_invoice_date : today(),
+        }) }) },
       ],
       groups: [...base.form.groups, ['plan_id', 'payment_token', 'health', 'last_invoice_date'], ['origin_id', 'renewal_id', 'closed_date']],
       tabs: [...base.form.tabs, { label: 'Invoices', fields: ['invoice_ids'] }, { label: 'Upsells', fields: ['upsell_ids'] }],

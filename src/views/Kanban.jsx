@@ -1,13 +1,18 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, groupRecords, write } from '../orm.js';
+import { create, groupRecords, write } from '../orm.js';
 import { viewRecords as search } from '../companyView.js';
 import { commit, getDb } from '../store.js';
+import { canDropOn } from './kanbanDrop.js';
 import { t } from '../i18n.js';
 import { Avatar, display, money, Stars, Tag } from '../ui.jsx';
+import { companySum } from '../models/money.js';
+
+/** The model's kanban spec, or a generic title-only card when it has none. */
+const kanbanOf = (model) => models[model].kanban ?? { title: typeof models[model].form?.title === 'string' ? models[model].form.title : 'name', lines: [] };
 
 function Card({ db, model, rec, open, draggable }) {
-  const k = models[model].kanban;
+  const k = kanbanOf(model);
   const fields = models[model].fields;
   const counter = k.counter && search(db, k.counter.model).filter((r) => r[k.counter.field] === rec.id).length;
   return (
@@ -24,11 +29,16 @@ function Card({ db, model, rec, open, draggable }) {
         <strong>{rec[k.title]}</strong>
       </div>
       {k.lines.map((f) => {
-        const v = display(db, fields[f], rec[f]);
+        const v = display(db, fields[f], rec[f], rec);
         return v ? <div key={f} className="card-line">{v}</div> : null;
       })}
       {k.tags && rec[k.tags]?.length > 0 && (
-        <div className="card-tags">{rec[k.tags].map((tag) => <Tag key={tag} name={tag} />)}</div>
+        <div className="card-tags">{rec[k.tags].map((tag, i) => {
+          // Tags are plain names, or lines whose first sub-field points at a tag record.
+          const [sub, subField] = Object.entries(fields[k.tags].fields ?? {})[0] ?? [];
+          const name = typeof tag === 'string' ? tag : display(db, subField, tag?.[sub]);
+          return name ? <Tag key={`${i}-${name}`} name={name} /> : null;
+        })}</div>
       )}
       {counter !== false && counter != null && <div className="card-counter"><b>{counter}</b> {t(k.counter.label)}</div>}
       {(k.priority || k.badge) && (
@@ -65,10 +75,8 @@ function QuickCreate({ model, vals, onDone }) {
   );
 }
 
-const DROPPABLE = ['selection', 'many2one', 'char', 'boolean'];
-
 export function Kanban({ db, model, records, open, groupBy, defaults }) {
-  const k = models[model].kanban;
+  const k = kanbanOf(model);
   const [quick, setQuick] = useState(null);
   const [over, setOver] = useState(null);
   const field = groupBy && models[model].fields[groupBy];
@@ -80,7 +88,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
       </div>
     );
   }
-  const canDrop = DROPPABLE.includes(field.type);
+  const canDrop = canDropOn(model, groupBy);
   const groups = groupRecords(db, model, records, groupBy);
   return (
     <div className="kanban">
@@ -113,7 +121,7 @@ export function Kanban({ db, model, records, open, groupBy, defaults }) {
               <div className="progress" aria-hidden="true">
                 {pr && recs.length > 0 && pr.map((n, i) => <span key={i} className={`p${3 - i}`} style={{ flexGrow: n }} />)}
               </div>
-              {k.sum && <b>{money(aggregate(recs, k.sum))}</b>}
+              {k.sum && <b>{money(companySum(db, recs, k.sum))}</b>}
             </div>
             {quick === key && <QuickCreate model={model} vals={{ ...defaults, [groupBy]: value }} onDone={() => setQuick(null)} />}
             {recs.map((r) => <Card key={r.id} db={db} model={model} rec={r} open={() => open(r.id)} draggable={canDrop} />)}

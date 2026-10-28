@@ -145,8 +145,10 @@ test('automatic approval and form proposals attribute weekly excess to the thres
   for (const date of ['2025-01-06', '2025-01-07', '2025-01-08', '2025-01-09', '2025-01-10']) db = shift(db, id, date).db;
   assert.deepEqual(workedDaysForPayslip(db, id, period), { days: 5, hours: 40, overtimeHours: 5 });
   const friday = search(db, 'hr.attendance').find((r) => r.employee_id === id && r.date === '2025-01-10');
+  assert.equal(friday.overtime_status, 'approved');
+  assert.equal(friday.validated_overtime, 5);
   const button = attendancePlusModels['hr.attendance'].form.buttons.find((b) => b.label === 'Approve Overtime');
-  assert.equal(read(button.run(db, friday).db, 'hr.attendance', friday.id).validated_overtime, 5);
+  assert.throws(() => button.run(db, friday), /not available/);
 });
 
 test('automatic checkout caps long shifts across midnight, flags them and is repeatable', () => {

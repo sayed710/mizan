@@ -149,7 +149,7 @@ function foreign(moveType = 'out_invoice', amount = 100, db = seed()) {
 test('foreign invoices revalue residuals after rate changes with a balanced next-day reversal and idempotence', () => {
   const { db, id } = foreign();
   const snapshot = JSON.stringify(db);
-  assert.deepEqual(unrealizedExchange(db, '2024-02-29'), [{ invoice_id: id, partner_id: 1,
+  assert.deepEqual(unrealizedExchange(db, '2024-02-29'), [{ invoice_id: id, company_id: 1, partner_id: 1,
     currency_id: read(db, 'account.move', id).currency_id, account: '121000', residual: 100, booked: 50, value: 100, difference: 50 }]);
   const done = revalueForeignBalances(db, '2024-02-29');
   assert.equal(JSON.stringify(db), snapshot);

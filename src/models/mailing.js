@@ -58,8 +58,11 @@ export function abSample(db, mailing) {
   return all.filter((r) => !traced.has(norm(r.email))).slice(0, Math.max(1, Math.round((all.length * pc) / 100)));
 }
 
-/** Validate and queue a mailing: one 'sent' trace per recipient (the server delivers them), then mark it sent. */
-export function queueMailing(db, mailing, { now = today(), token = () => crypto.randomUUID() } = {}) {
+/**
+ * Validate and queue a mailing: one trace per recipient, then mark it sent. With `queued` (server delivery) traces start
+ * 'queued' and count as delivered only once markSent records the email went out; otherwise they are 'sent' at once.
+ */
+export function queueMailing(db, mailing, { now = today(), token = () => crypto.randomUUID(), queued = false } = {}) {
   if (!mailing.subject) throw new Error('Set a subject before sending');
   if (mailing.state === 'sent') throw new Error('This mailing has already been sent');
   const all = recipientsOf(db, mailing);
@@ -72,9 +75,9 @@ export function queueMailing(db, mailing, { now = today(), token = () => crypto.
   if (!picked.length) throw new Error('Every recipient of this A/B campaign has already received a version');
   const next = picked.reduce((acc, r) => create(acc, 'mailing.trace', {
     mailing_id: mailing.id, email: r.email, name: r.name, res_model: r.res_model, res_id: r.res_id,
-    token: token(), state: 'sent', sent_date: now, ab_version: isVersion, links_clicked: [],
+    token: token(), state: queued ? 'queued' : 'sent', sent_date: now, ab_version: isVersion, links_clicked: [],
   }).db, db);
-  return write(next, 'mailing.mailing', mailing.id, { state: 'sent', sent_date: now, sent: picked.length, delivered: picked.length });
+  return write(next, 'mailing.mailing', mailing.id, { state: 'sent', sent_date: now, sent: picked.length, delivered: queued ? 0 : picked.length });
 }
 
 const traceBy = (db, token) => (token ? search(db, 'mailing.trace').find((t) => t.token === token) : undefined);
@@ -84,11 +87,18 @@ const bump = (db, mailingId, deltas) => {
   return write(db, 'mailing.mailing', m.id, Object.fromEntries(Object.entries(deltas).map(([k, d]) => [k, Math.max(0, (Number(m[k]) || 0) + d)])));
 };
 
-/** A hard bounce: the trace is bounced and the mailing counts one delivery less. */
+/** A queued email went out: the trace is sent and the mailing counts one more delivery. */
+export function markSent(db, token) {
+  const t = traceBy(db, token);
+  if (!t || t.state !== 'queued') return db;
+  return bump(write(db, 'mailing.trace', t.id, { state: 'sent' }), t.mailing_id, { delivered: 1 });
+}
+
+/** A hard bounce: the trace is bounced and, if it had counted as delivered, the mailing counts one delivery less. */
 export function markBounced(db, token) {
   const t = traceBy(db, token);
   if (!t || t.state === 'bounced') return db;
-  return bump(write(db, 'mailing.trace', t.id, { state: 'bounced' }), t.mailing_id, { delivered: -1, bounced: 1 });
+  return bump(write(db, 'mailing.trace', t.id, { state: 'bounced' }), t.mailing_id, { delivered: t.state === 'queued' ? 0 : -1, bounced: 1 });
 }
 
 /** Record an open, click or reply; states only move up and each counter counts a trace once. */
@@ -287,7 +297,7 @@ export const mailingModels = {
       res_model: { type: 'char', label: 'Document Model' },
       res_id: { type: 'integer', label: 'Document ID' },
       token: { type: 'char', label: 'Token', readonly: true },
-      state: state([['sent', 'Sent'], ['opened', 'Opened'], ['clicked', 'Clicked'], ['replied', 'Replied'], ['bounced', 'Bounced'], ['cancel', 'Cancelled']]),
+      state: state([['queued', 'Queued'], ['sent', 'Sent'], ['opened', 'Opened'], ['clicked', 'Clicked'], ['replied', 'Replied'], ['bounced', 'Bounced'], ['cancel', 'Cancelled']]),
       sent_date: { type: 'date', label: 'Sent On' },
       open_date: { type: 'date', label: 'Opened On' },
       click_date: { type: 'date', label: 'Clicked On' },

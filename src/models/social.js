@@ -71,6 +71,7 @@ const total = (r, k) => (r.live_post_ids?.length ? r.live_post_ids.reduce((s, l)
 export const socialModels = {
   'social.account': {
     label: 'Social Accounts',
+    simulated: 'Accounts are not connected to any network. Mizan stores them but cannot sign in to or post on them.',
     fields: {
       name: { type: 'char', label: 'Account Name', required: true },
       media: { type: 'selection', label: 'Social Media', options: MEDIA_OPTIONS, required: true },
@@ -87,6 +88,7 @@ export const socialModels = {
 
   'social.post': {
     label: 'Posts',
+    simulated: 'Posting only records the post in Mizan. Nothing is published on any network, and engagement numbers are entered by hand.',
     fields: {
       name: { type: 'char', label: 'Title', required: true },
       message: { type: 'text', label: 'Message' },

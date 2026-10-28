@@ -4,6 +4,7 @@ import { models } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
+import { currencyCode } from './models/money.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -13,15 +14,28 @@ export function setCurrency(code) {
   const c = CURRENCIES.includes(code) ? code : 'USD';
   if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
 }
-export const money = (n) => moneyFmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+const docFmts = new Map();
+/** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
+export const money = (n, code = null) => {
+  const fmt = code && code !== moneyFmt.resolvedOptions().currency
+    ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
+    : moneyFmt;
+  return fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n));
+};
+function safeFormat(code) {
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return moneyFmt; }
+}
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
+/** An ISO instant as a datetime-local input value (local time, minutes). */
+const localInput = (iso) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
-export function display(db, field, value) {
+/** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
+export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
-    case 'monetary': return money(value);
+    case 'monetary': return money(value, currencyCode(db, rec));
     case 'float': return Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
@@ -29,6 +43,7 @@ export function display(db, field, value) {
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
+    case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
   }
 }
@@ -48,6 +63,9 @@ export const Avatar = ({ name = '?', size = 28 }) => (
     {String(name).split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase()}
   </span>
 );
+
+/** Honest notice for a model whose effects stay inside Mizan (no real network call); see `simulated` in the model. */
+export const SimulatedNote = ({ text }) => (text ? <p className="simulated" role="note"><b>{t('Simulation')}:</b> {t(text)}</p> : null);
 
 export function Stars({ value = 0, onChange }) {
   return (
@@ -91,6 +109,9 @@ function TagsInput({ value = [], onChange }) {
 const MAX_FILE = 2 * 1024 * 1024;
 
 /** File field stored inline as { name, type, size, data(URL) }; capped so the shared database stays small. */
+/** Link to an uploaded file: inline data URL, or the server's stored copy. */
+const fileUrl = (v) => (/^data:/.test(v?.data ?? '') ? v.data : /^[0-9a-f]{32}$/.test(v?.blob ?? '') ? `/api/blob/${v.blob}` : null);
+
 function FileInput({ id, value, onChange }) {
   const [error, setError] = useState(null);
   const pick = (file) => {
@@ -102,14 +123,14 @@ function FileInput({ id, value, onChange }) {
   };
   return (
     <div className="file-input">
-      {/^data:/.test(value?.data ?? '') && <a href={value.data} download={value.name}>⬇ {value.name}</a>}
+      {fileUrl(value) && <a href={fileUrl(value)} download={value.name}>⬇ {value.name}</a>}
       <input id={id} type="file" onChange={(e) => pick(e.target.files[0])} />
       {error && <span className="req">{error}</span>}
     </div>
   );
 }
 
-import { subtotal as lineSubtotal } from './models/common.js';
+import { subtotal as lineSubtotal, pickedInstant } from './models/common.js';
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, field, value = [], onChange, readonly, record }) {
@@ -135,11 +156,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
               {cols.map(([k, f]) => (
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
-                    ? display(db, f, l[k])
+                    ? display(db, f, l[k], record)
                     : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
-              {priced && <td className="num">{money(lineSubtotal(l))}</td>}
+              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
               {!readonly && (
                 <td>
                   <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
@@ -162,7 +183,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
-  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value)}</span>;
+  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
   const text = (type = 'text', extra = {}) => (
     <input id={id} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
@@ -172,6 +193,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'monetary':
     case 'float': return text('number', { step: '0.01', onChange: (e) => onChange(e.target.value === '' ? null : Number(e.target.value)) });
     case 'date': return text('date');
+    case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean': return <input id={id} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       return (

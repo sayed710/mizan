@@ -145,7 +145,10 @@ test('folders support moves and cycle protection; tags retain facets and legacy 
   assert.equal(read(tagged, 'documents.tag', tag.id).facet, 'Status');
   assert.deepEqual(read(tagged, 'documents.document', one).tag_ids, [{ tag_id: tag.id }]);
   const legacy = search(db, 'documents.document').find((d) => d.legacy_tags.length);
-  assert.deepEqual(legacy.legacy_tags, legacy.tag_ids);
+  assert.deepEqual(legacy.legacy_tags, legacy.tag_ids.map((t) => t.name));
+  // Seeded tags are real documents.tag lines (older string tags are converted by the v2 migration).
+  const seeded = search(db, 'documents.document').find((d) => d.tag_ids.length);
+  assert.ok(seeded.tag_ids.every((line) => read(db, 'documents.tag', line.tag_id)));
 });
 
 test('locks reject another user unlocking or taking over and prevent moving locked files', () => {
@@ -201,8 +204,11 @@ test('seed and legacy Sign Now prompt, document conversion and form metadata rem
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'prompt');
   globalThis.prompt = () => 'Legacy Signer';
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'prompt', previous); else delete globalThis.prompt; });
-  const signed = button(db, 'sign.request', r.id, 'Sign Now');
+  assert.throws(() => button(db, 'sign.request', r.id, 'Sign Now'), /own signing link|not available/);
+  const company = write(db, 'sign.request', r.id, { signer_ids: [{ partner_id: r.partner_id, role: 'company', signed: false, token: r.token }] });
+  const signed = button(company, 'sign.request', r.id, 'Sign Now');
   assert.equal(get(signed, r.id).state, 'signed');
+  assert.equal(get(signed, r.id).signature, 'Legacy Signer');
   const file = create(db, 'documents.document', { name: 'Contract', partner_id: 1, file: 'contract.pdf' });
   const linked = button(file.db, 'documents.document', file.id, 'Request Signature');
   const d = read(linked, 'documents.document', file.id);
@@ -213,7 +219,16 @@ test('seed and legacy Sign Now prompt, document conversion and form metadata rem
 });
 
 test('template prompts gather typed fields; cancellation and refusal preserve their expected state', (t) => {
-  const { db, id } = fixture();
+  const customer = fixture();
+  globalThis.prompt = () => 'x';
+  assert.throws(() => button(customer.db, 'sign.request', customer.id, 'Sign'), /own signing link|not available/);
+  assert.throws(() => button(customer.db, 'sign.request', customer.id, 'Refuse'), /own signing link|not available/);
+  // A company signer signs in the app.
+  const base = seed();
+  const template = create(base, 'sign.template', { name: 'Agreement', item_ids: templateItems.map((i) => ({ ...i, role: i.role === 'customer' ? 'company' : i.role })) });
+  const draft = requestFromTemplate(template.db, template.id, { signers: [{ role: 'company', partner_id: 1 }, { role: 'employee', partner_id: 2 }], deadline: addDays(today(), 30) });
+  const { id } = draft;
+  const db = button(draft.db, 'sign.request', id, 'Send');
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'prompt');
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'prompt', previous); else delete globalThis.prompt; });
   globalThis.prompt = () => null;
@@ -225,4 +240,17 @@ test('template prompts gather typed fields; cancellation and refusal preserve th
   assert.equal(get(signed, id).signer_ids[0].signed, true);
   globalThis.prompt = () => 'Please amend';
   assert.equal(get(button(db, 'sign.request', id, 'Refuse'), id).refusal_reason, 'Please amend');
+});
+
+test('with parallel signing the company signer can sign even when a customer has not yet', (t) => {
+  const db = seed(), r = search(db, 'sign.request').find((s) => s.state === 'sent');
+  globalThis.prompt = () => 'Company Signer';
+  t.after(() => { delete globalThis.prompt; });
+  const people = [{ partner_id: r.partner_id, role: 'customer', signed: false, token: r.token }, { partner_id: r.partner_id, role: 'company', signed: false, token: 'c'.repeat(40) }];
+  const sequential = write(db, 'sign.request', r.id, { signer_ids: people, signing_order: true, item_ids: [] });
+  assert.throws(() => button(sequential, 'sign.request', r.id, 'Sign'), /own signing link|not available/); // the customer is first
+  const parallel = write(sequential, 'sign.request', r.id, { signing_order: false });
+  const signed = get(button(parallel, 'sign.request', r.id, 'Sign'), r.id);
+  assert.deepEqual(signed.signer_ids.map((s) => !!s.signed), [false, true]);
+  assert.equal(signed.signer_ids[1].signature, 'Company Signer');
 });

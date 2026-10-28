@@ -1,6 +1,7 @@
 // Timesheet validation, timers and service delivery, preserving invoice analytics.
 import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
+import { currentActor } from './authority.js';
 import { analyticPlusModels } from './analyticplus.js';
 
 const model = 'account.analytic.line';
@@ -176,7 +177,7 @@ export const timesheetPlusModels = {
       buttons: [
         ...(base.form.buttons ?? []),
         { label: 'Validate', primary: true, when: (r) => isTimesheet(r) && !r.validated && !r.timer_start, run: (db, r) => {
-          const user = prompt('Validating user', '');
+          const user = currentActor()?.name ?? prompt('Validating user', '');
           return { db: user === null ? db : validateTimesheets(db, [r.id], { user, date: today() }) };
         } },
         { label: 'Reset to Draft', admin: true, when: (r) => isTimesheet(r) && r.validated, run: (db, r) => {

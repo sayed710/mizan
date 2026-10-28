@@ -8,7 +8,8 @@ import { valuationModels } from './valuation.js';
 
 const number = (n) => Number(n) || 0;
 const round = (n) => Math.round(n * 100) / 100;
-const method = (p) => p?.purchase_method ?? (p?.type === 'service' ? 'purchase' : 'receive');
+// Services never get a receipt, so they are always billed on ordered quantities.
+const method = (p) => (p?.type === 'service' ? 'purchase' : p?.purchase_method ?? 'receive');
 const quantities = (l, policy) => {
   const ordered = number(l.qty), received = number(l.qty_delivered), billed = number(l.qty_invoiced);
   return { product_id: l.product_id, ordered, received, billed, toBill: Math.max(0, (policy === 'receive' ? received : ordered) - billed) };
@@ -101,7 +102,7 @@ export function priceDifferenceLines(db, bill) {
   if (!po) return [];
   const prior = previousBills(db, bill, po).flatMap((m) => m.invoice_line_ids ?? []);
   const used = new Map();
-  const rate = rateAt(db, bill.currency_id, bill.invoice_date ?? today());
+  const rate = rateAt(db, bill.currency_id, bill.invoice_date ?? today(), bill.company_id);
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
@@ -132,11 +133,13 @@ export function priceDifferenceLines(db, bill) {
   return result;
 }
 
+const BILL_POLICY = { type: 'selection', label: 'Bill Control', options: [['purchase', 'Ordered Quantities'], ['receive', 'Received Quantities']] };
+
 export const billControlModels = {
   get product() {
     const product = valuationModels.product;
     return { ...product, fields: { ...product.fields,
-      purchase_method: { type: 'selection', label: 'Bill Control', options: [['purchase', 'Ordered Quantities'], ['receive', 'Received Quantities']] },
+      purchase_method: BILL_POLICY,
     }, defaults: (id) => ({ ...product.defaults?.(id), purchase_method: 'receive' }),
     onchange: (r, key, db) => ({ ...product.onchange?.(r, key, db), ...(key === 'type' ? { purchase_method: r.type === 'service' ? 'purchase' : 'receive' } : {}) }),
     form: { ...product.form, groups: [...product.form.groups, ['purchase_method']] } };
@@ -144,7 +147,10 @@ export const billControlModels = {
   get 'purchase.order'() {
     const purchase = purchasePlusModels['purchase.order'];
     return { ...purchase,
-      fields: { ...purchase.fields, invoice_status: { ...purchase.fields.invoice_status, compute: status } },
+      fields: { ...purchase.fields,
+        invoice_status: { ...purchase.fields.invoice_status, compute: status },
+        order_line: { ...purchase.fields.order_line, fields: { ...purchase.fields.order_line.fields, purchase_method: { ...BILL_POLICY, readonly: true, hidden: true } } },
+      },
       onchange: (r, key, db) => ({ ...purchase.onchange?.(r, key, db), ...(['order_line', 'state'].includes(key) ? { order_line: policyLines(db, r) } : {}) }),
       form: { ...purchase.form, buttons: purchase.form.buttons.map((b) => b.label === 'Create Bill'
         ? { ...b, when: (r) => status(r) === 'to_invoice', run: createBill }

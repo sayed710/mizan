@@ -59,7 +59,7 @@ export function Navbar({ app, active }) {
             {companiesOf(db).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         )
-        : <a className="company" href="#/settings/general">{db.settings?.company}</a>}
+        : <a className="company" href="#/settings/general">{currentCompany(db).name}</a>}
       <Avatar name="Admin" />
     </header>
   );

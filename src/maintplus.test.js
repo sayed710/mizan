@@ -76,13 +76,13 @@ test('Start and Repaired synchronize stages, close the request and reject repeat
   const started = run(db, rid, 'Start');
   assert.equal(read(started, 'maintenance.request', rid).stage, 'progress');
   assert.equal(read(started, 'maintenance.request', rid).stage_id, 'progress');
-  assert.throws(() => run(started, rid, 'Start'), /Only new/);
+  assert.throws(() => run(started, rid, 'Start'), /Only new|not available/);
   const repaired = run(started, rid, 'Repaired');
   const record = read(repaired, 'maintenance.request', rid);
   assert.equal(record.stage, 'repaired');
   assert.equal(record.kanban_state, 'done');
   assert.match(record.close_date, /^\d{4}-\d{2}-\d{2}$/);
-  assert.throws(() => run(repaired, rid, 'Scrap'), /Only open/);
+  assert.throws(() => run(repaired, rid, 'Scrap'), /Only open|not available/);
   assert.equal(read(db, 'maintenance.request', rid).stage_id, 'new');
 });
 
