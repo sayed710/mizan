@@ -50,11 +50,23 @@ export function paymentGuard(db, before, after) {
   const payments = after.payments ?? [];
   if (!Array.isArray(payments) || payments.some((p) => !p || !(Number(p.amount) > 0))) return 'Invalid payments';
   const paid = Number(after.amount_paid) || 0;
-  if (round2(payments.reduce((s, p) => s + Number(p.amount), 0)) !== round2(paid)) return 'The paid amount must equal the recorded payments';
+  if (round2(payments.filter((p) => !p.reversed).reduce((s, p) => s + Number(p.amount), 0)) !== round2(paid)) return 'The paid amount must equal the recorded payments';
   if (isInvoice(after) && paid > 0 && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
   // A recorded payment keeps pointing at its posted settlement entry (so that entry stays protected); new ones must name one.
   const old = before?.payments ?? [];
   if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
+  for (const [i, p] of payments.entries()) {
+    const prior = old[i];
+    if (prior?.reversed && (!p.reversed || p.reversal_move_id !== prior.reversal_move_id)) return 'A reversed payment cannot be restored';
+    if (prior && Object.keys(prior).some((k) => !['reversed', 'reversal_move_id'].includes(k) && JSON.stringify(p[k]) !== JSON.stringify(prior[k]))) return 'A recorded payment cannot be changed';
+    if (p.reversed) {
+      const original = read(db, 'account.move', p.move_id);
+      const reversal = read(db, 'account.move', p.reversal_move_id);
+      if (!original || reversal?.state !== 'posted' || reversal.reversed_entry_id !== original.id
+        || JSON.stringify((original.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
+        !== JSON.stringify((reversal.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]))) return 'A reversed payment needs a posted reversing journal entry';
+    }
+  }
   const bad = payments.slice(old.length).find((p) => read(db, 'account.move', p.move_id)?.state !== 'posted');
   if (bad) return 'A payment must point at a posted journal entry';
   return null;
@@ -198,7 +210,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
 function openBalance(db, r) {
   const account = accountId(db, isPurchase(r) ? '211000' : '121000');
   const booked = (r.line_ids ?? []).filter((l) => l.account_id === account).reduce((s, l) => s + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0);
-  const paid = (r.payments ?? []).reduce((s, p) => s + (p.company_amount ?? toCompany(db, r.currency_id, p.amount, r.invoice_date ?? p.date, r.company_id)), 0);
+  const paid = (r.payments ?? []).filter((p) => !p.reversed).reduce((s, p) => s + (p.company_amount ?? toCompany(db, r.currency_id, p.amount, r.invoice_date ?? p.date, r.company_id)), 0);
   return round2(booked - paid);
 }
 
@@ -210,7 +222,7 @@ const releasedTaxes = (db, r) => {
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
       const key = `${code}:${l.tax_name ?? ''}`;
-      released.set(key, (released.get(key) ?? 0) + (Number(l.debit) || 0) + (Number(l.credit) || 0));
+      released.set(key, (released.get(key) ?? 0) + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)));
     }
   }
   return released;
@@ -231,7 +243,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
     const prior = final ? (released.get(`${g.account}:${g.tax_name}`) ?? 0) + (released.get(`${g.account}:`) ?? 0) * g.amount / accountTotal : 0;
-    return { ...g, amount: round2(final ? g.amount - prior : g.amount * share), base: round2(g.base * share) };
+    return { ...g, amount: round2(final ? g.amount - prior : g.amount * Math.abs(share)), base: round2(g.base * share) };
   })
     .filter((g) => g.amount > 0);
   if (!due.length) return db;
@@ -239,7 +251,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
   const lines = due.flatMap(({ account, amount, base, tax_name }) => {
     const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base };
-    return sale !== refund
+    return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
   });
@@ -393,7 +405,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, discount: { type: 'boolean', label: 'Early Payment Discount' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,

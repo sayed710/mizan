@@ -781,6 +781,8 @@ const ar = {
   'Analytic Distribution': 'التوزيع التحليلي',
   'Amount in Currency': 'المبلغ بالعملة',
   'Reversal of': 'عكس القيد',
+  'Reversed': 'معكوس',
+  'Reverse': 'عكس',
   'This deletes all data and loads the demo database. Type RESET to continue.': 'سيؤدي هذا إلى حذف جميع البيانات وتحميل قاعدة البيانات التجريبية. اكتب RESET للمتابعة.',
   'Replace all data in this browser with the backup?': 'هل تريد استبدال جميع بيانات هذا المتصفح بالنسخة الاحتياطية؟',
   'Restoring replaces all data for every user.': 'تؤدي الاستعادة إلى استبدال جميع البيانات لجميع المستخدمين.',

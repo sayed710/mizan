@@ -135,14 +135,25 @@ export function moveInvariant(db, after, before) {
   const paidBefore = Number(before?.amount_paid) || 0;
   const paidAfter = Number(after.amount_paid) || 0;
   if (Math.abs(paidAfter - paidBefore) < 0.005 && JSON.stringify(was) === JSON.stringify(now)) return null;
-  if (now.length < was.length || JSON.stringify(now.slice(0, was.length)) !== JSON.stringify(was)) return 'Registered payments cannot be changed';
+  const reversed = was.filter((p, i) => !p.reversed && now[i]?.reversed);
+  if (now.length < was.length || was.some((p, i) => {
+    const current = now[i];
+    if (JSON.stringify(current) === JSON.stringify(p)) return false;
+    if (p.reversed || !current?.reversed) return true;
+    const { reversed: flag, reversal_move_id: reversalId, ...original } = current;
+    const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
+    const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
+    return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || entry.reversed_entry_id !== source.id
+      || JSON.stringify((source.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
+      !== JSON.stringify((entry.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]));
+  })) return 'Registered payments cannot be changed without a posted reversing journal entry';
   const added = now.slice(was.length);
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   if (!added.every((p) => p && Number(p.amount) > 0 && settlementCapacity(db, entries.get(p.move_id), after) > 0)) return 'Payments must point at a posted journal entry';
-  if (Math.abs(round(paidBefore + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
+  if (Math.abs(round(paidBefore - reversed.reduce((sum, p) => sum + Number(p.amount), 0) + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
   // One entry may settle several invoices (a payment applied oldest first), but never more than it booked.
   for (const moveId of new Set(added.map((p) => p.move_id))) {
-    const used = [...entries.values()].reduce((sum, m) => sum + (m.payments ?? []).filter((p) => p?.move_id === moveId).reduce((s, p) => s + appliedValue(db, m, p), 0), 0);
+    const used = [...entries.values()].reduce((sum, m) => sum + (m.payments ?? []).filter((p) => !p.reversed && p?.move_id === moveId).reduce((s, p) => s + appliedValue(db, m, p), 0), 0);
     // ponytail: a cent of slack for foreign-currency rounding on partial payments.
     if (used > settlementCapacity(db, entries.get(moveId), after) + 0.01) return 'A payment cannot settle more than its journal entry booked';
   }
