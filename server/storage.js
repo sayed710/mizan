@@ -10,13 +10,15 @@ const LEASE_MS = 30 * 1000;
  * overwrite the first one's saves. The running server holds a lease (kv 'writer') and renews it; a new server refuses
  * to start while it is fresh, unless `force` (after a crash). `assert` throws when another server took the lease.
  */
-export function claimWriter(sql, { force = false, now = Date.now, id = `${process.pid}@${randomUUID()}` } = {}) {
+export function claimWriter(sql, { force = false, now = Date.now, id = `${process.pid}@${randomUUID()}`, busyMs = 5000 } = {}) {
   sql.exec('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const get = sql.prepare("SELECT value FROM kv WHERE key = 'writer'");
   const set = sql.prepare("INSERT INTO kv (key, value) VALUES ('writer', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
   const drop = sql.prepare("DELETE FROM kv WHERE key = 'writer' AND json_extract(value, '$.id') = ?");
+  const renewLease = sql.prepare("UPDATE kv SET value = ? WHERE key = 'writer' AND json_extract(value, '$.id') = ?");
   const holder = () => { try { return JSON.parse(get.get()?.value ?? 'null'); } catch { return null; } };
   const mine = () => holder()?.id === id;
+  sql.exec(`PRAGMA busy_timeout = ${Math.max(0, Number(busyMs) | 0)}`);
   sql.exec('BEGIN IMMEDIATE');
   try {
     const current = holder();
@@ -30,7 +32,8 @@ export function claimWriter(sql, { force = false, now = Date.now, id = `${proces
     throw e;
   }
   return {
-    renew: () => { if (mine()) set.run(JSON.stringify({ id, at: now() })); },
+    // One conditional UPDATE: a takeover that lands between a check and a write can never be overwritten.
+    renew: () => { renewLease.run(JSON.stringify({ id, at: now() }), id); },
     assert: () => { if (!mine()) throw new Error('Another Mizan server took over this database; this one stops writing'); },
     release: () => drop.run(id),
   };

@@ -75,20 +75,24 @@ try {
   console.error(e.message);
   process.exit(1);
 }
-setInterval(writer.renew, 10 * 1000).unref();
+// A competing process may hold the write lock for a moment: wait for it instead of failing, and never let a failed renewal kill the timer.
+sql.exec('PRAGMA busy_timeout = 5000');
+setInterval(() => { try { writer.renew(); } catch (e) { console.error(`Lease renewal failed, will retry: ${e.message}`); } }, 10 * 1000).unref();
 process.on('exit', () => { try { writer.release(); } catch { /* database already closed */ } });
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(0));
-const storage = openStorage(sql, {
-  beforeWrite: () => {
-    try {
-      writer.assert();
-    } catch (e) {
-      console.error(e.message);
-      setImmediate(() => process.exit(1));
-      throw e;
-    }
-  },
-});
+/** Stop (and refuse the write) when another server took over this database. */
+const ownLease = () => {
+  try {
+    writer.assert();
+  } catch (e) {
+    console.error(e.message);
+    setImmediate(() => process.exit(1));
+    throw e;
+  }
+};
+/** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
+const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+const storage = openStorage(sql, { beforeWrite: ownLease });
 let db = migrateAppointments(storage.load());
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
@@ -100,6 +104,8 @@ const storeFor = (opts) => {
   let base = db;
   return {
     get: () => { base = db; return db; },
+    /** Long-running work calls this before an external send, so a displaced server stops instead of sending. */
+    check: ownLease,
     commit: (next) => { commitDb(applyDiff(db, diffDb(base, next), opts)); base = db; },
   };
 };
@@ -115,8 +121,8 @@ function createUser({ login, name, password, isAdmin = false, apps = '' }) {
   if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
   const { salt, hash } = hashPassword(password);
   const allowed = parseApps(apps);
-  sql.prepare('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
+  writeSql('INSERT INTO users (login, name, salt, hash, is_admin, apps) VALUES (?, ?, ?, ?, ?, ?)',
+    login, String(name || login).slice(0, 100), salt, hash, isAdmin ? 1 : 0, allowed?.length ? allowed.join(',') : null);
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
@@ -398,7 +404,7 @@ async function api(req, res, path) {
     const user = checkPassword(login, password);
     if (!user) { recordFailure(limitKey); return send(res, 401, { error: 'Wrong login or password' }); }
     const token = randomBytes(32).toString('base64url');
-    sql.prepare('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)').run(sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
+    writeSql('INSERT INTO sessions (token_hash, user_id, expires) VALUES (?, ?, ?)', sha256(token), user.id, Date.now() + SESSION_DAYS * 864e5);
     return send(res, 200, { id: user.id, login: user.login, name: user.name, isAdmin: !!user.is_admin, apps: parseApps(user.apps) }, { 'Set-Cookie': cookie(token, SESSION_DAYS * 86400) });
   }
 
@@ -446,7 +452,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/logout' && req.method === 'POST') {
     const token = (req.headers.cookie ?? '').match(new RegExp(`${COOKIE}=([^;]+)`))?.[1];
-    if (token) sql.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+    if (token) writeSql('DELETE FROM sessions WHERE token_hash = ?', sha256(token));
     return send(res, 200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
   }
   if (path === '/api/db' && req.method === 'GET') return send(res, 200, visibleDb(user));
@@ -469,12 +475,12 @@ async function api(req, res, path) {
     if (req.method === 'POST') {
       const { name } = await readJson(req);
       const key = `mzn_${randomBytes(24).toString('base64url')}`;
-      sql.prepare('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)').run(sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
+      writeSql('INSERT INTO api_keys (key_hash, user_id, name, created) VALUES (?, ?, ?, ?)', sha256(key), user.id, String(name || 'API key').slice(0, 60), Date.now());
       return send(res, 201, { key }); // shown once; only the hash is stored
     }
     if (req.method === 'DELETE') {
       const created = Number(new URL(req.url, 'http://x').searchParams.get('created'));
-      sql.prepare('DELETE FROM api_keys WHERE user_id = ? AND created = ?').run(user.id, created);
+      writeSql('DELETE FROM api_keys WHERE user_id = ? AND created = ?', user.id, created);
       return send(res, 200, { ok: true });
     }
   }

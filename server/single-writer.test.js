@@ -66,3 +66,57 @@ test('a second server on the same database file refuses to start', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('renewing waits briefly for a competing write lock, then fails cleanly instead of hanging, and recovers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-lease-'));
+  try {
+    const sqlA = new DatabaseSync(join(dir, 'db.sqlite'));
+    const sqlB = new DatabaseSync(join(dir, 'db.sqlite'));
+    const a = claimWriter(sqlA, { id: '1@a', busyMs: 30 });
+    sqlB.exec('BEGIN IMMEDIATE'); // another process is writing
+    assert.throws(() => a.renew(), /locked|busy/i);
+    sqlB.exec('ROLLBACK');
+    assert.doesNotThrow(() => a.renew());
+    sqlA.close();
+    sqlB.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('renewal never takes back a lease another server claimed in between', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-lease-'));
+  try {
+    const sqlA = new DatabaseSync(join(dir, 'db.sqlite'));
+    const sqlB = new DatabaseSync(join(dir, 'db.sqlite'));
+    const a = claimWriter(sqlA, { id: '1@a' });
+    const b = claimWriter(sqlB, { id: '2@b', force: true });
+    a.renew(); // the old holder renewing after the takeover changes nothing
+    assert.equal(JSON.parse(sqlB.prepare("SELECT value FROM kv WHERE key = 'writer'").get().value).id, '2@b');
+    assert.doesNotThrow(() => b.assert());
+    sqlA.close();
+    sqlB.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('after a forced takeover the old server stops on its next login, user or API-key write', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-lease-'));
+  const dbPath = join(dir, 'db.sqlite');
+  const old = await start(dbPath);
+  let next;
+  try {
+    assert.ok(old.url, old.out);
+    next = await start(dbPath, { MIZAN_FORCE_TAKEOVER: '1' });
+    assert.ok(next.url, next.out);
+    const exited = new Promise((resolve) => old.child.on('exit', resolve));
+    const res = await fetch(`${old.url}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' }, body: JSON.stringify({ login: 'admin', password: 'lease-admin-pw' }) }).catch(() => null);
+    assert.ok(!res || res.status >= 400, `the displaced server must not hand out a session (got ${res?.status})`);
+    assert.equal(await exited, 1);
+  } finally {
+    old.child.kill();
+    next?.child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
