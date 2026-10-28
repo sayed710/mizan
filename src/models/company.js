@@ -130,7 +130,12 @@ function purchaseLine(db, line, fpId) {
   const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
   const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
   const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId) ?? taxSnapshot(null);
-  const price_unit = tax.tax_include && tax.tax_type !== 'fixed' ? Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6 : net;
+  // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
+  // inside the discounted price, so the discount is undone for it).
+  const kept_share = 1 - (Number(line.discount) || 0) / 100;
+  const price_unit = !tax.tax_include ? net
+    : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
+      : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
   return { ...kept, price_unit, ...tax };
 }
 
@@ -148,7 +153,7 @@ export function interCompanyRules(db, saleOrderId) {
   if (existing) return write(db, 'sale.order', sale.id, { auto_purchase_id: existing.id });
   const fpId = fiscalPositionFor(db, seller.partner_id);
   const purchase = create(db, 'purchase.order', {
-    company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name,
+    company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name, fiscal_position_id: fpId ?? null,
     order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId)),
     ...(sale.currency_id ? { currency_id: sale.currency_id } : {}),
   });
