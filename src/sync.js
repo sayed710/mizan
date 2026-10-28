@@ -63,6 +63,8 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
+    // A model absent from the stored records adds its own `"name":[],` to the serialized database.
+    if (!(model in records)) growth += json(model) + 4;
     // One working list per model, updated in place, instead of a copy of the model for every record.
     const list = [...current.values()];
     const position = new Map(list.map((r, i) => [r.id, i]));
@@ -88,7 +90,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     const blocked = [...(db.records[model] ?? []), ...(records[model] ?? [])].filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
     if (blocked) throw new Error(blocked);
     growth -= (records[model] ?? []).filter((r) => drop.has(r.id)).reduce((n, r) => n + json(r) + 1, 0);
-    records = { ...records, [model]: (records[model] ?? []).filter((r) => !drop.has(r.id)) };
+    if (model in records) records = { ...records, [model]: records[model].filter((r) => !drop.has(r.id)) };
   }
   const seq = { ...db.seq };
   for (const [model, n] of Object.entries(d.seq ?? {})) {

@@ -21,3 +21,14 @@ test('a save only looks at the models that changed', () => {
   for (const [model, list] of Object.entries(db.records)) if (model !== 'res.partner') assert.equal(next.records[model], list);
   assert.deepEqual(Object.keys(diffDb(db, next).upserts), ['res.partner']);
 });
+
+test('the first record of a new model and a delete on an absent model are counted exactly', () => {
+  const db = seed();
+  delete db.records['crm.lead'];
+  const lead = { ...create(seed(), 'crm.lead', { name: 'First' }).db.records['crm.lead'][0] };
+  const next = applyDiff(db, { upserts: { 'crm.lead': [lead] } });
+  assert.ok(dbSize(next) >= JSON.stringify(next).length - 2, `${dbSize(next)} vs ${JSON.stringify(next).length}`);
+  const untouched = applyDiff(db, { deletes: { 'crm.lead': [999] } });
+  assert.equal('crm.lead' in untouched.records, false);
+  assert.equal(dbSize(untouched), dbSize(db));
+});
