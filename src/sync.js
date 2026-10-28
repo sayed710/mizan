@@ -38,17 +38,22 @@ export function diffDb(prev, next) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
-/** Largest record id accepted from a client: far above any real count, far below where id arithmetic loses precision. */
+/** A new id this far out is always refused on a fresh database (kept for callers and tests). */
 export const MAX_ID = 2 ** 40;
+/** How far past a model's counter a client may pick a new id (queued offline creates), so one record can't burn the id space. */
+export const ID_WINDOW = 1_000_000;
 
-/** Reset id counters that are corrupt or absurdly far past the stored records (e.g. poisoned by an old client). */
+/** Highest id in a list of records, without spreading the list into Math.max (argument limits on large models). */
+export const maxId = (recs = []) => { let top = 0; for (const r of recs) if (r.id > top) top = r.id; return top; };
+
+/** Reset id counters that are corrupt, behind the stored records, or absurdly far past them (e.g. poisoned by an old client). */
 export function repairSeq(db) {
   if (!db) return db;
   let changed = false;
   const seq = { ...db.seq };
   for (const [model, n] of Object.entries(seq)) {
-    const top = Math.max(0, ...(db.records[model] ?? []).map((r) => r.id));
-    if (!Number.isSafeInteger(n) || n > MAX_ID || n < top) { seq[model] = top; changed = true; }
+    const top = maxId(db.records[model]);
+    if (!Number.isSafeInteger(n) || n < top || n > top + ID_WINDOW) { seq[model] = top; changed = true; }
   }
   return changed ? { ...db, seq } : db;
 }
@@ -68,8 +73,10 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
     const current = byId(records[model]);
+    const newIdLimit = Math.min(Number.MAX_SAFE_INTEGER, Math.max(db.seq?.[model] ?? 0, maxId(db.records[model])) + ID_WINDOW);
     for (const raw of recs) {
-      if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1 || raw.id > MAX_ID) throw new Error(`Invalid ${model} record`);
+      if (!raw || !Number.isSafeInteger(raw.id) || raw.id < 1) throw new Error(`Invalid ${model} record`);
+      if (!current.has(raw.id) && raw.id > newIdLimit) throw new Error(`Invalid ${model} record`);
       const rec = cleanRecord(model, raw);
       const seen = { ...db, records: { ...records, [model]: [...current.values()] } };
       const err = validate(model, rec) ?? models[model].guard?.(seen, current.get(rec.id) ?? null, rec, { isAdmin });
@@ -89,7 +96,7 @@ export function applyDiff(db, d, { author, isAdmin = true, allowed = null } = {}
   }
   // Id counters follow the records actually stored; the client's own counters (d.seq) are ignored so they cannot be poisoned.
   const seq = { ...db.seq };
-  for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, ...(records[model] ?? []).map((r) => r.id));
+  for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
   const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
   const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));

@@ -46,3 +46,31 @@ test('repairSeq resets poisoned or lagging counters and leaves healthy ones alon
   assert.equal(fixed.seq['res.partner'], Math.max(...db.records['res.partner'].map((r) => r.id)));
   assert.equal(repairSeq(db), db);
 });
+
+test('a new id far past the counter is refused, so one record cannot exhaust the id space', async () => {
+  const { ID_WINDOW } = await import('./sync.js');
+  const db = seed();
+  const top = db.seq['res.partner'];
+  assert.throws(() => applyDiff(db, { upserts: { 'res.partner': [{ id: top + ID_WINDOW + 1, name: 'Far' }] } }, contactsOnly), /Invalid res.partner record/);
+  const next = applyDiff(db, { upserts: { 'res.partner': [{ id: top + 3, name: 'Queued offline' }] } }, contactsOnly);
+  const { id } = create(next, 'res.partner', { name: 'After' });
+  assert.equal(id, top + 4);
+  applyDiff(next, { upserts: { 'res.partner': [{ id, name: 'After' }] } }, contactsOnly);
+});
+
+test('counters work on models with more records than a function call can take as arguments', async () => {
+  const { maxId } = await import('./sync.js');
+  const many = Array.from({ length: 300_000 }, (_, i) => ({ id: i + 1 }));
+  assert.equal(maxId(many), 300_000);
+  const db = { ...seed(), seq: { 'res.partner': 0 }, records: { 'res.partner': many } };
+  assert.equal(repairSeq(db).seq['res.partner'], 300_000);
+});
+
+test('legacy records with ids above MAX_ID keep accepting new records after a repair', () => {
+  const db = seed();
+  const big = MAX_ID * 2;
+  const legacy = repairSeq({ ...db, seq: { ...db.seq, 'res.partner': 5 }, records: { ...db.records, 'res.partner': [...db.records['res.partner'], { id: big, name: 'Old' }] } });
+  assert.equal(legacy.seq['res.partner'], big);
+  const next = applyDiff(legacy, { upserts: { 'res.partner': [{ id: big + 1, name: 'New' }] } }, contactsOnly);
+  assert.equal(next.seq['res.partner'], big + 1);
+});

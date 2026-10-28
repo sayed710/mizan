@@ -75,3 +75,12 @@ export function openStorage(sql) {
     },
   };
 }
+
+/** Load the stored db and run startup repairs/migrations on it, writing back whatever they changed. */
+export function loadRepaired(storage, repair) {
+  const loaded = storage.load();
+  if (!loaded) return loaded;
+  const db = repair(loaded);
+  if (db !== loaded) storage.save(loaded, db);
+  return db;
+}

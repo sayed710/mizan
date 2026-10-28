@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
 import { applyDiff, diffDb, repairSeq } from '../src/sync.js';
 import { installCustomFields } from '../src/models/studio.js';
-import { openStorage } from './storage.js';
+import { loadRepaired, openStorage } from './storage.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrateAppointments } from '../src/models/appointments.js';
 import { publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
@@ -68,7 +68,7 @@ const parseApps = (v) => (v ? String(v).split(',').map((x) => x.trim()).filter((
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
 const storage = openStorage(sql);
-let db = repairSeq(migrateAppointments(storage.load()));
+let db = loadRepaired(storage, (loaded) => repairSeq(migrateAppointments(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 const commitDb = (next, { full = false } = {}) => { storage.save(full ? null : db, next); db = next; };
 /**
