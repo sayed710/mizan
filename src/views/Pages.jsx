@@ -2,9 +2,9 @@
 import { useRef, useState } from 'react';
 import { models, today } from '../models/index.js';
 import { postNote, read, search } from '../orm.js';
-import { adjustQuantity } from '../models/valuation.js';
+import { countProduct } from '../models/valuation.js';
 import { profitAndLoss } from '../models/ledger.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, currentCompany, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
@@ -31,12 +31,13 @@ export function Barcode() {
     else { setProductId(found.id); setCounted(1); }
     setMessage(null);
   };
-  const apply = () => {
-    const before = product.qty_available;
+  const apply = async () => {
+    const count = { productId: product.id, counted, observed: product.qty_available, company: currentCompany(db)?.id };
     try {
-      // A count is a one-line physical inventory, so the difference gets a valuation layer and journal entry.
-      const next = adjustQuantity(getDb(), product.id, counted);
-      commit(postNote(next, 'product', product.id, `Inventory adjustment: ${before} → ${counted}`));
+      // A count is a valued adjustment (layer + journal entry). On a server it runs there, on the current stock and
+      // company, so a Barcode-only user needs no accounting access and two counters cannot overwrite each other.
+      if (isServer()) await serverAction('/api/barcode/count', count);
+      else commit(countProduct(getDb(), count));
       setMessage(t('Stock of {name} set to {qty}', { name: product.name, qty: counted }));
       setProductId(null);
     } catch (e) {

@@ -23,6 +23,7 @@ import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE 
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
 import { search } from '../src/orm.js';
+import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
 
 const ENV = process.env;
@@ -35,6 +36,8 @@ const ACTIONS = {
   '/api/integrations/sms-campaign': { need: 'sms', model: () => 'sms.campaign', run: (b, u, store) => sendSmsCampaign(ENV, store, b) },
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b) => quoteShipping(ENV, db, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b) => syncMarketplace(db, b) },
+  // Barcode counts run on the live stock: the count, valuation layer and journal entry are system-made, so the store may write them on top of the user's own models.
+  '/api/barcode/count': { model: () => 'product', extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b) => ({ db: countProduct(db, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company: b.company }) }) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b) => issueIotToken(db, b) },
 };
 
@@ -398,7 +401,7 @@ async function api(req, res, path) {
       const storeAllowed = allowed && action.extra ? new Set([...allowed, ...action.extra]) : allowed;
       const out = await action.run(body, user, storeFor({ author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
       // Changes made by integrations go through the same validation as client edits, applied on top of edits made meanwhile.
-      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed }));
+      if (out.db) commitDb(applyDiff(db, diffDb(snapshot, out.db), { author: user.name, isAdmin: user.isAdmin, allowed: storeAllowed }));
       return send(res, 200, { ok: true, message: out.message, text: out.text });
     } catch (e) {
       return send(res, 400, { error: e.message });
