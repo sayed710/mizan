@@ -192,6 +192,19 @@ export function refundBill(db, order) {
   return write(next, 'pos.order', order.id, { state: 'refunded' });
 }
 
+const floorOf = (order) => String(order.table_id ?? '').split(':')[0];
+/** The draft bill at another table of the same floor, for merging. */
+function draftAt(db, order, tableName) {
+  const target = search(db, 'pos.order').find((o) => o.id !== order.id && o.state === 'draft' && o.table_id === `${floorOf(order)}:${tableName}`);
+  if (!target) throw new Error('No draft bill at that table');
+  return target;
+}
+/** "1x2, 3" -> [{ index: 0, qty: 2 }, { index: 2, qty: 1 }] (line numbers start at 1). */
+export const parseSplit = (text) => String(text).split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
+  const [line, qty = '1'] = part.split(/x|\*/i).map((n) => n.trim());
+  return { index: Number(line) - 1, qty: Number(qty) };
+});
+
 export const posPlusModels = {
   'pos.config': {
     label: 'Point of Sale',
@@ -217,7 +230,14 @@ export const posPlusModels = {
     defaults: () => ({ table_ids: [] }),
     guard: (db, before, after) => new Set((after.table_ids ?? []).map((t) => t.name)).size !== (after.table_ids ?? []).length ? 'Table names must be unique within a floor' : null,
     list: ['name', 'config_id'],
-    form: { title: 'name', groups: [['config_id']], tabs: [{ label: 'Tables', fields: ['table_ids'] }] },
+    form: {
+      title: 'name', groups: [['config_id']], tabs: [{ label: 'Tables', fields: ['table_ids'] }],
+      buttons: [{
+        label: 'Open Table', primary: true,
+        ask: [{ label: 'Table' }, { label: 'Guests', type: 'number', default: () => '1' }],
+        run: (db, r, [table, guests]) => { const res = openTableOrder(db, { configId: r.config_id, floorId: r.id, tableName: table, customerCount: guests }); return { db: res.db, go: `#/pos/orders/${res.id}` }; },
+      }],
+    },
   },
   'pos.order': {
     ...baseOrder,
@@ -252,6 +272,16 @@ export const posPlusModels = {
         { label: 'Pay', primary: true, server: '/api/op/pos.bill.pay', when: (r) => r.state === 'draft', run: (db, r) => payWithMethods(db, r.id, r.payment_ids) },
         { label: 'Apply Promotions', when: (r) => r.state === 'draft', run: (db, r) => ({ db: applyLoyaltyToOrder(db, r.id) }) },
         { label: 'Refund', server: '/api/op/pos.bill.refund', when: (r) => r.state === 'paid' && !r.settlement_of, run: (db, r) => ({ db: refundBill(db, r) }) },
+        { label: 'Add Tip', when: (r) => r.state === 'draft', ask: [{ label: 'Tip amount', type: 'number', default: (r) => String(r.tip_amount ?? 0) }], run: (db, r, [amount]) => ({ db: addTip(db, r.id, amount) }) },
+        { label: 'Transfer Table', when: (r) => r.state === 'draft' && r.table_id, ask: [{ label: 'Move to table' }], run: (db, r, [table]) => ({ db: transferTable(db, r.id, `${floorOf(r)}:${table}`) }) },
+        {
+          label: 'Merge Into Table', when: (r) => r.state === 'draft' && r.table_id, ask: [{ label: 'Merge this bill into the bill at table' }],
+          run: (db, r, [table]) => { const into = draftAt(db, r, table); return { db: mergeTables(db, r.id, into.id), go: `#/pos/orders/${into.id}` }; },
+        },
+        {
+          label: 'Split Bill', when: (r) => r.state === 'draft' && r.lines?.length > 1, ask: [{ label: 'Lines to move to a new bill, as line x quantity (for example 1x2, 3)' }],
+          run: (db, r, [text]) => { const res = splitBill(db, r.id, parseSplit(text)); return { db: res.db, go: `#/pos/orders/${res.newOrderId}` }; },
+        },
       ],
     },
   },

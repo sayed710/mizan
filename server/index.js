@@ -35,6 +35,7 @@ import { read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
+import { sharePage, smsInbound, SMS_PATH, SMS_WRITE } from './inbound.js';
 
 const ENV = process.env;
 /** Server actions: endpoint → integration it needs, model it touches, extra models it logs to, admin-only flag, implementation. */
@@ -436,6 +437,17 @@ async function api(req, res, path) {
     res.writeHead(out.status, out.headers);
     return res.end(out.body);
   }
+  // Twilio inbound SMS: signed form POST; a STOP reply blacklists the sender.
+  if (path === SMS_PATH && req.method === 'POST') {
+    if (hits(`sms:${ip}`) >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
+    recordFailure(`sms:${ip}`);
+    let raw;
+    try { raw = await readRaw(req, MAX_WEBHOOK_BODY); } catch { return send(res, 413, { error: 'Request too large' }); }
+    const out = smsInbound(ENV, db, raw, req.headers['x-twilio-signature']);
+    if (out.db && out.db !== db) commitDb(applyDiff(db, diffDb(db, out.db), SMS_WRITE));
+    res.writeHead(out.status, { ...SECURITY_HEADERS, ...out.headers });
+    return res.end(out.body);
+  }
   // WhatsApp Cloud API webhook: verification token on GET, HMAC-signed raw body on POST; Meta retries on non-2xx.
   if (path === '/api/public/whatsapp/webhook' && ['GET', 'POST'].includes(req.method)) {
     if (hits(`whatsapp:${ip}`) >= WHATSAPP_HOOKS_PER_WINDOW) return send(res, 429, { error: 'Too many requests' });
@@ -820,6 +832,16 @@ async function website(req, res, path) {
     const xml = path === '/sitemap.xml';
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': `${xml ? 'application/xml' : 'text/plain'}; charset=utf-8`, 'Cache-Control': 'public, max-age=300' });
     return res.end((xml ? sitemap : robots)(db, websiteOrigin()));
+  }
+  if (req.method === 'GET' && path.startsWith('/share/')) {
+    const key = `share:${clientIp(req)}`;
+    if (tooMany(key)) return send(res, 429, { error: 'Too many requests' });
+    const out = sharePage(db, path, new Date().toISOString().slice(0, 10), blobs.get);
+    if (out) {
+      if (out.status === 404) recordFailure(key);
+      res.writeHead(out.status, { ...SECURITY_HEADERS, ...out.headers });
+      return res.end(out.body);
+    }
   }
   if (!['GET', 'POST'].includes(req.method) || path.startsWith('/assets/') || extname(path)) return serveStatic(req, res);
   let decoded;

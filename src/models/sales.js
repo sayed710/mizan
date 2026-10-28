@@ -1,5 +1,5 @@
 import { create, read, search, write } from '../orm.js';
-import { adjustQuantity, moveValued } from './valuation.js';
+import { adjustQuantity, moveValued, revalue } from './valuation.js';
 import { addShipping, applyLots, shippingPrice } from './logistics.js';
 import { procure } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
@@ -393,6 +393,11 @@ export const salesModels = {
             return { db: adjustQuantity(db, r.id, Number(qty), { reference: `Quantity update: ${r.name}` }) };
           },
           when: (r) => r.type === 'goods',
+        },
+        {
+          label: 'Revalue', when: (r) => r.type === 'goods' && Number(r.qty_available) > 0,
+          ask: [{ label: 'New unit cost', type: 'number', default: (r) => String(r.cost ?? 0) }],
+          run: (db, r, [cost]) => ({ db: revalue(db, r.id, cost) }),
         },
         { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],

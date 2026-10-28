@@ -6,7 +6,7 @@ import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { accountId, invoiceLines, postEntry, profitAndLoss } from './models/ledger.js';
-import { closeFiscalYear, compareProfitAndLoss, reopenFiscalYear } from './models/closing.js';
+import { closeFiscalYear, reopenFiscalYear } from './models/closing.js';
 import { adjustQuantity, receive } from './models/valuation.js';
 
 test('the registered product model keeps costing method and valuation, so goods bills clear 110200', () => {
@@ -29,8 +29,7 @@ test('closed years still report their result and reopening keeps the earlier loc
   db = closeFiscalYear(closeFiscalYear(y24.db, y23.id), y24.id);
   const p23 = { from: '2023-01-01', to: '2023-12-31' };
   const p24 = { from: '2024-01-01', to: '2024-12-31' };
-  const report = compareProfitAndLoss(db, [p23, p24]);
-  assert.deepEqual(report.rows.find((r) => r.key === 'revenue').values, [500, 1000]);
+  assert.deepEqual([profitAndLoss(db, p23).revenue, profitAndLoss(db, p24).revenue], [500, 1000]);
   assert.equal(profitAndLoss(db, p24).net, 1000);
   assert.equal(db.settings.lock_date, '2024-12-31');
   const reopened = reopenFiscalYear(db, y24.id);

@@ -10,6 +10,7 @@ import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
+import { RecordAnalysis } from './Analysis.jsx';
 
 /** Integrations whose buttons fall back to only recording a send when not configured. */
 const SENDING = { smtp: 'Email', sms: 'SMS' };
@@ -289,6 +290,12 @@ export function FormView({ leaf, id, base, params }) {
       if (id != null && b.vals.active === false) location.hash = backHash;
       return;
     }
+    const answers = [];
+    for (const q of b.ask ?? []) {
+      const text = prompt(t(q.label), q.default?.(current) ?? '');
+      if (text == null) return;
+      answers.push(q.type === 'number' ? Number(text) : text.trim());
+    }
     const savedId = save();
     if (savedId == null) return;
     try {
@@ -297,9 +304,10 @@ export function FormView({ leaf, id, base, params }) {
         if (out.go) location.hash = out.go;
         return;
       }
-      const res = b.run(getDb(), read(getDb(), model, savedId));
+      const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
       noteUnsent(savedId);
+      if (res.message) alert(res.message);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
@@ -423,6 +431,7 @@ export function FormView({ leaf, id, base, params }) {
               </>
             )}
           </section>
+          {!isNew && <RecordAnalysis db={db} model={model} rec={current} />}
         </div>
         {def.form.chatter && !isNew && <Chatter db={db} model={model} id={rec.id} name={rec[def.form.title]} />}
       </div>

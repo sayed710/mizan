@@ -1,4 +1,4 @@
-// Fiscal closing, comparative reports and reversing exchange adjustments.
+// Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
 import { create, read, search, updateSettings, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
@@ -57,13 +57,6 @@ function getYear(db, id) {
   const error = yearGuard(db, year, year);
   if (error) throw new Error(error);
   return year;
-}
-
-/** Fiscal year containing a date, falling back to its calendar year. */
-export function fiscalYearOf(db, date) {
-  checkDate(date);
-  return search(db, 'account.fiscal.year').find((y) => y.date_from <= date && date <= y.date_to)
-    ?? { date_from: `${date.slice(0, 4)}-01-01`, date_to: `${date.slice(0, 4)}-12-31` };
 }
 
 /** Close P&L balances into retained earnings and lock the fiscal year. */
@@ -230,6 +223,16 @@ export const closingModels = {
       buttons: [
         { label: 'Close Year', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: closeFiscalYear(db, r.id) }) },
         { label: 'Reopen', when: (r) => r.state === 'closed', run: (db, r) => ({ db: reopenFiscalYear(db, r.id) }) },
+        {
+          label: 'Revalue Foreign Currency', when: (r) => r.state === 'open',
+          ask: [{ label: 'Revaluation date (YYYY-MM-DD)', default: (r) => (today() < r.date_from ? r.date_from : today() < r.date_to ? today() : r.date_to) }],
+          run: (db, r, [date]) => {
+            const year = getYear(db, r.id);
+            checkDate(date);
+            if (year.state !== 'open' || date < year.date_from || date > year.date_to) throw new Error('Select a revaluation date inside this open fiscal year');
+            return { db: revalueForeignBalances(db, date) };
+          },
+        },
       ],
       chatter: true,
     },

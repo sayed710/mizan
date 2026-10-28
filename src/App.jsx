@@ -19,6 +19,7 @@ import { Studio } from './views/Studio.jsx';
 import { Kitchen } from './views/Kitchen.jsx';
 import { Knowledge } from './views/Knowledge.jsx';
 import { PrintDoc } from './views/PrintDoc.jsx';
+import { AnalysisPage } from './views/Analysis.jsx';
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -29,7 +30,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet };
+const PAGES = { analysis: AnalysisPage, dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet };
 
 export function App() {
   const [route, setRoute] = useState(parseHash);

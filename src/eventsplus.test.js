@@ -4,21 +4,12 @@ import { create, emptyDb, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import {
-  agenda, checkIn, eventDashboard, generateBadge, invoiceRegistrations, invoiceSponsor,
+  agenda, checkIn, eventDashboard, invoiceRegistrations, invoiceSponsor,
   reserveBooth, sellBooth, trackConflicts,
 } from './models/eventsplus.js';
 
 const event = (db, vals = {}) => create(db, 'event.event', {
   name: 'Community Expo', date_begin: '2027-04-01', seats_max: 100, ...vals,
-});
-
-test('event badges are deterministic and distinct for registrations in one event', () => {
-  const first = { event_id: 8, id: 1 };
-  const second = { event_id: 8, id: 2 };
-  assert.equal(generateBadge(first), generateBadge(first));
-  assert.notEqual(generateBadge(first), generateBadge(second));
-  assert.notEqual(generateBadge(first), generateBadge({ event_id: 9, id: 1 }));
-  assert.match(generateBadge(first), /^EV8-00001\d$/);
 });
 
 test('badge check-in accepts one active attendee and rejects unknown, cancelled, and repeat scans', () => {

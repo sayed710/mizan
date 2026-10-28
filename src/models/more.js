@@ -204,12 +204,6 @@ function invoiceSubscription(db, sub) {
   return { db: write(next, 'sale.subscription', sub.id, { next_invoice_date: nextDate, ...(ended ? { stage: 'closed', close_reason: null } : {}) }), go: `#/accounting/invoices/${id}` };
 }
 
-/** Recurring invoicing: one invoice for every running subscription due on or before `at`. */
-export function runRecurring(db, at = today()) {
-  return (db.records['sale.subscription'] ?? []).filter((s) => s.stage === 'progress' && s.next_invoice_date && s.next_invoice_date <= at)
-    .reduce((acc, s) => invoiceSubscription(acc, s).db, db);
-}
-
 function closeSubscription(db, r) {
   const pick = prompt(`Close reason:\n${CLOSE_REASONS.map(([, l], i) => `${i + 1}. ${l}`).join('\n')}`, '1');
   if (pick == null) return { db };

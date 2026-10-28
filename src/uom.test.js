@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, emptyDb, read, search, unlink, write } from './orm.js';
 import { seed } from './seed.js';
-import { checkPackagingMultiple, convert, convertPrice, defaultUoms, ensureUoms, lineToStockQty, packagingSuggestion, uomForLegacy, uomModels } from './models/uom.js';
+import { convert, convertPrice, defaultUoms, ensureUoms, lineToStockQty, packagingSuggestion, uomForLegacy, uomModels } from './models/uom.js';
 
 const named = (db, name) => search(db, 'uom.uom').find((r) => r.name === name).id;
 
@@ -68,7 +68,7 @@ test('stock quantities convert explicit line units and retain legacy fallback wi
   assert.equal(line.qty, 2);
 });
 
-test('packaging suggestions are largest-first and warnings tolerate floating point multiples', () => {
+test('packaging suggestions are largest-first, per product, and tolerate floating point multiples', () => {
   const db0 = seed();
   const small = create(db0, 'product.packaging', { name: 'Six', product_id: 1, qty: 6 });
   const large = create(small.db, 'product.packaging', { name: 'Case', product_id: 1, qty: 24 });
@@ -79,13 +79,10 @@ test('packaging suggestions are largest-first and warnings tolerate floating poi
   assert.equal(result.remainder, 3);
   assert.deepEqual(packagingSuggestion(other.db, 999, 7), { packages: [], remainder: 7 });
   assert.deepEqual(packagingSuggestion(other.db, 1, 0), { packages: [], remainder: 0 });
-  assert.equal(checkPackagingMultiple(other.db, 1, 48, large.id), null);
-  assert.match(checkPackagingMultiple(other.db, 1, 49, large.id), /multiple of 24.*Case/);
-  assert.throws(() => checkPackagingMultiple(other.db, 1, 100, other.id), /for this product/);
+  assert.deepEqual(packagingSuggestion(other.db, 2, 250).packages.map((p) => [p.packaging.id, p.count]), [[other.id, 2]]);
   assert.throws(() => packagingSuggestion(other.db, 1, -1), /negative/);
   assert.throws(() => write(other.db, 'product.packaging', small.id, { qty: 0 }), /positive/);
   const fractional = create(other.db, 'product.packaging', { name: 'Tenth', product_id: 3, qty: 0.1 });
-  assert.equal(checkPackagingMultiple(fractional.db, 3, 0.3, fractional.id), null);
   assert.equal(packagingSuggestion(fractional.db, 3, 0.3).packages[0].count, 3);
   assert.deepEqual(other.db, snapshot);
 });
