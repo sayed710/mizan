@@ -5,7 +5,8 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { seed } from '../src/seed.js';
@@ -52,8 +53,8 @@ const COOKIE = 'mizan_session';
 
 const DB_PATH = process.env.MIZAN_DB ?? join(ROOT, 'mizan.sqlite');
 const sql = new DatabaseSync(DB_PATH);
-// Wiping everything back to demo data is for demos and development; production needs MIZAN_ALLOW_RESET=1.
-const RESET_ALLOWED = process.env.MIZAN_ALLOW_RESET === '1' || (process.env.NODE_ENV !== 'production' && process.env.MIZAN_ALLOW_RESET !== '0');
+// Wiping everything back to demo data is off unless MIZAN_ALLOW_RESET=1, or NODE_ENV=development (and not MIZAN_ALLOW_RESET=0).
+const RESET_ALLOWED = process.env.MIZAN_ALLOW_RESET === '1' || (process.env.NODE_ENV === 'development' && process.env.MIZAN_ALLOW_RESET !== '0');
 sql.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -446,9 +447,10 @@ async function api(req, res, path) {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
     if (!RESET_ALLOWED) return send(res, 403, { error: 'Reset is disabled on this server (set MIZAN_ALLOW_RESET=1 to allow it)' });
     if ((await readJson(req)).confirm !== 'RESET') return send(res, 400, { error: 'Type RESET to confirm' });
-    // Keep what is about to be wiped, next to the database file.
+    // Keep what is about to be wiped, next to the database file: owner-only, never over an existing file. The copy and
+    // the reset happen in one synchronous step, so no other request can commit in between and be lost.
     const saved = `${DB_PATH}.before-reset-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    await writeFile(saved, JSON.stringify(db));
+    writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
     console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
     commitDb(seed(), { full: true });
     return send(res, 200, db);

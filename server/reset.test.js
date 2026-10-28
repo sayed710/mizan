@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,12 +33,24 @@ async function withServer(env, fn) {
 }
 const reset = (origin, h, body) => fetch(`${origin}/api/reset`, { method: 'POST', headers: h, body: JSON.stringify(body) });
 
-test('reset needs RESET typed and keeps the wiped data in a file', async () => {
-  await withServer({}, async (origin, admin, directory) => {
+test('reset needs RESET typed and keeps the wiped data in a private file', async () => {
+  await withServer({ NODE_ENV: 'development' }, async (origin, admin, directory) => {
     assert.equal((await (await fetch(`${origin}/api/session`, { headers: admin })).json()).canReset, true);
     assert.equal((await reset(origin, admin, {})).status, 400);
     assert.equal((await reset(origin, admin, { confirm: 'RESET' })).status, 200);
-    assert.ok((await readdir(directory)).some((f) => /^test\.sqlite\.before-reset-.*\.json$/.test(f)));
+    const saved = (await readdir(directory)).find((f) => /^test\.sqlite\.before-reset-.*\.json$/.test(f));
+    assert.ok(saved);
+    if (process.platform !== 'win32') assert.equal((await stat(join(directory, saved))).mode & 0o777, 0o600);
+  });
+});
+
+test('reset is off when NODE_ENV is unset, as in a plain npm start', async () => {
+  await withServer({}, async (origin, admin) => {
+    assert.equal((await (await fetch(`${origin}/api/session`, { headers: admin })).json()).canReset, false);
+    assert.equal((await reset(origin, admin, { confirm: 'RESET' })).status, 403);
+  });
+  await withServer({ NODE_ENV: 'development', MIZAN_ALLOW_RESET: '0' }, async (origin, admin) => {
+    assert.equal((await reset(origin, admin, { confirm: 'RESET' })).status, 403);
   });
 });
 
