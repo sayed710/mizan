@@ -126,6 +126,29 @@ export function overDeliveryError(db, picking) {
 }
 
 /** Recompute an order's invoiced quantities from its invoices/bills that are not cancelled (`move` is one of them). */
+/**
+ * Cancel a sale or purchase order, also once confirmed (FLOW-017): its open transfers and draft invoices or bills are
+ * cancelled with it. Delivered or received goods must be returned, and posted invoices or bills credited, first.
+ */
+export function cancelOrder(db, model, order) {
+  const field = model === 'sale.order' ? 'sale_id' : 'purchase_id';
+  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0)) {
+    throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
+  }
+  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
+  // Credit notes point at their invoice by name (invoice_origin), not at the order.
+  const invoices = moves.filter((m) => m.state === 'posted');
+  const names = new Set(invoices.map((m) => m.name));
+  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_refund', 'in_refund'].includes(m.move_type) && (m[field] === order.id || names.has(m.invoice_origin)));
+  const totalOf = (list) => list.reduce((sum, m) => sum + amounts(m.invoice_line_ids ?? []).total, 0);
+  const posted = totalOf(invoices.filter((m) => !['out_refund', 'in_refund'].includes(m.move_type))) - totalOf(refunds);
+  if (Math.abs(posted) > 0.005) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
+  const open = search(db, 'stock.picking').filter((p) => p[field] === order.id && ['draft', 'waiting', 'ready'].includes(p.state));
+  let next = open.reduce((acc, p) => write(acc, 'stock.picking', p.id, { state: 'cancel' }), db);
+  next = moves.filter((m) => m.state === 'draft').reduce((acc, m) => write(acc, 'account.move', m.id, { state: 'cancel' }), next);
+  return write(next, model, order.id, { state: 'cancel' });
+}
+
 export function syncInvoicedQty(db, move) {
   const [model, field] = move.sale_id ? ['sale.order', 'sale_id'] : move.purchase_id ? ['purchase.order', 'purchase_id'] : [];
   const order = model && read(db, model, move[field]);
@@ -476,7 +499,7 @@ export const salesModels = {
           },
         },
         { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale' && invoiceStatus(r, 'sale') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'sale'].includes(r.state) },
+        { label: 'Cancel', when: (r) => r.state !== 'cancel', run: (db, r) => ({ db: cancelOrder(db, 'sale.order', r) }) },
       ],
       smart: [
         { label: 'Delivery', model: 'stock.picking', field: 'sale_id', target: 'inventory/transfers' },
@@ -535,7 +558,7 @@ export const salesModels = {
           },
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase' && invoiceStatus(r, 'purchase') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
-        { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => !['cancel', 'purchase'].includes(r.state) },
+        { label: 'Cancel', when: (r) => r.state !== 'cancel', run: (db, r) => ({ db: cancelOrder(db, 'purchase.order', r) }) },
       ],
       smart: [
         { label: 'Receipt', model: 'stock.picking', field: 'purchase_id', target: 'inventory/transfers' },
