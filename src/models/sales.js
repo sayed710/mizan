@@ -376,6 +376,7 @@ export const salesModels = {
       description: { type: 'text', label: 'Internal Notes' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
+      pos_categ_ids: { type: 'many2many', relation: 'pos.category', label: 'Point of Sale Categories' },
       weight: { type: 'float', label: 'Weight (kg)' },
       route: { type: 'selection', label: 'Route', options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] },
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
@@ -401,7 +402,7 @@ export const salesModels = {
       return !stock || !purchase ? 'Select existing stock and purchase units of measure'
         : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14, pos_categ_ids: [] }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
       [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && Boolean(r.below_min) }],

@@ -31,10 +31,19 @@ export function runPosting(db, allowed, path, body = {}) {
       const product = read(db, 'product', line.product_id);
       if (!product || product.active === false || product.available_in_pos === false || product.sale_ok === false) throw new Error('Product is not available in POS');
     }
-    if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || !['cash', 'card', 'bank'].includes(p.method) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
-    if (!body.payments && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
+    if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || (!p.payment_method_id && !['cash', 'card', 'bank'].includes(p.method)) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
+    if (!body.payments && !Number.isInteger(Number(body.method)) && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
+    const resolvedMethod = Number.isInteger(Number(body.method)) ? Number(body.method) : body.method;
     // Prices come from the products, not from the request.
-    const { db: next, id } = payCart(db, { cart, method: body.method, payments: body.payments, partner_id: Number(body.partner_id) || null, request_key: body.request_key ?? null });
+    const { db: next, id } = payCart(db, {
+      cart,
+      method: resolvedMethod,
+      payments: body.payments,
+      partner_id: Number(body.partner_id) || null,
+      config_id: Number(body.config_id) || null,
+      preset_id: Number(body.preset_id) || null,
+      request_key: body.request_key ?? null,
+    });
     const order = read(next, 'pos.order', id);
     return { db: next, body: { id, name: order.name, total: order.amount_total } };
   }

@@ -43,7 +43,7 @@ export function display(db, field, value, rec = null) {
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
-    case 'many2many': return value.map((id) => { const r = read(db, field.relation, id); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
+    case 'many2many': return (value ?? []).map((id) => { const r = read(db, field.relation, id); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';

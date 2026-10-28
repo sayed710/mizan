@@ -3,7 +3,7 @@ import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount, taxGroups } from './taxes.js';
-import { round } from '../money.js';
+import { cashRound, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 
 export const ACCOUNT_TYPES = [
@@ -69,14 +69,23 @@ export function invoiceLines(db, move) {
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
   const bases = [...byAccount.values()].map(({ account, amount, zero }) => [account, round(amount / rate), round(amount), zero]);
+  const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
+  const rawTotalDoc = round(amounts(move.invoice_line_ids).total);
+  const totalDoc = rounding ? cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method) : rawTotalDoc;
+  const diffDoc = round(totalDoc - rawTotalDoc);
+  const total = round(totalDoc / rate);
+  const diff = round(diffDoc / rate);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
   const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc), rate);
-  const totalDoc = round(amounts(move.invoice_line_ids).total);
+  if (rounding && rounding.strategy === 'biggest_tax' && taxes.length && diffDoc !== 0) {
+    const largest = taxes.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(taxes[best].amount) ? i : best), 0);
+    taxes[largest] = { ...taxes[largest], amount: round(taxes[largest].amount + diff), document_amount: round(taxes[largest].document_amount + diffDoc) };
+  }
+
   // The receivable/payable is the document total; cents lost rounding each account go to the largest base line.
-  const total = round(amounts(move.invoice_line_ids).total / rate);
-  const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, g) => s + g.amount, 0));
+  const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, g) => s + g.amount, 0) - (rounding && rounding.strategy !== 'biggest_tax' && diff ? diff : 0));
   if (gap && bases.length) {
     const largest = bases.reduce((best, b, i) => (Math.abs(b[1]) > Math.abs(bases[best][1]) ? i : best), 0);
     bases[largest] = [bases[largest][0], round(bases[largest][1] + gap), bases[largest][2], bases[largest][3]];
@@ -89,10 +98,27 @@ export function invoiceLines(db, move) {
     const sign = (debit !== refund) !== (amount < 0) ? 1 : -1;
     return { debit: sign > 0 ? round(Math.abs(amount)) : 0, credit: sign > 0 ? 0 : round(Math.abs(amount)), ...(foreign ? { currency_id: move.currency_id, amount_currency: round(sign * Math.abs(doc)) } : {}) };
   };
+
+  const roundingLines = [];
+  if (rounding && rounding.strategy !== 'biggest_tax' && diffDoc !== 0) {
+    const isProfit = diffDoc > 0;
+    const profitAcc = rounding.profit_account_id ? (read(db, 'account.account', rounding.profit_account_id)?.id || rounding.profit_account_id) : accountId(db, '450000');
+    const lossAcc = rounding.loss_account_id ? (read(db, 'account.account', rounding.loss_account_id)?.id || rounding.loss_account_id) : accountId(db, '690000');
+    const acc = isProfit ? profitAcc : lossAcc;
+    roundingLines.push({
+      account_id: acc,
+      partner_id: move.partner_id,
+      name: 'Cash Rounding',
+      debit: isProfit ? (refund ? Math.abs(diff) : 0) : (refund ? 0 : Math.abs(diff)),
+      credit: isProfit ? (refund ? 0 : Math.abs(diff)) : (refund ? Math.abs(diff) : 0),
+    });
+  }
+
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
     ...bases.map(([account_id, amount, doc, zero]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...roundingLines,
   ].filter((l) => l.debit || l.credit);
 }
 

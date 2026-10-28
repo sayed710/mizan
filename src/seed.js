@@ -8,7 +8,7 @@ import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
-import { SCHEMA_VERSION } from './migrations.js';
+import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
@@ -278,7 +278,8 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  add('pos.order', { partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1 });
+  add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
   add('discuss.channel', { name: 'sales', description: 'Deals and quotations' });
@@ -469,5 +470,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...ensureCalendars(migrateProductCategories(migrateTimeOff(ensureQuants(ready)))), schema_version: SCHEMA_VERSION };
+  return { ...ensureCalendars(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))), schema_version: SCHEMA_VERSION };
 }
