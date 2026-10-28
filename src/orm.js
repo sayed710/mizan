@@ -184,6 +184,25 @@ export function writeMany(db, model, updates) {
 export const postNotes = (db, notes) => (notes.length
   ? { ...db, messages: [...db.messages, ...notes.map(([model, id, body]) => message(model, id, body, 'note'))] } : db);
 
+/**
+ * The first record that still points at one of `ids` of `model` (a many2one, or a many2one inside one2many lines),
+ * described for an error message, or null. Records being deleted themselves don't count.
+ */
+export function referenceTo(db, model, ids) {
+  const drop = new Set(ids);
+  for (const [source, def] of Object.entries(models)) {
+    for (const [key, f] of Object.entries(def.fields)) {
+      const direct = f.type === 'many2one' && f.relation === model && !f.compute;
+      const sub = f.type === 'one2many' && f.fields ? Object.keys(f.fields).filter((k) => f.fields[k].type === 'many2one' && f.fields[k].relation === model) : [];
+      if (!direct && !sub.length) continue;
+      const hit = (db.records[source] ?? []).find((r) => !(source === model && drop.has(r.id))
+        && (direct ? drop.has(r[key]) : Array.isArray(r[key]) && r[key].some((l) => sub.some((k) => drop.has(l?.[k])))));
+      if (hit) return `${def.label} ${hit.name ?? `#${hit.id}`}`;
+    }
+  }
+  return null;
+}
+
 export function unlink(db, model, ids) {
   const drop = new Set(ids);
   const blocked = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
@@ -194,7 +213,11 @@ export function unlink(db, model, ids) {
     records: { ...db.records, [model]: (db.records[model] ?? []).filter((r) => !drop.has(r.id)) },
     messages: db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
   };
-  return removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
+  const result = removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
+  // Checked after onUnlink, so records it removes along with these don't block the delete.
+  const used = referenceTo(result, model, ids);
+  if (used) throw new Error(`This record is still used by ${used}; archive it instead`);
+  return result;
 }
 
 /** A tracking (audit) message, as `write` posts for a changed tracked field. */
