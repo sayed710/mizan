@@ -209,7 +209,8 @@ const releasedTaxes = (db, r) => {
     if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
-      released.set(code, (released.get(code) ?? 0) + (Number(l.debit) || 0) + (Number(l.credit) || 0));
+      const key = `${code}:${l.tax_name ?? ''}`;
+      released.set(key, (released.get(key) ?? 0) + (Number(l.debit) || 0) + (Number(l.credit) || 0));
     }
   }
   return released;
@@ -224,17 +225,24 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
   const released = final ? releasedTaxes(db, r) : null;
-  const due = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id))
-    .map(([taxAccount, amount]) => {
-      const code = read(db, 'account.account', taxAccount)?.code ?? (sale ? '251000' : '131000');
-      return [code, round2(final ? amount - (released.get(code) ?? 0) : amount * share)];
-    })
-    .filter(([, amount]) => amount > 0);
+  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id))
+    .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000') }));
+  const due = groups.map((g) => {
+    const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
+    // Older releases were not tagged; allocate their account total across its taxes.
+    const prior = final ? (released.get(`${g.account}:${g.tax_name}`) ?? 0) + (released.get(`${g.account}:`) ?? 0) * g.amount / accountTotal : 0;
+    return { ...g, amount: round2(final ? g.amount - prior : g.amount * share), base: round2(g.base * share) };
+  })
+    .filter((g) => g.amount > 0);
   if (!due.length) return db;
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
-  const lines = due.flatMap(([account, amount]) => (sale !== refund
-    ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { account, credit: amount, partner_id: r.partner_id }]
-    : [{ account, debit: amount, partner_id: r.partner_id }, { account: transition, credit: amount, partner_id: r.partner_id }]));
+  // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
+  const lines = due.flatMap(({ account, amount, base, tax_name }) => {
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base };
+    return sale !== refund
+      ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
+      : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
+  });
   return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
 }
 
@@ -305,6 +313,9 @@ const lineItem = {
     credit: { type: 'monetary', label: 'Credit' },
     currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
     amount_currency: { type: 'monetary', label: 'Amount in Currency' },
+    // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
+    tax_name: { type: 'char', label: 'Tax', hidden: true },
+    tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
   },
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };

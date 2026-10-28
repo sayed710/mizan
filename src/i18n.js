@@ -23,6 +23,8 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Tax': 'الضريبة',
+  'Tax Base': 'الوعاء الضريبي',
   'Company Amount': 'المبلغ بعملة الشركة',
   'Early Payment Discount': 'خصم السداد المبكر',
   // shell

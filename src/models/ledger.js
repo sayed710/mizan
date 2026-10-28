@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, lineTaxOf, mapAccount } from './taxes.js';
+import { TRANSITION, mapAccount, taxGroups } from './taxes.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -67,16 +67,12 @@ export function invoiceLines(db, move) {
   const bases = [...byAccount].map(([account_id, amount]) => [account_id, round(amount / rate), round(amount)]);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000');
-  const byTax = new Map();
-  for (const l of move.invoice_line_ids ?? []) {
-    const account = l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc;
-    byTax.set(account, (byTax.get(account) ?? 0) + lineTaxOf(l));
-  }
-  const taxes = [...byTax].map(([account_id, amount]) => [account_id, round(amount / rate), round(amount)]);
+  // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
+  const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc), rate);
   const totalDoc = round(amounts(move.invoice_line_ids).total);
   // The receivable/payable is the document total; cents lost rounding each account go to the largest base line.
   const total = round(amounts(move.invoice_line_ids).total / rate);
-  const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, [, a]) => s + a, 0));
+  const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, g) => s + g.amount, 0));
   if (gap && bases.length) {
     const largest = bases.reduce((best, b, i) => (Math.abs(b[1]) > Math.abs(bases[best][1]) ? i : best), 0);
     bases[largest] = [bases[largest][0], round(bases[largest][1] + gap), bases[largest][2]];
@@ -92,19 +88,20 @@ export function invoiceLines(db, move) {
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
     ...bases.map(([account_id, amount, doc]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc) })),
-    ...taxes.map(([account_id, amount, doc]) => ({ account_id, partner_id: move.partner_id, name: 'Taxes', ...side(amount, !sale, doc) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base })),
   ].filter((l) => l.debit || l.credit);
 }
 
 /**
  * Create and post a miscellaneous entry.
- * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string}[]}} spec
+ * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
+ * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
 export function postEntry(db, { journal, date = today(), ref = '', lines, company = null }) {
   const line_ids = lines.map((l) => {
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net) };
+    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;

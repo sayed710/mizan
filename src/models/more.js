@@ -154,7 +154,7 @@ function postExpense(db, r) {
     journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,
     lines: [
       { account: accountCode, debit: round2(total - tax) },
-      ...(tax ? [{ account: '131000', debit: tax }] : []),
+      ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(r.tax) || 0}%`, tax_base: round2(total - tax) }] : []),
       { account: own ? '230100' : '101401', credit: total },
     ],
   });

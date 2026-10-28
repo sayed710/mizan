@@ -46,6 +46,7 @@ function saleEntry(db, lines, { method, partner_id, refund }) {
   const pay = method === 'cash' ? CASH : BANK;
   const entries = invoiceLines(db, move).map((l) => ({
     account: l.account_id === receivable ? pay : code(l.account_id), debit: l.debit, credit: l.credit, partner_id, name: l.name,
+    ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_base } : {}),
   }));
   // Income and tax groups are rounded one by one, so their sum can differ by a cent from the tender actually
   // collected (receipt and session totals). The payment account takes the tender; the cent goes to a visible line.
@@ -67,7 +68,7 @@ function reversalEntry(db, original, { partner_id }) {
   const entry = entryOfOrder(db, original);
   if (!entry) return null;
   const code = (id) => read(db, 'account.account', id)?.code;
-  return entry.line_ids.map((l) => ({ account: code(l.account_id), debit: l.credit, credit: l.debit, partner_id: l.partner_id ?? partner_id, name: l.name }));
+  return entry.line_ids.map((l) => ({ account: code(l.account_id), debit: l.credit, credit: l.debit, partner_id: l.partner_id ?? partner_id, name: l.name, ...(l.tax_name ? { tax_name: l.tax_name, tax_base: l.tax_base } : {}) }));
 }
 
 /** Book a paid order (or a refund, when `refund_of` is set) in the open session: stock moves and the sale/refund entry. */
