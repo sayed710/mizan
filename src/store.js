@@ -14,6 +14,8 @@ const listeners = new Set();
 let mode = 'local';
 let user = null;
 let db = null;
+let confirmed = null; // last state the server acknowledged
+let generation = 0; // bumped when a save fails, so saves queued on top of it are dropped
 const enqueue = createQueue(); // saves and polls, in order
 
 const COMPANY_KEY = 'mizan-company';
@@ -67,7 +69,7 @@ async function api(path, body) {
 
 async function pull() {
   const r = await api('/api/db');
-  if (r.ok) { db = r.data; notify(); }
+  if (r.ok) { db = confirmed = r.data; notify(); }
   if (r.status === 401) location.reload();
 }
 
@@ -110,13 +112,21 @@ export function commit(next) {
     try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { /* storage full/blocked: keep working in memory */ }
     return;
   }
+  const gen = generation;
+  const failed = (message) => {
+    generation++;
+    db = confirmed ?? db;
+    notify();
+    alert(`${message} Showing the last saved data; please redo any edits made since.`);
+  };
   enqueue(async () => {
-    if (isEmptyDiff(diff)) return;
+    if (gen !== generation || isEmptyDiff(diff)) return; // built on top of a failed save
     const r = await api('/api/diff', diff);
-    if (r.ok || r.data?.db) { db = r.ok ? r.data : r.data.db; notify(); }
-    if (!r.ok) alert(r.data?.error ?? 'Could not save changes');
+    if (r.ok) { db = confirmed = r.data; notify(); return; }
+    if (r.data?.db) confirmed = r.data.db;
+    failed(r.data?.error ?? 'Could not save changes.');
   }, (e) => {
-    alert(`Could not save changes: ${e.message}. Showing the last saved data.`);
+    failed(`Could not save changes: ${e.message}.`);
     return pull().catch(pollFailed);
   });
 }
