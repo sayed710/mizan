@@ -70,9 +70,14 @@ export const amountFields = (lineField) => ({
   amount_total: { type: 'monetary', label: 'Total', compute: (r) => amounts(r[lineField]).total },
 });
 
-/** Next "PREFIX00001"-style number among records matching `filter`. */
-export const nextName = (db, model, prefix, filter = () => true) =>
-  prefix + pad((db.records[model] ?? []).filter((r) => filter(r) && r.name?.startsWith(prefix)).length + 1);
+/**
+ * Next "PREFIX00001"-style number among records matching `filter`: one past the highest. The server keeps a
+ * high-water mark per model and prefix (`db.numbering`), so deleting the latest record never frees its number.
+ */
+export const nextName = (db, model, prefix, filter = () => true) => {
+  const used = (db.records[model] ?? []).filter((r) => filter(r) && r.name?.startsWith(prefix)).map((r) => Number(r.name.slice(prefix.length)));
+  return prefix + pad(Math.max(0, db.numbering?.[model]?.[prefix] ?? 0, ...used.filter(Number.isSafeInteger)) + 1);
+};
 
 export const monthFilters = (field) => [
   { id: `${field}_month`, label: 'This Month', fn: (r) => r[field]?.slice(0, 7) === today().slice(0, 7) },

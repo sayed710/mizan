@@ -173,6 +173,8 @@ export function unlink(db, model, ids) {
   return removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
 }
 
+/** A tracking (audit) message, as `write` posts for a changed tracked field. */
+export const postTracking = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'tracking')] });
 export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note')] });
 
 export const messagesOf = (db, model, id) =>
