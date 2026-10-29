@@ -12,3 +12,14 @@ export function round(n, digits = 2) {
 
 /** `n` as integer minor units (cents), rounded the same way. */
 export const cents = (n) => Math.round(round(n) * 100);
+
+/** Round a monetary amount to an increment, with directions measured away from zero. */
+export function cashRound(amount, increment, method) {
+  const value = Number(amount);
+  const step = Number(increment);
+  if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0 || !['UP', 'DOWN', 'HALF-UP'].includes(method)) throw new Error('Invalid cash rounding');
+  const scaled = Math.abs(value) / step;
+  const tolerance = Number.EPSILON * Math.max(1, scaled) * 4;
+  const units = method === 'UP' ? Math.ceil(scaled - tolerance) : method === 'DOWN' ? Math.floor(scaled + tolerance) : Math.floor(scaled + 0.5 + tolerance);
+  return Number((Math.sign(value) * units * step).toPrecision(15)) || 0;
+}

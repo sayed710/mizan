@@ -4,6 +4,7 @@ import { pad, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { round } from '../money.js';
 import { leaveIntervals } from './timeoff.js';
+import { calendarFor, isWorkingDay } from './calendar.js';
 
 
 /**
@@ -37,15 +38,13 @@ const datesBetween = (from, to) => {
 
 /** Summarize scheduled working days, validated unpaid leave, and attendance overtime for a slip. */
 export function workedDays(db, slip) {
-  const contract = runningContract(db, slip.employee_id, slip.date_to);
-  const schedule = String(contract?.work_days || DEFAULT_WORK_DAYS);
-  const weekdays = new Set(schedule.split(',').map((day) => Number(day.trim())).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6));
+  const calendar = calendarFor(db, slip.employee_id, slip.date_to);
   const unpaidLeaves = search(db, 'hr.leave').filter((leave) => {
     const configured = (db.records['hr.work.entry.type'] ?? []).find((t) => t.id === leave.work_entry_type_id);
     const type = String(configured?.legacy_code || configured?.name || leave.leave_type?.name || leave.leave_type || '').toLowerCase();
     return leave.employee_id === slip.employee_id && leave.state === 'validate' && (leave.unpaid === true || type.includes('unpaid'));
   });
-  const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => weekdays.has(new Date(`${date}T00:00:00Z`).getUTCDay()));
+  const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => isWorkingDay(calendar, date, db));
   const intervals = unpaidLeaves.flatMap((leave) => leaveIntervals(db, leave));
   const unpaidDays = round(workingDates.reduce((sum, date) => {
     const occupied = intervals.filter((i) => i.date === date).sort((a, b) => a.from - b.from);
@@ -134,9 +133,11 @@ function compute(db, slip) {
   const structure = read(db, 'hr.payroll.structure', contract?.structure_id ?? slip.structure_id);
   const rules = structure?.rules?.length ? structure.rules : DEFAULT_RULES;
   const worked = workedDays(db, slip);
+  const calendar = calendarFor(db, slip.employee_id, slip.date_to);
+  const hoursPerDay = Number(calendar?.hours_per_day) || 8;
   const workedDaysLines = [
-    { code: 'WORK100', name: 'Regular Work Days', days: worked.worked_days, hours: worked.worked_days * 8 },
-    { code: 'UNPAID', name: 'Unpaid Work Days', days: worked.unpaid_days, hours: worked.unpaid_days * 8 },
+    { code: 'WORK100', name: 'Regular Work Days', days: worked.worked_days, hours: worked.worked_days * hoursPerDay },
+    { code: 'UNPAID', name: 'Unpaid Work Days', days: worked.unpaid_days, hours: worked.unpaid_days * hoursPerDay },
     { code: 'OVERTIME', name: 'Overtime', days: 0, hours: worked.overtime_hours },
   ];
   return write(db, 'hr.payslip', slip.id, {
@@ -238,6 +239,7 @@ export const payrollModels = {
       employee_id: { type: 'many2one', relation: 'hr.employee', label: 'Employee', required: true },
       structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Salary Structure' },
       wage: { type: 'monetary', label: 'Wage' },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Working Schedule' },
       work_days: { type: 'char', label: 'Work Days' },
       hours_per_day: { type: 'float', label: 'Hours per Day' },
       hour_from: { type: 'float', label: 'Work Start Hour' },

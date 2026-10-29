@@ -4,6 +4,7 @@ import { today } from './common.js';
 import { round } from '../money.js';
 import { moreModels } from './more.js';
 import { currentActor, employeeFor, approvalError } from './authority.js';
+import { calendarFor, getAttendances, isPublicHoliday, isWorkingDay, workingHoursForDay } from './calendar.js';
 
 const LEAVE_TYPES = [['paid', 'Paid Time Off'], ['sick', 'Sick Time Off'], ['unpaid', 'Unpaid'], ['comp', 'Compensatory Days']];
 export const REQUIRES_ALLOCATION = new Set(['paid', 'comp']);
@@ -18,14 +19,25 @@ const policy = (db, r) => typeOf(db, r)?.validation_type || 'manager';
 const sameType = (db, r, type) => typeof type === 'number' ? typeOf(db, r)?.id === type : (r.work_entry_type_id ? typeOf(db, r)?.legacy_code === type : r.leave_type === type);
 const company = (a, b) => (a.company_id ?? 1) === (b.company_id ?? 1);
 
-/** Contract weekdays use JS weekday numbers, as payroll does. An unconfigured employee retains legacy calendar days. */
+/** Working schedule resolves through resource.calendar, subtracting holidays and weekends. */
 export function leaveSchedule(db, employeeId, date) {
   const employee = (db.records['hr.employee'] ?? []).find((e) => e.id === employeeId);
-  const c = (db.records['hr.contract'] ?? []).find((r) => r.employee_id === employeeId && (!employee || company(r, employee)) && r.state === 'running' && (!r.date_start || r.date_start <= date) && (!r.date_end || r.date_end >= date));
-  const weekdays = String(c?.work_days ?? '0,1,2,3,4,5,6').split(',').map(Number);
-  const hours = Number(c?.hours_per_day ?? employee?.daily_hours ?? ((Number(employee?.working_hours) || 40) / 5));
-  const from = Number(c?.hour_from ?? 9);
-  return { working: weekdays.includes(new Date(`${date}T00:00:00Z`).getUTCDay()), hours, from };
+  const c = (db.records['hr.contract'] ?? []).find(
+    (r) => r.employee_id === employeeId && (!employee || company(r, employee)) && r.state === 'running' && (!r.date_start || r.date_start <= date) && (!r.date_end || r.date_end >= date),
+  );
+  if (!employee?.resource_calendar_id && !c) {
+    const cal = calendarFor(db, employeeId, date);
+    const holiday = isPublicHoliday(cal, date, db);
+    return { working: !holiday, hours: 8, from: 9 };
+  }
+  const cal = calendarFor(db, employeeId, date);
+  const working = isWorkingDay(cal, date, db);
+  const hours = workingHoursForDay(cal, date, db);
+  const jsDay = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const odooDay = String((jsDay + 6) % 7);
+  const attendances = getAttendances(cal, db).filter((a) => String(a.dayofweek) === odooDay);
+  const from = attendances.length ? Math.min(...attendances.map((a) => Number(a.hour_from))) : 9;
+  return { working, hours: hours || Number(cal?.hours_per_day) || 8, from };
 }
 
 /** Actual occupied work intervals, shared by duration and overlap checks; half-day edges apply only at the endpoints. */

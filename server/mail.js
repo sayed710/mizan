@@ -7,21 +7,27 @@ import { deliverMailing } from './mailtrack.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
-const money = (db, n) => (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: db.settings?.currency ?? 'USD' });
+const docCurrency = (db, rec) => (rec.currency_id && read(db, 'res.currency', rec.currency_id)?.name)
+  ?? (read(db, 'res.company', rec.company_id ?? 1)?.currency_id && read(db, 'res.currency', read(db, 'res.company', rec.company_id ?? 1).currency_id)?.name)
+  ?? db.settings?.currency ?? 'USD';
+
+const money = (db, rec, n) => (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: docCurrency(db, rec) });
 
 /** Plain-text rendering of a document: header, lines, totals. */
 function documentText(db, model, rec) {
   const lines = rec.order_line ?? rec.invoice_line_ids ?? [];
   const product = (id) => read(db, 'product', id)?.name ?? '';
+  const comp = read(db, 'res.company', rec.company_id ?? 1);
+  const compName = comp?.name ?? db.settings?.company ?? '';
   return [
-    `${db.settings?.company ?? ''}`,
+    `${compName}`,
     '',
     `${models[model].label.replace(/s$/, '')} ${rec.name}`,
     '',
-    ...lines.map((l) => `- ${product(l.product_id)}  ×${l.qty}  ${money(db, l.price_unit)}`),
+    ...lines.map((l) => `- ${product(l.product_id)}  ×${l.qty}  ${money(db, rec, l.price_unit)}`),
     '',
-    `Total: ${money(db, rec.amount_total)}`,
-    rec.amount_residual ? `Amount due: ${money(db, rec.amount_residual)}` : '',
+    `Total: ${money(db, rec, rec.amount_total)}`,
+    rec.amount_residual ? `Amount due: ${money(db, rec, rec.amount_residual)}` : '',
   ].filter((l, i, all) => l !== '' || all[i - 1] !== '').join('\n');
 }
 

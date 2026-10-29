@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
@@ -59,7 +59,8 @@ function newDefaults(db, model, leaf, params) {
 function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
-  const text = <>{t(field.label)}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
+  const label = field.custom ? field.label : t(field.label);
+  const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
   return (
     <div className="field">
       {isLabelable(field, readonly) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
@@ -145,7 +146,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          <button type="button" role="menuitem" onClick={() => run(duplicate)}>{t('Duplicate')}</button>
+          <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>
           <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
           <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
             if (!confirm(t('Delete {n} record(s)?', { n: 1 }))) return;
@@ -227,6 +228,7 @@ export function FormView({ leaf, id, base, params }) {
   const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
+  const revRef = useRef(0);
 
   const view = params.get('view') ?? '';
   const relRaw = params.get('rel');
@@ -257,13 +259,17 @@ export function FormView({ leaf, id, base, params }) {
    */
   const save = (extra = {}) => {
     try {
+      const curRev = ++revRef.current;
       if (isNew) {
         const values = { ...changes, ...extra };
         const res = create(getDb(), model, { ...current, ...extra });
+        const expectedHash = `${base}/${res.id}${query}`;
         commit(res.db, { quiet: true }).then((r) => {
-          if (r.ok) return;
-          refusedNew = { base, values, error: r.error };
-          location.hash = `${base}/new${query}`;
+          if (r.ok || curRev !== revRef.current) return;
+          if (location.hash === expectedHash) {
+            refusedNew = { base, values, error: r.error };
+            location.hash = `${base}/new${query}`;
+          }
         });
         setChanges({});
         location.hash = `${base}/${res.id}${query}`;
@@ -272,7 +278,7 @@ export function FormView({ leaf, id, base, params }) {
       const vals = { ...changes, ...extra };
       if (Object.keys(vals).length) {
         commit(write(getDb(), model, rec.id, vals), { quiet: true }).then((r) => {
-          if (r.ok) return;
+          if (r.ok || curRev !== revRef.current) return;
           setChanges((c) => ({ ...vals, ...c }));
           setError(r.error);
         });
@@ -411,7 +417,7 @@ export function FormView({ leaf, id, base, params }) {
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>
-              <button type="button" className="btn sm" onClick={() => { setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
+              <button type="button" className="btn sm" onClick={() => { revRef.current++; setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
             </span>
           )}
         </div>
@@ -435,19 +441,36 @@ export function FormView({ leaf, id, base, params }) {
                   <button key={b.label} type="button" className={`btn ${b.primary ? 'primary' : ''}`} onClick={() => runButton(b)}>{t(b.label)}</button>
                 ))}
               </div>
-              {statusField && (
-                <ol className="statusbar" aria-label={t(statusField.label)}>
-                  {statusField.options
-                    .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
-                    .map(([k, label]) => (
-                      <li key={k}>
-                        <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
-                          disabled={!def.form.statusbarClickable}
-                          onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
-                      </li>
-                    ))}
-                </ol>
-              )}
+              {statusField && (() => {
+                const rawOptions = statusField.type === 'selection'
+                  ? (statusField.options ?? [])
+                  : (statusField.type === 'many2one' && statusField.relation
+                    ? (() => {
+                        let relRecs = [...(db.records[statusField.relation] ?? [])];
+                        if (model === 'crm.lead' && current.team_id) {
+                          relRecs = relRecs.filter((s) => !s.team_ids?.length || s.team_ids.includes(current.team_id));
+                        } else if (model === 'project.task' && current.project_id) {
+                          relRecs = relRecs.filter((s) => !s.project_ids?.length || s.project_ids.includes(current.project_id));
+                        }
+                        return relRecs
+                          .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+                          .map((s) => [s.id, s.name]);
+                      })()
+                    : []);
+                return (
+                  <ol className="statusbar" aria-label={t(statusField.label)}>
+                    {rawOptions
+                      .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
+                      .map(([k, label]) => (
+                        <li key={k}>
+                          <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
+                            disabled={!def.form.statusbarClickable}
+                            onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
+                        </li>
+                      ))}
+                  </ol>
+                );
+              })()}
             </div>
           )}
 

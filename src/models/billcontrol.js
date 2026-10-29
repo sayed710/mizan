@@ -5,6 +5,7 @@ import { accountId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
+import { productProperty } from './productconfig-helpers.js';
 import { round } from '../money.js';
 
 const number = (n) => Number(n) || 0;
@@ -27,9 +28,9 @@ export function billableLines(db, poId) {
   return (po.order_line ?? []).map((l) => quantities(l, method(read(db, 'product', l.product_id))));
 }
 
-const status = (r) => {
+const status = (r, db) => {
   if (r.state !== 'purchase' || !r.order_line?.length) return 'no';
-  const lines = r.order_line.map((l) => quantities(l, l.purchase_method ?? 'receive'));
+  const lines = r.order_line.map((l) => quantities(l, db ? method(read(db, 'product', l.product_id)) : l.purchase_method ?? 'receive'));
   if (lines.some((l) => l.toBill > 0)) return 'to_invoice';
   return lines.every((l) => l.billed >= l.ordered) ? 'invoiced' : 'no';
 };
@@ -106,7 +107,7 @@ export function priceDifferenceLines(db, bill) {
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
-    if (p?.type !== 'goods' || p.valuation === 'manual_periodic' || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
+    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation')) || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
     let skip = totalQty(prior, p.id) + (used.get(p.id) ?? 0), left = number(l.qty), value = 0;
     const layers = search(db, 'stock.valuation.layer').filter((v) => {
       const picking = read(db, 'stock.picking', v.picking_id);
@@ -153,7 +154,7 @@ export const billControlModels = {
       },
       onchange: (r, key, db) => ({ ...purchase.onchange?.(r, key, db), ...(['order_line', 'state'].includes(key) ? { order_line: policyLines(db, r) } : {}) }),
       form: { ...purchase.form, buttons: purchase.form.buttons.map((b) => b.label === 'Create Bill'
-        ? { ...b, when: (r) => status(r) === 'to_invoice', run: createBill }
+        ? { ...b, when: (r, db) => (r.invoice_status ?? status(r, db)) === 'to_invoice', run: createBill }
         : b.label === 'Confirm Order' ? { ...b, run: (db, r) => b.run(write(db, 'purchase.order', r.id, { order_line: policyLines(db, r) }), r) } : b) },
     };
   },

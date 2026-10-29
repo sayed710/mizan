@@ -7,7 +7,7 @@ import { moveQuantStock } from './quant.js';
 import { checkCreditLimit } from './finance.js';
 import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
-import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
+import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes, restoreOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
@@ -128,21 +128,28 @@ export function overDeliveryError(db, picking) {
  * cancelled with it. Delivered or received goods must be returned, and posted invoices or bills credited, first.
  */
 export function cancelOrder(db, model, order) {
+  if (order.state === 'cancel') return db;
   const field = model === 'sale.order' ? 'sale_id' : 'purchase_id';
-  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0)) {
+  // Service delivery is historical work, not physical stock to return; posted service invoices still need credits.
+  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0 && read(db, 'product', l.product_id)?.type !== 'service')) {
     throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
   }
-  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
-  // Credit notes point at their invoice by name (invoice_origin), not at the order.
-  const invoices = moves.filter((m) => m.state === 'posted');
-  const names = new Set(invoices.map((m) => m.name));
-  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_refund', 'in_refund'].includes(m.move_type) && (m[field] === order.id || names.has(m.invoice_origin)));
-  const totalOf = (list) => list.reduce((sum, m) => sum + amounts(m.invoice_line_ids ?? []).total, 0);
-  const posted = totalOf(invoices.filter((m) => !['out_refund', 'in_refund'].includes(m.move_type))) - totalOf(refunds);
-  if (Math.abs(posted) > 0.005) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
+  const type = model === 'sale.order' ? 'out_invoice' : 'in_invoice';
+  const moves = search(db, 'account.move').filter((m) => m.move_type === type && m.partner_id === order.partner_id
+    && (m.company_id ?? 1) === (order.company_id ?? 1) && m.state !== 'cancel'
+    && (m[field] === order.id || (!m[field] && (m.origin || m.invoice_origin) === order.name)));
+  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === (type === 'out_invoice' ? 'out_refund' : 'in_refund'));
+  const totalOf = (m) => amounts(m.invoice_line_ids ?? []).total;
+  const uncredited = moves.filter((m) => m.state === 'posted').some((m) => {
+    const credits = refunds.filter((n) => (n.reversed_entry_id ? n.reversed_entry_id === m.id : n.invoice_origin === m.name)
+      && n.partner_id === m.partner_id && (n.company_id ?? 1) === (m.company_id ?? 1) && (n.currency_id ?? null) === (m.currency_id ?? null));
+    return totalOf(m) - credits.reduce((sum, n) => sum + totalOf(n), 0) > 0.005;
+  });
+  if (uncredited) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
   const open = search(db, 'stock.picking').filter((p) => p[field] === order.id && ['draft', 'waiting', 'ready'].includes(p.state));
   let next = open.reduce((acc, p) => write(acc, 'stock.picking', p.id, { state: 'cancel' }), db);
   next = moves.filter((m) => m.state === 'draft').reduce((acc, m) => write(acc, 'account.move', m.id, { state: 'cancel' }), next);
+  if (model === 'sale.order' && ['sale', 'done'].includes(order.state)) next = restoreOrderCodes(next, order);
   return write(next, model, order.id, { state: 'cancel' });
 }
 
@@ -196,13 +203,38 @@ export const parseAttributes = (text = '') => String(text).split(';')
 
 /** Create one product per combination of attribute values (skips combinations that already exist). */
 export function generateVariants(db, template) {
+  const lines = template.attribute_line_ids ?? [];
+  if (lines.length) {
+    const groups = [...lines].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map((line) => {
+      const values = (line.value_ids ?? []).map((id) => read(db, 'product.attribute.value', id));
+      if (!line.attribute_id || !values.length || values.some((v) => !v || v.attribute_id !== line.attribute_id)) throw new Error('Select values belonging to each attribute');
+      return values;
+    });
+    const combos = groups.reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
+    const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => [...(p.variant_value_ids ?? [])].sort((a, b) => a - b).join('|')));
+    return combos.reduce((acc, values) => {
+      const ids = values.map((v) => v.id).sort((a, b) => a - b);
+      if (existing.has(ids.join('|'))) return acc;
+      return create(acc, 'product', {
+        name: `${template.name} (${values.map((v) => v.name).join(', ')})`,
+        default_code: `${template.default_code || `VAR-${template.id}`}-${ids.join('-')}`,
+        type: template.type, categ: template.categ, categ_id: template.categ_id, uom: template.uom, uom_id: template.uom_id, uom_po_id: template.uom_po_id,
+        list_price: Math.round(((Number(template.list_price) || 0) + values.reduce((s, v) => s + (Number(v.default_extra_price) || 0), 0)) * 100) / 100,
+        cost: template.cost, cost_method: template.cost_method, valuation: template.valuation,
+        property_account_income_id: template.property_account_income_id, property_account_expense_id: template.property_account_expense_id,
+        property_stock_valuation_account_id: template.property_stock_valuation_account_id, property_stock_journal: template.property_stock_journal,
+        sale_ok: template.sale_ok, purchase_ok: template.purchase_ok, available_in_pos: template.available_in_pos, tag_ids: [...(template.tag_ids ?? [])],
+        qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values.map((v) => v.name), variant_value_ids: ids,
+      }).db;
+    }, db);
+  }
   const combos = parseAttributes(template.attributes).reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
   const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => (p.variant_values ?? []).join('|')));
   return combos.filter((c) => !existing.has(c.join('|'))).reduce((acc, values, i) => create(acc, 'product', {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
     type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
-    qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values,
+    qty_available: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
 
@@ -344,6 +376,7 @@ export const salesModels = {
       description: { type: 'text', label: 'Internal Notes' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
+      pos_categ_ids: { type: 'many2many', relation: 'pos.category', label: 'Point of Sale Categories' },
       weight: { type: 'float', label: 'Weight (kg)' },
       route: { type: 'selection', label: 'Route', options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] },
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
@@ -359,6 +392,7 @@ export const salesModels = {
       qty_available: { type: 'float', label: 'On Hand', readonly: true },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       reorder_max: { type: 'float', label: 'Max. Quantity' },
+      below_min: { type: 'boolean', label: 'Below Minimum', compute: (r, db) => (db.records['stock.warehouse.orderpoint'] ?? []).some((op) => op.product_id === r.id && op.active !== false && (op.qty_forecast < op.product_min_qty || Number(r.qty_available) < Number(op.product_min_qty))) },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
     guard: (db, before, r) => {
@@ -368,10 +402,10 @@ export const salesModels = {
       return !stock || !purchase ? 'Select existing stock and purchase units of measure'
         : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14, pos_categ_ids: [] }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
-      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && r.qty_available < r.reorder_min }],
+      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && Boolean(r.below_min) }],
       [{ id: 'sale_ok', label: 'Can be Sold', fn: (r) => r.sale_ok !== false }, { id: 'purchase_ok', label: 'Can be Purchased', fn: (r) => r.purchase_ok !== false }, { id: 'pos', label: 'Available in POS', fn: (r) => r.available_in_pos }],
     ],
     groupBys: ['type', 'categ'],
@@ -399,11 +433,12 @@ export const salesModels = {
           ask: [{ label: 'New unit cost', type: 'number', default: (r) => String(r.cost ?? 0) }],
           run: (db, r, [cost]) => ({ db: revalue(db, r.id, cost) }),
         },
-        { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
+        { label: 'Generate Variants', when: (r) => !r.variant_of && (r.attribute_line_ids?.length || parseAttributes(r.attributes).length), run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
-        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
+        { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },

@@ -10,6 +10,17 @@ const at = (time, date = '2026-05-10') => `${date}T${time}:00Z`;
 const setup = (values = {}) => create(seed(), 'frontdesk.station', { name: 'Reception', drink_offer: true, drink_ids: [{ name: 'Tea' }, { name: 'Water' }], ...values });
 const plan = (db, stationId, generate = () => 'BADGE1') => planVisit(db, { name: 'Guest', hostId: 2, date: '2026-05-10', time: '23:00', stationId, email: 'guest@example.com', company: 'Guest Co' }, generate);
 
+test('station bulk checkout leaves visitors at other stations on site', () => {
+  const first = setup();
+  const second = create(first.db, 'frontdesk.station', { name: 'Other reception' });
+  const a = create(second.db, MODEL, { name: 'Here', station_id: first.id, stage_id: 'checked_in', date: '2026-01-01', check_in: '09:00' });
+  const b = create(a.db, MODEL, { name: 'Elsewhere', station_id: second.id, stage_id: 'checked_in', date: '2026-01-01', check_in: '09:00' });
+  const button = frontdeskPlusModels['frontdesk.station'].form.buttons.find((x) => x.label === 'Check Out All Visitors');
+  const next = button.run(b.db, read(b.db, 'frontdesk.station', first.id)).db;
+  assert.equal(read(next, MODEL, a.id).stage_id, 'checked_out');
+  assert.equal(read(next, MODEL, b.id).stage_id, 'checked_in');
+});
+
 test('planning preserves input and retries badge collisions, including archived badges', () => {
   const station = setup();
   const snapshot = structuredClone(station.db);

@@ -86,13 +86,16 @@ import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
 import { taxReturnModels } from './taxreturn.js';
 import { partnerBankModels } from './partnerbank.js';
+import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
 import { appAnalyses } from './analysis.js';
+import { orderpointModels } from './orderpoint.js';
+import { productConfigModels } from './productconfig.js';
 
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, taxReturnModels, partnerBankModels };
+export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -150,7 +153,9 @@ const allApps = [
         { key: 'forecast', label: 'Forecast', model: 'crm.lead', view: 'pivot' },
       ] },
       { label: 'Configuration', children: [
+        { key: 'stages', label: 'Stages', model: 'crm.stage' },
         { key: 'teams', label: 'Sales Teams', model: 'crm.team' },
+        { key: 'lost-reasons', label: 'Lost Reasons', model: 'crm.lost.reason' },
       ] },
     ],
   },
@@ -165,6 +170,7 @@ const allApps = [
       { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }, { key: 'quote-templates', label: 'Quotation Templates', model: 'sale.order.template' }, { key: 'loyalty', label: 'Discount & Loyalty', model: 'loyalty.program' }, { key: 'cards', label: 'Coupons & Cards', model: 'loyalty.card' }] },
       { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }] },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },
@@ -231,6 +237,7 @@ const allApps = [
         { key: 'budgets', label: 'Budgets', model: 'account.budget' },
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
         { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
+        { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
         { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
         { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
         { key: 'analytic-distribution-models', label: 'Analytic Distribution Models', model: 'account.analytic.distribution.model' },
@@ -255,6 +262,7 @@ const allApps = [
     menus: [
       { label: 'Operations', children: [
         { key: 'transfers', label: 'Transfers', model: 'stock.picking' },
+        { key: 'replenishment', label: 'Replenishment', model: 'stock.warehouse.orderpoint' },
         { key: 'scrap', label: 'Scrap', model: 'stock.scrap' },
         { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
         { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },
@@ -269,7 +277,7 @@ const allApps = [
       { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
       { key: 'valuation', label: 'Inventory Valuation', model: 'stock.valuation.layer' },
-      { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'warehouses', label: 'Warehouses', model: 'stock.warehouse' }, { key: 'locations', label: 'Locations', model: 'stock.location' }, { key: 'uom-categories', label: 'UoM Categories', model: 'uom.category' }, { key: 'uoms', label: 'Units of Measure', model: 'uom.uom' }, { key: 'packagings', label: 'Packagings', model: 'product.packaging' }] },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }, { key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'warehouses', label: 'Warehouses', model: 'stock.warehouse' }, { key: 'locations', label: 'Locations', model: 'stock.location' }, { key: 'uom-categories', label: 'UoM Categories', model: 'uom.category' }, { key: 'uoms', label: 'Units of Measure', model: 'uom.uom' }, { key: 'packagings', label: 'Packagings', model: 'product.packaging' }] },
       { label: 'Reporting', children: [
         { key: 'report', label: 'Stock', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
         { key: 'valuation', label: 'Valuation', type: 'report', report: 'valuation' },
@@ -287,6 +295,10 @@ const allApps = [
       { key: 'updates', label: 'Project Updates', model: 'project.update' },
       { key: 'recurring', label: 'Recurring Tasks', model: 'project.recurrence' },
       { key: 'report', label: 'Reporting', model: 'project.task', view: 'pivot' },
+      { label: 'Configuration', children: [
+        { key: 'stages', label: 'Task Stages', model: 'project.task.type' },
+        { key: 'tags', label: 'Tags', model: 'project.tags' },
+      ] },
     ],
   },
   {
@@ -302,6 +314,10 @@ const allApps = [
     menus: [
       { key: 'employees', label: 'Employees', model: 'hr.employee' },
       { key: 'departments', label: 'Departments', model: 'hr.department' },
+      { label: 'Configuration', children: [
+        { key: 'calendars', label: 'Working Schedules', model: 'resource.calendar' },
+        { key: 'public-holidays', label: 'Public Holidays', model: 'resource.calendar.leaves' },
+      ] },
     ],
   },
   {
@@ -324,7 +340,14 @@ const allApps = [
       { key: 'orders', label: 'Orders', model: 'pos.order' },
       { key: 'sessions', label: 'Sessions', model: 'pos.session' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
-      { label: 'Configuration', children: [{ key: 'pos-config', label: 'Point of Sale', model: 'pos.config' }, { key: 'floors', label: 'Floors', model: 'restaurant.floor' }] },
+      { label: 'Configuration', children: [
+        { key: 'pos-config', label: 'Point of Sale', model: 'pos.config' },
+        { key: 'payment-methods', label: 'Payment Methods', model: 'pos.payment.method' },
+        { key: 'pos-categories', label: 'PoS Product Categories', model: 'pos.category' },
+        { key: 'presets', label: 'Presets', model: 'pos.preset' },
+        { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
+        { key: 'floors', label: 'Floors', model: 'restaurant.floor' },
+      ] },
     ],
   },
   {
@@ -343,8 +366,11 @@ const allApps = [
       { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
       { key: 'allocations', label: 'Allocations', model: 'hr.leave.allocation' },
-      { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
       { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
+      { label: 'Configuration', children: [
+        { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
+        { key: 'public-holidays', label: 'Public Holidays', model: 'resource.calendar.leaves' },
+      ] },
     ],
   },
   {
@@ -687,3 +713,4 @@ export function targetOf(model, uninstalled = []) {
   return '#/';
 }
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];

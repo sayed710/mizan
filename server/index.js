@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { closeSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +48,12 @@ const ACTIONS = {
   '/api/integrations/shipping-rate': { need: 'shipping_api', model: () => 'sale.order', run: (b, _u, _store, view) => quoteShipping(ENV, view, b) },
   '/api/integrations/marketplace-sync': { need: 'marketplace', admin: true, model: () => 'marketplace.connector', run: (b, _u, _store, view) => syncMarketplace(view, b) },
   '/api/iot/token': { admin: true, model: () => 'iot.device', run: (b, _u, _store, view) => issueIotToken(view, b) },
-  '/api/barcode/count': { model: () => 'product', extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => ({ db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company: b.company }) }) },
+  '/api/barcode/count': { model: () => 'product', apps: ['barcode', 'inventory'], extra: ['stock.inventory.count', 'stock.valuation.layer', 'account.move'], run: (b, _u, _store, view) => {
+    if (typeof b.observed !== 'number' || !Number.isFinite(b.observed)) throw new Error('A finite observed quantity is required');
+    const company = b.company ?? view.settings.current_company_id ?? 1;
+    if (!Number.isSafeInteger(company) || !(view.records['res.company'] ?? []).some((c) => c.id === company && c.active !== false)) throw new Error('Select an existing active company');
+    return { db: countProduct(view, { productId: Number(b.productId), counted: Number(b.counted), observed: b.observed, company }) };
+  } },
   // E-signature: email each signer their private link (server/signing.js serves the link).
   // Signer links carry private tokens, so they are only built on the configured public address, never from the request's Host header.
   '/api/sign/send': { need: 'smtp', model: () => 'sign.request', run: (b, u, store) => sendSignRequest(SMTP, store, b, publicOrigin()) },
@@ -144,10 +149,22 @@ const ownLease = () => {
   }
 };
 /** A direct SQLite write (sessions, users, API keys) only runs while this server still holds the lease. */
-const writeSql = (text, ...args) => { ownLease(); return sql.prepare(text).run(...args); };
+const writeSql = (text, ...args) => {
+  const outer = sql.isTransaction;
+  if (!outer) sql.exec('BEGIN IMMEDIATE');
+  try {
+    ownLease();
+    const result = sql.prepare(text).run(...args);
+    if (!outer) sql.exec('COMMIT');
+    return result;
+  } catch (e) {
+    if (!outer) sql.exec('ROLLBACK');
+    throw e;
+  }
+};
+const storage = openStorage(sql, { beforeWrite: ownLease });
 ownLease();
 if (!sql.prepare('PRAGMA table_info(idempotency)').all().some((c) => c.name === 'response')) sql.exec('ALTER TABLE idempotency ADD COLUMN response TEXT');
-const storage = openStorage(sql, { beforeWrite: ownLease });
 const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
 {
@@ -167,7 +184,13 @@ const commitDb = (raw, { full = false, actor = 'system', action = 'replace', aud
   const at = new Date().toISOString();
   const entries = !audit ? [] : full ? [{ model: '*', res_id: 0, action, changes: {} }] : auditEntries(db, next);
   // The log rows and the data are written in one transaction: a failed save leaves neither behind.
-  storage.save(full ? null : db, next, () => { alongside(); for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes)); });
+  const nextEpoch = full ? Math.max(epoch + 1, Date.now()) : epoch;
+  storage.save(full ? null : db, next, () => {
+    alongside();
+    if (full) writeSql("INSERT INTO kv (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextEpoch));
+    for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes));
+  });
+  epoch = nextEpoch;
   db = next;
   revision++;
 };
@@ -177,7 +200,7 @@ const withAudit = (actor, model, resId, action, changes, step) => {
   try {
     ownLease();
     const out = step();
-    logChange.run(new Date().toISOString(), actor, model, resId ?? 0, action, JSON.stringify(changes));
+    if (out?.changes !== 0) logChange.run(new Date().toISOString(), actor, model, typeof resId === 'function' ? resId(out) : resId ?? 0, action, JSON.stringify(changes));
     sql.exec('COMMIT');
     return out;
   } catch (e) {
@@ -186,7 +209,8 @@ const withAudit = (actor, model, resId, action, changes, step) => {
   }
 };
 /** Changes whenever the whole database is replaced (restore, reset): work started before cannot be applied after. */
-let epoch = Date.now();
+writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('epoch', ?)", String(Date.now()));
+let epoch = Number(sql.prepare("SELECT value FROM kv WHERE key = 'epoch'").get().value);
 const RESTORED = 'The data was restored while this was running; nothing was saved, reload and try again';
 const sameEpoch = (at) => { if (at !== epoch) throw new Error(RESTORED); };
 const visitors = createVisitTracker();
@@ -233,20 +257,31 @@ function createUser({ login, name, password, isAdmin = false, apps = '', compani
   if (granted && (!granted.length || granted.some((id) => !(db.records['res.company'] ?? []).some((c) => c.id === id)))) throw new Error('Allowed companies: select existing companies');
   const apps_ = allowed?.length ? allowed.join(',') : null;
   const row = { login, name: String(name || login).slice(0, 100), is_admin: isAdmin ? 1 : 0, apps: apps_, companies: granted?.join(',') ?? null };
-  const made = withAudit(actor, 'auth.user', 0, 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
+  const made = withAudit(actor, 'auth.user', (out) => Number(out.lastInsertRowid), 'create', Object.fromEntries(Object.entries(row).map(([k, v]) => [k, [null, v]])),
     () => writeSql('INSERT INTO users (login, name, salt, hash, is_admin, apps, companies) VALUES (?, ?, ?, ?, ?, ?, ?)', login, row.name, salt, hash, row.is_admin, apps_, row.companies));
   return made;
 }
 
 if (!sql.prepare('SELECT COUNT(*) AS n FROM users').get().n) {
   const password = process.env.MIZAN_ADMIN_PASSWORD || randomBytes(9).toString('base64url');
-  createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
-  if (process.env.MIZAN_ADMIN_PASSWORD) console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
+  if (process.env.MIZAN_ADMIN_PASSWORD) {
+    createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
+    console.info('Created user "admin" with the password from MIZAN_ADMIN_PASSWORD.');
+  }
   else {
     // Logs are often shipped elsewhere; keep the generated secret in an owner-only file instead.
     const file = `${DB_PATH}.admin-password`;
-    writeFileSync(file, `${password}
-`, { mode: 0o600 });
+    // Never follow or overwrite an existing sidecar, and make the secret retrievable before committing the user.
+    const fd = openSync(file, 'wx', 0o600);
+    try {
+      writeFileSync(fd, `${password}\n`);
+      createUser({ login: 'admin', name: 'Admin', password, isAdmin: true });
+    } catch (e) {
+      closeSync(fd);
+      unlinkSync(file);
+      throw e;
+    }
+    closeSync(fd);
     console.info(`Created user "admin". Its generated password is in ${file}; delete that file after signing in.`);
   }
 }
@@ -360,7 +395,12 @@ const ACCOUNT_FAILURES_PER_WINDOW = 50;
 const hits = (k) => sql.prepare('SELECT COUNT(*) AS n FROM rate_events WHERE key = ? AND at > ?').get(k, Date.now() - WINDOW).n;
 const tooMany = (k) => hits(k) >= 10;
 const recordFailure = (k) => writeSql('INSERT INTO rate_events (key, at) VALUES (?, ?)', k, Date.now());
-setInterval(() => writeSql('DELETE FROM rate_events WHERE at <= ?', Date.now() - WINDOW), WINDOW).unref();
+const pruneRateEvents = () => {
+  try { writeSql('DELETE FROM rate_events WHERE at <= ?', Date.now() - WINDOW); }
+  catch (e) { log('warn', 'Rate-event cleanup failed; will retry', { error: e.message }); }
+};
+pruneRateEvents();
+setInterval(pruneRateEvents, WINDOW).unref();
 // Behind a reverse proxy set MIZAN_TRUST_PROXY=1 so limits apply per client, not per proxy.
 const clientIp = (req) => (process.env.MIZAN_TRUST_PROXY === '1' && String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim()) || req.socket.remoteAddress || '?';
 
@@ -452,8 +492,9 @@ const baseUrlOf = (req) => configuredBase() || `${SECURE ? 'https' : 'http'}://$
 const websiteOrigin = () => {
   try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
 };
-let lastBaseUrl = configuredBase() || `http://localhost:${PORT}`;
-let mailBaseKnown = false;
+const savedMailBase = sql.prepare("SELECT value FROM kv WHERE key = 'mail_base_url'").get()?.value;
+let lastBaseUrl = configuredBase() || savedMailBase || `http://localhost:${PORT}`;
+let mailBaseKnown = !!(configuredBase() || savedMailBase);
 
 async function api(req, res, path) {
   const ip = clientIp(req);
@@ -493,9 +534,15 @@ async function api(req, res, path) {
     return send(res, out.status, out.body);
   }
   if (path === '/api/public/site' && req.method === 'GET') return send(res, 200, siteOf(req));
-  // Website images by their random id (the id is only shown where the image is shown).
+  // Only declared images exposed by the visitor's current public payload may be downloaded.
   const imagePath = /^\/api\/public\/image\/([0-9a-f]{32})$/.exec(path);
-  if (imagePath && req.method === 'GET') return sendBlob(res, blobs.get(imagePath[1]), true);
+  if (imagePath && req.method === 'GET') {
+    const site = siteOf(req);
+    const images = [...site.products.map((p) => p.image), ...site.categories.map((c) => c.image),
+      ...site.appointments.flatMap((a) => [a.image, ...a.staff.map((e) => e.avatar)]), ...(site.posts ?? []).map((p) => p.cover)];
+    if (!images.includes(`/api/public/image/${imagePath[1]}`)) return send(res, 404, { error: 'Not found' });
+    return sendBlob(res, blobs.get(imagePath[1]), true);
+  }
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
   const blogRead = /^\/api\/public\/(blog|forum)\/(\d+)$/.exec(path);
   if (blogRead && req.method === 'GET') {
@@ -642,7 +689,7 @@ async function api(req, res, path) {
   }
   if (path === '/api/login' && req.method === 'POST') {
     const { login, password } = await readJson(req);
-    const account = String(login ?? '').toLowerCase().slice(0, 64);
+    const account = sha256(String(login ?? '')); // Match the case-sensitive, full login without storing unbounded input.
     const limitKey = `login:${ip}:${account}`;
     // A per-account ceiling also slows attacks spread over many IPs; it is higher so one attacker cannot lock the user out quickly.
     const accountKey = `login-account:${account}`;
@@ -662,6 +709,7 @@ async function api(req, res, path) {
   if (action && req.method === 'POST') {
     if (action.need && !{ ...integrationStatus(), smtp: !!SMTP }[action.need]) return send(res, 400, { error: `The ${action.need} integration is not configured` });
     if (action.admin && !user.isAdmin) return send(res, 403, { error: 'Admins only' });
+    if (action.apps && !user.isAdmin && user.apps && !action.apps.some((app) => user.apps.includes(app))) return send(res, 403, { error: 'Inventory or Barcode access is required' });
     const body = await readJson(req);
     const model = action.model(body);
     const allowed = allowedFor(user);
@@ -688,6 +736,11 @@ async function api(req, res, path) {
     try {
       lastBaseUrl = baseUrlOf(req);
       mailBaseKnown = true;
+      try {
+        writeSql("INSERT INTO kv (key, value) VALUES ('mail_base_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", lastBaseUrl);
+      } catch (e) {
+        log('warn', 'failed to persist mail_base_url', { error: e.message });
+      }
       const snapshot = scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
@@ -741,9 +794,11 @@ async function api(req, res, path) {
     // Newest first; pass the last id received as `before` for the next, older page.
     const before = q.has('before') ? Number(q.get('before')) : null;
     if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
+    const id = q.has('id') ? Number(q.get('id')) : null;
+    if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes FROM audit_log
       WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), q.has('id') ? Number(q.get('id')) : null, limit, before);
+      .all(q.get('model'), id, limit, before);
     return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
   }
   // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
@@ -751,7 +806,7 @@ async function api(req, res, path) {
     try {
       const body = await readJson(req);
       const snapshot = scopeFor(user);
-      const out = runPosting(snapshot, allowedFor(user), path, body);
+      const out = runPosting(snapshot, allowedFor(user), path, body.request_key == null ? body : { ...body, request_key: `${user.id}:${body.request_key}` });
       const diff = diffDb(snapshot, out.db);
       commitDb(applyDiff(db, diff, { ...writeOptions(user, null), taxClosingProofs: taxClosingProofs(out.db, diff) }), { actor: user.login });
       return send(res, 200, out.body);
@@ -764,7 +819,8 @@ async function api(req, res, path) {
     let remapped;
     // A browser that last synced before a restore would otherwise replay its queued edits onto the restored data.
     const seen = req.headers['x-mizan-epoch'];
-    if (seen !== undefined && seen !== String(epoch)) return send(res, 409, { error: 'The data was restored by an administrator; your unsaved edits were discarded', db: visibleDb(user) }, stamp());
+    const browser = req.headers['sec-fetch-site'] !== undefined || req.headers.origin !== undefined || /^Mozilla\//.test(req.headers['user-agent'] ?? '');
+    if ((browser || seen !== undefined) && seen !== String(epoch)) return send(res, 409, { error: 'The data was restored by an administrator; your unsaved edits were discarded', db: visibleDb(user) }, stamp());
     try {
       const assigned = assignIds(db, body);
       remapped = assigned.remapped;
@@ -793,7 +849,7 @@ async function api(req, res, path) {
     if (!body || typeof body !== 'object') return send(res, 400, { error: 'Send a JSON object' });
     try {
       const snapshot = scopeFor(user);
-      const out = runOperation(snapshot, op[1], body, { allowed: allowedFor(user), direct: menuModelsFor(user) });
+      const out = runOperation(snapshot, op[1], body.request_key == null ? body : { ...body, request_key: `${user.id}:${body.request_key}` }, { allowed: allowedFor(user), direct: menuModelsFor(user) });
       commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, out.allowed)), { actor: user.login });
       return send(res, 200, out.reply);
     } catch (e) {
@@ -814,7 +870,6 @@ async function api(req, res, path) {
       // A dry run only reports what would change; the real restore needs the typed confirmation.
       if (body.confirm !== 'RESTORE') return send(res, 200, { dryRun: true, ...summary });
       commitDb(restored, { full: true, actor: user.login, action: 'restore' });
-      epoch = Math.max(epoch + 1, Date.now());
       console.info(`Backup restored by ${user.login}: ${summary.restored} records (was ${summary.current})`);
       return send(res, 200, { ok: true, ...summary });
     } catch (e) {
@@ -824,7 +879,7 @@ async function api(req, res, path) {
   // The full business database as JSON (not the caller's filtered copy): an export for reading and re-importing records, not a restore point (see README).
   if (path === '/api/backup' && req.method === 'GET') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
-    return send(res, 200, db, { 'Content-Disposition': `attachment; filename="mizan-backup-${new Date().toISOString().slice(0, 10)}.json"` });
+    return send(res, 200, blobs.inline(db), { 'Content-Disposition': `attachment; filename="mizan-backup-${new Date().toISOString().slice(0, 10)}.json"` });
   }
   if (path === '/api/reset' && req.method === 'POST') {
     if (!user.isAdmin) return send(res, 403, { error: 'Admins only' });
@@ -836,7 +891,6 @@ async function api(req, res, path) {
     writeFileSync(saved, JSON.stringify(db), { flag: 'wx', mode: 0o600 });
     console.info(`Data reset to the demo database by ${user.login}; previous data saved to ${saved}`);
     commitDb(seed(), { full: true, actor: user.login, action: 'reset' });
-    epoch = Math.max(epoch + 1, Date.now());
     return send(res, 200, db, { 'X-Mizan-Epoch': String(epoch) });
   }
   if (path === '/api/keys') {
@@ -975,11 +1029,30 @@ const server = createServer(async (req, res) => {
     log('error', 'request failed', { requestId, method: req.method, path: redactPath(path), error: e });
     if (!res.headersSent) send(res, 500, { error: 'Server error', requestId });
   }
-}).listen(PORT, () => {
-  const url = `http://localhost:${server.address().port}`;
-  console.info(`Mizan listening on ${url}`);
-  if (process.send) process.send({ type: 'ready', port: server.address().port, url });
 });
+
+const WHATWG_BLOCKED_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
+  87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
+  139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531, 532, 540,
+  548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719, 1720, 1723, 2049,
+  3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
+
+const listen = () => {
+  server.listen(PORT, () => {
+    const port = server.address().port;
+    if (PORT === 0 && WHATWG_BLOCKED_PORTS.has(port)) {
+      server.close(() => listen());
+      return;
+    }
+    const url = `http://localhost:${port}`;
+    console.info(`Mizan listening on ${url}`);
+    if (process.send) process.send({ type: 'ready', port, url });
+    setImmediate(runJobs);
+  });
+};
+listen();
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;
@@ -992,7 +1065,6 @@ const runJobs = () => {
   }
 };
 // The first run waits until the server is listening, so a restart answers requests before the jobs finish.
-server.once('listening', () => setImmediate(runJobs));
 setInterval(runJobs, JOB_INTERVAL_MS).unref();
 scheduleSnapshots(DB_PATH);
 

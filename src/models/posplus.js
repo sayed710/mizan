@@ -11,7 +11,7 @@ const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
 const discountsOf = (lines) => round(lines.filter((l) => !l.payment_rounding && !l.is_tip).reduce((s, l) => s + (l.price_unit < 0 ? -amounts([l]).total : amounts([{ ...l, discount: 0 }]).total - amounts([l]).total), 0));
 const paymentsField = {
   type: 'one2many', label: 'Payments',
-  fields: { method: { type: 'selection', label: 'Method', options: methodOptions }, amount: { type: 'monetary', label: 'Amount' } },
+  fields: { method: { type: 'selection', label: 'Method', options: methodOptions }, payment_method_id: { type: 'many2one', relation: 'pos.payment.method', label: 'Payment Method' }, amount: { type: 'monetary', label: 'Amount' } },
   newLine: () => ({ method: 'cash', amount: 0 }),
 };
 
@@ -174,7 +174,7 @@ export function zReport(db, sessionId) {
     const sign = order.state === 'refund' ? -1 : 1;
     const totals = amounts(order.lines);
     if (sign < 0) report.refunds++;
-    for (const tender of tendersOf(order)) report.byMethod[tender.method === 'cash' ? 'cash' : 'bank'] += sign * tender.amount;
+    for (const tender of tendersOf(order, db)) report.byMethod[tender.method === 'cash' ? 'cash' : 'bank'] += sign * tender.amount;
     report.taxes += sign * totals.tax;
     const source = order.refund_of ? read(db, 'pos.order', order.refund_of) : order;
     report.tips += sign * (source?.settlement_of ? source.tip_amount : amounts(order.lines.filter((l) => l.is_tip)).total);
@@ -205,7 +205,75 @@ export const parseSplit = (text) => String(text).split(',').map((part) => part.t
   return { index: Number(line) - 1, qty: Number(qty) };
 });
 
+export const categoryCompleteName = (db, r) => {
+  if (!r?.parent_id || !db) return r?.name ?? '';
+  const parent = read(db, 'pos.category', r.parent_id);
+  return parent ? `${categoryCompleteName(db, parent)} / ${r.name}` : (r.name ?? '');
+};
+
 export const posPlusModels = {
+  'pos.payment.method': {
+    label: 'Payment Methods',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
+      type: { type: 'selection', label: 'Type', required: true, options: [['cash', 'Cash'], ['bank', 'Bank'], ['pay_later', 'Pay Later']] },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      receivable_account_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
+      outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account' },
+      config_ids: { type: 'many2many', relation: 'pos.config', label: 'Points of Sale' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      active: { type: 'boolean', label: 'Active' },
+    },
+    defaults: () => ({ sequence: 10, type: 'cash', config_ids: [], active: true, company_id: 1 }),
+    list: ['name', 'type', 'journal_id', 'company_id', 'active'],
+    form: { title: 'name', groups: [['type', 'sequence', 'company_id'], ['journal_id', 'receivable_account_id', 'outstanding_account_id', 'active', 'config_ids']] },
+  },
+  'pos.category': {
+    label: 'PoS Product Categories',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      parent_id: { type: 'many2one', relation: 'pos.category', label: 'Parent Category' },
+      complete_name: { type: 'char', label: 'Complete Name', compute: (r, db) => categoryCompleteName(db, r) },
+      sequence: { type: 'integer', label: 'Sequence' },
+      color: { type: 'integer', label: 'Color' },
+      pos_config_ids: { type: 'many2many', relation: 'pos.config', label: 'Points of Sale' },
+      active: { type: 'boolean', label: 'Active' },
+    },
+    defaults: () => ({ sequence: 10, color: 0, pos_config_ids: [], active: true }),
+    list: ['complete_name', 'sequence', 'active'],
+    form: { title: 'name', groups: [['parent_id', 'sequence', 'color'], ['pos_config_ids', 'active']] },
+  },
+  'pos.preset': {
+    label: 'Presets',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
+      fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      identification: { type: 'selection', label: 'Identification', required: true, options: [['none', 'None'], ['address', 'Address'], ['name', 'Name']] },
+      service_at: { type: 'selection', label: 'Service at', required: true, options: [['counter', 'Counter'], ['table', 'Table'], ['delivery', 'Delivery']] },
+      color: { type: 'integer', label: 'Color' },
+      is_return: { type: 'boolean', label: 'Is Return' },
+    },
+    defaults: () => ({ identification: 'none', service_at: 'counter', is_return: false, color: 0 }),
+    list: ['name', 'identification', 'service_at', 'pricelist_id', 'fiscal_position_id', 'is_return'],
+    form: { title: 'name', groups: [['identification', 'service_at', 'color'], ['pricelist_id', 'fiscal_position_id', 'is_return']] },
+  },
+  'account.cash.rounding': {
+    label: 'Cash Roundings',
+    fields: {
+      name: { type: 'char', label: 'Name' },
+      rounding: { type: 'float', label: 'Rounding Precision', required: true },
+      rounding_method: { type: 'selection', label: 'Rounding Method', required: true, options: [['UP', 'UP'], ['DOWN', 'DOWN'], ['HALF-UP', 'HALF-UP']] },
+      strategy: { type: 'selection', label: 'Rounding Strategy', required: true, options: [['biggest_tax', 'Modify tax amount'], ['add_invoice_line', 'Add a rounding line']] },
+      profit_account_id: { type: 'many2one', relation: 'account.account', label: 'Profit Account' },
+      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+    },
+    defaults: () => ({ name: 'Rounding', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line', company_id: 1 }),
+    list: ['name', 'rounding', 'rounding_method', 'strategy', 'company_id'],
+    form: { title: 'name', groups: [['name', 'rounding', 'rounding_method', 'strategy', 'company_id'], ['profit_account_id', 'loss_account_id']] },
+  },
   'pos.config': {
     label: 'Point of Sale',
     fields: {
@@ -215,10 +283,23 @@ export const posPlusModels = {
       tip_product_id: { type: 'many2one', relation: 'product', label: 'Tip Product' },
       payment_method_ids: { ...paymentsField, label: 'Payment Methods', fields: { name: { type: 'char', label: 'Name' }, journal: { type: 'selection', label: 'Journal', options: methodOptions } }, newLine: () => ({ name: 'Cash', journal: 'cash' }) },
       loyalty_enabled: { type: 'boolean', label: 'Loyalty' },
+      available_preset_ids: { type: 'many2many', relation: 'pos.preset', label: 'Presets' },
+      default_preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Default Preset' },
+      cash_rounding: { type: 'boolean', label: 'Cash Rounding' },
+      rounding_method_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method' },
+      only_round_cash_method: { type: 'boolean', label: 'Only Round Cash' },
     },
-    defaults: () => ({ module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, payment_method_ids: [] }),
-    list: ['name', 'module_restaurant', 'loyalty_enabled'],
-    form: { title: 'name', groups: [['module_restaurant']], tabs: [{ label: 'Payments', fields: ['payment_method_ids', 'iface_tipproduct', 'tip_product_id'] }, { label: 'Loyalty', fields: ['loyalty_enabled'] }] },
+    defaults: () => ({ module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, payment_method_ids: [], available_preset_ids: [], cash_rounding: false, only_round_cash_method: false }),
+    list: ['name', 'module_restaurant', 'loyalty_enabled', 'cash_rounding'],
+    form: {
+      title: 'name',
+      groups: [['module_restaurant', 'cash_rounding', 'rounding_method_id', 'only_round_cash_method']],
+      tabs: [
+        { label: 'Payments', fields: ['payment_method_ids', 'iface_tipproduct', 'tip_product_id'] },
+        { label: 'Order Types', fields: ['available_preset_ids', 'default_preset_id'] },
+        { label: 'Loyalty', fields: ['loyalty_enabled'] },
+      ],
+    },
   },
   'restaurant.floor': {
     label: 'Floors',
@@ -243,6 +324,8 @@ export const posPlusModels = {
     ...baseOrder,
     fields: {
       ...baseOrder.fields,
+      payment_method_id: { type: 'many2one', relation: 'pos.payment.method', label: 'Payment Method' },
+      preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Preset' },
       lines: { ...baseOrder.fields.lines, fields: { ...baseOrder.fields.lines.fields, name: { type: 'char', label: 'Description' }, is_tip: { type: 'boolean', label: 'Tip', hidden: true }, payment_rounding: { type: 'boolean', label: 'Payment Rounding', hidden: true } } },
       state: { ...baseOrder.fields.state, options: [['draft', 'Draft'], ...baseOrder.fields.state.options, ['cancel', 'Cancelled']] },
       config_id: { type: 'many2one', relation: 'pos.config', label: 'Point of Sale' },

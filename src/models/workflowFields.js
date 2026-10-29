@@ -21,7 +21,7 @@ const FIELDS = {
   'calendar.event': { interviewer: hidden('char', 'Interviewer') }, // recruitplus.js double-booking check
   'hr.employee': { timesheet_cost: hidden('monetary', 'Timesheet Cost per Hour', { readonly: false }), hourly_cost: hidden('monetary', 'Hourly Cost', { readonly: false }) },
   'mrp.production': { operation_cost_move_id: m2o('account.move', 'Operation Cost Entry') }, // workorder.js: posted once
-  'pos.order': { stock_costs: hidden('json', 'Stock Costs') }, // pos.js: refunds use the original unit cost
+  'pos.order': { stock_costs: hidden('json', 'Stock Costs'), request_key: hidden('char', 'Reference'), request_fingerprint: hidden('char', 'Reference') }, // pos.js: refunds use the original unit cost
   product: { qty_rented: hidden('float', 'Quantity Rented') }, // extra.js: rented stock stays in valuation
   'project.project': { last_update_status: hidden('selection', 'Last Update Status', { options: [['on_track', 'On Track'], ['at_risk', 'At Risk'], ['off_track', 'Off Track'], ['on_hold', 'On Hold'], ['done', 'Done']] }) },
   'res.partner': { supplier_rank: hidden('integer', 'Supplier Rank') },

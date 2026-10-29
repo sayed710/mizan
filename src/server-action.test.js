@@ -30,6 +30,47 @@ function teardown() {
   globalThis.setInterval = originalSetInterval;
 }
 
+test('serverAction keeps its refresh in the queue before the next action', async () => {
+  setup();
+  const base = seed();
+  let actions = 0;
+  let reads = 0;
+  let release;
+  let refreshing;
+  const refreshStarted = new Promise((resolve) => { refreshing = resolve; });
+  const response = (data) => new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
+  globalThis.fetch = async (url) => {
+    if (url === '/api/session') return response({ name: 'Admin', isAdmin: true });
+    if (url === '/api/db') {
+      reads++;
+      if (reads === 2) {
+        refreshing();
+        return new Promise((resolve) => { release = () => resolve(response({ ...base, settings: { ...base.settings, company: 'First' } })); });
+      }
+      return response({ ...base, settings: { ...base.settings, company: reads > 2 ? 'Second' : 'Initial' } });
+    }
+    actions++;
+    return response({ done: true });
+  };
+  let first, second;
+  try {
+    const store = await import('./store.js?queued-refresh');
+    await store.initStore();
+    first = store.serverAction('/api/action', {});
+    second = store.serverAction('/api/action', {});
+    await refreshStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(actions, 1, 'a later action cannot overtake an outstanding refresh');
+    release();
+    await Promise.all([first, second]);
+    assert.equal(store.getDb().settings.company, 'Second');
+  } finally {
+    release?.();
+    await Promise.allSettled([first, second]);
+    teardown();
+  }
+});
+
 test('serverAction skips when a preceding queued save failed in the same generation', async () => {
   setup();
 

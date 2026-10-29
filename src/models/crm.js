@@ -2,7 +2,49 @@ import { create, read, write } from '../orm.js';
 import { today } from './common.js';
 import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
 
-const LOST_REASONS = [['price', 'Too expensive'], ['competitor', 'We lost to a competitor'], ['timing', 'Not the right timing'], ['no_answer', 'No answer'], ['other', 'Other']];
+export function isRotting(db, model, r) {
+  if (!r) return false;
+  const stageModel = model === 'crm.lead' ? 'crm.stage' : model === 'project.task' ? 'project.task.type' : null;
+  if (!stageModel || !r.stage_id) return false;
+  const stages = db?.records?.[stageModel] ?? [];
+  const stage = typeof r.stage_id === 'number'
+    ? stages.find((s) => s.id === r.stage_id)
+    : stages.find((s) => s.name?.toLowerCase() === String(r.stage_id).toLowerCase());
+  if (!stage || !stage.rotting_threshold_days || stage.rotting_threshold_days <= 0) return false;
+  if (stage.is_won || stage.fold || r.active === false || r.state === 'done' || r.state === 'canceled') return false;
+  const stageDate = r.date_last_stage_update || r.create_date || r.date_start || today();
+  const diffDays = Math.floor((Date.parse(today()) - Date.parse(stageDate)) / (1000 * 60 * 60 * 24));
+  return diffDays > stage.rotting_threshold_days;
+}
+
+export function stageColumnsFor(db, model, context = {}) {
+  const stageModel = model === 'crm.lead' ? 'crm.stage' : model === 'project.task' ? 'project.task.type' : null;
+  if (!stageModel) return [];
+  let stages = db?.records?.[stageModel] ?? [];
+  if (model === 'crm.lead' && context.team_id) {
+    stages = stages.filter((s) => !s.team_ids?.length || s.team_ids.includes(context.team_id));
+  } else if (model === 'project.task' && context.project_id) {
+    stages = stages.filter((s) => !s.project_ids?.length || s.project_ids.includes(context.project_id));
+  }
+  return [...stages].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id).map((s) => ({
+    key: s.id,
+    label: s.name,
+    fold: !!s.fold,
+    requirements: s.requirements ?? '',
+    rotting_threshold_days: s.rotting_threshold_days ?? 0,
+    is_won: !!s.is_won,
+  }));
+}
+
+export function isWonLead(db, r) {
+  if (!r) return false;
+  if (r.stage_id === 'won' || r.stage_id === 4) return true;
+  if (db?.records?.['crm.stage']) {
+    const s = (db.records['crm.stage'] ?? []).find((x) => x.id === r.stage_id || x.name?.toLowerCase() === String(r.stage_id).toLowerCase());
+    if (s?.is_won) return true;
+  }
+  return r.probability === 100;
+}
 
 /** Lead → opportunity; creates the customer from the lead's company/contact when none is set. */
 export function convertLead(db, r) {
@@ -18,15 +60,44 @@ function newQuotation(db, r) {
   return { db: next, go: `#/sales/quotations/${id}` };
 }
 
-function markLost(db, r) {
-  const options = LOST_REASONS.map(([, label], i) => `${i + 1}. ${label}`).join('\n');
-  const pick = prompt(`Lost reason:\n${options}`, '1');
-  if (pick == null) return { db };
-  const reason = LOST_REASONS[Number(pick) - 1]?.[0] ?? 'other';
-  return { db: write(db, 'crm.lead', r.id, { active: false, probability: 0, lost_reason: reason }) };
-}
-
 export const crmModels = {
+  'crm.stage': {
+    label: 'Stages',
+    fields: {
+      name: { type: 'char', label: 'Stage Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
+      is_won: { type: 'boolean', label: 'Is Won Stage' },
+      fold: { type: 'boolean', label: 'Folded in Pipeline' },
+      requirements: { type: 'text', label: 'Requirements' },
+      rotting_threshold_days: { type: 'integer', label: 'Rotting Threshold (Days)' },
+      team_ids: { type: 'many2many', relation: 'crm.team', label: 'Sales Teams' },
+    },
+    defaults: (id) => ({ sequence: id ?? 10, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 }),
+    list: ['name', 'sequence', 'is_won', 'fold', 'rotting_threshold_days'],
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'sequence', 'team_ids'],
+        ['is_won', 'fold', 'rotting_threshold_days'],
+      ],
+      tabs: [{ label: 'Requirements', fields: ['requirements'] }],
+    },
+  },
+
+  'crm.lost.reason': {
+    label: 'Lost Reasons',
+    fields: {
+      name: { type: 'char', label: 'Reason', required: true },
+      active: { type: 'boolean', label: 'Active' },
+    },
+    defaults: () => ({ active: true }),
+    list: ['name', 'active'],
+    form: {
+      title: 'name',
+      groups: [['name', 'active']],
+    },
+  },
+
   'res.partner': {
     label: 'Contacts',
     fields: {
@@ -97,10 +168,29 @@ export const crmModels = {
       team_id: { type: 'many2one', relation: 'crm.team', label: 'Sales Team' },
       assign_date: { type: 'date', label: 'Assigned on', readonly: true },
       stage_id: {
-        type: 'selection',
+        type: 'many2one',
+        relation: 'crm.stage',
         label: 'Stage',
         tracking: true,
-        options: [['new', 'New'], ['qualified', 'Qualified'], ['proposition', 'Proposition'], ['won', 'Won']],
+      },
+      lost_reason_id: {
+        type: 'many2one',
+        relation: 'crm.lost.reason',
+        label: 'Lost Reason',
+      },
+      lost_feedback: {
+        type: 'text',
+        label: 'Closing Note',
+      },
+      date_last_stage_update: {
+        type: 'date',
+        label: 'Last Stage Update',
+        readonly: true,
+      },
+      is_rotting: {
+        type: 'boolean',
+        label: 'Rotting',
+        compute: (r, db) => isRotting(db, 'crm.lead', r),
       },
       user: { type: 'char', label: 'Salesperson' },
       date_deadline: { type: 'date', label: 'Expected Closing' },
@@ -109,7 +199,7 @@ export const crmModels = {
       tag_ids: { type: 'tags', label: 'Tags' },
       description: { type: 'text', label: 'Notes' },
       type: { type: 'selection', label: 'Type', options: [['lead', 'Lead'], ['opportunity', 'Opportunity']] },
-      lost_reason: { type: 'selection', label: 'Lost Reason', options: LOST_REASONS },
+      lost_reason: { type: 'char', label: 'Lost Reason (Legacy)', hidden: true },
       partner_name: { type: 'char', label: 'Company Name' },
       contact_name: { type: 'char', label: 'Contact Name' },
       website: { type: 'char', label: 'Website' },
@@ -121,21 +211,35 @@ export const crmModels = {
       source: { type: 'char', label: 'Source' },
     },
     onchange: (r, key, db) => {
-      if (key === 'stage_id') return { probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[r.stage_id] ?? r.probability };
+      if (key === 'stage_id') {
+        const stage = typeof r.stage_id === 'number'
+          ? (db.records['crm.stage'] ?? []).find((s) => s.id === r.stage_id)
+          : (db.records['crm.stage'] ?? []).find((s) => s.name?.toLowerCase() === String(r.stage_id).toLowerCase());
+        const won = stage?.is_won || r.stage_id === 'won' || r.stage_id === 4;
+        const legacyProbs = { new: 10, qualified: 30, proposition: 60, won: 100, 1: 10, 2: 30, 3: 60, 4: 100 };
+        return {
+          date_last_stage_update: today(),
+          probability: won ? 100 : (legacyProbs[r.stage_id] ?? r.probability),
+        };
+      }
       if (key !== 'partner_id' || !r.partner_id) return {};
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
       return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
     },
-    defaults: () => ({ type: 'opportunity', stage_id: 'new', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today() }),
+    defaults: () => ({ type: 'opportunity', stage_id: 1, probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today(), date_last_stage_update: today() }),
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],
       [
-        { id: 'won', label: 'Won', fn: (r) => r.stage_id === 'won' },
-        { id: 'ongoing', label: 'Ongoing', fn: (r) => r.stage_id !== 'won' },
-        { id: 'overdue', label: 'Overdue', fn: (r) => r.stage_id !== 'won' && r.date_deadline && r.date_deadline < today() },
+        { id: 'won', label: 'Won', fn: (r) => r.stage_id === 'won' || r.stage_id === 4 || r.probability === 100 },
+        { id: 'ongoing', label: 'Ongoing', fn: (r) => r.active !== false && r.stage_id !== 'won' && r.stage_id !== 4 && r.probability !== 100 },
+        { id: 'overdue', label: 'Overdue', fn: (r) => r.active !== false && r.date_deadline && r.date_deadline < today() },
+        { id: 'rotting', label: 'Rotting', fn: (r) => !!r.is_rotting },
+      ],
+      [
+        { id: 'lost', label: 'Lost', fn: (r) => r.active === false && !!r.lost_reason_id },
       ],
     ],
-    groupBys: ['stage_id', 'user', 'partner_id', 'lost_reason', 'medium', 'date_deadline', 'create_date'],
+    groupBys: ['stage_id', 'user', 'partner_id', 'lost_reason_id', 'medium', 'date_deadline', 'create_date'],
     kanban: {
       groupBy: 'stage_id',
       title: 'name',
@@ -157,11 +261,44 @@ export const crmModels = {
       buttons: [
         { label: 'Convert to Opportunity', primary: true, when: (r) => r.type === 'lead', run: (db, r) => ({ db: convertLead(db, r) }) },
         { label: 'New Quotation', primary: true, when: (r) => r.type !== 'lead' && r.active !== false, run: newQuotation },
-        { label: 'Won', primary: true, vals: { stage_id: 'won', probability: 100 }, when: (r) => r.type !== 'lead' && r.stage_id !== 'won' },
-        { label: 'Lost', when: (r) => r.active !== false, run: markLost },
-        { label: 'Restore', vals: { active: true, lost_reason: null }, when: (r) => r.active === false },
+        {
+          label: 'Won',
+          primary: true,
+          when: (r, db) => r.type !== 'lead' && !isWonLead(db, r) && r.active !== false,
+          run: (db, r) => {
+            const stages = db.records['crm.stage'] ?? [];
+            const wonStage = stages.find((s) => s.is_won && (!s.team_ids?.length || (r.team_id && s.team_ids.includes(r.team_id))))
+              ?? stages.find((s) => s.is_won)
+              ?? { id: 4 };
+            return { db: write(db, 'crm.lead', r.id, { stage_id: wonStage.id, probability: 100, date_last_stage_update: today() }) };
+          },
+        },
+        {
+          label: 'Lost',
+          when: (r) => r.active !== false,
+          wizard: () => ({
+            title: 'Lost Reason',
+            fields: [
+              { name: 'lost_reason_id', type: 'many2one', relation: 'crm.lost.reason', label: 'Lost Reason', required: true, domain: (x) => x.active !== false },
+              { name: 'lost_feedback', type: 'text', label: 'Closing Note' },
+            ],
+          }),
+          run: (db, r, v = {}) => {
+            const reasonId = Number(v.lost_reason_id);
+            if (!reasonId) throw new Error('Choose a lost reason');
+            return {
+              db: write(db, 'crm.lead', r.id, {
+                active: false,
+                probability: 0,
+                lost_reason_id: reasonId,
+                lost_feedback: v.lost_feedback ?? '',
+              }),
+            };
+          },
+        },
+        { label: 'Restore', vals: { active: true, lost_reason_id: null, lost_feedback: '' }, when: (r) => r.active === false },
       ],
-      ribbon: (r) => (r.active === false ? 'Lost' : r.stage_id === 'won' ? 'Won' : null),
+      ribbon: (r, db) => (r.active === false ? 'Lost' : isWonLead(db, r) ? 'Won' : null),
       smart: [{ label: 'Quotations', model: 'sale.order', field: 'opportunity_id', target: 'sales/quotations', sum: 'amount_total' }],
       title: 'name',
       groups: [
@@ -170,7 +307,7 @@ export const crmModels = {
       ],
       tabs: [
         { label: 'Notes', fields: ['description'] },
-        { label: 'Extra Info', fields: ['partner_name', 'contact_name', 'website', 'street', 'city', 'country', 'campaign_id', 'medium', 'source', 'lost_reason'] },
+        { label: 'Extra Info', fields: ['partner_name', 'contact_name', 'website', 'street', 'city', 'country', 'campaign_id', 'medium', 'source', 'lost_reason_id', 'lost_feedback', 'date_last_stage_update'] },
       ],
       chatter: true,
     },

@@ -12,6 +12,12 @@ test('an app opens only when installed and, for restricted users, on their allow
   assert.equal(appOpen(db, { apps: ['crm'] }, 'settings'), true);
 });
 
+test('administrators may open installed apps omitted from their app list', () => {
+  const db = seed();
+  assert.equal(appOpen(db, { isAdmin: true, apps: ['crm'] }, 'sales'), true);
+  assert.equal(appOpen({ ...db, settings: { ...db.settings, uninstalled: ['sales'] } }, { isAdmin: true, apps: ['crm'] }, 'sales'), false);
+});
+
 test('the signed-in user maps to the employee linked to their login, or to nobody', () => {
   const base = seed();
   const employee = base.records['hr.employee'][1];

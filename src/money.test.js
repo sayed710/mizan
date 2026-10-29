@@ -1,6 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cents, round } from './money.js';
+import { cashRound, cents, round } from './money.js';
+
+test('cash rounding uses the configured increment and direction, including refunds', () => {
+  assert.equal(cashRound(10.02, 0.05, 'UP'), 10.05);
+  assert.equal(cashRound(-10.02, 0.05, 'UP'), -10.05);
+  assert.equal(cashRound(10.04, 0.05, 'DOWN'), 10);
+  assert.equal(cashRound(-10.04, 0.05, 'DOWN'), -10);
+  assert.equal(cashRound(10.025, 0.05, 'HALF-UP'), 10.05);
+  assert.equal(cashRound(-10.025, 0.05, 'HALF-UP'), -10.05);
+  assert.equal(cashRound(10.05, 0.05, 'UP'), 10.05);
+  assert.throws(() => cashRound(10, 0, 'UP'));
+  assert.throws(() => cashRound(10, 0.05, 'INVALID'));
+});
 
 test('round goes half away from zero, through binary floating point error', () => {
   assert.equal(round(1.005), 1.01);

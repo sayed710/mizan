@@ -10,7 +10,8 @@ export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 // ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
 /** Master data shared by all companies (Odoo shares these by default). */
 export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
-  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type',
+  'account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 export const getActiveCompany = () => activeCompany;
@@ -104,6 +105,7 @@ export function create(db, model, vals) {
   const id = nextId(db, model);
   const rec = {
     ...(models[model].defaults?.(id) ?? {}),
+    ...(models[model].createDefaults?.(db, vals) ?? {}),
     ...(SHARED_MODELS.has(model) ? {} : { company_id: activeCompany ?? 1 }),
     ...stripComputed(model, vals),
     id,
@@ -130,7 +132,14 @@ function trackingMessages(db, model, before, vals) {
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
       if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking');
-      const label = (x) => fields[k].options?.find((o) => o[0] === x)?.[1] ?? x;
+      const label = (x) => {
+        if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
+        if (fields[k].type === 'many2one' && fields[k].relation) {
+          const relRec = (db.records[fields[k].relation] ?? []).find((r) => r.id === x || r.name?.toLowerCase() === String(x).toLowerCase());
+          if (relRec?.name) return relRec.name;
+        }
+        return x;
+      };
       return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking');
     });
 }
@@ -226,10 +235,11 @@ export function referenceTo(db, model, ids) {
   for (const [source, def] of Object.entries(models)) {
     for (const [key, f] of Object.entries(def.fields)) {
       const direct = f.type === 'many2one' && f.relation === model && !f.compute;
-      const sub = f.type === 'one2many' && f.fields ? Object.keys(f.fields).filter((k) => f.fields[k].type === 'many2one' && f.fields[k].relation === model) : [];
-      if (!direct && !sub.length) continue;
+      const multiple = f.type === 'many2many' && f.relation === model && !f.compute;
+      const sub = f.type === 'one2many' && f.fields ? Object.keys(f.fields).filter((k) => ['many2one', 'many2many'].includes(f.fields[k].type) && f.fields[k].relation === model) : [];
+      if (!direct && !multiple && !sub.length) continue;
       const hit = (db.records[source] ?? []).find((r) => !(source === model && drop.has(r.id))
-        && (direct ? drop.has(r[key]) : Array.isArray(r[key]) && r[key].some((l) => sub.some((k) => drop.has(l?.[k])))));
+        && (direct ? drop.has(r[key]) : multiple ? (r[key] ?? []).some((id) => drop.has(id)) : Array.isArray(r[key]) && r[key].some((l) => sub.some((k) => Array.isArray(l?.[k]) ? l[k].some((id) => drop.has(id)) : drop.has(l?.[k])))));
       if (hit) return `${def.label} ${hit.name ?? `#${hit.id}`}`;
     }
   }
@@ -254,7 +264,7 @@ export function unlink(db, model, ids) {
 }
 
 /** A tracking (audit) message, as `write` posts for a changed tracked field. */
-export const postTracking = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'tracking')] });
+export const postTracking = (db, model, id, body, by = author) => ({ ...db, messages: [...db.messages, { ...message(model, id, body, 'tracking'), author: by }] });
 export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note')] });
 
 export const messagesOf = (db, model, id) =>
@@ -293,15 +303,36 @@ export function groupLabel(db, field, key) {
  * dates group by month (chronological); others sort by label with "None" last.
  * @returns {{key: any, label: string, records: object[]}[]}
  */
-export function groupRecords(db, model, records, name) {
+export function groupRecords(db, model, records, name, context = {}) {
   const field = models[model].fields[name];
-  const buckets = new Map(field.type === 'selection' ? field.options.map(([k]) => [k, []]) : []);
+  const isStageRel = field.type === 'many2one' && ['crm.stage', 'project.task.type'].includes(field.relation);
+  let stageList = isStageRel
+    ? (db?.records?.[field.relation] ?? []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+    : null;
+  if (isStageRel && stageList) {
+    if (model === 'crm.lead' && context.team_id) {
+      stageList = stageList.filter((s) => !s.team_ids?.length || s.team_ids.includes(context.team_id));
+    } else if (model === 'project.task' && context.project_id) {
+      stageList = stageList.filter((s) => !s.project_ids?.length || s.project_ids.includes(context.project_id));
+    }
+  }
+  const buckets = new Map(
+    field.type === 'selection'
+      ? field.options.map(([k]) => [k, []])
+      : isStageRel
+        ? stageList.map((s) => [s.id, []])
+        : [],
+  );
   for (const r of records) {
-    const k = groupKey(field, r[name]);
+    let k = groupKey(field, r[name]);
+    if (isStageRel && typeof k === 'string') {
+      const match = stageList.find((s) => s.name.toLowerCase() === k.toLowerCase() || (k === 'won' && s.is_won));
+      if (match) k = match.id;
+    }
     buckets.set(k, [...(buckets.get(k) ?? []), r]);
   }
   const groups = [...buckets].map(([key, recs]) => ({ key, label: groupLabel(db, field, key), records: recs }));
-  if (field.type === 'selection') return groups;
+  if (field.type === 'selection' || isStageRel) return groups;
   const rank = (g) => (g.key === false ? '￿' : ['date', 'datetime'].includes(field.type) ? String(g.key) : g.label.toLowerCase());
   return groups.sort((a, b) => rank(a).localeCompare(rank(b)));
 }

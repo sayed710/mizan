@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 // Arabic must be active before i18n.js reads the language at import time.
 globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem() {} };
 const { t } = await import('./i18n.js');
-const { models } = await import('./models/index.js');
+const { models, apps } = await import('./models/index.js');
 
 // Product and platform names stay in their original spelling.
 const BRANDS = new Set(['Amazon', 'Noon', 'Shopee', 'Lazada', 'TikTok Shop', 'Jumia', 'Facebook', 'Instagram', 'X', 'YouTube']);
@@ -20,6 +20,14 @@ function uiStrings() {
     for (const o of f.options ?? []) if (typeof o?.[1] === 'string') keys.add(o[1]);
     for (const sub of Object.values(f.fields ?? {})) field(sub);
   };
+  const addMenu = (m) => {
+    if (m.label) keys.add(m.label);
+    for (const c of m.children ?? []) addMenu(c);
+  };
+  for (const app of apps ?? []) {
+    if (app.name) keys.add(app.name);
+    for (const m of app.menus ?? []) addMenu(m);
+  }
   for (const def of Object.values(models)) {
     if (def.label) keys.add(def.label);
     Object.values(def.fields ?? {}).forEach(field);
@@ -41,4 +49,12 @@ function uiStrings() {
 test('every UI string, field label and selection option has an Arabic translation', () => {
   const missing = uiStrings().filter((k) => !BRANDS.has(k) && t(k) === k);
   assert.deepEqual(missing, []);
+});
+
+test('custom fields named name or email retain their user-entered label in Arabic mode', () => {
+  const customNameField = { type: 'char', label: 'Custom Name', custom: true };
+  const customEmailField = { type: 'char', label: 'Custom Email', custom: true };
+  const resolve = (f) => (f.custom ? f.label : t(f.label));
+  assert.equal(resolve(customNameField), 'Custom Name');
+  assert.equal(resolve(customEmailField), 'Custom Email');
 });

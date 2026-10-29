@@ -13,6 +13,22 @@ import { postEntry } from '../src/models/ledger.js';
 const moves = (db) => search(db, 'account.move').length;
 const commitAsSystem = (db, next) => applyDiff(db, diffDb(db, next), { author: 'test', isAdmin: false, allowed: null });
 
+test('POS refuses invalid quantities and discounts before posting', () => {
+  const db = startSession(seed(), 0).db;
+  for (const line of [{ qty: -1 }, { qty: 0 }, { qty: Infinity }, { qty: NaN }, { qty: 1, discount: 101 }, { qty: 1, discount: -1 }, { qty: 1, discount: Infinity }]) {
+    assert.throws(() => runPosting(db, null, '/api/pos/pay', { lines: [{ product_id: 1, ...line }], method: 'cash' }), /Invalid cart/);
+  }
+});
+
+test('POS refuses products outside the register catalog', () => {
+  const db = startSession(seed(), 0).db;
+  for (const vals of [{ active: false }, { available_in_pos: false }, { sale_ok: false }]) {
+    const unavailable = write(db, 'product', 1, vals);
+    assert.throws(() => runPosting(unavailable, null, '/api/pos/pay', { lines: [{ product_id: 1, qty: 1 }], method: 'cash' }), /not available in POS/);
+  }
+  assert.throws(() => runPosting(db, null, '/api/pos/pay', { lines: [{ product_id: 999999, qty: 1 }], method: 'cash' }), /not available in POS/);
+});
+
 test('a POS-only user pays an order: the server prices it and posts the entry', () => {
   const pos = modelsForApps(['pos']);
   assert.equal(pos.has('account.move'), false);

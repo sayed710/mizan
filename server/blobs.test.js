@@ -47,6 +47,41 @@ test('an empty database (fresh install) passes through', () => {
   assert.equal(openBlobs(new DatabaseSync(':memory:')).externalize(null), null);
 });
 
+test('legacy malformed percent escapes do not abort blob migration; new writes reject them', () => {
+  const blobs = openBlobs(new DatabaseSync(':memory:'));
+  const db = seed();
+  const bad = { name: 'bad.txt', data: 'data:text/plain,bad%ZZ' };
+  const legacy = { ...db, records: { ...db.records, 'hr.expense': [{ id: 999, receipt: bad }] } };
+  assert.doesNotThrow(() => blobs.externalize(legacy));
+  assert.deepEqual(blobs.externalize(legacy).records['hr.expense'][0].receipt, bad);
+  assert.throws(() => cleanValue({ type: 'binary' }, bad, 'receipt'), /Invalid value/);
+});
+
+test('parameterized data URLs externalize once and retain decoded bytes', () => {
+  const blobs = openBlobs(new DatabaseSync(':memory:'));
+  for (const data of ['data:text/plain;charset=utf-8;base64,aGVsbG8=', 'data:text/plain;charset=utf-8,hello']) {
+    const { db, id } = create(seed(), 'hr.expense', { name: 'Receipt', employee_id: 1, receipt: { name: 'r.txt', data } });
+    const moved = blobs.externalize(db);
+    const file = read(moved, 'hr.expense', id).receipt;
+    assert.equal(Buffer.from(blobs.get(file.blob).data).toString(), 'hello');
+    assert.equal(blobs.externalize(moved), moved);
+  }
+});
+
+test('portable backups inline blob bytes and restore on another server', () => {
+  const source = openBlobs(new DatabaseSync(':memory:'));
+  const target = openBlobs(new DatabaseSync(':memory:'));
+  const { db, id } = create(seed(), 'hr.expense', { name: 'Receipt', employee_id: 1, receipt: { name: 'r.pdf', type: 'application/pdf', data: PDF } });
+  const stored = source.externalize(db);
+  const exported = source.inline(stored);
+  assert.equal(read(exported, 'hr.expense', id).receipt.data, PDF);
+  assert.equal(read(exported, 'hr.expense', id).receipt.blob, undefined);
+  assert.ok(read(stored, 'hr.expense', id).receipt.blob, 'export does not mutate live records');
+  const restored = target.externalize(exported);
+  const file = read(restored, 'hr.expense', id).receipt;
+  assert.equal(Buffer.from(target.get(file.blob).data).toString(), '%PDF-1.4 receipt');
+});
+
 test('blob schema and inserts require the writer lease', () => {
   const sql = new DatabaseSync(':memory:');
   try {
@@ -101,6 +136,18 @@ test('blob downloads require access to the referencing model and company', async
     const download = await admin('GET', path);
     assert.equal(download.status, 200);
     assert.equal(await download.text(), '%PDF-1.4 receipt');
+    const backup = await (await admin('GET', '/api/backup')).json();
+    assert.equal(backup.records['hr.expense'].find((r) => r.name === 'Secret receipt').receipt.data, PDF);
+    const withImage = create(moved, 'hr.expense', { name: 'Private image', employee_id: 1, receipt: { name: 'p.png', type: 'image/png', data: PNG } });
+    const imageSaved = await (await admin('POST', '/api/diff', diffDb(moved, withImage.db))).json();
+    const image = imageSaved.records['hr.expense'].find((r) => r.name === 'Private image').receipt;
+    assert.equal((await client()('GET', `/api/public/image/${image.blob}`)).status, 404);
+    const catalog = create(imageSaved, 'product', { name: 'Public picture', list_price: 10, image: { name: 'p.png', type: 'image/png', data: PNG } });
+    const publicSaved = await (await admin('POST', '/api/diff', diffDb(imageSaved, catalog.db))).json();
+    const publicImage = publicSaved.records.product.find((p) => p.name === 'Public picture').image;
+    const imageResponse = await client()('GET', `/api/public/image/${publicImage.blob}`);
+    assert.equal(imageResponse.status, 200);
+    assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), Buffer.from(PNG.split(',')[1], 'base64'));
     // Expenses without a company field belong to company 1 under the server's visibility rules.
     for (const [login, grants] of [['contactsonly', { apps: 'contacts' }], ['branchonly', { companies: String(branch.id) }]]) {
       assert.equal((await admin('POST', '/api/users', { login, name: login, password: 'blob-user-password', ...grants })).status, 201);

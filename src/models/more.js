@@ -8,6 +8,7 @@ import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty } from './picking.js';
 import { round as round2 } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -95,9 +96,11 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
   const { moves, planned, producing, ratio, used } = consumption(db, mo);
   const short = underConsumed(db, mo);
   if (short.length && !allowUnderConsumption) throw new Error(`Less than the bill of materials is consumed for ${short.map((c) => read(db, 'product', c.product_id)?.name).join(', ')}; confirm to produce anyway`);
-  const missing = used.find((c) => {
+  const needed = new Map();
+  for (const c of used) needed.set(c.product_id, (needed.get(c.product_id) ?? 0) + c.qty);
+  const missing = [...needed].map(([product_id, qty]) => ({ product_id, qty })).find((c) => {
     const p = read(db, 'product', c.product_id);
-    return p?.type === 'goods' && p.qty_available < c.qty;
+    return p?.type === 'goods' && freeQty(db, p.id, null, mo.id) < c.qty;
   });
   if (missing) throw new Error(`Not enough ${read(db, 'product', missing.product_id).name} in stock`);
   const product = read(db, 'product', mo.product_id);
@@ -148,7 +151,7 @@ function postExpense(db, r) {
   if (!(total > 0)) throw new Error('The expense total must be positive');
   const tax = round2(total - total / (1 + (Number(r.tax) || 0) / 100));
   const product = read(db, 'product', r.product_id);
-  const accountCode = (product?.property_account_expense_id && read(db, 'account.account', product.property_account_expense_id)?.code) || CATEGORY_ACCOUNT[r.category] || '600000';
+  const accountCode = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'))?.code || CATEGORY_ACCOUNT[r.category] || '600000';
   const own = r.payment_mode !== 'company_account';
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,

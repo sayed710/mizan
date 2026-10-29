@@ -38,13 +38,17 @@ export function postBatch(db, batch) {
   if (batch.batch_type === 'outbound' && !(Number(batch.check_number_start) > 0)) throw new Error('Set the first check number to print');
 
   let next = db;
-  for (const line of lines) next = payMove(next, line.move_id, Number(line.amount), batch.date);
+  const linked = lines.map((line) => {
+    next = payMove(next, line.move_id, Number(line.amount), batch.date);
+    const entryId = read(next, 'account.move', line.move_id).payments.at(-1).move_id;
+    return { ...line, payment_id: search(next, 'account.payment').find((p) => p.move_id === entryId).id, cancelled: false };
+  });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
   return write(next, 'account.batch.payment', batch.id, {
     name,
     state: 'posted',
-    lines: lines.map((line, index) => ({
+    lines: linked.map((line, index) => ({
       ...line,
       check_number: batch.batch_type === 'outbound' ? Number(batch.check_number_start) + index : line.check_number ?? null,
     })),
@@ -93,6 +97,8 @@ export const paymentModels = {
           move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
           amount: { type: 'monetary', label: 'Amount' },
           check_number: { type: 'integer', label: 'Check Number', readonly: true },
+          payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment', readonly: true },
+          cancelled: { type: 'boolean', label: 'Cancelled', readonly: true },
         },
         newLine: () => ({ move_id: null, amount: 0 }),
         // Picking an invoice fills the amount with its residual unless one was already entered.

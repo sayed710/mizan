@@ -45,7 +45,8 @@ export function reconcileWith(db, line, moveId) {
   const err = matchError(line, move);
   if (err) throw new Error(err);
   const paid = payMove(db, moveId, Math.abs(line.amount), line.date ?? today(), line.amount < 0 ? { statementLineId: line.id } : {});
-  return write(paid, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: moveId, partner_id: line.partner_id ?? move.partner_id });
+  const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
+  return write(paid, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: moveId, payment_move_id: paymentMove, partner_id: line.partner_id ?? move.partner_id });
 }
 
 function autoReconcile(db, line) {
@@ -68,7 +69,7 @@ function bookToAccount(db, line) {
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
 function lineGuard(db, before, after) {
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_ref'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_ref'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (after.state !== 'reconciled') return null;
@@ -82,7 +83,7 @@ export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
     guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'counterpart', 'unique_import_id', 'payment_ref', 'active'], (l) => l.state === 'reconciled' || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
-    protectDelete: datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.move_id)),
+    protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' ? 'A reconciled bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
@@ -93,6 +94,7 @@ export const bankModels = {
       amount: { type: 'monetary', label: 'Amount', required: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
+      payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },
       counterpart: {
         type: 'selection',

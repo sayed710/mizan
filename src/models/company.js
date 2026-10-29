@@ -9,7 +9,7 @@ import { ensureReturnTypes } from './taxreturn.js';
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'stock.quant', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };
@@ -27,9 +27,11 @@ export function setCompanies(db, { current, allowed }) {
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
 }
 
+// Configuration is shared even when older ORM versions stamped it with company 1.
+const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
-  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
 
@@ -42,6 +44,7 @@ export function visibleTo(companies, model, r, db = null) {
   if (!companies) return true;
   if (model === 'res.company') return companies.has(r?.id);
   if (GROUP_WIDE.has(model)) return false;
+  if (CONFIG_MODELS.has(model)) return true;
   if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
   if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
   return companies.has(r.company_id);
@@ -147,7 +150,10 @@ export function ensureMainCompany(db) {
 
 /** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
 export function renameCompany(db, companyId, name) {
-  const next = write(db, 'res.company', companyId, { name });
+  const company = read(db, 'res.company', companyId);
+  const partner = read(db, 'res.partner', company?.partner_id);
+  let next = write(db, 'res.company', companyId, { name });
+  if (partner?.name === company.name) next = write(next, 'res.partner', partner.id, { name });
   return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
 }
 
@@ -209,6 +215,7 @@ export const companyModels = {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
@@ -226,7 +233,7 @@ export const companyModels = {
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
     form: {
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'active'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'active'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },
