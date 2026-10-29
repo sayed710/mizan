@@ -17,6 +17,7 @@ import { auditEntries } from '../src/audit.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
+import { taxClosingProofs } from '../src/models/finance.js';
 import { openBlobs, RASTER, referencesBlob } from './blobs.js';
 import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
@@ -751,7 +752,8 @@ async function api(req, res, path) {
       const body = await readJson(req);
       const snapshot = scopeFor(user);
       const out = runPosting(snapshot, allowedFor(user), path, body);
-      commitDb(applyDiff(db, diffDb(snapshot, out.db), writeOptions(user, null)), { actor: user.login });
+      const diff = diffDb(snapshot, out.db);
+      commitDb(applyDiff(db, diff, { ...writeOptions(user, null), taxClosingProofs: taxClosingProofs(out.db, diff) }), { actor: user.login });
       return send(res, 200, out.body);
     } catch (e) {
       return send(res, 400, { error: e.message });

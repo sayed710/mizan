@@ -3,6 +3,7 @@ import { read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { payMove } from './accounting.js';
 import { cents, round } from '../money.js';
+import { resolveAndValidateRecipientBank } from './partnerbank.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -29,6 +30,9 @@ export function postBatch(db, batch) {
     const amount = Number(line.amount) || 0;
     if (!(amount > 0) || cents(amount) > cents(move.amount_residual)) {
       throw new Error(`${move.name}: the amount must be positive and at most the amount due (${round(move.amount_residual)})`);
+    }
+    if (batch.batch_type === 'outbound' && move.partner_id) {
+      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id);
     }
   }
   if (batch.batch_type === 'outbound' && !(Number(batch.check_number_start) > 0)) throw new Error('Set the first check number to print');

@@ -84,13 +84,15 @@ import { warehouseModels } from './warehouse.js';
 import { quantModels } from './quant.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { taxReturnModels } from './taxreturn.js';
+import { partnerBankModels } from './partnerbank.js';
 import { declareWorkflowFields } from './workflowFields.js';
 import { appAnalyses } from './analysis.js';
 
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels };
+export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, taxReturnModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -193,6 +195,10 @@ const allApps = [
         { key: 'consolidation-periods', label: 'Consolidation Periods', model: 'consolidation.period' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
       ] },
+      { label: 'Review', children: [
+        { key: 'tax-returns', label: 'Tax Returns', model: 'account.return' },
+        { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
+      ] },
       { label: 'Reporting', children: [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
         { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
@@ -226,6 +232,8 @@ const allApps = [
         { key: 'currencies', label: 'Currencies', model: 'res.currency' },
         { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
         { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
+        { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
+        { key: 'analytic-distribution-models', label: 'Analytic Distribution Models', model: 'account.analytic.distribution.model' },
       ] },
     ],
   },
@@ -268,7 +276,7 @@ const allApps = [
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }] },
+  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],

@@ -83,7 +83,7 @@ const checkDeclared = (model, rec) => {
 
 function stripComputed(model, vals) {
   const fields = models[model].fields;
-  return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute));
+  return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute || fields[k]?.type === 'one2many'));
 }
 
 let author = 'Admin';
@@ -111,7 +111,7 @@ export function create(db, model, vals) {
   const err = validate(model, rec) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
-  return {
+  const res = {
     db: {
       ...db,
       records: { ...db.records, [model]: [...(db.records[model] ?? []), rec] },
@@ -120,6 +120,7 @@ export function create(db, model, vals) {
     },
     id,
   };
+  return models[model].afterCreate ? { ...res, db: models[model].afterCreate(res.db, rec, vals) } : res;
 }
 
 function trackingMessages(db, model, before, vals) {
@@ -134,27 +135,57 @@ function trackingMessages(db, model, before, vals) {
     });
 }
 
-/** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
-function prepareWrite(db, model, before, vals) {
+/** Apply onchange without mutating the original record. */
+function writeValues(db, model, before, vals) {
   const base = stripComputed(model, vals);
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
-  const after = { ...before, ...clean };
-  const err = validate(model, after) ?? models[model].guard?.(db, before, after);
+  return { after: { ...before, ...clean }, clean };
+}
+
+/** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
+function prepareWrite(db, model, before, vals) {
+  const result = writeValues(db, model, before, vals);
+  const err = validate(model, result.after) ?? models[model].guard?.(db, before, result.after);
   if (err) throw new Error(err);
-  checkDeclared(model, after);
-  return { after, clean };
+  checkDeclared(model, result.after);
+  return result;
 }
 
 export function write(db, model, id, vals) {
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
   const { after, clean } = prepareWrite(db, model, before, vals);
-  return {
+  const nextDb = {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
     messages: [...db.messages, ...trackingMessages(db, model, before, clean)],
   };
+  return models[model].afterWrite ? models[model].afterWrite(nextDb, before, after, vals) : nextDb;
+}
+
+/** Validate simultaneous updates against their complete final state, then apply them immutably. */
+export function writeManyAtomic(db, model, updates) {
+  if (!updates.size) return db;
+  const list = db.records[model] ?? [];
+  const byId = new Map(list.map((record) => [record.id, record]));
+  const changes = new Map();
+  for (const [id, vals] of updates) {
+    const before = byId.get(id);
+    if (!before) throw new Error(`${model} #${id} not found`);
+    changes.set(id, { before, vals, ...writeValues(db, model, before, vals) });
+  }
+  let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
+  for (const { before, after } of changes.values()) {
+    const error = validate(model, after) ?? models[model].guard?.(next, before, after);
+    if (error) throw new Error(error);
+    checkDeclared(model, after);
+  }
+  next = { ...next, messages: [...db.messages, ...[...changes.values()].flatMap(({ before, clean }) => trackingMessages(db, model, before, clean))] };
+  for (const { before, after, vals } of changes.values()) {
+    if (models[model].afterWrite) next = models[model].afterWrite(next, before, after, vals);
+  }
+  return next;
 }
 
 /**
@@ -229,7 +260,16 @@ export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.mess
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));
 
-export const updateSettings = (db, vals) => ({ ...db, settings: { ...db.settings, ...vals } });
+export const updateSettings = (db, vals) => {
+  const nextSettings = { ...db.settings, ...vals };
+  if ('lock_date' in vals && !vals.lock_sources) {
+    nextSettings.lock_sources = {
+      ...(nextSettings.lock_sources ?? {}),
+      manual: vals.lock_date || null,
+    };
+  }
+  return { ...db, settings: nextSettings };
+};
 
 const groupKey = (field, v) => {
   if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;

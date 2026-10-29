@@ -1,9 +1,10 @@
 // Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
-import { create, read, search, updateSettings, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { round } from '../money.js';
+import { syncLockDate } from './finance.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
@@ -76,9 +77,7 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, lines });
   // The year references its closing entry first: only such an entry may carry the closing flag.
   const closed = write(entry.db, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null });
-  return updateSettings(write(closed, 'account.move', entry.id, { is_closing: true }), {
-    lock_date: [db.settings?.lock_date, year.date_to].filter(Boolean).sort().at(-1),
-  });
+  return syncLockDate(write(closed, 'account.move', entry.id, { is_closing: true }));
 }
 
 /** Reverse the closing on the year end, clearing only that year's fiscal lock. */
@@ -87,9 +86,8 @@ export function reopenFiscalYear(db, yearId) {
   if (year.state !== 'closed') throw new Error('This fiscal year is already open');
   const closing = read(db, 'account.move', year.closing_move_id);
   if (!closing || closing.state !== 'posted') throw new Error('The posted closing entry is missing');
-  // Fall back to the latest other closed year rather than unlocking everything.
-  const previous = search(db, 'account.fiscal.year').filter((y) => y.id !== yearId && y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
-  const unlocked = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: previous }) : db;
+  // Recompute lock date from active sources rather than blindly falling back or clearing.
+  const unlocked = syncLockDate(db, { excludeYearId: yearId });
   // Open the year before booking into it: a closed year locks its period.
   const next = write(unlocked, 'account.fiscal.year', yearId, { state: 'open' });
   const entry = postEntry(next, {

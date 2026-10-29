@@ -1,5 +1,6 @@
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
+import { ensureReturnTypes } from './taxreturn.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -121,9 +122,11 @@ export function createCompany(db, vals) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
-    return create(next, 'res.company', { ...values, partner_id: partner.id });
+    const res = create(next, 'res.company', { ...values, partner_id: partner.id });
+    return { ...res, db: ensureReturnTypes(res.db) };
   }
-  return create(next, 'res.company', values);
+  const res = create(next, 'res.company', values);
+  return { ...res, db: ensureReturnTypes(res.db) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -133,12 +136,13 @@ export function createForCompany(db, model, vals) {
 
 /** Initialize the demo's main company once; call after seed to preserve existing IDs. */
 export function ensureMainCompany(db) {
-  if (record(db, 'res.company', 1)) return db;
+  if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const code = db.settings?.currency ?? 'USD';
   const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
   const base = currency ? { db, id: currency.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
-  return createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  return ensureReturnTypes(created);
 }
 
 /** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
@@ -211,14 +215,18 @@ export const companyModels = {
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
       logo: { type: 'text', label: 'Logo' }, active: { type: 'boolean', label: 'Active' },
       intercompany_rule: { type: 'selection', label: 'Inter-Company Rule', options: [['none', 'None'], ['sale_purchase', 'Create Purchase from Sale']] },
+      tax_periodicity: { type: 'selection', label: 'Tax Periodicity', options: [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']] },
+      tax_start_date: { type: 'date', label: 'Tax Period Start' },
     },
-    defaults: () => ({ active: true, intercompany_rule: 'none' }),
+    defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly' }),
     guard: companyGuard,
+    afterCreate: (db) => ensureReturnTypes(db),
+    afterWrite: (db) => ensureReturnTypes(db),
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
     form: {
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'active'], ['email', 'phone', 'vat'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'active'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

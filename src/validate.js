@@ -34,6 +34,9 @@ export function cleanValue(field, value, where) {
     case 'many2one':
       if (!Number.isInteger(value) || value < 1) fail(where);
       return value;
+    case 'many2many':
+      if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every((id) => Number.isSafeInteger(id) && id > 0) || new Set(value).size !== value.length) fail(where);
+      return [...value];
     case 'boolean':
       if (typeof value !== 'boolean') fail(where);
       return value;

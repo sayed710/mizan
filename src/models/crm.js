@@ -1,5 +1,6 @@
-import { create, write } from '../orm.js';
+import { create, read, write } from '../orm.js';
 import { today } from './common.js';
+import { syncPartnerBankAccounts, validatePartnerBankLines } from './partnerbank.js';
 
 const LOST_REASONS = [['price', 'Too expensive'], ['competitor', 'We lost to a competitor'], ['timing', 'Not the right timing'], ['no_answer', 'No answer'], ['other', 'Other']];
 
@@ -43,8 +44,25 @@ export const crmModels = {
       followup_level_delay: { type: 'integer', label: 'Last Reminder Level (days)', readonly: true },
       followup_date: { type: 'date', label: 'Last Reminder', readonly: true },
       tag_ids: { type: 'tags', label: 'Tags' },
+      bank_ids: {
+        type: 'one2many',
+        relation: 'res.partner.bank',
+        label: 'Bank Accounts',
+        compute: (r, db) => (db?.records?.['res.partner.bank'] ?? []).filter((b) => b.partner_id === r?.id && b.active !== false).map((b) => read(db, 'res.partner.bank', b.id)),
+        fields: {
+          account_number: { type: 'char', label: 'Account Number', required: true },
+          bank_name: { type: 'char', label: 'Bank Name' },
+          bank_bic: { type: 'char', label: 'Bank Identifier Code' },
+          holder_name: { type: 'char', label: 'Account Holder' },
+          allow_out_payment: { type: 'boolean', label: 'Send Money' },
+        },
+        newLine: () => ({ account_number: '', bank_name: '', bank_bic: '', allow_out_payment: true }),
+      },
     },
     defaults: () => ({ tag_ids: [] }),
+    guard: (db, before, after) => validatePartnerBankLines(db, after?.id, after?.bank_ids),
+    afterCreate: (db, rec, vals) => syncPartnerBankAccounts(db, rec.id, vals?.bank_ids),
+    afterWrite: (db, before, after, vals) => syncPartnerBankAccounts(db, after.id, vals?.bank_ids),
     filters: [[
       { id: 'companies', label: 'Companies', fn: (r) => r.is_company },
       { id: 'individuals', label: 'Individuals', fn: (r) => !r.is_company },
@@ -61,6 +79,7 @@ export const crmModels = {
       ],
       buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
       groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'country', 'pricelist_id', 'property_payment_term_id', 'credit_limit', 'tag_ids']],
+      tabs: [{ label: 'Bank Accounts', fields: ['bank_ids'] }],
       chatter: true,
     },
   },

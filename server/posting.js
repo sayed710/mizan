@@ -19,7 +19,7 @@ export function runPosting(db, allowed, path, body = {}) {
     need(allowed, model);
     const button = models[model]?.form?.buttons?.find((b) => b.posts && b.label === label);
     const rec = read(db, model, Number(id));
-    if (!button || !rec || (button.when && !button.when(rec))) throw new Error('This action is not available');
+    if (!button || !rec || (button.when && !button.when(rec, db))) throw new Error('This action is not available');
     const res = button.run(db, rec);
     return { db: res.db, body: { go: res.go ?? null } };
   }

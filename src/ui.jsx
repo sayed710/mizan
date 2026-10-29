@@ -43,6 +43,7 @@ export function display(db, field, value, rec = null) {
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
+    case 'many2many': return (Array.isArray(value) ? value : []).map((id) => read(db, field.relation, Number(id))?.name ?? `#${id}`).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     case 'binary': return value?.name ?? '';
@@ -243,6 +244,32 @@ export const isLabelable = (field, readonly) =>
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
+  if (field.type === 'many2many') {
+    const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
+    const locked = readonly || field.readonly || field.compute;
+    const paths = { 'account.move': '#/accounting/entries', 'documents.document': '#/documents/all', 'helpdesk.ticket': '#/helpdesk/tickets' };
+    const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id));
+    return (
+      <div className="many2many-tags">
+        {ids.map((item) => {
+          const related = read(db, field.relation, item);
+          const name = related?.name ?? `#${item}`;
+          const target = paths[field.relation];
+          return <span key={item} className="tag">
+            {target && related ? <a href={`${target}/${item}`} className="tag-link">{name}</a> : name}
+            {!locked && <button type="button" aria-label={`${t('Remove')} ${name}`} onClick={() => onChange(ids.filter((i) => i !== item))}>×</button>}
+          </span>;
+        })}
+        {!locked && <select id={id} aria-label={label} aria-required={field.required || undefined} value="" onChange={(e) => {
+          const selected = Number(e.target.value);
+          if (candidates.some((candidate) => candidate.id === selected)) onChange([...ids, selected]);
+        }}>
+          <option value="">{t('Add')}</option>
+          {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name ?? `#${candidate.id}`}</option>)}
+        </select>}
+      </div>
+    );
+  }
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };

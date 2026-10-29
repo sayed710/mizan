@@ -12,6 +12,9 @@ const run = (db, model, id, label) => button(model, label).run(db, read(db, mode
 /** A posted invoice or vendor bill of 1000 + 14% VAT (1140 due); customer 3, vendor 7. */
 const invoice = (db, move_type) => {
   const partner_id = move_type === 'in_invoice' ? 7 : 3;
+  if (move_type === 'in_invoice' && !search(db, 'res.partner.bank').some((b) => b.partner_id === partner_id)) {
+    db = create(db, 'res.partner.bank', { partner_id, account_number: 'TEST-VENDOR-BANK' }).db;
+  }
   const { db: withMove, id } = create(db, 'account.move', { move_type, partner_id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14 }] });
   return { db: run(withMove, 'account.move', id, 'Confirm'), id };
 };

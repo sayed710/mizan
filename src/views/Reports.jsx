@@ -137,6 +137,23 @@ function Ledger({ db, period }) {
 
 const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
 
+export function TaxReportTable({ db, period }) {
+  return (
+    <div className="list-wrap">
+      <table className="list report">
+        <thead>
+          <tr>
+            <th />
+            <th className="num">{t('Base')}</th>
+            <th className="num">{t('Tax')}</th>
+          </tr>
+        </thead>
+        <Tax db={db} period={period} />
+      </table>
+    </div>
+  );
+}
+
 function Tax({ db, period }) {
   const r = taxReport(db, period);
   const byTax = taxesByTax(db, period);

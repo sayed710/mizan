@@ -1,12 +1,14 @@
 // Cashiers and payroll officers complete sales and payslips: the server books the journal entry for them.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from '../src/orm.js';
-import { modelsForApps } from '../src/models/index.js';
+import { create, read, search, updateSettings, write } from '../src/orm.js';
+import { models, modelsForApps } from '../src/models/index.js';
 import { startSession } from '../src/models/pos.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { seed } from '../src/seed.js';
 import { runPosting } from './posting.js';
+import { taxClosingProofs } from '../src/models/finance.js';
+import { postEntry } from '../src/models/ledger.js';
 
 const moves = (db) => search(db, 'account.move').length;
 const commitAsSystem = (db, next) => applyDiff(db, diffDb(db, next), { author: 'test', isAdmin: false, allowed: null });
@@ -46,6 +48,48 @@ test('a payroll-only user confirms a payslip through the posting button', () => 
   const saved = commitAsSystem(db, out.db);
   assert.equal(read(saved, 'hr.payslip', id).state, 'done');
   assert.ok(moves(saved) > moves(db));
+});
+
+test('server tax submission carries an internal proof through sync without trusting a forged reference', () => {
+  let db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  const type = search(db, 'account.return.type')[0];
+  const made = create(db, 'account.return', { name: 'Server VAT', type_id: type.id, company_id: 1, date_from: '2025-03-01', date_to: '2025-03-31' });
+  const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
+  db = review.run(made.db, read(made.db, 'account.return', made.id)).db;
+  const out = runPosting(db, null, '/api/button', { model: 'account.return', id: made.id, label: 'Submit' });
+  const diff = diffDb(db, out.db);
+  assert.throws(() => applyDiff(db, diff, { author: 'test' }), /locked/i);
+  assert.throws(() => applyDiff(db, diff, { author: 'test', taxClosingProofs: [{}] }), /locked/i);
+  const proof = taxClosingProofs(out.db, diff);
+  assert.equal(proof.length, 1);
+  const altered = structuredClone(diff);
+  altered.upserts['account.move'][0].line_ids[0].debit = 1;
+  altered.upserts['account.move'][0].line_ids[1].credit = 1;
+  assert.throws(() => applyDiff(db, altered, { author: 'test', taxClosingProofs: proof }), /locked/i);
+  const saved = applyDiff(db, diff, { author: 'test', taxClosingProofs: proof });
+  const ret = read(saved, 'account.return', made.id);
+  assert.equal(ret.state, 'submitted');
+  assert.equal(read(saved, 'account.move', ret.closing_move_ids[0]).state, 'posted');
+});
+
+test('server direct-pay workflow posts its validated closing into a pre-existing lock', () => {
+  let db = seed();
+  const type = search(db, 'account.return.type')[0];
+  db = create(db, 'res.partner.bank', { partner_id: type.payment_partner_id, account_number: 'SERVER-TAX-BANK' }).db;
+  db = postEntry(db, { journal: 'MISC', date: '2025-03-15', company: 1, lines: [
+    { account: '251000', credit: 140, tax_name: 'VAT' }, { account: '101401', debit: 140 },
+  ] }).db;
+  db = updateSettings(db, { lock_date: '2025-03-31' });
+  db = write(db, 'account.return.type', type.id, { states_workflow: 'generic_state_only_pay' });
+  const made = create(db, 'account.return', { name: 'Server direct VAT', type_id: type.id, company_id: 1, date_from: '2025-03-01', date_to: '2025-03-31' });
+  const out = runPosting(made.db, null, '/api/button', { model: 'account.return', id: made.id, label: 'Pay' });
+  const diff = diffDb(made.db, out.db);
+  const saved = applyDiff(made.db, diff, { author: 'test', taxClosingProofs: taxClosingProofs(out.db, diff) });
+  const ret = read(saved, 'account.return', made.id);
+  assert.equal(ret.state, 'paid');
+  assert.equal(read(saved, 'account.move', ret.closing_move_ids[0]).state, 'posted');
+  assert.equal(ret.total_amount_to_pay, 140);
+  assert.equal(read(saved, 'account.payment', ret.payment_id).state, 'posted');
 });
 
 test('users without the business document, and buttons not marked as posting, are refused', () => {

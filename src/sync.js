@@ -305,7 +305,7 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * @param {any} d
  * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null, login?: string | null, companies?: any, readOnly?: Set<string> | null }} [options]
  */
-export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
+export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null, taxClosingProofs = [] } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
@@ -356,7 +356,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, taxClosingProofs });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);

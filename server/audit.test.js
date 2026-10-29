@@ -7,6 +7,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diffDb } from '../src/sync.js';
+import { create, read, search, updateSettings } from '../src/orm.js';
+import { models } from '../src/models/index.js';
 
 const PASSWORD = 'audit-admin-pw';
 
@@ -65,6 +67,40 @@ test('an edit through /api/diff is logged with the login, server time and old an
     const clerk = client(url);
     assert.equal((await clerk('POST', '/api/login', { login: 'clerk', password: 'clerk-password' })).status, 200);
     assert.equal((await clerk('GET', '/api/audit')).status, 403);
+  } finally {
+    await stop();
+  }
+});
+
+test('locked-period tax closing requires the server submission action, not a forged diff', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    assert.equal((await admin('POST', '/api/login', { login: 'admin', password: PASSWORD })).status, 200);
+    let db = (await admin('GET', '/api/db')).body;
+    const type = search(db, 'account.return.type')[0];
+    const ret = create(db, 'account.return', { name: 'HTTP VAT', type_id: type.id, company_id: 1, date_from: '2020-03-01', date_to: '2020-03-31' });
+    const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
+    const reviewed = review.run(ret.db, read(ret.db, 'account.return', ret.id)).db;
+    const setup = updateSettings(reviewed, { lock_date: '2020-03-31' });
+    const setupResponse = await admin('POST', '/api/diff', diffDb(db, setup));
+    assert.equal(setupResponse.status, 200, JSON.stringify(setupResponse.body));
+    db = setupResponse.body;
+    const bank = search(db, 'account.account').find((a) => a.code === '101401');
+    const payable = search(db, 'account.account').find((a) => a.code === '211000');
+    const draft = create(db, 'account.move', { name: 'MISC/2020/99999', move_type: 'entry', date: '2020-03-31', invoice_date: '2020-03-31',
+      ref: 'Tax Closing: HTTP VAT', line_ids: [{ account_id: bank.id, debit: 10, credit: 0 }, { account_id: payable.id, debit: 0, credit: 10 }] });
+    const forged = { ...draft.db, records: { ...draft.db.records, 'account.move': draft.db.records['account.move'].map((m) => m.id === draft.id ? { ...m, state: 'posted' } : m) } };
+    const rejected = await admin('POST', '/api/diff', diffDb(db, forged));
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.body.error, /locked/i);
+    const submitted = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
+    assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
+    const saved = (await admin('GET', '/api/db')).body;
+    const result = read(saved, 'account.return', ret.id);
+    assert.equal(result.state, 'submitted');
+    assert.equal(read(saved, 'account.move', result.closing_move_ids[0]).state, 'posted');
+    assert.equal(saved.settings.lock_date, '2020-03-31');
   } finally {
     await stop();
   }

@@ -1,12 +1,11 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
-import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
+import { postNote, postNotes, read, search, updateSettings, write, writeMany } from '../orm.js';
 import { today } from './common.js';
-import { accountId, isBalanced, journalItems } from './ledger.js';
-import { toCompany } from './currency.js';
+import { accountId, isBalanced, journalId, journalItems, postEntry } from './ledger.js';
+import { companyCurrency, rateAt, toCompany } from './currency.js';
+import { taxGroups } from './taxes.js';
 import { companySum } from './money.js';
 import { round } from '../money.js';
-
-const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
 
 /** Open receivable (posted, unpaid invoices) of a partner. */
 export const receivableOf = (db, partnerId) => round(search(db, 'account.move')
@@ -22,10 +21,10 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
+const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'tax_rate_at_posting', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
-const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
+export const moveDate = (m) => (m?.move_type === 'entry' && m?.date ? m.date : m?.invoice_date ?? m?.date ?? today());
 /** Archiving hides a record from every report, so `active` counts as changed only between kept and archived. */
 const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : r?.[k]);
 const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
@@ -55,6 +54,30 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+/** Recompute the active global lock date across all active independent sources (manual, closed fiscal years, submitted/paid returns). */
+export function activeLockDate(db, { excludeReturnId = null, excludeYearId = null } = {}) {
+  const yearLocks = (db.records?.['account.fiscal.year'] ?? [])
+    .filter((y) => y.id !== excludeYearId && y.state === 'closed')
+    .map((y) => y.date_to);
+  const returnLocks = (db.records?.['account.return'] ?? [])
+    .filter((r) => r.id !== excludeReturnId && ['submitted', 'paid'].includes(r.state))
+    .map((r) => r.date_to);
+  const manual = db.settings?.lock_sources?.manual !== undefined
+    ? db.settings.lock_sources.manual
+    : (yearLocks.includes(db.settings?.lock_date) || returnLocks.includes(db.settings?.lock_date) ? null : db.settings?.lock_date ?? null);
+  return [manual, ...yearLocks, ...returnLocks].filter(Boolean).sort().at(-1) ?? '';
+}
+
+/** Synchronize db.settings.lock_date and independent lock sources. */
+export function syncLockDate(db, opts = {}) {
+  const manual = db.settings?.lock_sources?.manual !== undefined
+    ? db.settings.lock_sources.manual
+    : (db.settings?.lock_date ?? null);
+  const lock = activeLockDate(db, opts);
+  const lock_sources = { ...(db.settings?.lock_sources ?? {}), manual };
+  return updateSettings(db, { lock_date: lock || '', lock_sources });
+}
+
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
 const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && l.move_id === id);
 
@@ -78,7 +101,7 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'tax_rate_at_posting', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'active'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(before, after) {
@@ -106,6 +129,19 @@ const appliedValue = (db, inv, p) => Math.min(Number(p.amount) || 0, toCompany(d
 /** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
 function settlementCapacity(db, entry, inv) {
   if (!entry || entry.state !== 'posted' || entry.id === inv.id || (entry.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+  const taxReturn = (db.records['account.return'] ?? []).find((r) => (r.closing_move_ids ?? []).includes(inv.id) && ['submitted', 'paid'].includes(r.state));
+  if (taxReturn) {
+    const payment = (db.records['account.payment'] ?? []).find((p) => p.state === 'posted' && p.is_tax_payment && p.return_id === taxReturn.id && p.move_id === entry.id);
+    const settlement = (inv.payments ?? []).find((p) => p.move_id === entry.id && !p.reversed);
+    const closingLine = Number.isInteger(settlement?.line_index) ? inv.line_ids?.[settlement.line_index] : null;
+    if (!payment || !closingLine || closingLine.account_id !== payment.destination_account_id || closingLine.partner_id !== payment.partner_id
+      || (taxReturn.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+    const signed = round((Number(closingLine.credit) || 0) - (Number(closingLine.debit) || 0));
+    const paid = round((entry.line_ids ?? []).filter((line) => line.account_id === closingLine.account_id && line.partner_id === payment.partner_id)
+      .reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0));
+    if (!signed || Math.sign(signed) !== Math.sign(paid) || Math.sign(signed) !== Math.sign(Number(taxReturn.total_amount_to_pay))) return 0;
+    return Math.min(Math.abs(signed), Math.abs(paid));
+  }
   // A credit note and its original invoice settle each other through their opposite receivable/payable lines.
   const creditPair = (note, original) => note.reversed_entry_id === original.id
     && note.move_type === (original.move_type === 'out_invoice' ? 'out_refund' : original.move_type === 'in_invoice' ? 'in_refund' : null)
@@ -164,8 +200,14 @@ export function paymentInvariant(db, after) {
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
-  const accounts = settlementAccounts(db);
-  if (after.partner_id && !(entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id && accounts.includes(l.account_id))) return 'The journal entry does not belong to this payment';
+  if (after.is_tax_payment || after.return_id) {
+    const ret = (db.records['account.return'] ?? []).find((r) => r.id === after.return_id && r.state === 'paid');
+    const closings = (ret?.closing_move_ids ?? []).map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
+    if (!ret || !closings.some((closing) => closing && settlementCapacity(db, entry, closing) >= round(Number(after.amount) || 0))) return 'The tax payment must settle its closing entry';
+  } else {
+    const accounts = settlementAccounts(db);
+    if (after.partner_id && !(entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id && accounts.includes(l.account_id))) return 'The journal entry does not belong to this payment';
+  }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
 }
@@ -178,16 +220,53 @@ export function closedYearLock(db) {
   return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
 }
 
-export function moveGuard(db, before, after) {
-  return lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
+// Only the synchronous, validated tax-closing operation below can grant this ephemeral permission. It is never
+// stored in the database or accepted from an ORM record, request context, reference, or client-supplied flag.
+const taxClosingAuthorization = new WeakMap();
+const taxClosingProofByLines = new WeakMap();
+const taxClosingProofDetails = new WeakMap();
+
+/** Opaque proof objects for newly generated closing moves in a trusted server action's diff. */
+export function taxClosingProofs(db, diff) {
+  const ids = new Set((diff.upserts?.['account.move'] ?? []).map((move) => move.id));
+  return (db.records['account.move'] ?? []).filter((move) => ids.has(move.id) && Array.isArray(move.line_ids)).map((move) => taxClosingProofByLines.get(move.line_ids)).filter(Boolean);
+}
+
+/** Only a genuine server-generated closing can attest a direct-pay transition collapsed into one sync. */
+export function taxClosingProofMatchesReturn(ctx, ret) {
+  return (ctx?.taxClosingProofs ?? []).some((token) => {
+    const proof = taxClosingProofDetails.get(token);
+    return proof && proof.returnId === ret.id && proof.company === ret.company_id && proof.date === ret.date_to
+      && (ret.closing_move_ids ?? []).includes(proof.moveId) && round(Number(ret.total_amount_to_pay) || 0) === proof.payable;
+  });
+}
+
+export function moveGuard(db, before, after, ctx) {
+  return lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
 }
 
 
-function lockRule(db, before, after) {
+function lockRule(db, before, after, ctx) {
   if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
+  // An internally generated closing may post despite a pre-existing lock, but only for its exact validated entry.
+  const local = !before && taxClosingAuthorization.get(db);
+  const proof = !before && (ctx?.taxClosingProofs ?? []).map((token) => taxClosingProofDetails.get(token)).find((entry) => entry?.moveId === after.id);
+  const authorized = local || proof;
+  const relatedReturn = authorized && read(db, 'account.return', authorized.returnId);
+  const linked = local ? relatedReturn?.state === 'reviewed'
+    : ['submitted', 'paid'].includes(relatedReturn?.state) && (relatedReturn.closing_move_ids ?? []).includes(after.id);
+  if (authorized && linked && after.move_type === 'entry' && after.state === 'posted' && after.company_id === authorized.company
+    && after.date === authorized.date && after.invoice_date === authorized.date && after.journal_id === authorized.journal
+    && after.ref === authorized.ref && JSON.stringify((after.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit, l.credit])) === authorized.lines) return null;
+  // Existing return closings may be cancelled by the reset workflow.
+
+  const isReturnClosing = (db.records?.['account.return'] ?? []).some((r) => (r.closing_move_ids ?? []).includes((before ?? after).id) && r.state !== 'paid');
+  if (isReturnClosing && ['draft', 'cancel'].includes(after.state) && !changedFields(before, after, ['line_ids', 'invoice_line_ids', 'date', 'invoice_date', 'journal_id', 'company_id'])) {
+    return null;
+  }
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
   const lock = [...[before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)), yearLock].sort().at(-1);
@@ -248,15 +327,23 @@ export function moveDeleteGuard(db, move, staged = db) {
 }
 
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
-function taxAccounts(db) {
-  const of = (use, code) => new Set([accountByCode(db, code)?.id, ...search(db, 'account.tax').filter((x) => x.type_tax_use === use).map((x) => x.account_id)].filter(Boolean));
+export function taxAccounts(db, companyId) {
+  const of = (use, code) => new Set([
+    accountId(db, code, companyId),
+    ...search(db, 'account.tax')
+      .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
+      .map((x) => x.account_id),
+  ].filter(Boolean));
   return { sale: of('sale', '251000'), purchase: of('purchase', '131000') };
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
-  const accounts = taxAccounts(db);
+  const companyId = period?.company_id ?? period?.company;
+  const accounts = taxAccounts(db, companyId);
   return journalItems(db, period).flatMap((l) => {
+    if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
+    if (!l.tax_name) return [];
     const side = accounts.sale.has(l.account_id) ? 'sale' : accounts.purchase.has(l.account_id) ? 'purchase' : null;
     if (!side) return [];
     const balance = (Number(l.debit) || 0) - (Number(l.credit) || 0);
@@ -271,6 +358,121 @@ export function taxReport(db, period) {
   const output = sum('sale');
   const input = sum('purchase');
   return { output, input, payable: round(output - input) };
+}
+
+
+export function validateTaxReturnPeriod(db, ret) {
+  // 1. Check for draft moves in the period
+  const drafts = search(db, 'account.move').filter(
+    (m) => m.state === 'draft'
+      && moveDate(m) >= ret.date_from
+      && moveDate(m) <= ret.date_to
+      && (!ret.company_id || (m.company_id ?? 1) === ret.company_id)
+  );
+  if (drafts.length > 0) {
+    throw new Error('Draft entries exist in the period; post or cancel them before reviewing');
+  }
+
+  // 2. Check for unbalanced tax accounts
+  const accounts = taxAccounts(db, ret.company_id);
+  const taxAccountIds = new Set([
+    ...accounts.sale,
+    ...accounts.purchase,
+  ].filter(Boolean));
+
+  const items = journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })
+    .filter((l) => taxAccountIds.has(l.account_id) && !l.is_closing && !l.is_tax_closing && !l.is_tax_payment);
+
+  if (items.some((l) => !l.tax_name)) {
+    throw new Error('Unbalanced tax account: untagged entry exists on tax account');
+  }
+
+  // The tax report itself is ledger-based. Independently recompute invoice tax from the stored source lines,
+  // then compare each tax/account group with its posted journal items (including refunds and currency rounding).
+  // Cash-basis tax is booked to transition accounts on the invoice and enters the report on later payments.
+  const invoices = search(db, 'account.move').filter((m) => m.state === 'posted'
+    && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(m.move_type)
+    && (m.company_id ?? 1) === (ret.company_id ?? 1) && moveDate(m) >= ret.date_from && moveDate(m) <= ret.date_to);
+  for (const invoice of invoices) {
+    const purchase = ['in_invoice', 'in_refund'].includes(invoice.move_type);
+    const refund = ['out_refund', 'in_refund'].includes(invoice.move_type);
+    const sign = (purchase ? 1 : -1) * (refund ? -1 : 1);
+    const fallback = accountId(db, purchase ? '131000' : '251000');
+    const ownCurrency = companyCurrency(db, invoice.company_id)
+      ?? (db.records['res.currency'] ?? []).find((currency) => currency.name === db.settings?.currency)?.id ?? null;
+    // Older foreign invoices did not save their posting rate. Their original currency amounts still provide an
+    // independent control, without recalculating company values using a subsequently edited exchange rate.
+    const legacyForeign = !(Number(invoice.tax_rate_at_posting) > 0) && invoice.currency_id && invoice.currency_id !== ownCurrency;
+    const rate = legacyForeign ? 1 : Number(invoice.tax_rate_at_posting) > 0
+      ? Number(invoice.tax_rate_at_posting) : rateAt(db, invoice.currency_id, invoice.invoice_date ?? today(), invoice.company_id);
+    const expected = taxGroups((invoice.invoice_line_ids ?? []).filter((line) => !line.tax_cash_basis),
+      (line) => line.tax_account_id || fallback, rate);
+    const sums = new Map();
+    const add = (account, name, amount) => {
+      const key = JSON.stringify([account, name]);
+      sums.set(key, (sums.get(key) ?? 0) + amount);
+    };
+    for (const group of expected) if (taxAccountIds.has(group.account_id)) add(group.account_id, group.tax_name, sign * group.amount);
+    for (const line of invoice.line_ids ?? []) if (taxAccountIds.has(line.account_id)) {
+      const postedAmount = legacyForeign ? Number(line.amount_currency) || 0 : (Number(line.debit) || 0) - (Number(line.credit) || 0);
+      add(line.account_id, line.tax_name, -postedAmount);
+    }
+    if ([...sums.values()].some((amount) => Math.abs(round(amount)) > 0.005)) {
+      throw new Error(`Unbalanced tax account: invoice ${invoice.name} tax differs from its journal items`);
+    }
+  }
+
+  return taxReport(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id });
+}
+
+
+/** Construct and post only the validated closing of a reviewed return, never a caller-supplied journal entry. */
+export function postTaxReturnClosing(db, returnId) {
+  const ret = read(db, 'account.return', returnId);
+  if (!ret || ret.state !== 'reviewed') throw new Error('A reviewed tax return is required for closing');
+  const type = read(db, 'account.return.type', ret.type_id);
+  if (!type || (type.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
+  const report = validateTaxReturnPeriod(db, ret);
+  const accounts = taxAccounts(db, ret.company_id);
+  const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
+  const balances = new Map();
+  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })) {
+    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    if (taxIds.has(line.account_id)) balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0));
+  }
+  const lines = [];
+  let netClosed = 0;
+  for (const [id, raw] of balances) {
+    const balance = round(raw);
+    if (!balance) continue;
+    const account = read(db, 'account.account', id)?.code;
+    lines.push(balance > 0 ? { account, credit: balance } : { account, debit: -balance });
+    netClosed = round(netClosed - balance);
+  }
+  if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
+  const payable = (type.tax_payable_account_id && read(db, 'account.account', type.tax_payable_account_id)?.code) || '251000';
+  const receivable = (type.tax_receivable_account_id && read(db, 'account.account', type.tax_receivable_account_id)?.code) || '131000';
+  const partner = type.payment_partner_id || ret.payment_partner_id;
+  if (report.payable > 0) lines.push({ account: payable, credit: report.payable, partner_id: partner });
+  else if (report.payable < 0) lines.push({ account: receivable, debit: -report.payable, partner_id: partner });
+  if (!lines.length) lines.push({ account: payable, debit: 0, credit: 0 }, { account: receivable, debit: 0, credit: 0 });
+  const ref = `Tax Closing: ${ret.name}`;
+  const expected = lines.map((line) => {
+    const net = round((line.debit ?? 0) - (line.credit ?? 0));
+    return [accountId(db, line.account, ret.company_id), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
+  });
+  if (taxClosingAuthorization.has(db)) throw new Error('A tax closing is already in progress');
+  const authorization = { returnId: ret.id, company: ret.company_id, date: ret.date_to, journal: journalId(db, 'MISC'), ref, lines: JSON.stringify(expected), payable: report.payable };
+  taxClosingAuthorization.set(db, authorization);
+  try {
+    const entry = postEntry(db, { journal: 'MISC', date: ret.date_to, ref, lines, company: ret.company_id, is_tax_closing: true, tax_return_id: ret.id });
+    const proof = {};
+    taxClosingProofDetails.set(proof, { ...authorization, moveId: entry.id });
+    taxClosingProofByLines.set(entry.db.records['account.move'].find((move) => move.id === entry.id).line_ids, proof);
+    return { ...entry, payable: report.payable };
+  } finally {
+    taxClosingAuthorization.delete(db);
+  }
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
