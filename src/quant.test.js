@@ -8,8 +8,9 @@ import { receive } from './models/valuation.js';
 import { applyInventory, clearInventory, requestCount, ensureQuants } from './models/quant.js';
 import { applyDiff, diffDb } from './sync.js';
 import { migrate } from './migrations.js';
+import { today } from './models/common.js';
 
-const date = '2026-10-28';
+const date = today();
 function setup(tracking = 'none') {
   const p = create(seed(), 'product', { name: 'Quant widget', type: 'goods', cost: 10, qty_available: 0, tracking });
   const a = create(p.db, 'stock.location', { name: 'Quant A' });
