@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { isBalanced } from './models/ledger.js';
+import { validatePicking } from './models/picking.js';
 import { round } from './money.js';
 import { seed } from './seed.js';
 
@@ -725,6 +726,37 @@ test('tracked dropship shipment and return resolve or create company-scoped lot 
   db = run(db, 'stock.picking', ret.id, 'Validate');
   const doneRet = read(db, 'stock.picking', ret.id);
   assert.equal(doneRet.move_ids[0].lot_id, lot.id);
+});
+
+test('validation writes explicitly returned done lines without mutating the apply input', () => {
+  const picking = create(seed(), 'stock.picking', { picking_type: 'dropship', state: 'ready', move_ids: [{ product_id: 3, qty: 1 }] });
+  const out = validatePicking(picking.db, read(picking.db, 'stock.picking', picking.id), {
+    apply: (db, transfer) => {
+      Object.freeze(transfer.move_ids[0]);
+      return { db, move_ids: transfer.move_ids.map((line) => ({ ...line, lot_id: 123 })) };
+    },
+  });
+  assert.equal(read(out.db, 'stock.picking', picking.id).move_ids[0].lot_id, 123);
+  assert.equal(out.done[0].lot_id, 123);
+  assert.equal(read(picking.db, 'stock.picking', picking.id).move_ids[0].lot_id, undefined);
+});
+
+test('tracked line validation gives the same missing-lot error on receipt, internal transfer and dropship', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Tracked shared check', type: 'goods', tracking: 'lot', qty_available: 0, cost: 10 });
+  let source, destination, receipt;
+  ({ db, id: source } = create(db, 'stock.location', { name: 'Tracked source', usage: 'internal' }));
+  ({ db, id: destination } = create(db, 'stock.location', { name: 'Tracked destination', usage: 'internal' }));
+  ({ db, id: receipt } = create(db, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: source, move_ids: [{ product_id: product, qty: 2 }] }));
+  const message = 'Tracked shared check is tracked: enter a lot/serial number';
+  const fails = (id) => assert.throws(() => run(db, 'stock.picking', id, 'Validate'), (error) => error.message === message);
+  fails(receipt);
+  db = write(db, 'stock.picking', receipt, { move_ids: [{ product_id: product, qty: 2, lot_name: 'LOT' }] });
+  db = run(db, 'stock.picking', receipt, 'Validate');
+  let internal, dropship;
+  ({ db, id: internal } = create(db, 'stock.picking', { picking_type: 'internal', state: 'ready', location_id: source, location_dest_id: destination, move_ids: [{ product_id: product, qty: 1 }] }));
+  ({ db, id: dropship } = create(db, 'stock.picking', { picking_type: 'dropship', state: 'ready', move_ids: [{ product_id: product, qty: 1 }] }));
+  fails(internal);
+  fails(dropship);
 });
 
 test('landed costs allocate to periodic receipts through the public action with Odoo 20 accounting', () => {

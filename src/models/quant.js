@@ -2,19 +2,19 @@
 import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { today } from './common.js';
 import { applyCount, startCount } from './valuation.js';
-import { applyLots } from './logistics.js';
+import { applyLots, checkTrackedLine } from './logistics.js';
 import { closedYearLock, lockDateFor } from './finance.js';
 import { uomForLegacy } from './uom.js';
 import { quantReservationMap } from './picking.js';
+import { defaultStockLocationId } from './stock-location.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
 const records = (db, model) => db.records[model] ?? [];
 const companyRows = (db, model, company) => records(db, model).filter((r) => (r.company_id ?? 1) === company);
 
 function defaultLocation(db, company) {
-  const wh = companyRows(db, 'stock.warehouse', company).find((w) => w.lot_stock_id);
-  const loc = wh && read(db, 'stock.location', wh.lot_stock_id) || companyRows(db, 'stock.location', company).find((l) => l.usage === 'internal');
-  if (loc) return { db, id: loc.id };
+  const id = defaultStockLocationId(db, company, { requireExisting: true });
+  if (id) return { db, id };
   return create(db, 'stock.location', { name: 'Stock', usage: 'internal', company_id: company });
 }
 
@@ -86,8 +86,7 @@ export function transferQuants(db, picking) {
   let next = db;
   for (const line of picking.move_ids ?? []) {
     const product = read(next, 'product', line.product_id);
-    if (['lot', 'serial'].includes(product?.tracking) && !line.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
-    if (product?.tracking === 'serial' && Number(line.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
+    checkTrackedLine(product, line);
     next = moveQuantStock(next, [{ ...line, location_id: picking.location_id, company_id: picking.company_id }], -1);
     next = moveQuantStock(next, [{ ...line, location_id: picking.location_dest_id, company_id: picking.company_id }], 1);
   }

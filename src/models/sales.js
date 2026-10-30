@@ -1,6 +1,6 @@
 import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { adjustQuantity, moveValued, revalue } from './valuation.js';
-import { addShipping, applyLots, shippingPrice } from './logistics.js';
+import { addShipping, applyLots, checkTrackedLine, shippingPrice } from './logistics.js';
 import { procure, routeAction } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { moveQuantStock } from './quant.js';
@@ -325,21 +325,21 @@ export const salesModels = {
                 if (p.picking_type === 'dropship') {
                   let nextD = d;
                   const company = p.company_id ?? getActiveCompany() ?? 1;
+                  const moveIds = [];
                   for (const m of p.move_ids) {
                     const product = read(nextD, 'product', m.product_id);
+                    checkTrackedLine(product, m);
                     if (product?.tracking && product.tracking !== 'none') {
-                      if (!m.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
-                      if (product.tracking === 'serial' && Number(m.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
                       let lot = (nextD.records['stock.lot'] ?? []).find((l) => l.product_id === product.id && l.name === m.lot_name && (l.company_id ?? 1) === company);
                       if (!lot) {
                         const createdLot = create(nextD, 'stock.lot', { name: m.lot_name, product_id: product.id, company_id: company, qty: 0, expiration_date: m.expiration_date || null });
                         nextD = createdLot.db;
                         lot = read(nextD, 'stock.lot', createdLot.id);
                       }
-                      m.lot_id = lot.id;
-                    }
+                      moveIds.push({ ...m, lot_id: lot.id });
+                    } else moveIds.push(m);
                   }
-                  return nextD;
+                  return { db: nextD, move_ids: moveIds };
                 }
                 const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
                 // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.

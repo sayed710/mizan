@@ -31,6 +31,13 @@ export function addShipping(db, order, price) {
   return write(db, 'sale.order', order.id, { order_line: [...lines, { product_id: ship.id, qty: 1, price_unit: round(price), discount: 0, tax: 14 }] });
 }
 
+/** Check the common requirements for a tracked transfer line. */
+export function checkTrackedLine(product, line) {
+  if (!product?.tracking || product.tracking === 'none') return;
+  if (!line.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
+  if (product.tracking === 'serial' && Number(line.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
+}
+
 /**
  * Validate lots on a transfer: tracked products need a lot/serial per line; serials are unique units.
  * Incoming creates/raises lots, outgoing lowers them. Returns the new db.
@@ -40,8 +47,7 @@ export function applyLots(db, picking, sign) {
   for (const m of picking.move_ids ?? []) {
     const product = read(next, 'product', m.product_id);
     if (!product || !product.tracking || product.tracking === 'none') continue;
-    if (!m.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
-    if (product.tracking === 'serial' && Number(m.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
+    checkTrackedLine(product, m);
     const company = picking.company_id ?? getActiveCompany() ?? 1;
     const lot = (next.records['stock.lot'] ?? []).find((l) => l.product_id === product.id && l.name === m.lot_name && (l.company_id ?? 1) === company);
     if (!lot) {

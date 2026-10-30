@@ -6,6 +6,7 @@ import { explode } from './more.js';
 import { round as round2 } from '../money.js';
 import { applyLots } from './logistics.js';
 import { productProperty } from './productconfig-helpers.js';
+import { defaultStockLocationId } from './stock-location.js';
 
 
 /** Write off a quantity: stock goes down and its value (at cost) is booked as a loss against stock valuation. */
@@ -21,17 +22,16 @@ export function validateScrap(db, scrap, date = today()) {
   if (previousCompany && previousCompany !== company) throw new Error('Scrap is not accessible in this company');
   setActiveCompany(company);
   try {
-    const warehouse = (db.records['stock.warehouse'] ?? []).find((w) => (w.company_id ?? 1) === company && w.lot_stock_id);
-    const source = scrap.location_id ?? warehouse?.lot_stock_id ?? (db.records['stock.location'] ?? []).find((l) => l.usage === 'internal' && (l.company_id ?? 1) === company)?.id;
+    const source = scrap.location_id ?? defaultStockLocationId(db, company);
     const location = read(db, 'stock.location', source);
     if (!location || location.usage !== 'internal' || (location.company_id ?? 1) !== company) throw new Error('Select an internal location in the same company');
     let next = db;
-    let destination = (next.records['stock.location'] ?? []).find((l) => l.usage === 'inventory' && (l.company_id ?? 1) === company);
+    let destination = (next.records['stock.location'] ?? []).find((l) => l.name === 'Scrap' && l.usage === 'inventory' && (l.company_id ?? 1) === company);
     if (!destination) {
-      const created = create(next, 'stock.location', { name: 'Inventory Adjustment', usage: 'inventory', company_id: company });
+      const created = create(next, 'stock.location', { name: 'Scrap', usage: 'inventory', company_id: company });
       next = created.db; destination = read(next, 'stock.location', created.id);
     }
-    const move = create(next, 'stock.picking', { picking_type: 'outgoing', state: 'done', date_done: date, origin: scrap.name,
+    const move = create(next, 'stock.picking', { picking_type: 'internal', state: 'done', date_done: date, origin: scrap.name,
       company_id: company, location_id: source, location_dest_id: destination.id, move_ids: [{ product_id: product.id, qty, lot_name: scrap.lot_name ?? '' }] });
     next = applyLots(move.db, read(move.db, 'stock.picking', move.id), -1);
     const automated = product.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(next, product, 'property_valuation'));

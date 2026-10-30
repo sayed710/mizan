@@ -2,6 +2,7 @@
 import { create, getActiveCompany, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { lineToStockQty } from './uom.js';
+import { defaultStockLocationId } from './stock-location.js';
 
 const doneQty = (l) => (l.quantity == null || l.quantity === '' ? Number(l.qty) || 0 : Number(l.quantity) || 0);
 const isGoods = (db, l) => read(db, 'product', l.product_id)?.type === 'goods';
@@ -9,8 +10,7 @@ const isGoods = (db, l) => read(db, 'product', l.product_id)?.type === 'goods';
 /** Free default-location stock after reservations in the active company. */
 export function freeQty(db, productId, exceptPickingId = null, exceptMoId = null) {
   const company = getActiveCompany() ?? db.settings?.current_company_id ?? 1;
-  const wh = (db.records['stock.warehouse'] ?? []).find((w) => (w.company_id ?? 1) === company && w.lot_stock_id);
-  const location = wh?.lot_stock_id ?? (db.records['stock.location'] ?? []).find((l) => (l.company_id ?? 1) === company && l.usage === 'internal')?.id;
+  const location = defaultStockLocationId(db, company);
   const quants = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === productId);
   const onHand = quants.length ? quants.filter((q) => (q.company_id ?? 1) === company && q.location_id === location).reduce((sum, q) => sum + q.quantity, 0)
     : company === (read(db, 'product', productId)?.company_id ?? 1) ? Number(read(db, 'product', productId)?.qty_available) || 0 : 0;
@@ -29,8 +29,7 @@ export function freeQty(db, productId, exceptPickingId = null, exceptMoId = null
 /** Assign each open reservation once to matching company, location and lot quants. */
 export function quantReservationMap(db, productId, company, { exceptPickingId = null, exceptMoId = null } = {}) {
   const product = read(db, 'product', productId);
-  const wh = (db.records['stock.warehouse'] ?? []).find((w) => (w.company_id ?? 1) === company && w.lot_stock_id);
-  const defaultLocation = wh?.lot_stock_id ?? (db.records['stock.location'] ?? []).find((l) => (l.company_id ?? 1) === company && l.usage === 'internal')?.id;
+  const defaultLocation = defaultStockLocationId(db, company);
   const quants = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === productId && (q.company_id ?? 1) === company).sort((a, b) => a.id - b.id);
   const reserved = new Map(quants.map((q) => [q.id, 0]));
   const demands = [];
@@ -61,8 +60,7 @@ function freeForPicking(db, picking, productId, lotName) {
   const product = read(db, 'product', productId);
   if (!['lot', 'serial'].includes(product?.tracking)) lotName = null;
   const all = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === productId);
-  const wh = (db.records['stock.warehouse'] ?? []).find((w) => (w.company_id ?? 1) === company && w.lot_stock_id);
-  const defaultLocation = wh?.lot_stock_id ?? (db.records['stock.location'] ?? []).find((l) => (l.company_id ?? 1) === company && l.usage === 'internal')?.id;
+  const defaultLocation = defaultStockLocationId(db, company);
   const source = picking.location_id ?? defaultLocation;
   if (!all.length) {
     if (source !== defaultLocation || lotName) return 0;
@@ -131,7 +129,7 @@ export function reservePicking(db, picking) {
 /**
  * Validate with the done quantities (a line's `quantity`, else its demand). Anything left becomes a backorder
  * transfer when `backorder` is true; otherwise the rest is dropped. Returns { db, done, backorderId }.
- * `apply(db, lines, sign)` moves the stock (lots, quantities); it is injected to keep this module free of sales logic.
+ * `apply(db, picking, sign)` moves stock and may return { db, move_ids } to supply updated done lines.
  */
 export function validatePicking(db, picking, { backorder = true, apply, date = today() }) {
   if (!['ready', 'waiting', 'draft'].includes(picking.state)) throw new Error('This transfer is already processed');
@@ -148,8 +146,10 @@ export function validatePicking(db, picking, { backorder = true, apply, date = t
     if (short && short.lot_name && ['lot', 'serial'].includes(read(db, 'product', short.product_id)?.tracking) && !(db.records['stock.lot'] ?? []).some((lot) => lot.name === short.lot_name && lot.product_id === short.product_id && (lot.company_id ?? 1) === (picking.company_id ?? 1))) throw new Error(`Lot ${short.lot_name} is not in stock`);
     if (short) throw new Error(`Not enough free stock for ${read(db, 'product', short.product_id)?.name ?? 'a product'}: the rest is reserved for other operations`);
   }
-  let next = write(apply(db, { ...picking, move_ids: done }, sign), 'stock.picking', picking.id, {
-    state: 'done', date_done: date, move_ids: done.map(({ quantity, ...l }) => l),
+  const applied = apply(db, { ...picking, move_ids: done }, sign);
+  const appliedDone = applied.move_ids ?? done;
+  let next = write(applied.db ?? applied, 'stock.picking', picking.id, {
+    state: 'done', date_done: date, move_ids: appliedDone.map(({ quantity, ...l }) => l),
   });
   let backorderId = null;
   if (rest.length && backorder) {
@@ -161,7 +161,7 @@ export function validatePicking(db, picking, { backorder = true, apply, date = t
     next = reservePicking(res.db, read(res.db, 'stock.picking', res.id));
     backorderId = res.id;
   }
-  return { db: next, done, backorderId };
+  return { db: next, done: appliedDone, backorderId };
 }
 
 const lotKey = (l) => `${l.product_id}|${l.lot_name ?? ''}`;
