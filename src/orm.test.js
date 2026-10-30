@@ -105,8 +105,8 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   const numbered = search(db, 'account.move').filter((m) => m.id !== inv.id && m.name?.startsWith(`INV/${year}/`)).length;
   assert.equal(posted.name, `INV/${year}/${String(numbered + 1).padStart(5, '0')}`);
   assert.equal(posted.payment_state, 'not_paid');
-  const settled = postEntry(db, { journal: 'BNK1', ref: 'pay', lines: [{ account: '101401', debit: posted.amount_total }, { account: '121000', credit: posted.amount_total }] });
-  db = write(settled.db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: '2026-01-01', amount: posted.amount_total, move_id: settled.id }] });
+  const settled = postEntry(db, { journal: 'BNK1', ref: 'pay', lines: [{ account: '101401', debit: posted.amount_total }, { account: '121000', credit: posted.amount_total, partner_id: posted.partner_id }] });
+  db = write(settled.db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: read(settled.db, 'account.move', settled.id).invoice_date, amount: posted.amount_total, move_id: settled.id }] });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
 });

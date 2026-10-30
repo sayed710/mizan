@@ -1,9 +1,10 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, read, search, unlink, write } from '../orm.js';
-import { subtotal, today } from './common.js';
-import { financeModels } from './finance.js';
+import { today } from './common.js';
+import { analyticActuals, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { mapAccount } from './taxes.js';
+import { allocateInvoiceGroup, invoiceBaseGroups, invoiceLines } from './ledger.js';
 import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 
@@ -52,20 +53,37 @@ export function checkMandatoryPlans(db, move) {
 
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
 export function analyticLinesForMove(db, move) {
-  if (!['out_invoice', 'in_invoice'].includes(move.move_type)) return [];
+  if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
   checkMandatoryPlans(db, move);
-  const purchase = move.move_type === 'in_invoice';
-  return (move.invoice_line_ids ?? []).flatMap((line) => {
+  const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+  const refund = ['out_refund', 'in_refund'].includes(move.move_type);
+  const journalLines = move.line_ids?.length ? move.line_ids : invoiceLines(db, move);
+  const allocations = new Map();
+  for (const group of invoiceBaseGroups(db, move)) {
+    const booked = journalLines.find((l) => l.name === (purchase ? 'Purchases' : 'Sales') && l.account_id === group.account && (l.tax_zero ? l.tax_name : '') === group.zero);
+    const net = purchase ? (booked?.debit || 0) - (booked?.credit || 0) : (booked?.credit || 0) - (booked?.debit || 0);
+    for (const { index, value } of allocateInvoiceGroup(group, net * (refund ? -1 : 1))) allocations.set(index, value);
+  }
+  return (move.invoice_line_ids ?? []).flatMap((line, index) => {
     const product = read(db, 'product', line.product_id);
     const fallback = search(db, 'account.account').find((a) => a.code === (purchase ? '600000' : '400000'))?.id;
     const account = mapAccount(db, move.fiscal_position_id, line.account_id || productProperty(db, product, purchase ? 'property_account_expense_id' : 'property_account_income_id') || fallback);
-    return Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => ({
-      name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
-      account_id: Number(id), amount: round(subtotal(line) * percent / 100 * (purchase ? -1 : 1)),
-      general_account: read(db, 'account.account', account)?.code || (purchase ? '600000' : '400000'),
-      move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
-      category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
-    }));
+    const lineAmount = allocations.get(index);
+    const totals = new Map();
+    return Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => {
+      const plan = planOf(read(db, 'account.analytic.account', Number(id)));
+      const previous = totals.get(plan) ?? { percent: 0, amount: 0 };
+      const cumulative = round(lineAmount * (previous.percent + percent) / 100);
+      const amount = round(cumulative - previous.amount);
+      totals.set(plan, { percent: previous.percent + percent, amount: cumulative });
+      return {
+        name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
+        account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
+        general_account: read(db, 'account.account', account)?.code || (purchase ? '600000' : '400000'),
+        move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
+        category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+      };
+    });
   });
 }
 
@@ -106,10 +124,9 @@ export function budgetReport(db, budgetId, atDate = today()) {
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
   const fraction = Math.min(1, Math.max(0, (day(atDate) - start + 1) / (end - start + 1)));
-  const lines = search(db, 'account.analytic.line').filter((r) => inPeriod(r, budget.date_from, budget.date_to));
   return (budget.lines ?? []).map((line) => {
     const planned = Number(line.planned) || 0;
-    const practical = round(lines.filter((r) => r.account_id === line.analytic_account_id && (!line.general_account || (r.general_account ?? '').startsWith(line.general_account))).reduce((s, r) => s + (Number(r.amount) || 0), 0));
+    const practical = analyticActuals(db, { from: budget.date_from, to: budget.date_to, company_id: budget.company_id, account_id: line.analytic_account_id, general_account: line.general_account }).get(line.analytic_account_id) ?? 0;
     const theoretical = round(planned * fraction);
     return { ...line, planned, practical, theoretical, achievement: theoretical ? round(practical / theoretical * 100) : 0 };
   });

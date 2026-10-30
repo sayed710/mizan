@@ -3,8 +3,10 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
-import { datedLockDelete, datedLockGuard, paymentInvariant } from './finance.js';
+import { datedLockDelete, datedLockGuard, paymentInvariant, settlementFxError } from './finance.js';
 import { round } from '../money.js';
+import { rateAt } from './currency.js';
+import { settlementCompanyAmount } from './settlement.js';
 
 // Which open documents a payment settles, by direction and partner side.
 const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
@@ -16,31 +18,47 @@ const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund']
 export function postPayment(db, p) {
   if (p.state !== 'draft') throw new Error('Only draft payments can be confirmed');
   if (!p.partner_id) throw new Error('Set the partner');
-  if (!(Number(p.amount) > 0)) throw new Error('The amount must be positive');
+  if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) throw new Error('The amount must be a finite positive number');
   const date = p.date ?? today();
   if (p.invoice_id) return payMove(db, p.invoice_id, Number(p.amount), date, { paymentId: p.id, journalId: p.journal_id });
   const via = paymentJournal(db, p.journal_id);
   const name = p.name && p.name !== '/' ? p.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const open = search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && m.partner_id === p.partner_id && m.amount_residual > 0 && SETTLES[p.partner_type]?.[p.payment_type]?.includes(m.move_type))
+    .filter((m) => m.state === 'posted' && m.partner_id === p.partner_id && (m.company_id ?? 1) === (p.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[p.partner_type]?.[p.payment_type]?.includes(m.move_type))
     .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = p.payment_type === 'inbound';
   const counterpart = p.partner_type === 'supplier' ? '211000' : '121000';
   const amount = round(Number(p.amount));
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: via.code, date, ref: p.memo || name,
+    journal: via.code, date, ref: p.memo || name, company: p.company_id ?? 1,
     lines: inbound
       ? [{ account: via.account, debit: amount, partner_id: p.partner_id }, { account: counterpart, credit: amount, partner_id: p.partner_id }]
       : [{ account: counterpart, debit: amount, partner_id: p.partner_id }, { account: via.account, credit: amount, partner_id: p.partner_id }],
   });
-  // ponytail: applied in company currency at face value; foreign-currency invoices should be paid from the invoice.
+  // Register the source before allocations so all callers can derive its currency semantics.
+  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: amount });
+  // Apply a company-currency payment against the recorded company balance of each document.
   const { db: applied, left } = open.reduce((acc, m) => {
-    const take = round(Math.min(acc.left, m.amount_residual));
-    if (!(take > 0)) return acc;
-    const released = releaseCashBasis(acc.db, m, take / m.amount_total, date, { final: take >= m.amount_residual });
-    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: take }] });
-    return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - take) };
-  }, { db: booked, left: amount });
+    if (!(acc.left > 0)) return acc;
+    const rate = rateAt(acc.db, m.currency_id, date, m.company_id);
+    const take = Math.min(m.amount_residual, Math.floor((acc.left * rate + 1e-9) * 100) / 100);
+    const cashAmount = round(take / rate);
+    const companyAmount = settlementCompanyAmount(acc.db, m, take);
+    if (!(take > 0) || !(cashAmount > 0) || cashAmount > acc.left) return acc;
+    const diff = round((cashAmount - companyAmount) * (inbound ? 1 : -1));
+    let withFx = acc.db;
+    let fxMove = null;
+    if (diff) {
+      const fx = postEntry(withFx, { journal: 'MISC', company: p.company_id ?? 1, date, ref: `Exchange difference ${name}`,
+        lines: diff > 0
+          ? [{ account: counterpart, debit: diff, partner_id: p.partner_id }, { account: '450100', credit: diff }]
+          : [{ account: counterpart, credit: -diff, partner_id: p.partner_id }, { account: '690100', debit: -diff }] });
+      withFx = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: moveId, fx_invoice_id: m.id } : entry) } }; fxMove = fx.id;
+    }
+    const released = releaseCashBasis(withFx, m, take / m.amount_total, date, { final: take >= m.amount_residual });
+    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: companyAmount, payment_company_amount: cashAmount, ...(fxMove ? { payment_fx_move_id: fxMove } : {}) }] });
+    return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - cashAmount) };
+  }, { db: registered, left: amount });
   return write(applied, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: left });
 }
 
@@ -56,10 +74,19 @@ export function reversePayment(db, p, date = today()) {
       // Legacy rows cannot disambiguate two identical payments: retain their conservative refusal until relinked.
       : l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount)));
   if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
+  if (date < (p.date ?? entry.invoice_date)) throw new Error('Reversal date cannot be before the payment date');
+  for (const m of search(db, 'account.move')) for (const x of m.payments ?? []) {
+    if (x.move_id === entry.id && !x.reversed) {
+      const error = settlementFxError(db, m, x);
+      if (error) throw new Error(error);
+    }
+  }
   const sources = new Set([entry.id]);
   for (const m of search(db, 'account.move')) for (const x of m.payments ?? []) {
     if (x.discount && !x.reversed && x.payment_move_id === p.move_id) sources.add(x.move_id);
+    if (!x.reversed && x.move_id === p.move_id && x.payment_fx_move_id) sources.add(x.payment_fx_move_id);
   }
+  if (search(db, 'account.move').some((m) => (m.payments ?? []).some((x) => sources.has(x.move_id) && !x.reversed && x.date > date))) throw new Error('Reversal date cannot be before an application date');
   let booked = db;
   const reversals = new Map();
   for (const id of sources) {
@@ -76,7 +103,7 @@ export function reversePayment(db, p, date = today()) {
   const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => sources.has(x.move_id) && !x.reversed));
   const reopened = settled.reduce((acc, m) => {
     const amount = round((m.payments ?? []).filter((x) => sources.has(x.move_id) && !x.reversed).reduce((sum, x) => sum + Number(x.amount), 0));
-    const payments = m.payments.map((x) => sources.has(x.move_id) && !x.reversed ? { ...x, reversed: true, reversal_move_id: reversals.get(x.move_id) } : x);
+    const payments = m.payments.map((x) => sources.has(x.move_id) && !x.reversed ? { ...x, reversed: true, reversal_move_id: reversals.get(x.move_id), reversal_date: date } : x);
     const released = releaseCashBasis(acc, m, -amount / m.amount_total, date);
     const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) - amount), payments, payment_date: payments.filter((x) => !x.reversed).at(-1)?.date ?? null });
     return postNote(next, 'account.move', m.id, `Payment ${p.name} reversed: ${amount}`);

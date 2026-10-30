@@ -35,40 +35,74 @@ export const JOURNALS = [
   ['POSS', 'Point of Sale', 'sale', '400000'],
 ];
 
-export const accountId = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code)?.id ?? null;
-export const journalId = (db, code) => (db.records['account.journal'] ?? []).find((j) => j.code === code)?.id ?? null;
+export const accountId = (db, code, company = null) => {
+  const accounts = db.records['account.account'] ?? [];
+  if (company) {
+    const match = accounts.find((a) => a.code === code && a.company_id === company);
+    if (match) return match.id;
+  }
+  return accounts.find((a) => a.code === code && (!company || !a.company_id || a.company_id === company))?.id ?? accounts.find((a) => a.code === code)?.id ?? null;
+};
+export const journalId = (db, code, company = null) => {
+  const journals = db.records['account.journal'] ?? [];
+  if (company) {
+    const match = journals.find((j) => j.code === code && j.company_id === company);
+    if (match) return match.id;
+  }
+  return journals.find((j) => j.code === code && (!company || !j.company_id || j.company_id === company))?.id ?? journals.find((j) => j.code === code)?.id ?? null;
+};
 
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
 export const isBalanced = (lines = []) =>
   lines.length >= 2 && round(lines.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0)) === 0;
 
+/** Invoice base groups, including the source lines used to allocate a posted group. */
+export function invoiceBaseGroups(db, move) {
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const base = accountId(db, sale ? '400000' : '600000', move.company_id);
+  const byAccount = new Map();
+  const productAccount = (l) => {
+    const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
+    if (!sale && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200', move.company_id);
+    return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+  };
+  for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
+    const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
+    const zero = !lineTaxOf(l) && l.tax_name ? l.tax_name : '';
+    const key = `${account}:${zero}`;
+    const group = byAccount.get(key) ?? { account, zero, amount: 0, lines: [] };
+    group.amount += subtotal(l);
+    group.lines.push({ index, amount: subtotal(l) });
+    byAccount.set(key, group);
+  }
+  return [...byAccount.values()];
+}
+
+/** Allocate a booked base group's cents across its source lines. */
+export function allocateInvoiceGroup(group, amount) {
+  const cents = Math.round(amount * 100);
+  let cumulative = 0;
+  let allocated = 0;
+  return group.lines.map(({ index, amount: lineAmount }) => {
+    cumulative += lineAmount;
+    const through = group.amount ? Math.round(cents * cumulative / group.amount) : 0;
+    const value = (through - allocated) / 100;
+    allocated = through;
+    return { index, value };
+  });
+}
+
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
 export function invoiceLines(db, move) {
   // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
-  // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
-  const counterpart = accountId(db, sale ? '121000' : '211000');
-  const base = accountId(db, sale ? '400000' : '600000');
-  // Each line may override the income/expense account; amounts are grouped per account.
-  const byAccount = new Map();
-  const productAccount = (l) => {
-    const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
-    if (!sale && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200');
-    return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
-  };
-  for (const l of move.invoice_line_ids ?? []) {
-    const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
-    const zero = !lineTaxOf(l) && l.tax_name ? l.tax_name : '';
-    const key = `${account}:${zero}`;
-    const group = byAccount.get(key) ?? { account, zero, amount: 0 };
-    byAccount.set(key, { ...group, amount: group.amount + subtotal(l) });
-  }
+  const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = [...byAccount.values()].map(({ account, amount, zero }) => [account, round(amount / rate), round(amount), zero]);
+  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero }) => [account, round(amount / rate), round(amount), zero]);
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
   const rawTotalDoc = round(amounts(move.invoice_line_ids).total);
   const totalDoc = rounding ? cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method) : rawTotalDoc;
@@ -76,9 +110,9 @@ export function invoiceLines(db, move) {
   const total = round(totalDoc / rate);
   const diff = round(diffDoc / rate);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
-  const taxAcc = accountId(db, sale ? '251000' : '131000');
+  const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
-  const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) : l.tax_account_id || taxAcc), rate);
+  const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) : l.tax_account_id || taxAcc), rate);
   if (rounding && rounding.strategy === 'biggest_tax' && taxes.length && diffDoc !== 0) {
     const largest = taxes.reduce((best, g, i) => (Math.abs(g.amount) > Math.abs(taxes[best].amount) ? i : best), 0);
     taxes[largest] = { ...taxes[largest], amount: round(taxes[largest].amount + diff), document_amount: round(taxes[largest].document_amount + diffDoc) };
@@ -101,23 +135,24 @@ export function invoiceLines(db, move) {
 
   const roundingLines = [];
   if (rounding && rounding.strategy !== 'biggest_tax' && diffDoc !== 0) {
-    const isProfit = diffDoc > 0;
-    const profitAcc = rounding.profit_account_id ? (read(db, 'account.account', rounding.profit_account_id)?.id || rounding.profit_account_id) : accountId(db, '450000');
-    const lossAcc = rounding.loss_account_id ? (read(db, 'account.account', rounding.loss_account_id)?.id || rounding.loss_account_id) : accountId(db, '690000');
+    const isProfit = (sale !== refund) ? diffDoc > 0 : diffDoc < 0;
+    const profitAcc = rounding.profit_account_id ? (read(db, 'account.account', rounding.profit_account_id)?.id || rounding.profit_account_id) : accountId(db, '450000', move.company_id);
+    const lossAcc = rounding.loss_account_id ? (read(db, 'account.account', rounding.loss_account_id)?.id || rounding.loss_account_id) : accountId(db, '690000', move.company_id);
     const acc = isProfit ? profitAcc : lossAcc;
     roundingLines.push({
       account_id: acc,
       partner_id: move.partner_id,
       name: 'Cash Rounding',
-      debit: isProfit ? (refund ? Math.abs(diff) : 0) : (refund ? 0 : Math.abs(diff)),
-      credit: isProfit ? (refund ? 0 : Math.abs(diff)) : (refund ? Math.abs(diff) : 0),
+      debit: isProfit ? 0 : Math.abs(diff),
+      credit: isProfit ? Math.abs(diff) : 0,
+      ...(foreign ? { currency_id: move.currency_id, amount_currency: round((isProfit ? -1 : 1) * Math.abs(diffDoc)) } : {}),
     });
   }
 
   return [
     { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(total, sale, totalDoc) },
     ...bases.map(([account_id, amount, doc, zero]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase']) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit);
 }
@@ -127,16 +162,34 @@ export function invoiceLines(db, move) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, date = today(), ref = '', lines, company = null }) {
+export function postEntry(db, { journal, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null }) {
+  if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
+  if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
+  const jId = typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal));
+  if (!jId) throw new Error(`Journal not found: ${journal}`);
+  const j = read(db, 'account.journal', jId);
+  if (!j) throw new Error(`Journal not found: ${journal}`);
+  if (j.company_id && company && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
+
   const line_ids = lines.map((l) => {
+    let accId = null;
+    if (l.account_id) accId = l.account_id;
+    else if (typeof l.account === 'number') accId = l.account;
+    else if (l.account) accId = accountId(db, l.account, company) ?? accountId(db, l.account);
+    if (!accId) throw new Error(`Account not found: ${l.account}`);
+    const acc = read(db, 'account.account', accId);
+    if (!acc) throw new Error(`Account not found: ${accId}`);
+    if (acc.company_id && company && acc.company_id !== company) throw new Error(`Account ${acc.code || acc.name} belongs to another company`);
+
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
+    return { account_id: accId, partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
-  const prefix = `${journal}/${date.slice(0, 4)}/`;
+  const journalCode = j?.code ?? journal;
+  const prefix = `${journalCode}/${date.slice(0, 4)}/`;
   return create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: journalId(db, journal), invoice_date: date, ref, ...(company ? { company_id: company } : {}),
+    move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
   });
 }

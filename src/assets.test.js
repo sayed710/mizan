@@ -127,3 +127,101 @@ test('posting a bill line on a fixed-asset account creates one draft asset', () 
   assert.equal(assets[0].original_value, 30000);
   assert.equal(assets[0].state, 'draft');
 });
+
+test('foreign-currency bill asset depreciates and disposes its company-currency cost', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXA', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: [{ name: 'Foreign forklift', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '151000') }],
+  });
+  db = postMove(bill.db, bill.id);
+  const asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  assert.equal(lineAmount(db, read(db, 'account.move', bill.id), '151000'), 50);
+  assert.equal(asset.original_value, 50);
+  db = confirmAsset(db, asset);
+  db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+  const depreciation = read(db, 'account.asset', asset.id).depreciation_ids[0];
+  assert.equal(depreciation.amount, 10);
+  assert.equal(lineAmount(db, read(db, 'account.move', depreciation.move_id), '680000'), 10);
+  db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  const disposal = search(db, 'account.move').find((m) => m.ref === 'Foreign forklift disposal');
+  assert.equal(lineAmount(db, disposal, '151000'), -50);
+  assert.equal(lineAmount(db, disposal, '152000'), 10);
+  assert.equal(lineAmount(db, disposal, '690300'), 40);
+});
+
+test('grouped foreign bill assets use the booked cents through depreciation and disposal', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXG', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: ['First machine', 'Second machine'].map((name) => ({ name, product_id: 1, qty: 1, price_unit: 0.03, tax: 0, account_id: accountId(db, '151000') })),
+  });
+  db = postMove(bill.db, bill.id);
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === bill.id);
+  assert.equal(assets.length, 2);
+  assert.equal(lineAmount(db, read(db, 'account.move', bill.id), '151000'), 0.03);
+  assert.equal(Math.round(assets.reduce((sum, a) => sum + a.original_value, 0) * 100), 3);
+  for (const asset of assets) {
+    db = confirmAsset(db, asset);
+    db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+    db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  }
+  const disposals = search(db, 'account.move').filter((m) => m.ref?.endsWith('machine disposal'));
+  assert.equal(disposals.length, 2);
+  assert.equal(Math.round(disposals.reduce((sum, m) => sum + lineAmount(db, m, '151000'), 0) * 100), -3);
+});
+
+test('one-cent grouped bill drafts only usable assets and disposes the booked value', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXC', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: [1, 2].map((n) => ({ name: `Small asset ${n}`, product_id: 1, qty: 1, price_unit: 0.01, tax: 0, account_id: accountId(db, '151000') })),
+  });
+  db = postMove(bill.db, bill.id);
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === bill.id);
+  const booked = lineAmount(db, read(db, 'account.move', bill.id), '151000');
+  assert.equal(booked, 0.01);
+  assert.equal(assets.length, 1);
+  assert.ok(assets.every((asset) => asset.original_value > 0));
+  assert.equal(Math.round(assets.reduce((sum, a) => sum + a.original_value, 0) * 100), Math.round(booked * 100));
+  for (const asset of assets) {
+    db = confirmAsset(db, asset);
+    db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+    db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  }
+  const disposals = search(db, 'account.move').filter((m) => m.ref?.startsWith('Small asset ') && m.ref.endsWith(' disposal'));
+  assert.equal(disposals.length, assets.length);
+  assert.equal(Math.round(disposals.reduce((sum, m) => sum + lineAmount(db, m, '151000'), 0) * 100), -Math.round(booked * 100));
+});
+
+test('fiscal position mapped asset account is used for bill posting and disposal', () => {
+  let db = seed();
+  const source = accountId(db, '151000');
+  const mapped = create(db, 'account.account', { code: '151100', name: 'Mapped fixed assets', account_type: 'asset_fixed' });
+  db = mapped.db;
+  const position = create(db, 'account.fiscal.position', {
+    name: 'Asset mapping', account_ids: [{ account_src_id: source, account_dest_id: mapped.id }],
+  });
+  db = position.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', fiscal_position_id: position.id,
+    invoice_line_ids: [{ name: 'Mapped machine', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: source }],
+  });
+  db = postMove(bill.db, bill.id);
+  const posted = read(db, 'account.move', bill.id);
+  const asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  assert.equal(lineAmount(db, posted, '151100'), 100);
+  assert.equal(lineAmount(db, posted, '151000'), 0);
+  assert.equal(asset.account_asset_id, mapped.id);
+  db = confirmAsset(db, asset);
+  db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  const disposal = search(db, 'account.move').find((m) => m.ref === 'Mapped machine disposal');
+  assert.equal(lineAmount(db, disposal, '151100'), -100);
+  assert.equal(lineAmount(db, disposal, '151000'), 0);
+});

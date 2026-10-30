@@ -1,7 +1,7 @@
 import { create, postNote, read, write } from '../orm.js';
-import { amounts, nextName, productLines, promptedAmount, subtotal, today } from './common.js';
-import { ACCOUNT_TYPES, accountId, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
-import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
+import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
+import { ACCOUNT_TYPES, allocateInvoiceGroup, badLineSign, invoiceBaseGroups, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
+import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
@@ -9,6 +9,7 @@ import { syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
 import { round as round2 } from '../money.js';
+import { settlementCompanyAmount } from './settlement.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -34,13 +35,14 @@ const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'U
 const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', in_refund: 'RBILL', entry: 'MISC' };
 
 /** Ids of the entries that settle invoices (payments and early-payment discounts). */
-const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatMap((m) => (m.payments ?? []).map((p) => p.move_id)));
+const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]).filter(Boolean)));
 
 /**
  * The paid amount is the sum of the recorded payments and never above the total; a paid invoice and the
  * entries that pay it stay posted, so the books and the payment status cannot drift apart.
  */
-export function paymentGuard(db, before, after) {
+export function paymentGuard(db, before, after, ctx) {
+  if (!before && (after.fx_payment_move_id || after.fx_invoice_id)) return ctx ? fxProvenanceError(db, after) : 'Exchange provenance cannot be supplied on creation';
   if (after.correction_of_id && after.state !== 'cancel') {
     const note = read(db, 'account.move', after.correction_of_id);
     if (!note || note.state !== 'posted' || !isRefund(note) || after.move_type !== (note.move_type === 'out_refund' ? 'out_invoice' : 'in_invoice')
@@ -53,6 +55,7 @@ export function paymentGuard(db, before, after) {
   if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
   if (leavesPosted && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
   // The books of a settlement entry are fixed once an invoice records it as a payment.
+  if (before && ['fx_payment_move_id', 'fx_invoice_id'].some((k) => (before[k] ?? null) !== (after[k] ?? null))) return 'Exchange entry linkage cannot be changed';
   if (before?.state === 'posted' && settlingEntries(db).has(before.id)
     && ['line_ids', 'journal_id', 'partner_id'].some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) {
     return 'This entry settles an invoice payment and cannot be changed';
@@ -73,18 +76,32 @@ export function paymentGuard(db, before, after) {
   if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
   for (const [i, p] of payments.entries()) {
     const prior = old[i];
-    if (prior?.reversed && (!p.reversed || p.reversal_move_id !== prior.reversal_move_id)) return 'A reversed payment cannot be restored';
-    if (prior && Object.keys(prior).some((k) => !['reversed', 'reversal_move_id'].includes(k) && JSON.stringify(p[k]) !== JSON.stringify(prior[k]))) return 'A recorded payment cannot be changed';
+    if (prior?.reversed && (!p.reversed || p.reversal_move_id !== prior.reversal_move_id || p.reversal_date !== prior.reversal_date)) return 'A reversed payment cannot be restored';
+    if (prior && Object.keys(prior).some((k) => !['reversed', 'reversal_move_id', 'reversal_date'].includes(k) && JSON.stringify(p[k]) !== JSON.stringify(prior[k]))) return 'A recorded payment cannot be changed';
     if (p.reversed) {
       const original = read(db, 'account.move', p.move_id);
       const reversal = read(db, 'account.move', p.reversal_move_id);
       if (!original || reversal?.state !== 'posted' || reversal.reversed_entry_id !== original.id
         || JSON.stringify((original.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
         !== JSON.stringify((reversal.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]))) return 'A reversed payment needs a posted reversing journal entry';
+      if (p.date && p.date > reversal.invoice_date) return 'Reversal date cannot be before the application date';
+      if (p.reversal_date && p.reversal_date !== reversal?.invoice_date) return 'Reversal date must match the posted reversal entry';
     }
   }
+  if (payments.slice(old.length).some((p) => (!p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date) || !Number.isFinite(Date.parse(p.date)) || new Date(p.date).toISOString().slice(0, 10) !== p.date) || ['amount', 'company_amount', 'payment_company_amount'].some((key) => p[key] != null && (!Number.isFinite(Number(p[key])) || Number(p[key]) < 0)))) return 'Invalid payment date or amount';
+  const invalidDate = payments.slice(old.length).some((p) => {
+    const source = read(db, 'account.move', p.move_id);
+    const reversal = p.move_id && (db.records['account.move'] ?? []).find((m) => m.move_type === 'entry' && m.state === 'posted' && m.reversed_entry_id === p.move_id);
+    const validSide = source?.move_type === 'entry' && (source.line_ids ?? []).some((l) => l.partner_id === after.partner_id && ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type));
+    return (validSide && source.state === 'posted' && p.date && p.date < source.invoice_date) || (reversal && p.date > reversal.invoice_date);
+  });
+  if (invalidDate) return 'Payment application date must be after payment and before reversal';
   const bad = payments.slice(old.length).find((p) => read(db, 'account.move', p.move_id)?.state !== 'posted');
   if (bad) return 'A payment must point at a posted journal entry';
+  if (before?.state === 'posted' && payments.length > old.length) {
+    const staged = { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).map((m) => m.id === after.id ? after : m) } };
+    return moveInvariant(staged, after, before);
+  }
   return null;
 }
 
@@ -109,7 +126,7 @@ export function postMove(db, id) {
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
-  return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
+  return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, read(posted, 'account.move', id)) : posted;
 }
 
 /** Credit notes of an invoice that are not cancelled, other than `exceptId`. */
@@ -146,20 +163,15 @@ function offsetCreditNote(db, noteId) {
   const value = Math.min(total(note), residual(invoice));
   if (!(value > 0)) return db;
   const date = note.invoice_date ?? today();
+  const invoicePortion = settlementCompanyAmount(db, invoice, value);
+  const notePortion = settlementCompanyAmount(db, note, value);
   const settle = (next, r, other) => write(next, 'account.move', r.id, {
     amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id }],
   });
   let next = settle(settle(db, invoice, note), note, invoice);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
-  const bookedPortion = (r) => {
-    const account = accountId(db, isPurchase(r) ? '211000' : '121000');
-    const booked = Math.abs((r.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === r.partner_id)
-      .reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0));
-    const paid = Number(r.amount_paid) || 0;
-    return round2(booked * (paid + value) / total(r)) - round2(booked * paid / total(r));
-  };
-  const gap = round2(bookedPortion(invoice) - bookedPortion(note));
+  const gap = round2(invoicePortion - notePortion);
   if (gap) {
     const account = sale ? '121000' : '211000';
     const amount = Math.abs(gap);
@@ -176,13 +188,21 @@ function offsetCreditNote(db, noteId) {
 function draftAssetsFromBill(db, bill) {
   const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
   const already = new Set((db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id).map((a) => a.bill_line));
-  return (bill.invoice_line_ids ?? []).reduce((acc, l, i) => {
-    if (!fixed.has(l.account_id) || already.has(i)) return acc;
-    const product = read(acc, 'product', l.product_id);
-    return create(acc, 'account.asset', {
-      name: l.name || product?.name || bill.name, original_value: Math.round(subtotal(l) * 100) / 100, acquisition_date: bill.invoice_date ?? today(),
-      partner_id: bill.partner_id, bill_id: bill.id, bill_line: i,
-    }).db;
+  return invoiceBaseGroups(db, bill).reduce((next, group) => {
+    if (!fixed.has(group.account)) return next;
+    const booked = (bill.line_ids ?? []).find((l) => l.name === 'Purchases' && l.account_id === group.account && (l.tax_zero ? l.tax_name : '') === group.zero);
+    const amount = (booked?.debit || 0) - (booked?.credit || 0);
+    for (const { index, value } of allocateInvoiceGroup(group, amount)) {
+      if (value === 0 || already.has(index)) continue;
+      const line = bill.invoice_line_ids[index];
+      const product = read(next, 'product', line.product_id);
+      next = create(next, 'account.asset', {
+        name: line.name || product?.name || bill.name, original_value: value, acquisition_date: bill.invoice_date ?? today(),
+        partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
+        account_asset_id: group.account,
+      }).db;
+    }
+    return next;
   }, db);
 }
 
@@ -192,6 +212,7 @@ function draftAssetsFromBill(db, bill) {
  */
 export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal } = {}) {
   const r = read(db, 'account.move', id);
+  if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
@@ -201,23 +222,22 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const counterpartCode = isPurchase(r) ? '211000' : '121000';
   const via = paymentJournal(db, payJournal);
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
-  // ponytail: partial foreign payments can leave a cent of company-currency rounding on the receivable.
   const bank = toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
   const final = value >= residual(r);
-  const open = final ? openBalance(db, r) : toCompany(db, r.currency_id, value, r.invoice_date ?? date, r.company_id);
+  const open = settlementCompanyAmount(db, r, value);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
   const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
   // The bank line converts what was really received once; the credit is whatever remains after the settled part.
   const extra = excess > 0 ? Math.round((toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) * 100) / 100 : 0;
   const credit = extra ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit' } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit' }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
-    journal: via.code, date, ref: `Payment ${r.name}`,
+    journal: via.code, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
     lines: sale
       ? [{ account: via.account, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: via.account, credit: bank + extra, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', move_id: paymentMove, journal_id: journalId(db, via.code), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -227,14 +247,6 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const next = write(releaseCashBasis(withPayment, r, value / total(r), date, { final }), 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
-}
-
-/** What the invoice still has on its receivable/payable in company currency: its posted line minus the payments so far. */
-function openBalance(db, r) {
-  const account = accountId(db, isPurchase(r) ? '211000' : '121000');
-  const booked = (r.line_ids ?? []).filter((l) => l.account_id === account).reduce((s, l) => s + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0);
-  const paid = (r.payments ?? []).filter((p) => !p.reversed).reduce((s, p) => s + (p.company_amount ?? toCompany(db, r.currency_id, p.amount, r.invoice_date ?? p.date, r.company_id)), 0);
-  return round2(booked - paid);
 }
 
 /** Tax already released for an invoice, per tax account code. */
@@ -282,7 +294,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
   });
-  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
+  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null }).db;
 }
 
 /** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill, while some of it is left to credit. */
@@ -383,6 +395,8 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
+      cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating Activities'], ['investing', 'Investing Activities'], ['financing', 'Financing Activities']] },
+      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags' },
     },
     defaults: () => ({ account_type: 'expense' }),
     protectDelete: accountDeleteGuard,
@@ -392,8 +406,17 @@ export const accountingModels = {
     views: ['list', 'kanban'],
     form: {
       title: 'name',
-      groups: [['code', 'account_type'], ['reconcile']],
+      groups: [['code', 'account_type'], ['reconcile', 'cash_flow_activity']],
     },
+  },
+
+  'account.account.tag': {
+    label: 'Account Tags',
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+    },
+    list: ['name'],
+    form: { title: 'name', groups: [['name']] },
   },
 
   'account.journal': {
@@ -416,7 +439,7 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
-    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
+    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     invariant: (db, after, before) => lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     audited: (db) => db.settings?.audit_trail === true,
@@ -450,7 +473,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
@@ -466,6 +489,8 @@ export const accountingModels = {
         options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid']],
       },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
+      fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
+      fx_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Settlement Invoice', readonly: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },

@@ -4,6 +4,7 @@ import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { round } from '../money.js';
+import { applicationEffectiveDate, settlementCompanyAllocations } from './settlement.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
@@ -155,16 +156,25 @@ export function unrealizedExchange(db, date) {
   return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice'].includes(m.move_type)
     && m.invoice_date <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
     const payments = m.payments ?? [];
-    const untrackedPaid = Math.max(0, round((Number(m.amount_paid) || 0) - payments.reduce((s, p) => s + p.amount, 0)));
-    const paid = payments.filter((p) => p.date <= date);
-    const residual = round(m.amount_total - untrackedPaid - paid.reduce((s, p) => s + p.amount, 0));
+    const activePaid = payments.filter((p) => !p.reversed).reduce((s, p) => s + p.amount, 0);
+    const untrackedPaid = Math.max(0, round((Number(m.amount_paid) || 0) - activePaid));
+    const allocations = settlementCompanyAllocations(db, m);
+    const paid = allocations.filter(({ row: p }) => {
+      const effDate = applicationEffectiveDate(p, m);
+      if (!effDate || effDate > date) return false;
+      if (!p.reversed) return true;
+      const revDate = (p.reversal_move_id ? read(db, 'account.move', p.reversal_move_id)?.invoice_date : null) || p.reversal_date;
+      return revDate ? revDate > date : false;
+    });
+    const paidForeign = round(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
+    const residual = round(m.amount_total - untrackedPaid - paidForeign);
     if (residual <= 0) return [];
     const account = m.move_type === 'out_invoice' ? '121000' : '211000';
     const sign = m.move_type === 'out_invoice' ? 1 : -1;
-    const original = (m.line_ids ?? []).filter((l) => l.account_id === accountId(db, account))
+    const original = (m.line_ids ?? []).filter((l) => l.account_id === accountId(db, account, m.company_id))
       .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
-    const booked = round(original - toCompany(db, m.currency_id, untrackedPaid, m.invoice_date, m.company_id)
-      - paid.reduce((s, p) => s + toCompany(db, m.currency_id, p.amount, m.invoice_date, m.company_id), 0));
+    const paidBooked = round(paid.reduce((s, a) => s + a.value, 0));
+    const booked = round(original - toCompany(db, m.currency_id, untrackedPaid, m.invoice_date, m.company_id) - paidBooked);
     const value = toCompany(db, m.currency_id, residual, date, m.company_id);
     return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, residual, booked, value, difference: round(value - booked) }];
   });

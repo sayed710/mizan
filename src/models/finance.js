@@ -1,3 +1,4 @@
+import { installments } from './terms.js';
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
@@ -6,6 +7,9 @@ import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
 import { round } from '../money.js';
+import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate } from './settlement.js';
+
+export { applicationEffectiveDate };
 
 const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
 
@@ -100,10 +104,12 @@ function postedMoveRule(before, after) {
 
 /** Whether invoice `inv` is settled by the credit (customer invoice, vendor refund) or the debit side of its partner's balance. */
 const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move_type);
-/** Standalone payment allocations are company currency; invoice-linked applications use the invoice-date rate. */
-const appliedValue = (db, inv, p) => {
-  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
-  return payment && !payment.invoice_id ? Number(p.amount) || 0 : toCompany(db, inv.currency_id, p.amount, inv.invoice_date ?? p.date, inv.company_id);
+/** Derive settlement consumption from the document and booking dates, never from caller-supplied amounts. */
+export const appliedValue = (db, inv, p) => {
+  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
+  const source = read(db, 'account.move', p.move_id);
+  const date = source?.move_type !== 'entry' && source?.invoice_date ? source.invoice_date : payment && !payment.invoice_id ? p.date : (inv.invoice_date ?? p.date);
+  return toCompany(db, inv.currency_id, p.amount, date, inv.company_id);
 };
 
 /** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
@@ -114,7 +120,7 @@ function settlementCapacity(db, entry, inv) {
     && note.move_type === (original.move_type === 'out_invoice' ? 'out_refund' : original.move_type === 'in_invoice' ? 'in_refund' : null)
     && note.partner_id === original.partner_id && (note.currency_id ?? null) === (original.currency_id ?? null);
   if (entry.move_type !== 'entry' && !creditPair(entry, inv) && !creditPair(inv, entry)) return 0;
-  const account = accountId(db, ['in_invoice', 'in_refund'].includes(inv.move_type) ? '211000' : '121000');
+  const account = accountId(db, ['in_invoice', 'in_refund'].includes(inv.move_type) ? '211000' : '121000', inv.company_id);
   return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
     .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
@@ -122,7 +128,7 @@ function settlementCapacity(db, entry, inv) {
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
-    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id));
+    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
 }
 
 /**
@@ -142,16 +148,28 @@ export function moveInvariant(db, after, before) {
     const current = now[i];
     if (JSON.stringify(current) === JSON.stringify(p)) return false;
     if (p.reversed || !current?.reversed) return true;
-    const { reversed: flag, reversal_move_id: reversalId, ...original } = current;
+    const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
     const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
     const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
-    return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || entry.reversed_entry_id !== source.id
+    return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || (revDate && revDate !== entry.invoice_date) || (p.date && p.date > entry.invoice_date) || entry.reversed_entry_id !== source.id
       || JSON.stringify((source.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
       !== JSON.stringify((entry.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]));
   })) return 'Registered payments cannot be changed without a posted reversing journal entry';
   const added = now.slice(was.length);
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  if (!added.every((p) => p && Number(p.amount) > 0 && settlementCapacity(db, entries.get(p.move_id), after) > 0)) return 'Payments must point at a posted journal entry';
+  if (!added.every((p) => {
+    if (!p || !(Number(p.amount) > 0)) return false;
+    if (settlementCapacity(db, entries.get(p.move_id), after) > 0) return true;
+    const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.invoice_id === after.id && x.state === 'posted');
+    return payment && entries.get(p.move_id)?.state === 'posted' && p.company_amount === 0
+      && settlementCompanyAmount(db, { ...read(db, 'account.move', after.id), payments: was }, Number(p.amount)) === 0;
+  })) return 'Payments must point at a posted journal entry';
+  if (added.some((p) => !p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date) || !Number.isFinite(Date.parse(p.date)) || new Date(p.date).toISOString().slice(0, 10) !== p.date)) return 'A valid payment application date is required';
+  if (added.some((p) => {
+    const source = entries.get(p.move_id);
+    const reversal = p.move_id && [...entries.values()].find((m) => m.state === 'posted' && m.move_type === 'entry' && m.reversed_entry_id === p.move_id);
+    return (source?.state === 'posted' && p.date && p.date < source.invoice_date) || (reversal && p.date > reversal.invoice_date);
+  })) return 'Payment application date must be after payment and before reversal';
   if (Math.abs(round(paidBefore - reversed.reduce((sum, p) => sum + Number(p.amount), 0) + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
   // One entry may settle several invoices (a payment applied oldest first), but never more than it booked.
   for (const moveId of new Set(added.map((p) => p.move_id))) {
@@ -159,7 +177,50 @@ export function moveInvariant(db, after, before) {
     // ponytail: a cent of slack for foreign-currency rounding on partial payments.
     if (used > settlementCapacity(db, entries.get(moveId), after) + 0.01) return 'A payment cannot settle more than its journal entry booked';
   }
+  if (added.some((p) => p.payment_company_amount != null && Math.abs(Number(p.payment_company_amount) - toCompany(db, after.currency_id, p.amount, p.date, after.company_id)) > 0.01)) return 'Payment company amount does not match the booked conversion';
+  for (const [index, p] of added.entries()) {
+    const prior = { ...read(db, 'account.move', after.id), payments: now.slice(0, was.length + index) };
+    const booked = settlementCompanyAmount(db, prior, Number(p.amount));
+    if (p.company_amount != null && (!Number.isFinite(Number(p.company_amount)) || Number(p.company_amount) !== booked)) return 'Settlement company amount does not match the invoice booking';
+    const error = settlementFxError(db, after, p, booked);
+    if (error) return error;
+  }
   return null;
+}
+
+/** Validate the exclusive FX entry for a settlement, including legacy rows read during reversal. */
+export function settlementFxError(db, invoice, p, allocated) {
+  const moves = db.records['account.move'] ?? [];
+  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
+  const cash = appliedValue(db, invoice, p);
+  const index = (invoice.payments ?? []).findIndex((row) => row === p || (row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
+  const earlier = index < 0 ? invoice.payments ?? [] : invoice.payments.slice(0, index);
+  const prior = { ...invoice, ...read(db, 'account.move', invoice.id), payments: earlier.map((row) => {
+    const reversalDate = read(db, 'account.move', row.reversal_move_id)?.invoice_date ?? row.reversal_date;
+    return row.reversed && reversalDate && reversalDate > p.date ? { ...row, reversed: false } : row;
+  }) };
+  const booked = allocated ?? settlementCompanyAmount(db, prior, Number(p.amount));
+  const difference = payment && !payment.invoice_id ? round((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1)) : 0;
+  if (!difference) return p.payment_fx_move_id ? 'An exchange entry is not required for this settlement' : null;
+  const fx = read(db, 'account.move', p.payment_fx_move_id);
+  const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
+  if (uses > 1) return 'Exchange entry is already used by another settlement';
+  const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+  const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === invoice.partner_id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  const offset = accountId(db, difference > 0 ? '450100' : '690100', invoice.company_id);
+  const lines = fx?.line_ids ?? [];
+  const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
+  const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  if (fx?.state !== 'posted' || fx.move_type !== 'entry' || fx.fx_payment_move_id !== p.move_id || fx.fx_invoice_id !== invoice.id || (fx.company_id ?? 1) !== (invoice.company_id ?? 1) || fx.invoice_date !== p.date || lines.length !== 2 || other.length !== 1 || round(net) !== round(difference) || round(otherNet) !== round(-difference)) return 'A dedicated posted exchange entry must match the settlement';
+  return null;
+}
+
+/** Validate a synchronized newly-created FX entry against its staged settlement. */
+export function fxProvenanceError(db, entry) {
+  const invoice = read(db, 'account.move', entry.fx_invoice_id);
+  const row = (invoice?.payments ?? []).find((p) => p.payment_fx_move_id === entry.id && p.move_id === entry.fx_payment_move_id);
+  if (!row) return 'Exchange provenance requires its settlement';
+  return settlementFxError(db, invoice, row);
 }
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
@@ -170,12 +231,15 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
-  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000');
+  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
   const net = (id) => round((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
   const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : round(Number(after.amount));
-  const bank = accountId(db, paymentJournal(db, after.journal_id).account);
-  if ((inbound ? -1 : 1) * net(account) <= 0 || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > 0.01
+  const bank = accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  const counterpart = (inbound ? -1 : 1) * net(account);
+  const document = invoice && read(db, 'account.move', invoice.id);
+  const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
+  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > 0.01
     || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > 0.01)) return 'The journal entry must book this payment amount and direction';
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
@@ -310,15 +374,72 @@ export function taxesByTax(db, period = {}) {
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today()) {
-  const type = kind === 'receivable' ? 'out_invoice' : 'in_invoice';
+  const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
   const rows = new Map();
-  for (const m of search(db, 'account.move').filter((x) => x.state === 'posted' && x.move_type === type && x.amount_residual > 0)) {
-    const days = Math.floor((new Date(at) - new Date(m.invoice_date_due ?? m.invoice_date)) / 864e5);
+  const add = (partner, date, amount) => {
+    const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
     const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
-    const row = rows.get(m.partner_id) ?? { partner_id: m.partner_id, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
-    row[bucket] = round(row[bucket] + m.amount_residual);
-    row.total = round(row.total + m.amount_residual);
-    rows.set(m.partner_id, row);
+    const row = rows.get(partner) ?? { partner_id: partner, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+    row[bucket] = round(row[bucket] + amount);
+    row.total = round(row.total + amount);
+    rows.set(partner, row);
+  };
+  const moves = search(db, 'account.move');
+  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
+    const payments = m.payments ?? [];
+    const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+    const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType)
+      .reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
+    const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
+    const allocations = settlementCompanyAllocations(db, m);
+    let paid = (m.payment_date && m.payment_date <= at ? round(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => {
+      const effDate = applicationEffectiveDate(p, m);
+      if (!effDate || effDate > at) return false;
+      if (!p.reversed) return true;
+      const reversalDate = read(db, 'account.move', p.reversal_move_id)?.invoice_date ?? p.reversal_date;
+      return !!reversalDate && reversalDate > at;
+    }).reduce((sum, allocation) => sum + allocation.value, 0);
+    const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
+    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date).sort((a, b) => a.date.localeCompare(b.date)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
+    let assigned = 0;
+    const dues = docDues.map((d, i) => {
+      const amount = i === docDues.length - 1 ? round(booked - assigned) : round(booked * d.amount / (Number(m.amount_total) || 1));
+      assigned = round(assigned + amount);
+      return { ...d, amount };
+    });
+    for (const due of dues) {
+      const applied = Math.min(paid, due.amount);
+      paid -= applied;
+      const open = round(due.amount - applied);
+      if (open <= 0) continue;
+      add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * open);
+    }
+  }
+  // A payment's unallocated portion is a partner credit until it is applied or reversed.
+  for (const payment of search(db, 'account.payment')) {
+    if (!payment.move_id || !['posted', 'reversed'].includes(payment.state) || payment.date > at) continue;
+    if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
+    const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
+    const reversal = moves.find((m) => m.state === 'posted' && m.reversed_entry_id === payment.move_id && m.move_type === 'entry');
+    if (reversal && reversal.invoice_date <= at) continue;
+    const entry = read(db, 'account.move', payment.move_id);
+    const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+    const bookedCredit = (entry?.line_ids ?? []).filter((l) => l.partner_id === payment.partner_id && read(db, 'account.account', l.account_id)?.account_type === accountType)
+      .reduce((sum, l) => sum + (kind === 'receivable' ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0);
+    const applied = moves.reduce((sum, m) => {
+      return sum + (m.payments ?? []).filter((p) => {
+        if (p.move_id !== payment.move_id) return false;
+        const effDate = applicationEffectiveDate(p, m);
+        if (!effDate || effDate > at) return false;
+        if (!p.reversed) return true;
+        const reversalDate = read(db, 'account.move', p.reversal_move_id)?.invoice_date ?? p.reversal_date;
+        return !!reversalDate && reversalDate > at;
+      }).reduce((n, p) => n + appliedValue(db, m, p), 0);
+    }, 0);
+    const remaining = round(Math.abs(bookedCredit) - applied);
+    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining);
   }
   return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
@@ -406,13 +527,13 @@ export function logManualFollowUp(db, partnerId, at = today()) {
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
-  for (const m of search(db, 'account.move').filter((x) => x.state === 'posted' && x.move_type !== 'entry' && (!period.from || x.invoice_date >= period.from) && (!period.to || x.invoice_date <= period.to))) {
-    const sign = m.move_type === 'in_invoice' ? -1 : 1;
-    for (const l of m.invoice_line_ids ?? []) {
-      if (!l.analytic_account_id) continue;
-      const amount = (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
-      totals.set(l.analytic_account_id, round((totals.get(l.analytic_account_id) ?? 0) + sign * amount));
-    }
+  for (const line of search(db, 'account.analytic.line')) {
+    if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) continue;
+    if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) continue;
+    if (period.account_id != null && line.account_id !== period.account_id) continue;
+    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) continue;
+    if (line.move_id && read(db, 'account.move', line.move_id)?.state !== 'posted') continue;
+    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
   }
   return totals;
 }

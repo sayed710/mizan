@@ -91,7 +91,8 @@ test('cash flow splits every cash movement into operating, investing and financi
   assert.deepEqual([cf.operating, cf.investing, cf.financing], [8936, -25000, 205000]); // payments; van; opening entry + capital
   assert.equal(cf.net, cf.operating + cf.investing + cf.financing);
   assert.deepEqual(cf.lines.map((l) => [l.section, l.account.code, l.amount]), [
-    ['operating', '121000', 8936],
+    ['operating', '251000', 1097.4],
+    ['operating', '400000', 7838.6],
     ['investing', '151000', -25000],
     ['financing', '301000', 205000],
   ]);

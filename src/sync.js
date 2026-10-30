@@ -367,7 +367,12 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         ...raw, name: prior.name,
         ...(Array.isArray(raw.line_ids) ? { line_ids: raw.line_ids.map((l) => l?.name === raw.name ? { ...l, name: prior.name } : l) } : {}),
       } : raw;
-      const rec = cleanRecord(model, merge(model, prior, submitted, d.bases?.[model]?.[raw.id]));
+      // FX provenance is server-derived from a newly staged settlement, never from submitted fields.
+      if (model === 'account.move' && prior && (submitted.fx_payment_move_id !== prior.fx_payment_move_id || submitted.fx_invoice_id !== prior.fx_invoice_id)) {
+        if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
+      }
+      const input = model === 'account.move' && !prior ? (({ fx_payment_move_id, fx_invoice_id, ...rest }) => rest)(submitted) : submitted;
+      const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id]));
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
       const old = current.get(rec.id);
@@ -378,6 +383,22 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       changed.push([model, rec]);
     }
     records = { ...records, [model]: list.sort((a, b) => a.id - b.id) };
+  }
+  // Reconstruct provenance only for new exchange entries referenced by newly added application rows.
+  const oldMoves = byId(db.records['account.move']);
+  const provenance = new Map();
+  for (const [model, record] of changed) {
+    if (model !== 'account.move') continue;
+    const oldRows = oldMoves.get(record.id)?.payments ?? [];
+    for (const row of (record.payments ?? []).slice(oldRows.length)) {
+      if (!row.payment_fx_move_id || oldMoves.has(row.payment_fx_move_id)) continue;
+      if (provenance.has(row.payment_fx_move_id)) throw new Error('Exchange entry is already used by another settlement');
+      provenance.set(row.payment_fx_move_id, { fx_payment_move_id: row.move_id, fx_invoice_id: record.id });
+    }
+  }
+  if (provenance.size) {
+    records = { ...records, 'account.move': (records['account.move'] ?? []).map((m) => provenance.has(m.id) ? { ...m, ...provenance.get(m.id) } : m) };
+    for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
   const seen = { ...db, records };
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;

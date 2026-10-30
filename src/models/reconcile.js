@@ -52,11 +52,11 @@ function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
   const balance = round(Math.abs(line.amount));
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance).filter((l) => l.value);
-  const unknown = counterparts.find((l) => !accountId(db, l.account_code));
+  const unknown = counterparts.find((l) => !accountId(db, l.account_code, line.company_id ?? 1));
   if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
   const { db: booked, id } = postEntry(db, {
-    journal: 'BNK1', date: line.date, ref: line.payment_ref,
+    journal: 'BNK1', date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
       { account: '101401', [incoming ? 'debit' : 'credit']: balance, partner_id },
       ...counterparts.map((l) => ({ account: l.account_code, [incoming ? 'credit' : 'debit']: l.value, partner_id, name: l.label || line.payment_ref })),

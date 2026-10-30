@@ -206,11 +206,10 @@ function Budget({ db }) {
   return (
     <tbody>
       {search(db, 'account.budget').filter((b) => b.state !== 'draft').flatMap((b) => {
-        const actual = analyticActuals(db, { from: b.date_from, to: b.date_to });
         return [
           <tr key={b.id} className="rep-section"><td colSpan={4}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
           ...(b.lines ?? []).map((l, i) => {
-            const a = actual.get(l.analytic_account_id) ?? 0;
+            const a = analyticActuals(db, { from: b.date_from, to: b.date_to, company_id: b.company_id, general_account: l.general_account }).get(l.analytic_account_id) ?? 0;
             return (
               <tr key={`${b.id}-${i}`} className="rep-detail">
                 <td>{read(db, 'account.analytic.account', l.analytic_account_id)?.name ?? '—'}</td>

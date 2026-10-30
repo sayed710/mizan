@@ -18,6 +18,7 @@ const outboundTypes = ['in_invoice', 'out_refund'];
 /** Why this line cannot settle this invoice/bill: not open, wrong direction (money in vs out) or more than is due. */
 export function matchError(line, move) {
   if (!move) return 'Select an invoice or bill to match';
+  if ((line.company_id ?? 1) !== (move.company_id ?? 1)) return 'The invoice belongs to another company';
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) return 'A bank transaction of 0 cannot be reconciled';
   if (move.state !== 'posted' || !(move.amount_residual > 0)) return `${move.name} has nothing left to pay`;
   const incoming = line.amount > 0;
@@ -34,7 +35,7 @@ export function matchError(line, move) {
 export function candidates(db, line) {
   const incoming = line.amount > 0;
   return search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && m.amount_residual > 0 && (incoming ? inboundTypes : outboundTypes).includes(m.move_type))
+    .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === (line.company_id ?? 1) && m.amount_residual > 0 && (incoming ? inboundTypes : outboundTypes).includes(m.move_type))
     .sort((a, b) => Number(b.partner_id === line.partner_id) - Number(a.partner_id === line.partner_id)
       || Math.abs(a.amount_residual - Math.abs(line.amount)) - Math.abs(b.amount_residual - Math.abs(line.amount)));
 }
@@ -62,7 +63,7 @@ function bookToAccount(db, line) {
   const lines = line.amount > 0
     ? [{ account: '101401', debit: value }, { account, credit: value }]
     : [{ account, debit: value }, { account: '101401', credit: value }];
-  const { db: booked, id } = postEntry(db, { journal: 'BNK1', date: line.date, ref: line.payment_ref, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
+  const { db: booked, id } = postEntry(db, { journal: 'BNK1', date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id }) };
 }
 

@@ -1,7 +1,7 @@
 // Fixed assets: depreciation boards and their posting.
 import { read, write } from '../orm.js';
 import { today } from './common.js';
-import { postEntry } from './ledger.js';
+import { accountId, journalId, postEntry } from './ledger.js';
 import { cents } from '../money.js';
 
 const DAY = 86400000;
@@ -50,15 +50,43 @@ export function depreciationBoard(asset) {
   });
 }
 
-function validate(asset) {
+function validate(db, asset) {
   if (!(Number(asset.original_value) > 0)) throw new Error('The original value must be positive');
   if (!Number.isInteger(Number(asset.method_number)) || Number(asset.method_number) < 1) throw new Error('The duration must be at least 1 period');
   if (!(Number(asset.salvage_value || 0) < Number(asset.original_value))) throw new Error('The not depreciable value must be lower than the original value');
   if (!asset.acquisition_date) throw new Error('Set an acquisition date');
+
+  const company = asset.company_id ?? 1;
+  if (asset.company_id && !read(db, 'res.company', asset.company_id)) throw new Error('Asset company does not exist');
+
+  const jId = asset.journal_id ?? journalId(db, 'MISC', company) ?? journalId(db, 'MISC');
+  if (!jId) throw new Error('Asset journal not found');
+  const j = read(db, 'account.journal', jId);
+  if (!j) throw new Error('Asset journal not found');
+  if (j.company_id && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
+
+  const assetAccId = asset.account_asset_id ?? accountId(db, '151000', company) ?? accountId(db, '151000');
+  if (assetAccId) {
+    const acc = read(db, 'account.account', assetAccId);
+    if (!acc) throw new Error('Asset account not found');
+    if (acc.company_id && acc.company_id !== company) throw new Error(`Asset account ${acc.code || acc.name} belongs to another company`);
+  }
+  const depAccId = asset.account_depreciation_id ?? accountId(db, '152000', company) ?? accountId(db, '152000');
+  if (depAccId) {
+    const acc = read(db, 'account.account', depAccId);
+    if (!acc) throw new Error('Asset account not found');
+    if (acc.company_id && acc.company_id !== company) throw new Error(`Depreciation account ${acc.code || acc.name} belongs to another company`);
+  }
+  const expAccId = asset.account_depreciation_expense_id ?? accountId(db, '680000', company) ?? accountId(db, '680000');
+  if (expAccId) {
+    const acc = read(db, 'account.account', expAccId);
+    if (!acc) throw new Error('Asset account not found');
+    if (acc.company_id && acc.company_id !== company) throw new Error(`Expense account ${acc.code || acc.name} belongs to another company`);
+  }
 }
 
 function computeBoard(db, asset) {
-  validate(asset);
+  validate(db, asset);
   const depreciation_ids = depreciationBoard(asset).map((l) => ({ ...l, posted: false, move_id: null }));
   return write(db, 'account.asset', asset.id, { depreciation_ids });
 }
@@ -71,11 +99,17 @@ export function confirmAsset(db, asset) {
 /** Post each unposted board line dated on or before `upTo`; the asset closes once all are posted. */
 export function postDepreciation(db, asset, upTo = today()) {
   if (asset.state !== 'open') return db;
+  validate(db, asset);
+  const company = asset.company_id ?? 1;
+  const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
+  const expAcc = asset.account_depreciation_expense_id ?? '680000';
+  const depAcc = asset.account_depreciation_id ?? '152000';
   const { db: next, lines } = (asset.depreciation_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, lines: [...acc.lines, l] };
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'MISC', date: l.date, ref: `${asset.name} depreciation ${l.date}`,
-      lines: [{ account: '680000', debit: l.amount }, { account: '152000', credit: l.amount }],
+      journal, date: l.date, ref: `${asset.name} depreciation ${l.date}`,
+      lines: [{ account: expAcc, debit: l.amount }, { account: depAcc, credit: l.amount }],
+      company,
     });
     return { db: booked, lines: [...acc.lines, { ...l, posted: true, move_id: id }] };
   }, { db, lines: [] });
@@ -87,6 +121,7 @@ export function disposeAsset(db, asset, { date, saleValue = 0 }) {
   if (!['open', 'paused'].includes(asset.state)) throw new Error('Only running or paused assets can be disposed');
   if (!date) throw new Error('Set a disposal date');
   if (!(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
+  validate(db, asset);
   const depreciated = postDepreciation(db, asset, date);
   const current = read(depreciated, 'account.asset', asset.id);
   const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
@@ -94,14 +129,18 @@ export function disposeAsset(db, asset, { date, saleValue = 0 }) {
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
   const sale = cents(saleValue);
   const loss = original - accumulated - sale;
+  const company = asset.company_id ?? 1;
+  const journal = asset.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
+  const assetAcc = asset.account_asset_id ?? '151000';
+  const depAcc = asset.account_depreciation_id ?? '152000';
   const lines = [
-    { account: '151000', credit: original / 100 },
-    accumulated > 0 && { account: '152000', debit: accumulated / 100 },
+    { account: assetAcc, credit: original / 100 },
+    accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
     sale > 0 && { account: '101401', debit: sale / 100 },
     loss > 0 && { account: '690300', debit: loss / 100 },
     loss < 0 && { account: '450300', credit: -loss / 100 },
   ].filter(Boolean);
-  const { db: booked } = postEntry(depreciated, { journal: 'MISC', date, ref: `${asset.name} disposal`, lines });
+  const { db: booked } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
   return write(booked, 'account.asset', asset.id, { depreciation_ids: kept, state: 'close', disposal_date: date, sale_value: sale / 100 });
 }
 
@@ -145,8 +184,13 @@ export const assetModels = {
       },
       disposal_date: { type: 'date', label: 'Disposal Date' },
       sale_value: { type: 'monetary', label: 'Sale Price' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account' },
+      account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
+      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
     },
-    defaults: () => ({ acquisition_date: today(), method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, state: 'draft', depreciation_ids: [] }),
+    defaults: () => ({ acquisition_date: today(), method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, state: 'draft', depreciation_ids: [], company_id: 1 }),
     groupBys: ['state', 'method'],
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'open' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'close' }]],
     kanban: { title: 'name', lines: ['original_value', 'book_value', 'method'], badge: 'state' },
@@ -164,7 +208,7 @@ export const assetModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'disposal_date', 'sale_value']],
+      groups: [['original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'disposal_date', 'sale_value', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id']],
       tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids'] }],
       chatter: true,
     },
