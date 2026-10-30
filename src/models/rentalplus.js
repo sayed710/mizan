@@ -31,11 +31,11 @@ export function holdDeposit(db, rentalId, amount) {
   const rental = rentalOf(db, rentalId);
   if (!Number.isFinite(amount) || round(amount) <= 0) throw new Error('Deposit amount must be positive');
   const value = round(amount);
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Deposit ${rental.name}`, lines: [
+  const booked = postEntry(db, { journal: 'BNK1', ref: `Deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
     { account: '101401', debit: value, partner_id: rental.partner_id },
     { account: '230100', credit: value, partner_id: rental.partner_id },
   ] });
-  return create(booked.db, 'rental.deposit', { rental_id: rentalId, amount: value, state: 'held', move_id: booked.id });
+  return create(booked.db, 'rental.deposit', { rental_id: rentalId, company_id: rental.company_id ?? 1, amount: value, state: 'held', move_id: booked.id });
 }
 
 /** Release the liability to bank and, for damage, other income; returns the new db. */
@@ -47,7 +47,7 @@ export function settleDeposit(db, depositId, { damage = 0, note } = {}) {
   const rental = rentalOf(db, deposit.rental_id);
   const withheld = round(damage), refund = round(deposit.amount - withheld);
   const partner_id = rental.partner_id;
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Settle deposit ${rental.name}`, lines: [
+  const booked = postEntry(db, { journal: 'BNK1', ref: `Settle deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
     { account: '230100', debit: deposit.amount, partner_id },
     ...(refund ? [{ account: '101401', credit: refund, partner_id }] : []),
     ...(withheld ? [{ account: '450000', credit: withheld, partner_id }] : []),

@@ -44,10 +44,11 @@ export function createSheet(db, expenseIds, { name } = {}) {
   if (lines.some((r) => !r)) throw new Error('Expense not found');
   if (lines.some((r) => r.sheet_id)) throw new Error('An expense is already in another report');
   if (lines.some((r) => r.state !== 'draft')) throw new Error('Only draft expenses can be reported');
+  if (lines.some((r) => (r.company_id ?? 1) !== (lines[0].company_id ?? 1))) throw new Error('All expenses must belong to the same company');
   const person = read(db, 'hr.employee', lines[0].employee_id);
   if (!person || lines.some((r) => r.employee_id !== person.id)) throw new Error('Select expenses from the same employee');
   const made = create(db, 'hr.expense.sheet', {
-    name: name || nextName(db, 'hr.expense.sheet', 'EXP/'), employee_id: person.id,
+    name: name || nextName(db, 'hr.expense.sheet', 'EXP/'), employee_id: person.id, company_id: lines[0].company_id ?? 1,
     manager_id: person.parent_id ?? null, payment_mode: lines[0].payment_mode, expense_line_ids: snapshots(lines),
   });
   const linked = lines.reduce((acc, r) => write(acc, 'hr.expense', r.id, { sheet_id: made.id }), made.db);
@@ -102,7 +103,7 @@ export function postSheet(db, id, date = today()) {
     const tax = round(Number(l.total_amount) - Number(l.total_amount) / (1 + Number(l.tax ?? 0) / 100));
     return [{ account, debit: round(Number(l.total_amount) - tax) }, ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(l.tax ?? 0)}%`, tax_side: 'purchase', tax_base: round(Number(l.total_amount) - tax) }] : [])];
   });
-  const booked = postEntry(contact.db, { journal: r.journal || 'MISC', date, ref: r.name,
+  const booked = postEntry(contact.db, { journal: r.journal || 'MISC', date, ref: r.name, company: r.company_id ?? 1,
     lines: [...debits, { account: own ? '211000' : '101401', credit: total(lines), partner_id: contact.id }],
   });
   const linked = lines.reduce((acc, l) => write(acc, 'hr.expense', l.id, { move_id: booked.id }), booked.db);
@@ -118,7 +119,7 @@ export function registerPayment(db, id, amount, date = today()) {
   const due = round(r.total_amount - (r.amount_paid || 0));
   if (!Number.isFinite(value) || value <= 0) throw new Error('Enter a positive reimbursement amount');
   if (value > due) throw new Error('Reimbursement exceeds the outstanding amount');
-  const booked = postEntry(db, { journal: 'BNK1', date, ref: `Reimbursement: ${r.name}`, lines: [
+  const booked = postEntry(db, { journal: 'BNK1', date, ref: `Reimbursement: ${r.name}`, company: r.company_id ?? 1, lines: [
     { account: '211000', debit: value, partner_id: r.partner_id }, { account: '101401', credit: value, partner_id: r.partner_id },
   ] });
   return transition(booked.db, r, value === due ? 'done' : 'post', value === due ? 'paid' : 'posted', { amount_paid: round((r.amount_paid || 0) + value) });

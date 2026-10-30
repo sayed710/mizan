@@ -74,6 +74,12 @@ export function reversePayment(db, p, date = today()) {
       // Legacy rows cannot disambiguate two identical payments: retain their conservative refusal until relinked.
       : l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount)));
   if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
+  // A posted legacy line without payment identity could represent any payment of its linked invoice.
+  // Do not guess from amount or reference; require the missing link to be repaired first.
+  const missingBatchLink = (db.records['account.batch.payment'] ?? []).some((batch) => batch.state === 'posted'
+    && (batch.lines ?? []).some((line) => !line.cancelled && !line.payment_id
+      && p.invoice_id && line.move_id === p.invoice_id));
+  if (missingBatchLink) throw new Error('Cannot reverse payment: a posted batch line is missing its payment_id; repair the payment link first');
   if (date < (p.date ?? entry.invoice_date)) throw new Error('Reversal date cannot be before the payment date');
   for (const m of search(db, 'account.move')) for (const x of m.payments ?? []) {
     if (x.move_id === entry.id && !x.reversed) {
@@ -136,7 +142,7 @@ export function reversePayment(db, p, date = today()) {
     const remaining = round(search(next, 'account.payment').filter((x) => x.sale_id === p.sale_id && x.state === 'posted').reduce((sum, x) => sum + Number(x.amount), 0));
     next = write(next, 'sale.order', p.sale_id, { amount_paid: remaining, payment_state: remaining > 0 ? 'paid' : 'pending' });
   }
-  for (const batch of search(next, 'account.batch.payment').filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
+  for (const batch of (next.records['account.batch.payment'] ?? []).filter((b) => b.state === 'posted' && b.lines?.some((l) => l.payment_id === p.id))) {
     next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, cancelled: true } : l) });
   }
   return postNote(next, 'account.payment', p.id, `Reversed by ${reversal.name}`);

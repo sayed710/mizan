@@ -608,15 +608,26 @@ const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.nam
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
 export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
 
-/** Record a reminder sent by hand: a note on the contact, the date, and the follow-up level it reached. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+const manualFollowUpGroups = (scope, partnerId, at, reminder, companyId) => {
   const f = reminder ?? followUps(scope, at).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
   const allGroups = followUpCompanies(f);
   const targetCompany = companyId ?? reminder?.company_id ?? null;
   const groups = targetCompany ? allGroups.filter((g) => g.company_id === targetCompany) : allGroups;
   if (!groups.length) throw new Error('This customer has no overdue invoices');
+  return groups;
+};
 
+/** Record preparation without claiming that the email was sent. */
+export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
+  return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
+    `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
+}
+
+/** Record a reminder confirmed sent by hand. */
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
   const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
 
   let nextDb = db;

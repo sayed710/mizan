@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { agedBalance, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
 import { companyViewDb, scopeAuditRows } from '../companyView.js';
@@ -182,7 +182,7 @@ const Aged = (kind) => function AgedBody({ db }) {
   );
 };
 
-function FollowUps({ db, sourceDb, companyId = 'all' }) {
+export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   const settingsAllowed = (sourceDb ?? db).settings?.allowed_company_ids ?? [currentCompany(sourceDb ?? db)];
   const allowed = companyId === 'all'
     ? settingsAllowed
@@ -223,8 +223,11 @@ function FollowUps({ db, sourceDb, companyId = 'all' }) {
                     <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
                     <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
                     {email && (
-                      <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                        onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Open Reminder in Mail App')}</a>
+                      <>
+                        <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                          onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Open Reminder in Mail App')}</a>{' '}
+                        <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Confirm Sent')}</button>
+                      </>
                     )}
                   </td>
                   <td className="num">{f.oldest}</td>
@@ -239,7 +242,7 @@ function FollowUps({ db, sourceDb, companyId = 'all' }) {
   }
 
   const singleCompanyId = allowed[0] ?? currentCompany(db);
-  const singleItems = companyGroups.get(singleCompanyId) ?? allFollowUps;
+  const singleItems = companyGroups.get(singleCompanyId) ?? [];
 
   return (
     <tbody>
@@ -252,8 +255,11 @@ function FollowUps({ db, sourceDb, companyId = 'all' }) {
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
               {email && (
-                <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                  onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: f.company_id ?? f.invoices[0]?.company_id ?? 1 }))}>{t('Open Reminder in Mail App')}</a>
+                <>
+                  <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                    onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Open Reminder in Mail App')}</a>{' '}
+                  <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Confirm Sent')}</button>
+                </>
               )}
             </td>
             <td className="num">{f.oldest}</td>

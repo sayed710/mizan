@@ -30,6 +30,11 @@ test('follow-up reminder logs only the selected company invoices and level for a
     const body = new URLSearchParams(props(link).href.split('?')[1]).get('body');
     assert.match(body, /VISIBLE-INV/); assert.doesNotMatch(body, /FOREIGN-INV/);
     await React.act(async () => props(link).onClick());
+    assert.match(getDb().messages.at(-1).body, /opened in mail app/);
+    assert.equal(getDb().records['res.partner'].find((p) => p.id === partner.id).followup_lines.length, 0);
+    const confirm = find(link.parentNode, (node) => node.tagName === 'BUTTON' && textOf(node) === 'Confirm Sent');
+    assert.ok(confirm);
+    await React.act(async () => props(confirm).onClick());
     const saved = getDb();
     const note = saved.messages.at(-1).body;
     assert.match(note, /Gentle/); assert.match(note, /VISIBLE-INV/); assert.doesNotMatch(note, /FOREIGN-INV|Final/);
@@ -304,6 +309,12 @@ test('follow-up report with several companies selected shows separate sections w
     assert.doesNotMatch(body2, /COMP1-INV/);
 
     await React.act(async () => props(links[0]).onClick());
+    assert.match(getDb().messages.at(-1).body, /opened in mail app/);
+    assert.equal(getDb().messages.at(-1).company_id, 1);
+    assert.equal(getDb().records['res.partner'].find((x) => x.id === partner.id).followup_lines.length, 0);
+    const confirm1 = find(links[0].parentNode, (node) => node.tagName === 'BUTTON' && textOf(node) === 'Confirm Sent');
+    assert.ok(confirm1);
+    await React.act(async () => props(confirm1).onClick());
     let saved = getDb();
     let note1 = saved.messages.at(-1).body;
     assert.match(note1, /Final Notice/);
@@ -314,6 +325,12 @@ test('follow-up report with several companies selected shows separate sections w
     assert.equal(line1?.followup_level_delay, 30, 'Company 1 gets 30-day level (40 days overdue)');
 
     await React.act(async () => props(links[1]).onClick());
+    assert.match(getDb().messages.at(-1).body, /opened in mail app/);
+    assert.equal(getDb().messages.at(-1).company_id, 2);
+    assert.equal(getDb().records['res.partner'].find((x) => x.id === partner.id).followup_lines.find((l) => l.company_id === 2), undefined);
+    const confirm2 = find(links[1].parentNode, (node) => node.tagName === 'BUTTON' && textOf(node) === 'Confirm Sent');
+    assert.ok(confirm2);
+    await React.act(async () => props(confirm2).onClick());
     saved = getDb();
     let note2 = saved.messages.at(-1).body;
     assert.match(note2, /Gentle/);

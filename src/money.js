@@ -4,10 +4,13 @@
 
 /** `n` rounded to `digits` decimals (2 by default). */
 export function round(n, digits = 2) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return 0;
   const factor = 10 ** digits;
-  const x = Number(n) * factor;
-  if (!Number.isFinite(x)) return 0;
-  return (Math.sign(x) * Math.round(Math.abs(x) * (1 + Number.EPSILON))) / factor || 0;
+  const x = num * factor;
+  const nudged = Math.abs(x) * (1 + Number.EPSILON);
+  if (!Number.isFinite(x) || !Number.isFinite(nudged)) throw new Error('Unrepresentable monetary amount');
+  return (Math.sign(x) * Math.round(nudged)) / factor || 0;
 }
 
 /** `n` as integer minor units (cents), rounded the same way. */

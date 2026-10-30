@@ -57,7 +57,7 @@ function writeOff(db, rule, line) {
   if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
   const { db: booked, id } = postEntry(db, {
-    journal: 'BNK1', date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
+    journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
       { account: '101401', [incoming ? 'debit' : 'credit']: balance, partner_id },
       ...counterparts.map((l) => ({ account: l.account_code, [incoming ? 'credit' : 'debit']: l.value, partner_id, name: l.label || line.payment_ref })),

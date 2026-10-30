@@ -31,6 +31,7 @@ export function cleanValue(field, value, where) {
       return value;
     case 'integer': case 'float': case 'monetary': case 'priority':
       if (typeof value !== 'number' || !Number.isFinite(value)) fail(where);
+      if (field.type === 'monetary' && !Number.isFinite(value * 100)) fail(where);
       return value;
     case 'many2one':
       if (typeof value === 'string') {

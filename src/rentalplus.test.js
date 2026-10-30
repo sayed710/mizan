@@ -7,6 +7,8 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { extraModels } from './models/extra.js';
 import { availability, bestPrice, holdDeposit, pickupPicking, rentalHours, rentalPlusModels, rentalSchedule, returnPicking, settleDeposit } from './models/rentalplus.js';
 import { seed } from './seed.js';
+import { accountingCompany, assertEntryCompany } from './test-support/accounting-company.js';
+import { applyDiff, diffDb } from './sync.js';
 import { migrate } from './migrations.js';
 
 const rental = (db, vals = {}) => create(db, 'sale.rental', {
@@ -208,6 +210,24 @@ for (const damage of [0, 35.25, 100]) {
     assert.deepEqual(base.db, snapshot);
   });
 }
+
+test('rental deposit hold and damage settlement stay in the rental company', () => {
+  const branch = accountingCompany(seed());
+  const order = rental(branch.db, { company_id: branch.id, state: 'reserved' });
+  const hold = models['sale.rental'].form.buttons.find((b) => b.label === 'Hold Deposit');
+  const result = hold.run(order.db, read(order.db, 'sale.rental', order.id), [100]);
+  const id = Number(result.go.split('/').at(-1));
+  const deposit = read(result.db, 'rental.deposit', id);
+  assert.equal(deposit.company_id, branch.id);
+  assertEntryCompany(assert, result.db, read(result.db, 'account.move', deposit.move_id), branch.id);
+  const settle = models['rental.deposit'].form.buttons.find((b) => b.label === 'Withhold for Damage');
+  const done = settle.run(result.db, deposit, [25, 'Damage']).db;
+  assertEntryCompany(assert, done, read(done, 'account.move', read(done, 'rental.deposit', id).settlement_move_id), branch.id);
+  const savedHold = applyDiff(order.db, diffDb(order.db, result.db), { isAdmin: true });
+  const saved = applyDiff(savedHold, diffDb(result.db, done), { isAdmin: true });
+  assert.equal(read(saved, 'rental.deposit', id).company_id, branch.id);
+  assertEntryCompany(assert, saved, read(saved, 'account.move', read(saved, 'rental.deposit', id).settlement_move_id), branch.id);
+});
 
 test('deposits reject missing records, nonpositive holds and invalid damage without changing the db', () => {
   const base = rental(seed());

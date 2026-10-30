@@ -163,6 +163,57 @@ test('reversed outbound batch payments cancel their check lines while preserving
   assert.equal(read(synced, 'account.batch.payment', batch.id).lines[0].cancelled, true);
 });
 
+test('batch reversal uses payment_id, not matching amounts or invoice references', () => {
+  const bill = invoice(seed(), 200, { move_type: 'in_invoice', force_post: true });
+  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
+  const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
+  const posted = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
+  const batchPaymentId = read(posted, 'account.batch.payment', batch.id).lines[0].payment_id;
+  const manual = payMove(posted, bill.id, 100);
+  const manualPayment = search(manual, 'account.payment').find((p) => p.invoice_id === bill.id && p.id !== batchPaymentId);
+  assert.ok(manualPayment);
+  const draft = create(manual, 'account.batch.payment', { batch_type: 'outbound', lines: [{ move_id: bill.id, amount: 100, payment_id: manualPayment.id }] });
+  const afterManual = reverse(draft.db, manualPayment.id);
+  assert.equal(read(afterManual, 'account.batch.payment', batch.id).lines[0].cancelled, false);
+  assert.equal(read(afterManual, 'account.batch.payment', draft.id).lines[0].cancelled, undefined);
+  const reversed = reverse(afterManual, batchPaymentId);
+  assert.equal(read(reversed, 'account.batch.payment', batch.id).lines[0].cancelled, true);
+  assert.equal(read(reversed, 'account.batch.payment', draft.id).lines[0].cancelled, undefined);
+  const synced = applyDiff(afterManual, diffDb(afterManual, reversed));
+  assert.equal(read(synced, 'account.batch.payment', batch.id).lines[0].payment_id, batchPaymentId);
+  assert.equal(read(synced, 'account.batch.payment', batch.id).lines[0].cancelled, true);
+});
+
+test('a posted batch line missing payment_id fails closed before payment reversal', () => {
+  const bill = invoice(seed(), 200, { move_type: 'in_invoice', force_post: true });
+  const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
+  const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
+  const posted = validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db;
+  const paymentId = read(posted, 'account.batch.payment', batch.id).lines[0].payment_id;
+  const legacy = { ...posted, records: { ...posted.records, 'account.batch.payment': posted.records['account.batch.payment'].map((b) => b.id === batch.id ? { ...b, lines: b.lines.map(({ payment_id, ...line }) => ({ ...line, amount: 77 })) } : b) } };
+  assert.throws(() => reverse(legacy, paymentId), /batch line.*missing.*payment_id/i);
+  assert.equal(read(legacy, 'account.payment', paymentId).state, 'posted');
+  assert.equal(read(legacy, 'account.move', bill.id).amount_residual, 100);
+  assert.equal(read(legacy, 'account.batch.payment', batch.id).lines[0].cancelled, false);
+  const unrelated = invoice(legacy, 50, { move_type: 'in_invoice', force_post: true });
+  const otherPaid = payMove(unrelated.db, unrelated.id, 50);
+  const otherPayment = search(otherPaid, 'account.payment').find((p) => p.invoice_id === unrelated.id);
+  const otherReversed = reverse(otherPaid, otherPayment.id);
+  assert.equal(read(otherReversed, 'account.payment', otherPayment.id).state, 'reversed');
+  assert.equal(read(otherReversed, 'account.batch.payment', batch.id).lines[0].cancelled, false);
+});
+
+test('a posted legacy batch line without invoice or payment links does not block unrelated reversal', () => {
+  const inv = invoice(seed(), 100);
+  const paid = payMove(inv.db, inv.id, 100, '2026-03-05');
+  const payment = search(paid, 'account.payment').find((p) => p.invoice_id === inv.id);
+  const batch = create(paid, 'account.batch.payment', { batch_type: 'outbound', state: 'posted', lines: [{ amount: 100 }] });
+  const reversed = reverse(batch.db, payment.id);
+  assert.equal(read(reversed, 'account.payment', payment.id).state, 'reversed');
+  assert.equal(read(reversed, 'account.move', inv.id).amount_residual, 100);
+  assert.deepEqual(read(reversed, 'account.batch.payment', batch.id).lines, read(batch.db, 'account.batch.payment', batch.id).lines);
+});
+
 test('reversing a payment with a linked release reverses exactly that entry', () => {
   const tax = search(seed(), 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)' && t.type_tax_use === 'sale');
   const inv = invoice(seed(), 100, { invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(tax) }] });

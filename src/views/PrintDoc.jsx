@@ -48,7 +48,7 @@ function Checks({ db, batch }) {
         <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
-      {(batch.lines ?? []).filter((l) => !l.cancelled && (!l.payment_id || read(db, 'account.payment', l.payment_id)?.state === 'posted')).map((l) => {
+      {(batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id && read(db, 'account.payment', l.payment_id)?.state === 'posted').map((l) => {
         const move = read(db, 'account.move', l.move_id);
         return (
           <article key={l.check_number ?? l.move_id} className="paper check">
