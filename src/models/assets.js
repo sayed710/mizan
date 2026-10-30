@@ -92,6 +92,7 @@ export function confirmAsset(db, asset) {
 
 /** Post each unposted board line dated on or before `upTo`; the asset closes once all are posted. */
 export function postDepreciation(db, asset, upTo = today()) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
   if (asset.state !== 'open') return db;
   validate(db, asset);
   const company = asset.company_id ?? 1;
@@ -111,10 +112,12 @@ export function postDepreciation(db, asset, upTo = today()) {
 }
 
 /** Post due depreciation, drop the rest of the board and book the sale or scrapping of the asset. */
-export function disposeAsset(db, asset, { date, saleValue = 0 }) {
-  if (!['open', 'paused'].includes(asset.state)) throw new Error('Only running or paused assets can be disposed');
+export function disposeAsset(db, asset, { date, saleValue = 0, invoiceId = null, invoiceLine = 0 }) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
+  if (!['open', 'paused', 'close'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be disposed');
   if (!date) throw new Error('Set a disposal date');
   if (!(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
+  if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
   validate(db, asset);
   const depreciated = postDepreciation(db, asset, date);
   const current = read(depreciated, 'account.asset', asset.id);
@@ -122,6 +125,10 @@ export function disposeAsset(db, asset, { date, saleValue = 0 }) {
   const original = cents(asset.original_value);
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
   const sale = cents(saleValue);
+  const invoice = invoiceId && read(depreciated, 'account.move', invoiceId);
+  if (invoiceId && (invoice?.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== (asset.company_id ?? 1))) throw new Error('Select a posted sale invoice in the asset company');
+  const saleLine = invoice && (invoice.line_ids ?? []).find((line) => (line.invoice_sources ?? []).some((source) => source.index === Number(invoiceLine)));
+  if (invoice && !saleLine) throw new Error('Sale invoice line not found');
   const loss = original - accumulated - sale;
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
@@ -130,23 +137,18 @@ export function disposeAsset(db, asset, { date, saleValue = 0 }) {
   const lines = [
     { account: assetAcc, credit: original / 100 },
     accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
-    sale > 0 && { account: '101401', debit: sale / 100 },
-    loss > 0 && { account: '690300', debit: loss / 100, analytic_distribution: asset.analytic_distribution },
-    loss < 0 && { account: '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
+    sale > 0 && { account: saleLine?.account_id ?? '101401', debit: sale / 100 },
+    loss > 0 && { account: asset.account_loss_id ?? '690300', debit: loss / 100, analytic_distribution: asset.analytic_distribution },
+    loss < 0 && { account: asset.account_gain_id ?? '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, state: 'close', disposal_date: date, sale_value: sale / 100 });
-}
-
-function sellOrDispose(db, r) {
-  const input = prompt('Sale price (0 to scrap the asset)', '0');
-  if (input == null) return { db };
-  return { db: disposeAsset(db, read(db, 'account.asset', r.id), { date: today(), saleValue: Number(input) }) };
+  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100 });
 }
 
 export const assetModels = {
   'account.asset': {
     label: 'Assets',
+    actions: { dispose: disposeAsset },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
       acquisition_date: { type: 'date', label: 'Acquisition Date' },
@@ -162,13 +164,13 @@ export const assetModels = {
       model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account' },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
-      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Model Expense Account (Fallback)' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       bill_id: { type: 'many2one', relation: 'account.move', label: 'Bill' },
       bill_line: { type: 'integer', label: 'Bill Line', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['open', 'Running'], ['paused', 'Paused'], ['close', 'Closed'], ['cancel', 'Cancelled']] },
-      book_value: { type: 'monetary', label: 'Book Value', readonly: true, compute: (r) => (cents(r.original_value) - cents(r.already_depreciated) - postedCents(r)) / 100 },
+      book_value: { type: 'monetary', label: 'Book Value', readonly: true, compute: (r) => r.disposal_date ? 0 : (cents(r.original_value) - cents(r.already_depreciated) - postedCents(r)) / 100 },
       depreciation_ids: {
         type: 'one2many',
         label: 'Depreciation Board',
@@ -182,10 +184,15 @@ export const assetModels = {
         },
         newLine: () => ({ date: today(), amount: 0, cumulated: 0, remaining: 0, posted: false, move_id: null }),
       },
+      cancelled_depreciation_ids: { type: 'one2many', label: 'Cancelled Depreciation', readonly: true, fields: {
+        date: { type: 'date', label: 'Date' }, amount: { type: 'monetary', label: 'Depreciation' }, cumulated: { type: 'monetary', label: 'Cumulative Depreciation' }, remaining: { type: 'monetary', label: 'Book Value' }, posted: { type: 'boolean', label: 'Posted' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' }, cancelled: { type: 'boolean', label: 'Cancelled' },
+      } },
       disposal_date: { type: 'date', label: 'Disposal Date' },
       sale_value: { type: 'monetary', label: 'Sale Price' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
-      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)' },
+      account_gain_id: { type: 'many2one', relation: 'account.account', label: 'Gain Account' },
+      account_loss_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
     },
     defaults: () => ({ acquisition_date: today(), method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, state: 'draft', depreciation_ids: [], company_id: 1 }),
     createDefaults: (db, vals) => {
@@ -226,12 +233,23 @@ export const assetModels = {
         { label: 'Post Depreciation', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: postDepreciation(db, read(db, 'account.asset', r.id)) }) },
         { label: 'Pause', when: (r) => r.state === 'open', vals: { state: 'paused' } },
         { label: 'Resume', primary: true, when: (r) => r.state === 'paused', vals: { state: 'open' } },
-        { label: 'Sell or Dispose', when: (r) => r.state === 'open', run: sellOrDispose },
+        { label: 'Sell or Dispose', when: (r) => ['open', 'paused', 'close'].includes(r.state) && !r.disposal_date,
+          wizard: (db, r) => ({ title: 'Sell or Dispose', fields: [
+            { name: 'date', type: 'date', label: 'Disposal Date', required: true, default: today() },
+            { name: 'sale_value', type: 'monetary', label: 'Sale Price', required: true, default: 0 },
+            { name: 'invoice_id', type: 'many2one', relation: 'account.move', label: 'Customer Invoice', domain: (invoice) => invoice.state === 'posted' && invoice.move_type === 'out_invoice' && (invoice.company_id ?? 1) === (r.company_id ?? 1) },
+            { name: 'invoice_line', type: 'selection', label: 'Invoice Line', dependsOn: 'invoice_id', options: (currentDb, values) => (read(currentDb, 'account.move', values.invoice_id)?.invoice_line_ids ?? []).map((line, index) => [String(index), line.name || read(currentDb, 'product', line.product_id)?.name || `#${index + 1}`]) },
+          ] }),
+          run: (db, r, values = {}) => {
+            if (values.invoice_id && (values.invoice_line == null || values.invoice_line === '')) throw new Error('Select a sale invoice line');
+            if (values.sale_value != null && (!Number.isFinite(Number(values.sale_value)) || Number(values.sale_value) < 0)) throw new Error('The sale price cannot be negative');
+            return { db: disposeAsset(db, r, { date: values.date ?? today(), saleValue: Number(values.sale_value ?? 0), invoiceId: values.invoice_id || null, invoiceLine: Number(values.invoice_line ?? 0) }) };
+          } },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
       groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_expense_id', 'account_depreciation_expense_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution', 'disposal_date', 'sale_value']],
-      tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids'] }],
+      tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids', 'cancelled_depreciation_ids'] }],
       chatter: true,
     },
   },
