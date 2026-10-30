@@ -175,7 +175,7 @@ export function seed() {
     { sequence: 3, code: 'GROSS', name: 'Gross', category: 'gross', amount_type: 'wage', base: '', value: 0, account: '' },
     { sequence: 4, code: 'NET', name: 'Net', category: 'net', amount_type: 'wage', base: '', value: 0, account: '' },
   ] });
-  [[2, 6000], [3, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
+  [[2, 6000], [4, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
 
   const wh = add('stock.location', { name: 'WH', usage: 'view' });
   ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));

@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from '../src/orm.js';
-import { modelsForApps } from '../src/models/index.js';
+import { models, modelsForApps } from '../src/models/index.js';
 import { closeSession, openSession, refundOrder, sessionTotals, startSession } from '../src/models/pos.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { runOperation } from '../src/operations.js';
@@ -10,6 +10,7 @@ import { seed } from '../src/seed.js';
 import { accountId } from '../src/models/ledger.js';
 import { receive } from '../src/models/valuation.js';
 import { runPosting } from './posting.js';
+import { postEntry } from '../src/models/ledger.js';
 
 const moves = (db) => search(db, 'account.move').length;
 const commitAsSystem = (db, next) => applyDiff(db, diffDb(db, next), { author: 'test', isAdmin: false, allowed: null });
@@ -101,6 +102,49 @@ test('a payroll-only user confirms a payslip through the posting button', () => 
   const saved = commitAsSystem(db, out.db);
   assert.equal(read(saved, 'hr.payslip', id).state, 'done');
   assert.ok(moves(saved) > moves(db));
+});
+
+test('server tax submission sync validates the linked closing against the ledger', () => {
+  let db = seed();
+  const type = search(db, 'account.return.type')[0];
+  const made = create(db, 'account.return', { name: 'Server VAT', type_id: type.id, company_id: 1, date_from: '2025-03-01', date_to: '2025-03-31' });
+  const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
+  db = review.run(made.db, read(made.db, 'account.return', made.id)).db;
+  const out = runPosting(db, null, '/api/button', { model: 'account.return', id: made.id, label: 'Submit' });
+  const diff = diffDb(db, out.db);
+  const altered = structuredClone(diff);
+  altered.upserts['account.move'][0].line_ids[0].debit = 1;
+  altered.upserts['account.move'][0].line_ids[1].credit = 1;
+  assert.throws(() => applyDiff(db, altered, { author: 'test', isAdmin: true }), /closing/i);
+  const saved = applyDiff(db, diff, { author: 'test', isAdmin: true });
+  const ret = read(saved, 'account.return', made.id);
+  assert.equal(ret.state, 'submitted');
+  assert.equal(read(saved, 'account.move', ret.closing_move_ids[0]).state, 'posted');
+});
+
+test('server direct-pay workflow syncs its linked closing and payment', () => {
+  let db = seed();
+  const type = search(db, 'account.return.type')[0];
+  db = create(db, 'res.partner.bank', { partner_id: type.payment_partner_id, account_number: 'SERVER-TAX-BANK' }).db;
+  db = postEntry(db, { journal: 'MISC', date: '2025-03-15', company: 1, lines: [
+    { account: '251000', credit: 140, tax_name: 'VAT' }, { account: '101401', debit: 140 },
+  ] }).db;
+  db = write(db, 'account.return.type', type.id, { states_workflow: 'generic_state_only_pay' });
+  const made = create(db, 'account.return', { name: 'Server direct VAT', type_id: type.id, company_id: 1, date_from: '2025-03-01', date_to: '2025-03-31' });
+  const out = runPosting(made.db, null, '/api/button', { model: 'account.return', id: made.id, label: 'Pay' });
+  const diff = diffDb(made.db, out.db);
+  const noClosing = structuredClone(diff);
+  noClosing.upserts['account.return'][0].closing_move_ids = [];
+  assert.throws(() => applyDiff(made.db, noClosing, { author: 'test', isAdmin: true }), /transition|closing/i);
+  const wrongAmount = structuredClone(diff);
+  wrongAmount.upserts['account.return'][0].total_amount_to_pay = 1;
+  assert.throws(() => applyDiff(made.db, wrongAmount, { author: 'test', isAdmin: true }), /transition|closing|payment/i);
+  const saved = applyDiff(made.db, diff, { author: 'test', isAdmin: true });
+  const ret = read(saved, 'account.return', made.id);
+  assert.equal(ret.state, 'paid');
+  assert.equal(read(saved, 'account.move', ret.closing_move_ids[0]).state, 'posted');
+  assert.equal(ret.total_amount_to_pay, 140);
+  assert.equal(read(saved, 'account.payment', ret.payment_id).state, 'posted');
 });
 
 test('users without the business document, and buttons not marked as posting, are refused', () => {

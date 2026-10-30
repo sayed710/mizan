@@ -77,11 +77,14 @@ test('the audit trail logs every change, keeps numbered entries and cannot be sw
 test('automatic reminders log each reached level once per customer', async () => {
   const { partnerFollowUp, runFollowUps } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
+  const { applyDiff, diffDb } = await import('./sync.js');
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
   const first = runFollowUps(db);
   assert.equal(partnerFollowUp(read(first, 'res.partner', 5), 1)?.followup_level_delay, 15);
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => m.body.includes('overdue \u2014 ')));
+  const synced = applyDiff(db, diffDb(db, first));
+  assert.ok(messagesOf(synced, 'res.partner', 5).some((m) => /First reminder: .* overdue — /.test(m.body)));
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
   const later = runFollowUps(first, addDays(today(), 12));
   assert.equal(partnerFollowUp(read(later, 'res.partner', 5), 1)?.followup_level_delay, 30);

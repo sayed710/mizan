@@ -45,7 +45,7 @@ export function reconcileWith(db, line, moveId) {
   const move = read(db, 'account.move', moveId);
   const err = matchError(line, move);
   if (err) throw new Error(err);
-  const paid = payMove(db, moveId, Math.abs(line.amount), line.date ?? today(), { journalId: line.journal_id });
+  const paid = payMove(db, moveId, Math.abs(line.amount), line.date ?? today(), { journalId: line.journal_id, ...(line.amount < 0 ? { statementLineId: line.id } : {}) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
   return write(paid, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: moveId, payment_move_id: paymentMove, partner_id: line.partner_id ?? move.partner_id });
 }

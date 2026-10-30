@@ -17,6 +17,7 @@ import { RecordAnalysis } from './Analysis.jsx';
 /** Integrations whose buttons fall back to only recording a send when not configured. */
 const SENDING = { smtp: 'Email', sms: 'SMS' };
 import { Wizard } from './Wizard.jsx';
+import { TaxReportTable } from './Reports.jsx';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -503,7 +504,9 @@ export function FormView({ leaf, id, base, params }) {
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {(tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
+                  {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
+                    <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id }} />
+                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
                     ? (
                       <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
                         readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />

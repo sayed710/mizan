@@ -86,7 +86,7 @@ const checkDeclared = (model, rec) => {
 
 function stripComputed(model, vals) {
   const fields = models[model].fields;
-  return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute));
+  return Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.compute || fields[k]?.type === 'one2many'));
 }
 
 let author = 'Admin';
@@ -116,7 +116,7 @@ export function create(db, model, vals) {
   const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
-  return {
+  const res = {
     db: {
       ...db,
       records: { ...db.records, [model]: [...(db.records[model] ?? []), rec] },
@@ -125,6 +125,7 @@ export function create(db, model, vals) {
     },
     id,
   };
+  return model === 'res.partner' ? { ...res, db: models[model].onWrite?.(res.db, rec, null, vals) ?? res.db } : res;
 }
 
 function trackingMessages(db, model, before, vals) {
@@ -146,16 +147,21 @@ function trackingMessages(db, model, before, vals) {
     });
 }
 
-/** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
-function prepareWrite(db, model, before, vals) {
+/** Apply onchange without mutating the original record. */
+function writeValues(db, model, before, vals) {
   const base = stripComputed(model, vals);
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
-  const after = { ...before, ...clean };
-  const err = validate(model, after, db) ?? models[model].guard?.(db, before, after);
+  return { after: { ...before, ...clean }, clean };
+}
+
+/** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
+function prepareWrite(db, model, before, vals) {
+  const result = writeValues(db, model, before, vals);
+  const err = validate(model, result.after, db) ?? models[model].guard?.(db, before, result.after);
   if (err) throw new Error(err);
-  checkDeclared(model, after);
-  return { after, clean };
+  checkDeclared(model, result.after);
+  return result;
 }
 
 export function write(db, model, id, vals) {
@@ -168,6 +174,30 @@ export function write(db, model, id, vals) {
     messages: [...db.messages, ...trackingMessages(db, model, before, clean)],
   };
   return models[model].onWrite?.(next, after, before, clean) ?? next;
+}
+
+/** Validate simultaneous updates against their complete final state, then apply them immutably. */
+export function writeManyAtomic(db, model, updates) {
+  if (!updates.size) return db;
+  const list = db.records[model] ?? [];
+  const byId = new Map(list.map((record) => [record.id, record]));
+  const changes = new Map();
+  for (const [id, vals] of updates) {
+    const before = byId.get(id);
+    if (!before) throw new Error(`${model} #${id} not found`);
+    changes.set(id, { before, vals, ...writeValues(db, model, before, vals) });
+  }
+  let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
+  for (const { before, after } of changes.values()) {
+    const error = validate(model, after, next) ?? models[model].guard?.(next, before, after);
+    if (error) throw new Error(error);
+    checkDeclared(model, after);
+  }
+  next = { ...next, messages: [...db.messages, ...[...changes.values()].flatMap(({ before, clean }) => trackingMessages(db, model, before, clean))] };
+  for (const { before, after, vals } of changes.values()) {
+    next = models[model].onWrite?.(next, after, before, vals) ?? next;
+  }
+  return next;
 }
 
 /**

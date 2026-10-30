@@ -10,6 +10,9 @@ const PURCHASE_METHOD = [['purchase', 'On ordered quantities'], ['receive', 'On 
 /** Top-level fields per model. */
 const FIELDS = {
   'account.move': {
+    is_tax_closing: hidden('boolean', 'Closing Entry'),
+    is_tax_payment: hidden('boolean', 'Tax Payment'),
+    tax_return_id: m2o('account.return', 'Tax Return'),
     is_closing: hidden('boolean', 'Closing Entry'), // closing.js: year-end entries are excluded from the P&L
     force_post: hidden('boolean', 'Post Despite Quantity Mismatch'), // billcontrol.js
     revaluation_date: hidden('date', 'Revaluation Date'), // closing.js: one revaluation per date

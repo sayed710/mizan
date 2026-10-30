@@ -1,6 +1,6 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useEffect, useState } from 'react';
-import { models } from './models/index.js';
+import { models, targetOf } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
@@ -44,7 +44,7 @@ export function display(db, field, value, rec = null) {
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
-    case 'many2many': return (value ?? []).map((id) => { const r = read(db, field.relation, id); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
+    case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
     case 'distribution': return JSON.stringify(value);
@@ -262,25 +262,38 @@ function DistributionInput({ value, onChange, ...props }) {
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
-  if (readonly || field.readonly || field.compute) {
-    if (field.type === 'many2many' && field.relation && Array.isArray(value)) {
-      return (
-        <span className="readonly">
-          {value.map((valId, i) => {
-            const r = read(db, field.relation, valId);
-            const labelText = r?.display_name ?? r?.name ?? `#${valId}`;
-            return (
-              <span key={valId}>
-                {i > 0 && ', '}
-                <a href={`#/open/${field.relation}/${valId}`}>{labelText}</a>
-              </span>
-            );
-          })}
-        </span>
-      );
-    }
-    return <span className="readonly">{display(db, field, value, record)}</span>;
+  if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
+    return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
+      const related = read(db, field.relation, valId);
+      return <span key={valId}>{i > 0 && ', '}<a href={`#/open/${field.relation}/${valId}`}>{related?.display_name ?? related?.name ?? `#${valId}`}</a></span>;
+    })}</span>;
   }
+  if (field.type === 'many2many') {
+    const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
+    const locked = readonly || field.readonly || field.compute;
+    const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
+    const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record)));
+    return (
+      <div className="many2many-tags">
+        {ids.map((item) => {
+          const related = read(db, field.relation, item);
+          const name = related?.display_name ?? related?.name ?? `#${item}`;
+          return <span key={item} className="tag">
+            {target !== '#/' && related ? <a href={`${target}/${item}`} className="tag-link">{name}</a> : name}
+            {!locked && <button type="button" aria-label={`${t('Remove')} ${name}`} onClick={() => onChange(ids.filter((i) => i !== item))}>×</button>}
+          </span>;
+        })}
+        {!locked && <select id={id} aria-label={label} aria-required={field.required || undefined} value="" onChange={(e) => {
+          const selected = Number(e.target.value);
+          if (candidates.some((candidate) => candidate.id === selected)) onChange([...ids, selected]);
+        }}>
+          <option value="">{t('Add')}</option>
+          {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.display_name ?? candidate.name ?? `#${candidate.id}`}</option>)}
+        </select>}
+      </div>
+    );
+  }
+  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
   const text = (type = 'text', extra = {}) => (
@@ -309,10 +322,6 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
           {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
-    case 'many2many':
-      return <select {...a11y} multiple value={(value ?? []).map(String)} onChange={(e) => onChange(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
-        {relationCandidates(db, field.relation).filter((r) => !field.domain || field.domain(r, record) || (value ?? []).includes(r.id)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
-      </select>;
     case 'priority': return <Stars value={value} onChange={onChange} />;
     case 'binary': return <FileInput id={id} value={value} onChange={onChange} />;
     case 'tags': return <TagsInput id={id} value={value} onChange={onChange} />;

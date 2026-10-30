@@ -1,4 +1,4 @@
-import { create, postNote, read, write } from '../orm.js';
+import { create, postNote, read, search, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
@@ -6,13 +6,14 @@ import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
-import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
+import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { cashRound, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
 import { t } from '../i18n.js';
 import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
+import { resolveAndValidateRecipientBank } from './partnerbank.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -161,10 +162,16 @@ export function postMove(db, id) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
+  const resolvedLines = (r.invoice_line_ids ?? []).map((line) => {
+    if (line.analytic_distribution && Object.keys(line.analytic_distribution).length > 0) return line;
+    const dist = distributionOfLine(line, db, r);
+    return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
+  });
+  const updatedR = { ...r, invoice_line_ids: resolvedLines };
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id);
-  const line_ids = [...invoiceLines(db, { ...r, name }), ...priceDifferenceLines(db, { ...r, name })];
+  const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: r.invoice_line_ids }), id);
+  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
@@ -259,12 +266,27 @@ function draftAssetsFromBill(db, bill) {
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
   const value = Math.min(amount, residual(r));
   if (!(value > 0)) return db;
+  const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
+  if (paymentId && (!payRec || payRec.partner_id !== r.partner_id || payRec.payment_type !== (isInbound(r) ? 'inbound' : 'outbound') || payRec.partner_type !== (isPurchase(r) ? 'supplier' : 'customer'))) {
+    throw new Error('Payment must match the invoice partner and direction');
+  }
+  // Matching an existing bank statement records money already sent, rather than authorizing a new payout.
+  const statement = statementLineId ? read(db, 'account.bank.statement.line', statementLineId) : null;
+  if (statementLineId && (!statement || statement.state !== 'to_check' || statement.amount >= 0 || isInbound(r)
+    || round2(Math.abs(Number(statement.amount))) !== round2(Number(amount)) || (statement.date ?? today()) !== date)) {
+    throw new Error('Invalid bank statement settlement');
+  }
+  let recipientBankId = null;
+  if (isPurchase(r) && !isInbound(r) && !statement) {
+    recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id });
+    if (recipientBankId && !r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
+  }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
   const excess = Math.round((amount - value) * 100) / 100;
   const sale = isInbound(r);
@@ -286,7 +308,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       ? [{ account: via.account, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: via.account, credit: bank + extra, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -423,7 +445,10 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
-const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+const invoiceLineField = { ...invoiceLineBase, onchange: (line, key, db, move) => {
+  const updated = invoiceLineBase.onchange(line, key, db, move);
+  return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) } : updated;
+}, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
@@ -530,10 +555,23 @@ export const accountingModels = {
     },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db) => {
-      if (key === 'partner_id' && r.partner_id) {
-        const term = read(db, 'res.partner', r.partner_id)?.property_payment_term_id;
-        const fiscal = { fiscal_position_id: fiscalPositionFor(db, r.partner_id) };
-        return term ? { ...fiscal, invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : fiscal;
+      if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
+        const partnerChange = key === 'partner_id';
+        const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
+        const fiscal = partnerChange ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id) } : {};
+        const partnerBank = partnerChange && isPurchase(r)
+          ? search(db, 'res.partner.bank').find((b) => b.partner_id === r.partner_id && b.allow_out_payment && b.active !== false)?.id ?? null
+          : null;
+        const context = { ...r, ...fiscal };
+        const linesUpdate = Array.isArray(r.invoice_line_ids)
+          ? { invoice_line_ids: r.invoice_line_ids.map((line) => ({ ...line, analytic_distribution: defaultDistributionForLine(db, line, context, line.analytic_distribution ?? {}) })) }
+          : {};
+        return {
+          ...fiscal,
+          ...(partnerBank ? { partner_bank_id: partnerBank } : {}),
+          ...linesUpdate,
+          ...(term ? { invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {}),
+        };
       }
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
@@ -542,7 +580,9 @@ export const accountingModels = {
       move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
+      date: { type: 'date', label: 'Accounting Date' },
       invoice_date: { type: 'date', label: 'Date' },
       invoice_date_due: { type: 'date', label: 'Due Date' },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
@@ -557,7 +597,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
@@ -801,7 +841,7 @@ Object.assign(accountingModels, {
       warnings: { type: 'text', label: 'Warnings', readonly: true },
       entries_count: { type: 'integer', label: 'Number of Entries to Secure', readonly: true },
       move_to_hash_ids: { type: 'many2many', relation: 'account.move', label: 'Entries to Secure', readonly: true },
-      not_hashable_unlocked_move_ids: { type: 'many2many', relation: 'account.move', label: 'Draft Entries', readonly: true },
+      not_hashable_unlocked_move_ids: { type: 'many2many', relation: 'account.move', label: 'Draft Entries', readonly: true, openDirect: true },
       chains_to_hash_with_gaps: { type: 'char', label: 'Chains with Gaps', readonly: true },
     },
     onchange: (r, key, db) => {

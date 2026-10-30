@@ -7,6 +7,7 @@ import { migrateDocumentTags } from './models/signplus.js';
 import { migrateWorkorderTimes } from './models/workorder.js';
 import { ensureQuants } from './models/quant.js';
 import { migrateTimeOff } from './models/timeoff.js';
+import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
@@ -397,6 +398,54 @@ export function migrateFollowUps(db) {
   return { ...db, records: { ...db.records, 'res.partner': partners } };
 }
 
+/** Free-text bank_account on partners becomes res.partner.bank records. */
+export function migratePartnerBankAccounts(db) {
+  if (!db?.records) return db;
+  const partners = db.records['res.partner'] ?? [];
+  const existingBanks = db.records['res.partner.bank'] ?? [];
+  const banks = [...existingBanks];
+  let maxId = Math.max(0, db.seq?.['res.partner.bank'] ?? 0, ...banks.map((b) => b.id ?? 0));
+
+  const updatedPartners = partners.map((p) => {
+    if (!p.bank_account || !sanitizeAccountNumber(p.bank_account)) return p;
+    const { bank_account, ...rest } = p;
+    const sanitized = sanitizeAccountNumber(bank_account);
+    const existingIndex = banks.findIndex((b) => b.partner_id === p.id && (b.sanitized_account_number === sanitized || sanitizeAccountNumber(b.account_number) === sanitized));
+    if (existingIndex >= 0) {
+      const existing = banks[existingIndex];
+      if (existing.account_number !== bank_account) {
+        banks[existingIndex] = { ...existing, legacy_account_numbers: [...new Set([...(existing.legacy_account_numbers ?? []), bank_account])] };
+      }
+    } else {
+      maxId += 1;
+      banks.push({
+        id: maxId,
+        partner_id: p.id,
+        account_number: bank_account,
+        sanitized_account_number: sanitized,
+        allow_out_payment: true,
+        active: true,
+      });
+    }
+    return rest;
+  });
+
+  const nextSeq = Math.max(db.seq?.['res.partner.bank'] ?? 0, maxId);
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'res.partner': updatedPartners,
+      'res.partner.bank': banks,
+    },
+    seq: {
+      ...(db.seq ?? {}),
+      'res.partner.bank': nextSeq,
+    },
+  };
+}
+
 export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
@@ -414,6 +463,7 @@ export const MIGRATIONS = [
   { version: 12, name: 'Follow-ups: store follow-up progress per partner and company', up: migrateFollowUps },
   { version: 13, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
   { version: 14, name: 'Rental: flag legacy billing counters for review', up: migrateLegacyRentalBilling },
+  { version: 15, name: 'Partners: migrate free-text bank accounts to res.partner.bank', up: migratePartnerBankAccounts },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

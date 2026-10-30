@@ -82,6 +82,11 @@ export function invoiceBaseGroups(db, move) {
   return [...byAccount.values()];
 }
 
+/** Resolve the same account used by the journal grouping. */
+export function invoiceLineAccount(db, move, line) {
+  return invoiceBaseGroups(db, { ...move, invoice_line_ids: [line] })[0]?.account ?? null;
+}
+
 /** Split a posted journal item's company cents across its contributing lines. */
 export function allocateJournalSources(amount, sources, rate = 1) {
   if (!sources.length) return [];
@@ -189,7 +194,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -216,8 +221,10 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
   return create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, ref, ...(company ? { company_id: company } : {}),
+    move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
+    ...(is_tax_payment ? { is_tax_payment: true } : {}),
+    ...(tax_return_id ? { tax_return_id } : {}),
   });
 }
 
@@ -228,11 +235,29 @@ export function paymentJournal(db, journalId) {
   return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
 }
 
-/** Posted journal items with their move date, optionally limited to [from, to]. */
-export function journalItems(db, { from, to } = {}) {
+/** Posted journal items with their move date, optionally limited to [from, to] and company. */
+export function journalItems(db, { from, to, company_id, company } = {}) {
+  const targetCompany = company_id ?? company;
+  const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
+  const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
   return search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && (!from || m.invoice_date >= from) && (!to || m.invoice_date <= to))
-    .flatMap((m) => (m.line_ids ?? []).map((l) => ({ ...l, move_id: m.id, move_name: m.name, date: m.invoice_date, is_closing: !!m.is_closing })));
+    .filter((m) => m.state === 'posted'
+      && (!from || (m.invoice_date ?? m.date) >= from)
+      && (!to || (m.invoice_date ?? m.date) <= to)
+      && (!targetCompany || (m.company_id ?? 1) === targetCompany))
+    .flatMap((m) => {
+      const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
+      const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
+      return (m.line_ids ?? []).map((l) => ({
+        ...l,
+        move_id: m.id,
+        move_name: m.name,
+        date: m.invoice_date ?? m.date,
+        is_closing: !!m.is_closing,
+        is_tax_closing: isTaxClosing,
+        is_tax_payment: isTaxSettlement,
+      }));
+    });
 }
 
 /** Balance per account (debit − credit) over the given items. */
