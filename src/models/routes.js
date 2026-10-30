@@ -5,6 +5,8 @@ import { postEntry } from './ledger.js';
 import { capitalizeStock } from './valuation.js';
 import { round } from '../money.js';
 import { getForecast, orderOrderpoints } from './orderpoint.js';
+import { rateAt } from './currency.js';
+import { convert, convertPrice, uomForLegacy } from './uom.js';
 
 
 /**
@@ -53,11 +55,20 @@ export function procure(db, order) {
 }
 
 /** Best vendor pricelist line for a product: valid dates, min quantity, then sequence and price. */
-export function vendorPrice(db, productId, { partnerId, qty = 1, date = today() } = {}) {
+export function vendorPrice(db, productId, { partnerId, qty = 1, date = today(), currencyId = null, companyId = null, uomId = null } = {}) {
+  const product = read(db, 'product', productId);
+  const orderUnit = uomId ?? product?.uom_po_id ?? product?.uom_id ?? uomForLegacy(db, product?.uom ?? 'unit')?.id;
   const info = search(db, 'product.supplierinfo').filter((s) => s.product_id === productId && (!partnerId || s.partner_id === partnerId)
-    && Number(s.min_qty ?? 0) <= qty && (!s.date_start || s.date_start <= date) && (!s.date_end || s.date_end >= date))
+    && Number(s.min_qty ?? 0) <= (s.uom_id && orderUnit ? convert(db, qty, orderUnit, s.uom_id, { round: false }) : qty)
+    && (!s.date_start || s.date_start <= date) && (!s.date_end || s.date_end >= date))
     .sort((a, b) => Number(a.sequence ?? 10) - Number(b.sequence ?? 10) || Number(a.price) - Number(b.price) || a.id - b.id)[0];
-  return info ? { price: Number(info.price), delay: Number(info.delay ?? 0), partner_id: info.partner_id } : null;
+  if (!info) return null;
+  const legacyCurrency = info.currency && search(db, 'res.currency').find((c) => c.name === info.currency);
+  const sourceCurrency = info.currency_id ?? legacyCurrency?.id ?? null;
+  if (info.currency && !sourceCurrency && info.currency !== (db.settings?.currency ?? 'USD')) throw new Error(`Currency ${info.currency} not found`);
+  const unitPrice = info.uom_id && orderUnit ? convertPrice(db, info.price, info.uom_id, orderUnit) : Number(info.price);
+  const price = unitPrice / rateAt(db, sourceCurrency, date, companyId) * rateAt(db, currencyId, date, companyId);
+  return { price, delay: Number(info.delay ?? 0), partner_id: info.partner_id };
 }
 
 /**

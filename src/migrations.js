@@ -11,6 +11,7 @@ import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
 import { journalId } from './models/ledger.js';
+import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -273,6 +274,7 @@ export const MIGRATIONS = [
   { version: 8, name: 'Product categories: preserve and link legacy names', up: migrateProductCategories },
   { version: 9, name: 'CRM and task stages: configurable models, lost reasons, tags', up: migrateStages },
   { version: 10, name: 'POS: migrate payment methods', up: migratePosMethods },
+  { version: 11, name: 'Rental: flag legacy billing counters for review', up: migrateLegacyRentalBilling },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

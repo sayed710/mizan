@@ -159,11 +159,12 @@ export function write(db, model, id, vals) {
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
   const { after, clean } = prepareWrite(db, model, before, vals);
-  return {
+  const next = {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
     messages: [...db.messages, ...trackingMessages(db, model, before, clean)],
   };
+  return models[model].onWrite?.(next, after, before, clean) ?? next;
 }
 
 /**
@@ -184,11 +185,12 @@ export function writeMany(db, model, updates) {
     written.set(id, after);
     tracked.push(...trackingMessages(db, model, before, clean));
   }
-  return {
+  const next = {
     ...db,
     records: { ...db.records, [model]: list.map((r) => written.get(r.id) ?? r) },
     messages: tracked.length ? [...db.messages, ...tracked] : db.messages,
   };
+  return [...written].reduce((acc, [id, after]) => models[model].onWrite?.(acc, after, byId.get(id), updates.get(id)) ?? acc, next);
 }
 
 /** Add several chatter notes at once: `notes` are [model, id, body]. */

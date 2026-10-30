@@ -148,10 +148,10 @@ export function orderOrderpoints(db, ids) {
     } else {
       // Buy route: creates or extends draft RFQ for the vendor
       const suppliers = search(next, 'product.supplierinfo').filter((s) => s.product_id === op.product_id);
-      let best = vendorPrice(next, op.product_id, { qty });
+      let best = vendorPrice(next, op.product_id, { qty, companyId: op.company_id });
       if (!best && !prod?.vendor_id && suppliers.length > 0) {
         const minSupp = Math.min(...suppliers.map((s) => Number(s.min_qty) || 0));
-        best = vendorPrice(next, op.product_id, { qty: Math.max(qty, minSupp) });
+        best = vendorPrice(next, op.product_id, { qty: Math.max(qty, minSupp), companyId: op.company_id });
       }
       const vendor = best?.partner_id ?? prod?.vendor_id;
       if (!vendor) continue; // no valid vendor
@@ -170,10 +170,11 @@ export function orderOrderpoints(db, ids) {
         if (lineIdx >= 0) {
           const line = lines[lineIdx];
           const newQty = Math.max(Number(line.qty) || 0, qty);
-          const newPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty: newQty })?.price ?? line.price_unit;
+          const newPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty: newQty, currencyId: existingRfq.currency_id, companyId: existingRfq.company_id, uomId: line.uom_id, date: existingRfq.date_order || today() })?.price ?? line.price_unit;
           lines[lineIdx] = { ...line, qty: newQty, price_unit: newPrice };
         } else {
-          lines.push({ product_id: op.product_id, qty, price_unit: priceUnit, tax });
+          const existingPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty, currencyId: existingRfq.currency_id, companyId: existingRfq.company_id, date: existingRfq.date_order || today() })?.price ?? priceUnit;
+          lines.push({ product_id: op.product_id, qty, price_unit: existingPrice, tax });
         }
         const vals = {
           order_line: lines,

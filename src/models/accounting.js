@@ -5,9 +5,9 @@ import { accountDeleteGuard, lockedSettlementInvariant, moveDeleteGuard, moveGua
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
-import { syncInvoicedQty } from './sales.js';
+import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
-import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
+import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { round as round2 } from '../money.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
@@ -48,8 +48,28 @@ export function paymentGuard(db, before, after) {
     if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.correction_of_id === note.id && m.state !== 'cancel')) return 'This credit note already has a correction';
     if (after.state === 'posted' && round2(total(after)) !== round2(total(note))) return 'A correction must restore the full credit note amount';
   }
-  if (after.state === 'posted' && isInvoice(after) && !(total(after) > 0)) return 'The total must be positive; use a credit note or refund instead';
+  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after)) return 'The total must be positive; use a credit note or refund instead';
+  // Any sales invoice can overcommit an order with advances, not just an advance itself.
+  if (after.state === 'posted' && before?.state !== 'posted' && after.move_type === 'out_invoice' && after.sale_id
+    && [after, ...(db.records['account.move'] ?? []).filter((m) => m.sale_id === after.sale_id && m.state === 'posted')]
+      .some((m) => (m.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0))) {
+    const order = read(db, 'sale.order', after.sale_id);
+    if (order) {
+      const moves = [...(db.records['account.move'] ?? []).filter((m) => m.id !== after.id && m.sale_id === after.sale_id
+        && m.state === 'posted' && ['out_invoice', 'out_refund'].includes(m.move_type)), after];
+      if (downPaymentOvercommitted(order, moves)) return 'Down payment exceeds the remaining order amount';
+    }
+  }
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
+  // A posted credit may have enabled an advance; resetting it must not undo that protection.
+  if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
+    const order = read(db, 'sale.order', before.sale_id);
+    const moves = (db.records['account.move'] ?? []).filter((m) => m.id !== before.id && m.sale_id === before.sale_id
+      && m.state === 'posted' && ['out_invoice', 'out_refund'].includes(m.move_type));
+    if (order && moves.some((m) => m.move_type === 'out_invoice' && (m.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0))) {
+      if (downPaymentOvercommitted(order, moves)) return 'Down payment exceeds the remaining order amount';
+    }
+  }
   if (leavesPosted && (Number(before.amount_paid) > 0)) return 'Paid invoices cannot be reset or cancelled; reverse the payment with a credit note instead';
   if (leavesPosted && settlingEntries(db).has(before.id)) return 'This entry settles an invoice payment and cannot be reset or cancelled';
   // The books of a settlement entry are fixed once an invoice records it as a payment.
@@ -88,9 +108,16 @@ export function paymentGuard(db, before, after) {
   return null;
 }
 
+const validInvoiceTotal = (r) => total(r) > 0 || (total(r) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
-  const r = read(db, 'account.move', id);
+  let r = read(db, 'account.move', id);
+  const order = r.move_type === 'out_invoice' && r.sale_id && !r.correction_of_id && read(db, 'sale.order', r.sale_id);
+  if (order && (r.invoice_line_ids ?? []).some((l) => !l.down_payment_key)
+    && !(r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0)) {
+    r = { ...r, invoice_line_ids: refreshAdvanceDeductions(db, order, r.invoice_line_ids, id) };
+  }
   const year = (r.invoice_date ?? today()).slice(0, 4);
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
   if (!isInvoice(r)) {
@@ -100,14 +127,14 @@ export function postMove(db, id) {
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  if (!(total(r) > 0)) throw new Error('The total must be positive; use a credit note or refund instead');
+  if (!validInvoiceTotal(r)) throw new Error('The total must be positive; use a credit note or refund instead');
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
   const line_ids = [...invoiceLines(db, { ...r, name }), ...priceDifferenceLines(db, { ...r, name })];
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
+  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: r.invoice_line_ids }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...r, name }) : posted;
 }
@@ -292,9 +319,10 @@ export function creditNote(db, r) {
   if (round2(credited) >= round2(total(r))) throw new Error(`${r.name} is already fully credited`);
   const { db: next, id } = create(db, 'account.move', {
     move_type: purchase ? 'in_refund' : 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(), reversed_entry_id: r.id,
+    sale_id: r.sale_id ?? null, purchase_id: r.purchase_id ?? null, company_id: r.company_id,
     invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })), ref: `Reversal of ${r.name}`, currency_id: r.currency_id ?? null, fiscal_position_id: r.fiscal_position_id ?? null,
   });
-  return { db: next, go: `#/accounting/${purchase ? 'refunds' : 'credit-notes'}/${id}` };
+  return { db: syncInvoicedQty(next, read(next, 'account.move', id)), go: `#/accounting/${purchase ? 'refunds' : 'credit-notes'}/${id}` };
 }
 
 /** Correct an issued credit with a fresh debit invoice; never reopen or erase its historical settlement. */
@@ -353,7 +381,7 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
-const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } } };
+const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
@@ -421,6 +449,10 @@ export const accountingModels = {
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
+    onWrite: (db, after, before, vals) => {
+      if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
+      return syncInvoicedQty(syncInvoicedQty(db, before), after);
+    },
     // The partner's payment term becomes the default; the term and invoice date drive the due date.
     onchange: (r, key, db) => {
       if (key === 'partner_id' && r.partner_id) {
@@ -465,6 +497,7 @@ export const accountingModels = {
         compute: paymentState,
         options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid']],
       },
+      should_be_paid: { type: 'selection', label: 'Should Be Paid', compute: (r, db) => shouldBePaid(db, r), options: [['yes', 'Yes'], ['exception', 'Exception']] },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
       // Set by fiscal closing and exchange revaluation only.
@@ -498,6 +531,8 @@ export const accountingModels = {
       lockedWhen: (r) => r.state !== 'draft',
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
+        { label: 'Approve for Payment', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted' && r.should_be_paid === 'exception', run: (db, r) => ({ db: write(db, 'account.move', r.id, { force_post: true }) }) },
+        { label: 'Reset Payment Review', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted' && r.force_post, run: (db, r) => ({ db: write(db, 'account.move', r.id, { force_post: false }) }) },
         // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
@@ -511,7 +546,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'payment_date', 'should_be_paid']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

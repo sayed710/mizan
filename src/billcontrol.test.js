@@ -87,6 +87,20 @@ test('ordered policy bills before receipt and cancelled draft bills release quan
   assert.equal(billableLines(cancelled, out.id)[0].toBill, 10);
 });
 
+test('editing a draft vendor bill releases the uninvoiced quantity on its purchase order', () => {
+  const out = order();
+  const configured = write(out.db, 'product', 1, { purchase_method: 'purchase' });
+  const confirmed = run(configured, 'purchase.order', out.id, 'Confirm Order').db;
+  const billed = run(confirmed, 'purchase.order', out.id, 'Create Bill').db;
+  const move = search(billed, 'account.move').find((m) => m.purchase_id === out.id);
+  const edited = write(billed, 'account.move', move.id, { invoice_line_ids: move.invoice_line_ids.map((l) => ({ ...l, qty: 6 })) });
+  assert.equal(read(edited, 'purchase.order', out.id).order_line[0].qty_invoiced, 6);
+  assert.equal(billableLines(edited, out.id)[0].toBill, 4);
+  const posted = run(edited, 'account.move', move.id, 'Confirm').db;
+  const remainder = run(posted, 'purchase.order', out.id, 'Create Bill').db;
+  assert.deepEqual(search(remainder, 'account.move').filter((m) => m.purchase_id === out.id).map((m) => m.invoice_line_ids[0].qty), [6, 4]);
+});
+
 test('three-way match reports exact, excess quantity and price mismatch, including origin links', () => {
   const out = order([{ ...line(1), qty_delivered: 5 }]);
   const exact = bill(out.db, out.id, [line(1, 3)]);
@@ -99,14 +113,14 @@ test('three-way match reports exact, excess quantity and price mismatch, includi
   assert.throws(() => matchBill(out.db, -1), /not found/);
 });
 
-test('matching guard rejects cumulative excess across duplicate lines and posted bills; force post overrides', () => {
+test('matching reports cumulative excess across duplicate lines and posted bills without blocking', () => {
   const out = order([{ ...line(1), qty_delivered: 5 }]);
   const first = bill(out.db, out.id, [line(1, 3)]);
   const posted = force(first.db, 'account.move', first.id, { state: 'posted' });
   const second = bill(posted, out.id, [line(1, 1), line(1, 2)]);
   const record = read(second.db, 'account.move', second.id);
   assert.equal(matchBill(second.db, second.id)[1].status, 'qty_exceeds_received');
-  assert.throws(() => checkBillMatch(second.db, record), /exceeds received/);
+  assert.doesNotThrow(() => checkBillMatch(second.db, record));
   assert.doesNotThrow(() => checkBillMatch(second.db, { ...record, force_post: true }));
   const ordered = write(second.db, 'product', 1, { purchase_method: 'purchase' });
   assert.doesNotThrow(() => checkBillMatch(ordered, record));

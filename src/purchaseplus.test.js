@@ -4,11 +4,44 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { salesModels } from './models/sales.js';
+import { models } from './models/index.js';
 import { purchasePlusModels, vendorPrice, applyVendorPrices, confirmRequisition, newQuotationFromRequisition, remainingQty, compareAlternatives, chooseAlternative, closeRequisition, blanketExpiryCheck } from './models/purchaseplus.js';
 
 const req = (db, vals = {}) => create(db, 'purchase.requisition', { date_start: '2026-01-01', date_end: '2026-12-31', vendor_id: 2, line_ids: [{ product_id: 1, product_qty: 10, price_unit: 25 }], ...vals });
 const confirm = (db, id) => purchasePlusModels['purchase.order'].form.buttons.find((b) => b.label === 'Confirm Order').run(db, read(db, 'purchase.order', id)).db;
 const info = (db, vals = {}) => create(db, 'product.supplierinfo', { partner_id: 2, product_id: 1, price: 30, delay: 4, ...vals }).db;
+
+test('vendor prices use the order currency, date and units in purchase and tender actions', () => {
+  let db = seed();
+  const eur = create(db, 'res.currency', { name: 'TEST-EUR', rate_ids: [{ date: '2020-01-01', rate: 2 }, { date: '2021-01-01', rate: 4 }] });
+  const foreign = create(eur.db, 'res.currency', { name: 'TEST-USD', rate_ids: [{ date: '2020-01-01', rate: 1 }] });
+  const unit = search(foreign.db, 'uom.uom').find((u) => u.name === 'Units');
+  const dozen = search(foreign.db, 'uom.uom').find((u) => u.name === 'Dozens');
+  db = create(foreign.db, 'product.supplierinfo', { partner_id: 2, product_id: 1, price: 120, currency_id: foreign.id, uom_id: dozen.id, min_qty: 1 }).db;
+  const po = create(db, 'purchase.order', { partner_id: 2, currency_id: eur.id, date_order: '2020-06-01', order_line: [{ product_id: 1, qty: 12, uom_id: unit.id, price_unit: 0 }] });
+  const button = models['purchase.order'].form.buttons.find((b) => b.label === 'Apply Vendor Prices');
+  db = button.run(po.db, read(po.db, 'purchase.order', po.id)).db;
+  assert.equal(read(db, 'purchase.order', po.id).order_line[0].price_unit, 20);
+  const agreement = create(db, 'purchase.requisition', { type: 'tender', currency_id: eur.id, line_ids: [{ product_id: 1, product_qty: 12 }] });
+  const confirmButton = models['purchase.requisition'].form.buttons.find((b) => b.label === 'Confirm');
+  db = confirmButton.run(agreement.db, read(agreement.db, 'purchase.requisition', agreement.id)).db;
+  const newButton = models['purchase.requisition'].form.buttons.find((b) => b.label === 'New Quotation');
+  const previousPrompt = globalThis.prompt;
+  try { globalThis.prompt = () => '2'; db = newButton.run(db, read(db, 'purchase.requisition', agreement.id)).db; } finally { globalThis.prompt = previousPrompt; }
+  const quotation = search(db, 'purchase.order').find((p) => p.requisition_id === agreement.id);
+  assert.equal(quotation.currency_id, eur.id);
+  assert.equal(quotation.order_line[0].price_unit, 40);
+});
+
+test('Apply Vendor Prices converts a legacy supplier currency name', () => {
+  const source = create(seed(), 'res.currency', { name: 'LEGACY-FX', rate_ids: [{ date: '2020-01-01', rate: 2 }] });
+  const target = create(source.db, 'res.currency', { name: 'ORDER-FX', rate_ids: [{ date: '2020-01-01', rate: 4 }] });
+  const supplier = create(target.db, 'product.supplierinfo', { partner_id: 2, product_id: 1, price: 30, currency: 'LEGACY-FX' });
+  const order = create(supplier.db, 'purchase.order', { partner_id: 2, currency_id: target.id, date_order: '2020-06-01', order_line: [{ product_id: 1, qty: 1, price_unit: 0 }] });
+  const button = models['purchase.order'].form.buttons.find((b) => b.label === 'Apply Vendor Prices');
+  const db = button.run(order.db, read(order.db, 'purchase.order', order.id)).db;
+  assert.equal(read(db, 'purchase.order', order.id).order_line[0].price_unit, 60);
+});
 
 test('supplier prices filter vendor, product, inclusive dates and minimum quantity, then sequence and price', () => {
   let db = info(seed(), { date_start: '2026-02-01', date_end: '2026-02-28' });

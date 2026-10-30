@@ -17,7 +17,7 @@ const quantities = (l, policy) => {
 };
 const orderFor = (db, bill) => bill.purchase_id ? read(db, 'purchase.order', bill.purchase_id)
   : search(db, 'purchase.order').find((p) => p.name === (bill.origin || bill.invoice_origin));
-const previousBills = (db, bill, po) => search(db, 'account.move').filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
+const previousBills = (db, bill, po) => (db.records['account.move'] ?? []).filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
   && m.state === 'posted' && orderFor(db, m)?.id === po.id);
 const totalQty = (lines, id) => lines.filter((l) => l.product_id === id).reduce((s, l) => s + number(l.qty), 0);
 
@@ -87,14 +87,17 @@ export function matchBill(db, billId) {
   return matches(db, bill);
 }
 
-/** Refuse excess received-policy quantities unless forced; return price warnings. */
+/** Return price warnings without blocking confirmation of a vendor bill. */
 export function checkBillMatch(db, bill) {
   if (bill.move_type !== 'in_invoice' || !orderFor(db, bill)) return [];
   const rows = matches(db, bill);
-  if (!bill.force_post && rows.some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive')) {
-    throw new Error('Billed quantity exceeds received quantity; receive the goods or enable force post');
-  }
   return rows.filter((l) => Math.abs(l.priceDifference) >= 0.01);
+}
+
+/** Compute the review recommendation from current receipts and other posted bills. */
+export function shouldBePaid(db, bill) {
+  if (bill.move_type !== 'in_invoice' || !db.settings?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
+  return matches(db, bill).some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') ? 'exception' : 'yes';
 }
 
 /** Balanced company-currency adjustments to append to invoiceLines, using receipt interim values. */

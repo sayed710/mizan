@@ -70,6 +70,8 @@ const collectNote = (db, sub, invoiceId) => (sub.payment_token
 
 function generateInvoice(db, sub) {
   if (sub.stage !== 'progress') throw new Error('Only an in-progress subscription can be invoiced');
+  if (sub.origin_id && !sub.is_upsell && sub.start_date > today()) throw new Error('The renewal has not started');
+  db = startRenewal(db, sub, today());
   const date = sub.next_invoice_date || today();
   if (sub.end_date && date >= sub.end_date) throw new Error('The subscription term has ended');
   const billed = billPeriod(db, sub, date, date < today() ? today() : date);
@@ -99,6 +101,8 @@ export function invoiceDue(db, date = today()) {
 function invoiceOne(db, id, date) {
   let next = db;
   let sub = read(next, 'sale.subscription', id);
+  next = startRenewal(next, sub, date);
+  sub = read(next, 'sale.subscription', id);
   while (sub.stage === 'progress' && sub.next_invoice_date && sub.next_invoice_date <= date) {
     const at = sub.next_invoice_date;
     if (sub.end_date && at >= sub.end_date) {
@@ -115,6 +119,16 @@ function invoiceOne(db, id, date) {
     sub = read(next, 'sale.subscription', sub.id);
   }
   return refresh(next, read(next, 'sale.subscription', id), date);
+}
+
+/** Start a confirmed renewal only on its effective date, after billing the preceding term. */
+function startRenewal(db, sub, date) {
+  if (sub.stage !== 'progress' || sub.is_upsell || !sub.origin_id || !sub.start_date || sub.start_date > date) return db;
+  const original = read(db, 'sale.subscription', sub.origin_id);
+  if (!original || original.renewal_id !== sub.id || !['progress', 'paused'].includes(original.stage)) return db;
+  const next = original.stage === 'progress' ? invoiceOne(db, original.id, addDays(sub.start_date, -1)) : db;
+  const current = read(next, 'sale.subscription', original.id);
+  return current.stage === 'closed' ? next : write(next, 'sale.subscription', original.id, { stage: 'closed', closed_date: sub.start_date, close_reason: 'other' });
 }
 
 /** Close running contracts whose oldest posted unpaid invoice has exceeded the plan's grace days. */
@@ -151,7 +165,7 @@ export function upsell(db, subId, extraLines, date = today()) {
   return { db: refresh(result.db, sub, date), id: result.id };
 }
 
-/** Create a fresh quotation for the successor term and close the original with reciprocal links. */
+/** Create a fresh quotation for the successor term with reciprocal links. */
 export function renew(db, subId, { date = today() } = {}) {
   checkDate(date);
   const sub = requireSub(db, subId);
@@ -163,7 +177,7 @@ export function renew(db, subId, { date = today() } = {}) {
     ...planValues(planFor(db, sub)), recurring_amount: sub.recurring_amount, order_line: (sub.order_line ?? []).map((l) => ({ ...l })),
     origin_id: sub.id, start_date: start, next_invoice_date: start, stage: 'draft', payment_token: sub.payment_token,
   });
-  return { db: write(next, 'sale.subscription', sub.id, { stage: 'closed', renewal_id: id, closed_date: date, close_reason: 'other' }), id };
+  return { db: write(next, 'sale.subscription', sub.id, { renewal_id: id }), id };
 }
 
 /** Untaxed recurring revenue normalized to one month (52 weeks per year). */
@@ -244,7 +258,11 @@ export const subscriptionPlusModels = {
     form: {
       ...base.form,
       buttons: [
-        ...base.form.buttons.filter((b) => !['Renew', 'Generate Invoice', 'Close'].includes(b.label)),
+        ...base.form.buttons.filter((b) => !['Start', 'Renew', 'Generate Invoice', 'Close'].includes(b.label)),
+        { label: 'Start', primary: true, when: (r) => r.stage === 'draft', run: (db, r) => {
+          const next = write(db, 'sale.subscription', r.id, { stage: 'progress' });
+          return { db: startRenewal(next, read(next, 'sale.subscription', r.id), today()) };
+        } },
         { label: 'Generate Invoice', primary: true, when: (r) => r.stage === 'progress', run: generateInvoice },
         { label: 'Upsell', when: (r) => r.stage === 'progress', run: (db, r) => { const result = upsell(db, r.id, linesFor(r).map((l) => ({ ...l, qty: 1 })), today()); return { db: result.db, go: `#/subscriptions/subscriptions/${result.id}` }; } },
         { label: 'Renew', when: (r) => ['progress', 'closed'].includes(r.stage) && !r.renewal_id, run: (db, r) => { const result = renew(db, r.id, { date: today() }); return { db: result.db, go: `#/subscriptions/subscriptions/${result.id}` }; } },
