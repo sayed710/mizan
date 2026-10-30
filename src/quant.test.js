@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write, setActiveCompany } from './orm.js';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 import { models, apps } from './models/index.js';
 import { receive } from './models/valuation.js';
 import { applyInventory, clearInventory, requestCount, ensureQuants } from './models/quant.js';
@@ -180,9 +181,10 @@ test('company-two counts only change their own quants and post their entries in 
   const { db: base, product, a } = setup();
   let db = transfer(base, product, 5, 'incoming', null, a);
   const first = quants(db, product).find((q) => q.quantity);
-  const loc = create(db, 'stock.location', { name: 'Company two', company_id: 2 });
-  db = { ...loc.db, settings: { ...loc.db.settings, current_company_id: 2 } };
-  setActiveCompany(2);
+  const company = createCompany(db, { name: 'Company two' });
+  const loc = create(company.db, 'stock.location', { name: 'Company two', company_id: company.id });
+  db = { ...loc.db, settings: { ...loc.db.settings, current_company_id: company.id } };
+  setActiveCompany(company.id);
   try {
     db = transfer(db, product, 3, 'incoming', null, loc.id);
     assert.equal(search(db, 'stock.valuation.layer').filter((l) => l.product_id === product).reduce((s, l) => s + l.quantity, 0), 3);

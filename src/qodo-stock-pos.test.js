@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 import { create, read, write } from './orm.js';
 import { startSession, payOrder, priceLines } from './models/pos.js';
 import { runPosting } from '../server/posting.js';
@@ -81,8 +82,9 @@ test('waiting manufacturing cannot consume components reserved by another order'
 
 test('counting shared stock in another company does not duplicate opening layers', () => {
   const p = stock();
-  const first = countProduct(p.db, { productId: p.id, counted: 11, observed: 10, company: 1 });
-  const second = countProduct(first, { productId: p.id, counted: 12, observed: 11, company: 2 });
+  const company = createCompany(p.db, { name: 'Company two' });
+  const first = countProduct(company.db, { productId: p.id, counted: 11, observed: 10, company: 1 });
+  const second = countProduct(first, { productId: p.id, counted: 12, observed: 11, company: company.id });
   const layers = second.records['stock.valuation.layer'].filter((l) => l.product_id === p.id);
   assert.equal(layers.filter((l) => l.opening).length, 1);
   assert.equal(layers.reduce((s, l) => s + l.quantity, 0), 12);
