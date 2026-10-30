@@ -4,12 +4,57 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  tests:
+    name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -19,6 +64,38 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run lint
       # `npm test` builds first (pretest): the server tests serve dist/.
       - run: npm test
+
+  security:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm audit --audit-level=high
+
+  # Retain the existing check name for repositories requiring CI / test.
+  test:
+    needs: [lint, typecheck, build, tests, security]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all CI checks to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node --input-type=module -e '
+            const results = JSON.parse(process.env.RESULTS);
+            for (const [name, job] of Object.entries(results)) {
+              console.log(`${name}: ${job.result}`);
+            }
+            if (Object.values(results).some(job => job.result !== "success")) {
+              process.exit(1);
+            }
+          '
