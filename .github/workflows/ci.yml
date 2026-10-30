@@ -79,9 +79,68 @@ jobs:
           cache: npm
       - run: npm audit --audit-level=high
 
+  browser:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            .github/browser-tests/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix .github/browser-tests
+      - run: npx --prefix .github/browser-tests playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm test --prefix .github/browser-tests
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:javascript-typescript
+
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan Git history with Gitleaks (redacted output)
+        run: >-
+          docker run --rm -v "$PWD:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.30.1
+          git /repo --redact=100 --no-banner
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image without publishing
+        run: docker build --tag mizan-ci:${{ github.sha }} .
+
   # Retain the existing check name for repositories requiring CI / test.
   test:
-    needs: [lint, typecheck, build, tests, security]
+    needs: [lint, typecheck, build, tests, security, browser, codeql, secrets, docker]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
