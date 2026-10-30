@@ -8,23 +8,25 @@ import { dueDate, earlyDiscount } from './terms.js';
 import { syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
-import { round as round2 } from '../money.js';
+import { cashRound, round as round2 } from '../money.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
-const total = (r) => {
+const total = (r, db) => {
   if (!isInvoice(r)) return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
   const base = amounts(r.invoice_line_ids).total;
   if (r.invoice_cash_rounding_id && r.state === 'posted') {
-    const main = (r.line_ids ?? []).find((l) => l.name === r.name);
-    if (main) return main.amount_currency ? Math.abs(main.amount_currency) : Number(main.debit || main.credit) || base;
+    const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
+    if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
   }
+  const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
+  if (rounding) return cashRound(base, rounding.rounding, rounding.rounding_method);
   return base;
 };
-const residual = (r) => (isInvoice(r) ? Math.max(0, Math.round((total(r) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
+const residual = (r, db) => (isInvoice(r) ? Math.max(0, Math.round((total(r, db) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
 const paymentState = (r) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
   if (residual(r) === 0) return 'paid';
@@ -366,6 +368,7 @@ const lineItem = {
     credit: { type: 'monetary', label: 'Credit' },
     currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
     amount_currency: { type: 'monetary', label: 'Amount in Currency' },
+    date_maturity: { type: 'date', label: 'Due Date' },
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
     tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
@@ -511,7 +514,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

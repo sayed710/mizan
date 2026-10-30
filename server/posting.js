@@ -25,27 +25,30 @@ export function runPosting(db, allowed, path, body = {}) {
   }
   if (path === '/api/pos/pay') {
     need(allowed, 'pos.order');
-    if (!Array.isArray(body.lines) || !body.lines.length || body.lines.some((l) => !l || !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0 || !Number.isFinite(Number(l.discount ?? 0)) || Number(l.discount ?? 0) < 0 || Number(l.discount ?? 0) > 100)) throw new Error('Invalid cart quantities or discounts');
-    const cart = body.lines.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), uom_id: l.uom_id ? Number(l.uom_id) : undefined, discount: Number(l.discount ?? 0) }));
-    for (const line of cart) {
-      const product = read(db, 'product', line.product_id);
-      if (!product || product.active === false || product.available_in_pos === false || product.sale_ok === false) throw new Error('Product is not available in POS');
-    }
-    if (body.payments !== undefined && (!Array.isArray(body.payments) || !body.payments.length || body.payments.some((p) => !p || (!p.payment_method_id && !['cash', 'card', 'bank'].includes(p.method)) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0))) throw new Error('Invalid payments');
-    if (!body.payments && !Number.isInteger(Number(body.method)) && !['cash', 'card'].includes(body.method)) throw new Error('Unknown payment method');
-    const resolvedMethod = Number.isInteger(Number(body.method)) ? Number(body.method) : body.method;
-    // Prices come from the products, not from the request.
-    const { db: next, id } = payCart(db, {
-      cart,
-      method: resolvedMethod,
+    const out = payCart(db, {
+      cart: body.lines ?? body.cart,
+      method: body.method,
       payments: body.payments,
-      partner_id: Number(body.partner_id) || null,
-      config_id: Number(body.config_id) || null,
-      preset_id: Number(body.preset_id) || null,
+      partner_id: body.partner_id ? Number(body.partner_id) : null,
+      config_id: body.config_id ? Number(body.config_id) : null,
+      preset_id: body.preset_id ? Number(body.preset_id) : null,
+      request_key: body.request_key ?? null,
+      refund_of: body.refund_of ? Number(body.refund_of) : null,
+    });
+    return { db: out.db, body: { id: out.id, name: out.name, total: out.total } };
+  }
+  if (path === '/api/pos/refund') {
+    need(allowed, 'pos.order');
+    const orderId = Number(body.id ?? body.order_id ?? body.refund_of);
+    const order = read(db, 'pos.order', orderId);
+    if (!order) throw new Error('Order not found');
+    const out = payCart(db, {
+      method: body.method,
+      payments: body.payments,
+      refund_of: order.id,
       request_key: body.request_key ?? null,
     });
-    const order = read(next, 'pos.order', id);
-    return { db: next, body: { id, name: order.name, total: order.amount_total } };
+    return { db: out.db, body: { id: out.id, name: out.name, total: out.total } };
   }
   if (path === '/api/pos/close') {
     need(allowed, 'pos.session');

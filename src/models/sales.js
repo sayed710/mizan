@@ -438,7 +438,7 @@ export const salesModels = {
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
         { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
         { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },

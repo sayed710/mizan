@@ -16,15 +16,24 @@ export function installments(term, total, invoiceDate) {
   const lines = term.line_ids ?? [];
   if (!lines.length) throw new Error('Add at least one due term');
 
-  const totalCents = cents(total);
-  const fixedCents = lines.reduce((sum, line) => sum + (line.value_type === 'fixed' ? cents(line.value) : 0), 0);
-  if (fixedCents > totalCents) throw new Error('Fixed amounts exceed the total');
+  const signedTotal = cents(total);
+  const sign = Math.sign(signedTotal);
+  const totalCents = Math.abs(signedTotal);
+  const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, cents(line.value)) : 0);
+  let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
+  if (fixedRemaining > totalCents) throw new Error('Fixed amounts exceed the total');
 
-  const amounts = lines.map((line) => line.value_type === 'fixed'
-    ? cents(line.value)
-    : Math.round(totalCents * (Number(line.value) || 0) / 100));
-  const assigned = amounts.reduce((sum, amount) => sum + amount, 0);
-  amounts[amounts.length - 1] += totalCents - assigned;
+  let remaining = totalCents;
+  const amounts = lines.map((line, index) => {
+    fixedRemaining -= fixed[index];
+    const requested = line.value_type === 'fixed'
+      ? fixed[index]
+      : Math.max(0, Math.round(totalCents * (Number(line.value) || 0) / 100));
+    // Reserve later fixed terms and never let rounded percentages overspend the total.
+    const amount = index === lines.length - 1 ? remaining : Math.min(requested, remaining - fixedRemaining);
+    remaining -= amount;
+    return sign * amount;
+  });
 
   return lines.map((line, index) => ({
     date: lineDate(line, invoiceDate),

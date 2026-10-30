@@ -633,6 +633,7 @@ export const moreModels = {
     label: 'Orders',
     fields: {
       name: { type: 'char', label: 'Order Ref', readonly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       date_order: { type: 'date', label: 'Date', readonly: true },
       payment_method: { type: 'selection', label: 'Payment Method', options: [['cash', 'Cash'], ['card', 'Card']] },
@@ -643,7 +644,7 @@ export const moreModels = {
       lines: productLines('Products', 'list_price'),
       ...amountFields('lines'),
     },
-    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', lines: [] }),
+    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', company_id: 1, lines: [] }),
     groupBys: ['session_id', 'payment_method', 'state', 'partner_id', 'date_order'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total'], badge: 'payment_method' },
     list: ['name', 'date_order', 'session_id', 'partner_id', 'payment_method', 'amount_total', 'state'],

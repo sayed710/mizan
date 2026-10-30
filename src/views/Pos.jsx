@@ -1,12 +1,13 @@
 import { useRef, useState } from 'react';
+import { round } from '../money.js';
 import { read, search } from '../orm.js';
 import { amounts } from '../models/common.js';
-import { closeSession, openSession, payOrder, priceLines, sessionTotals, startSession } from '../models/pos.js';
+import { closeSession, openSession, payOrder, posOrderTotal, priceLines, sessionTotals, startSession } from '../models/pos.js';
+import { posCategories, posPaymentMethods, posProducts } from '../models/posplus.js';
 import { commit, getDb, isServer, serverAction, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
-import { relationCandidates, viewRecords } from '../companyView.js';
-import { cashRound, round } from '../money.js';
+import { relationCandidates } from '../companyView.js';
 
 /** No open session: count the opening cash and start one. */
 function OpenSession() {
@@ -39,19 +40,18 @@ export function Pos() {
   const config = configId ? read(db, 'pos.config', configId) : null;
 
   // Available Presets
-  const availablePresets = config?.available_preset_ids?.length
-    ? config.available_preset_ids.map((id) => read(db, 'pos.preset', id)).filter(Boolean)
-    : (search(db, 'pos.preset') ?? []);
-  const [presetId, setPresetId] = useState(config?.default_preset_id ?? (availablePresets[0]?.id ?? null));
+  const availablePresets = (config?.available_preset_ids ?? []).map((id) => read(db, 'pos.preset', id)).filter(Boolean);
+  const [presetSelection, setPresetSelection] = useState(null);
+  const presetId = presetSelection?.configId === configId && availablePresets.some((p) => p.id === presetSelection.id)
+    ? presetSelection.id : (config?.default_preset_id ?? availablePresets[0]?.id ?? null);
   const preset = presetId ? read(db, 'pos.preset', presetId) : null;
 
   // Payment methods for this config
-  const allPaymentMethods = search(db, 'pos.payment.method') ?? [];
-  const configMethods = allPaymentMethods.filter((m) => m.active !== false && (m.company_id ?? 1) === (config?.company_id ?? 1) && (!m.config_ids?.length || m.config_ids.includes(configId)));
-  const paymentMethods = configMethods.length ? configMethods : [{ id: 'cash', name: 'Cash', type: 'cash' }, { id: 'card', name: 'Card', type: 'bank' }];
+  const paymentMethods = posPaymentMethods(db, configId);
+  const [splitPayments, setSplitPayments] = useState([]);
 
   // Categories hierarchy filtered by config
-  const allCategories = (search(db, 'pos.category') ?? []).filter((c) => c.active !== false && (!c.pos_config_ids?.length || c.pos_config_ids.includes(configId)));
+  const allCategories = posCategories(db, configId);
   const rootCategories = allCategories.filter((c) => !c.parent_id);
   const subCategories = selectedCatId ? allCategories.filter((c) => c.parent_id === selectedCatId) : [];
 
@@ -63,62 +63,53 @@ export function Pos() {
     curr = curr.parent_id ? read(db, 'pos.category', curr.parent_id) : null;
   }
 
-  // Descendant categories for product filtering
-  const getDescendantCatIds = (catId) => {
-    const ids = new Set([catId]);
-    const addChildren = (pid) => {
-      for (const c of allCategories) {
-        if (c.parent_id === pid && !ids.has(c.id)) {
-          ids.add(c.id);
-          addChildren(c.id);
-        }
-      }
-    };
-    addChildren(catId);
-    return ids;
-  };
-
-  const activeCatIds = selectedCatId ? getDescendantCatIds(selectedCatId) : null;
-  const currentCat = selectedCatId ? read(db, 'pos.category', selectedCatId) : null;
-
-  const products = viewRecords(db, 'product').filter((p) => p.available_in_pos !== false && p.sale_ok !== false);
-  const shown = products.filter((p) => {
-    if (query && !p.name.toLowerCase().includes(query.toLowerCase())) return false;
-    if (!selectedCatId) return true;
-    return (p.pos_categ_ids ?? []).some((id) => activeCatIds.has(id)) || p.categ === currentCat?.name;
-  });
+  const shown = posProducts(db, { configId, selectedCatId, query });
 
   const lines = priceLines(db, cart, Number(partner) || null, { pricelistId: preset?.pricelist_id ?? null, fiscalPositionId: preset?.fiscal_position_id ?? null });
   const total = amounts(lines);
 
   // Cash rounding
   const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
-  const isDefaultCash = paymentMethods[0]?.type === 'cash';
-  const shouldRoundDefault = Boolean(rounding && (!config?.only_round_cash_method || isDefaultCash));
-  const payableTotal = shouldRoundDefault ? cashRound(total.total, rounding.rounding, rounding.rounding_method) : total.total;
-  const roundingDifference = round(payableTotal - total.total);
+  const { roundedTotal: payableTotal, roundingDifference } = posOrderTotal(db, lines, { configId, payments: splitPayments });
+  const paidSoFar = round(splitPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const remaining = round(payableTotal - paidSoFar);
+  const validPayments = splitPayments.length > 0 && splitPayments.every((p) => {
+    const amount = Number(p.amount);
+    return p.amount !== '' && Number.isFinite(amount) && (payableTotal === 0 ? amount === 0 : payableTotal < 0 ? amount < 0 : amount > 0);
+  });
+
+  const addPayment = (method) => {
+    requestKey.current = null;
+    const next = [...splitPayments, { payment_method_id: method.id, amount: 0 }];
+    const nextTotal = posOrderTotal(db, lines, { configId, payments: next }).roundedTotal;
+    next[next.length - 1].amount = round(nextTotal - paidSoFar);
+    setSplitPayments(next);
+  };
 
   const add = (id) => {
     if (inFlight.current) return;
     requestKey.current = null;
+    const delta = preset?.is_return ? -1 : 1;
     setCart((c) => (c.some((l) => l.product_id === id)
-      ? c.map((l) => (l.product_id === id ? { ...l, qty: l.qty + 1 } : l))
-      : [...c, { product_id: id, qty: 1 }]));
+      ? c.map((l) => (l.product_id === id ? { ...l, qty: l.qty + delta } : l))
+      : [...c, { product_id: id, qty: delta }]));
   };
   const setQty = (id, qty) => {
     if (inFlight.current) return;
     requestKey.current = null;
-    setCart((c) => (qty <= 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
+    setCart((c) => (qty === 0 ? c.filter((l) => l.product_id !== id) : c.map((l) => (l.product_id === id ? { ...l, qty } : l))));
   };
 
-  const pay = async (methodRecord) => {
+  const pay = async (methodOrPayments) => {
     if (inFlight.current) return;
     inFlight.current = true;
     setPending(true);
     requestKey.current ??= crypto.randomUUID();
     const partner_id = Number(partner) || null;
-    const methodId = typeof methodRecord === 'object' && methodRecord?.id ? methodRecord.id : methodRecord;
-    const methodType = typeof methodRecord === 'object' && methodRecord?.type ? methodRecord.type : (methodRecord === 'cash' ? 'cash' : 'bank');
+    const isSplit = Array.isArray(methodOrPayments);
+    const methodRecord = !isSplit ? methodOrPayments : null;
+    const methodId = methodRecord ? (typeof methodRecord === 'object' && methodRecord?.id ? methodRecord.id : methodRecord) : null;
+    const methodType = methodRecord ? (typeof methodRecord === 'object' && methodRecord?.type ? methodRecord.type : (methodRecord === 'cash' ? 'cash' : 'bank')) : null;
 
     if (preset) {
       if (preset.identification === 'name' && !partner_id) {
@@ -139,16 +130,24 @@ export function Pos() {
       }
     }
 
-    if (methodType === 'pay_later' && !partner_id) {
+    if (isSplit) {
+      for (const p of methodOrPayments) {
+        const m = read(db, 'pos.payment.method', p.payment_method_id);
+        if (m?.type === 'pay_later' && !partner_id) {
+          alert(t('A customer is required for pay later'));
+          inFlight.current = false;
+          setPending(false);
+          return;
+        }
+      }
+    } else if (methodType === 'pay_later' && !partner_id) {
       alert(t('A customer is required for pay later'));
       inFlight.current = false;
       setPending(false);
       return;
     }
 
-    const isCash = methodType === 'cash';
-    const shouldRound = Boolean(rounding && (!config?.only_round_cash_method || isCash));
-    const finalAmount = shouldRound ? cashRound(total.total, rounding.rounding, rounding.rounding_method) : total.total;
+    const { roundedTotal: finalAmount } = posOrderTotal(db, lines, { configId, method: methodId, payments: isSplit ? methodOrPayments : null });
 
     let receipt;
     try {
@@ -156,6 +155,7 @@ export function Pos() {
         receipt = await serverAction('/api/pos/pay', {
           lines: cart,
           method: methodId,
+          payments: isSplit ? methodOrPayments : undefined,
           partner_id,
           config_id: config?.id ?? null,
           preset_id: presetId ?? null,
@@ -163,15 +163,16 @@ export function Pos() {
         });
         if (receipt?.ok === false) throw new Error(receipt.error);
       } else {
-        const { db: booked, id } = payOrder(getDb(), {
+        const { db: booked, id, total } = payOrder(getDb(), {
           lines,
           method: methodId,
+          payments: isSplit ? methodOrPayments : null,
           partner_id,
           config_id: config?.id ?? null,
           preset_id: presetId ?? null,
         });
         commit(booked);
-        receipt = { id, name: read(booked, 'pos.order', id).name, total: read(booked, 'pos.order', id).amount_total };
+        receipt = { id, name: read(booked, 'pos.order', id).name, total: total ?? round(read(booked, 'pos.order', id).amount_total + (Number(read(booked, 'pos.order', id).rounding_difference) || 0)) };
       }
     } catch (e) {
       alert(e.message);
@@ -181,13 +182,17 @@ export function Pos() {
       setPending(false);
     }
     requestKey.current = null;
+    const methodName = isSplit
+      ? methodOrPayments.map((p) => read(db, 'pos.payment.method', p.payment_method_id)?.name).filter(Boolean).join(', ')
+      : (typeof methodRecord === 'object' && methodRecord !== null ? methodRecord.name : (methodRecord || 'Cash'));
     setReceipt({
       ...receipt,
       total: receipt?.total ?? finalAmount,
-      method: typeof methodRecord === 'object' && methodRecord !== null ? methodRecord.name : (methodRecord || 'Cash'),
+      method: methodName,
     });
     setCart([]);
     setPartner('');
+    setSplitPayments([]);
   };
 
   const close = () => {
@@ -258,7 +263,17 @@ export function Pos() {
                 type="button"
                 disabled={pending}
                 className={`chip ${presetId === p.id ? 'on' : ''}`}
-                onClick={() => { requestKey.current = null; setPresetId(p.id); }}
+                onClick={() => {
+                  if (inFlight.current) return;
+                  requestKey.current = null;
+                  if (Boolean(preset?.is_return) !== Boolean(p.is_return)) {
+                    setCart((current) => current.map((line) => ({ ...line, qty: -line.qty })));
+                    setSplitPayments((current) => current.map((payment) => ({
+                      ...payment, amount: payment.amount === '' ? '' : -Number(payment.amount),
+                    })));
+                  }
+                  setPresetSelection({ configId, id: p.id });
+                }}
               >
                 {t(p.name)}
               </button>
@@ -287,20 +302,73 @@ export function Pos() {
           {rounding && roundingDifference !== 0 && (
             <div><dt>{t('Rounding')}</dt><dd>{money(roundingDifference)}</dd></div>
           )}
-          <div className="grand"><dt>{t('Total')}</dt><dd>{money(rounding ? payableTotal : total.total)}</dd></div>
+          <div className="grand"><dt>{t('Total')}</dt><dd>{money(payableTotal)}</dd></div>
         </dl>
         <div className="pos-pay" aria-busy={pending}>
-          {paymentMethods.map((m) => (
+          <div className="split-tender-panel">
+            <div className="split-tender-methods">
+              {paymentMethods.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className="chip"
+                  disabled={pending || !lines.length || (splitPayments.length > 0 && Math.abs(remaining) < 0.005)}
+                  onClick={() => addPayment(m)}
+                >
+                  {t(m.name)}
+                </button>
+              ))}
+            </div>
+            {splitPayments.length > 0 && (
+              <ul className="pos-split-lines">
+                {splitPayments.map((p, idx) => {
+                  const method = read(db, 'pos.payment.method', p.payment_method_id);
+                  return (
+                    <li key={idx} className="row">
+                      <span>{method?.name}</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        aria-label={t('{method} amount', { method: method?.name })}
+                        disabled={pending}
+                        value={p.amount}
+                        onChange={(e) => {
+                          requestKey.current = null;
+                          const value = e.target.value;
+                          setSplitPayments((current) => current.map((item, i) => i === idx ? { ...item, amount: value } : item));
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="round"
+                        aria-label={t('Remove {method}', { method: method?.name })}
+                        disabled={pending}
+                        onClick={() => {
+                          requestKey.current = null;
+                          setSplitPayments((current) => current.filter((_, i) => i !== idx));
+                        }}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <div className="split-summary">
+              <div><span>{t('Paid')}</span><b>{money(paidSoFar)}</b></div>
+              <div><span>{t('Remaining')}</span><b>{money(remaining)}</b></div>
+            </div>
             <button
-              key={m.id}
               type="button"
               className="btn primary"
-              disabled={pending || !lines.length}
-              onClick={() => pay(m)}
+              disabled={pending || !lines.length || !validPayments || Math.abs(remaining) > 0.005}
+              onClick={() => pay(splitPayments.map((p) => ({ ...p, amount: round(Number(p.amount)) })))}
             >
-              {t(m.name)}
+              {t('Validate')}
             </button>
-          ))}
+          </div>
+          {!paymentMethods.length && <div className="muted">{t('No payment methods configured.')}</div>}
         </div>
       </aside>
     </main>

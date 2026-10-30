@@ -238,7 +238,7 @@ test('periodic receipts, deliveries, production, unbuild and scrap remain quanti
   const sale = payOrder(db, { lines: [line(f.id, 1)], method: 'cash' });
   const refunded = refundOrder(sale.db, read(sale.db, 'pos.order', sale.id)).db;
   assert.equal(qty(refunded, f.id), 8);
-  assert.equal(search(refunded, 'account.move').length, start + 2);
+  assert.equal(search(refunded, 'account.move').length, start + 4); // sale and tender, plus their reversals
   assert.equal(layers(refunded, f.id).length, 0);
   assert.ok(search(refunded, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
 });
