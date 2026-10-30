@@ -2,9 +2,10 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts } from './common.js';
 import { moreModels } from './more.js';
-import { openSession, payOrder, refundOrder, tendersOf } from './pos.js';
+import { openSession, payOrder, posOrderTotal, refundOrder, tendersOf, posPaymentMethods, resolvePosConfigAndPreset, orderCompany, resolvePosOrderCheckout } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
 import { round } from '../money.js';
+import { companyFilter } from './company.js';
 
 const baseOrder = moreModels['pos.order'];
 const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
@@ -36,7 +37,8 @@ export function openTableOrder(db, { configId, floorId, tableName, customerCount
   tableAt(db, key, configId);
   if (!Number.isInteger(customerCount) || customerCount < 1) throw new Error('Enter a positive whole number of guests');
   if (search(db, 'pos.order').some((o) => o.table_id === key && o.state === 'draft')) throw new Error('This table already has a draft order');
-  return create(db, 'pos.order', { config_id: configId, table_id: key, customer_count: customerCount, state: 'draft' });
+  const cfg = configId ? read(db, 'pos.config', configId) : null;
+  return create(db, 'pos.order', { config_id: configId, company_id: cfg?.company_id ?? 1, table_id: key, customer_count: customerCount, state: 'draft' });
 }
 
 /** Show tables, aggregating draft split bills and guests. */
@@ -82,14 +84,27 @@ export function splitBill(db, orderId, lineSelections) {
   const remaining = order.lines.map((l, i) => ({ ...l, qty: l.qty - (selected.get(i) ?? 0) })).filter((l) => l.qty > 0);
   const tip = round(amounts(lines.filter((l) => l.is_tip)).total);
   const next = write(db, 'pos.order', orderId, { lines: remaining, tip_amount: round(order.tip_amount - tip) });
-  const out = create(next, 'pos.order', { config_id: order.config_id, table_id: order.table_id, customer_count: 0, partner_id: order.partner_id, note: order.note, state: 'draft', lines, tip_amount: tip });
+  const out = create(next, 'pos.order', {
+    config_id: order.config_id,
+    company_id: order.company_id ?? 1,
+    table_id: order.table_id,
+    customer_count: 0,
+    partner_id: order.partner_id,
+    note: order.note,
+    state: 'draft',
+    lines,
+    tip_amount: tip,
+    ...(order.preset_id ? { preset_id: order.preset_id } : {}),
+  });
   return { db: out.db, newOrderId: out.id };
 }
 
 /** Replace the tip with one untaxed tip line. */
 export function addTip(db, orderId, amount) {
   const order = draftOrder(db, orderId);
-  const config = read(db, 'pos.config', order.config_id);
+  const session = openSession(db);
+  const resolvedConfigId = order.config_id ?? session?.config_id ?? search(db, 'pos.config')[0]?.id;
+  const config = resolvedConfigId ? read(db, 'pos.config', resolvedConfigId) : null;
   if (!Number.isFinite(amount) || amount < 0) throw new Error('Enter a non-negative tip');
   const productId = config?.iface_tipproduct ? config.tip_product_id : null;
   if (productId && !read(db, 'product', productId)) throw new Error('Tip product not found');
@@ -100,7 +115,9 @@ export function addTip(db, orderId, amount) {
 /** Apply automatic POS promotions or one code once per draft bill. */
 export function applyLoyaltyToOrder(db, orderId, code) {
   const order = draftOrder(db, orderId);
-  if (!read(db, 'pos.config', order.config_id)?.loyalty_enabled) throw new Error('Enable loyalty for this point of sale');
+  const session = openSession(db);
+  const resolvedConfigId = order.config_id ?? session?.config_id ?? search(db, 'pos.config')[0]?.id;
+  if (!read(db, 'pos.config', resolvedConfigId)?.loyalty_enabled) throw new Error('Enable loyalty for this point of sale');
   if (order.loyalty_applied) throw new Error('Loyalty has already been applied to this bill');
   let lines = order.lines;
   let uses = [];
@@ -124,21 +141,61 @@ export function applyLoyaltyToOrder(db, orderId, code) {
 /** Pay using method-specific settlements, returning cash overpayment as change. */
 export function payWithMethods(db, orderId, payments) {
   const order = draftOrder(db, orderId);
-  if (!openSession(db)) throw new Error('Open a session first');
-  const total = amounts(order.lines).total;
-  if (!order.lines.length || !Number.isFinite(total) || total < 0) throw new Error('The bill must have a non-negative total and at least one line');
-  const config = read(db, 'pos.config', order.config_id);
+  const unrounded = amounts(order.lines).total;
+  if (!order.lines.length || !Number.isFinite(unrounded) || unrounded < 0) throw new Error('The bill must have a non-negative total and at least one line');
+  const session = openSession(db);
+  if (!session) throw new Error('Open a session first');
+  const orderComp = orderCompany(db, order);
+  if ((session.company_id ?? 1) !== orderComp) {
+    throw new Error('POS session company does not match the order company');
+  }
+  if (session.config_id && order.config_id && session.config_id !== order.config_id) {
+    throw new Error('POS configuration does not match the session');
+  }
+  const { config, resolvedConfigId, effectivePresetId } = resolvePosConfigAndPreset(db, {
+    session,
+    config_id: order.config_id,
+    preset_id: order.preset_id,
+    lines: order.lines,
+    partner_id: order.partner_id,
+  });
+  const total = posOrderTotal(db, order.lines, { configId: resolvedConfigId, payments }).roundedTotal;
   const byMethod = { cash: 0, bank: 0 };
+  const enabledMethods = posPaymentMethods(db, resolvedConfigId);
+  const resolved = [];
   for (const payment of payments) {
     const method = payment.method === 'card' ? 'bank' : payment.method;
     if (!['cash', 'bank'].includes(method) || !Number.isFinite(payment.amount) || payment.amount <= 0) throw new Error('Select a valid payment method and positive amount');
-    if (config?.payment_method_ids?.length && !config.payment_method_ids.some((m) => m.name === payment.method || m.journal === method)) throw new Error('Payment method is not enabled');
+    const match = payment.payment_method_id != null
+      ? enabledMethods.find((m) => String(m.id) === String(payment.payment_method_id) && m.type === method)
+      : enabledMethods.find((m) => m.type === method || m.name?.toLowerCase() === payment.method?.toLowerCase());
+    if (!match) throw new Error('Payment method is not enabled');
     byMethod[method] = round(byMethod[method] + payment.amount);
+    resolved.push({ payment_method_id: match.id, method, amount: round(payment.amount) });
   }
   const change = round(byMethod.cash + byMethod.bank - total);
   if (change < 0) throw new Error('Payments must cover the order total');
   if (change > byMethod.cash) throw new Error('Only cash may exceed the order total');
   byMethod.cash = round(byMethod.cash - change);
+
+  // One settlement with the whole bill, its money split by method (FLOW-017: quantities are never split).
+  let remainingChange = change;
+  const tenders = resolved.map((p) => {
+    const deduction = p.method === 'cash' ? Math.min(p.amount, remainingChange) : 0;
+    remainingChange = round(remainingChange - deduction);
+    return { ...p, amount: round(p.amount - deduction) };
+  }).filter((p) => p.amount > 0);
+  const primaryMethodId = resolved[0]?.payment_method_id ?? enabledMethods.find((m) => m.type === 'cash')?.id ?? enabledMethods[0]?.id ?? 'cash';
+
+  // Validate checkout preconditions BEFORE executing any loyalty or gift card writes
+  resolvePosOrderCheckout(db, {
+    lines: order.lines,
+    ...(tenders.length ? { payments: tenders } : { method: primaryMethodId }),
+    partner_id: order.partner_id,
+    config_id: resolvedConfigId,
+    preset_id: effectivePresetId,
+  });
+
   let next = db;
   let points = 0;
   if (config?.loyalty_enabled) {
@@ -156,13 +213,24 @@ export function payWithMethods(db, orderId, payments) {
       points += earned;
     }
   }
-  // One settlement with the whole bill, its money split by method (FLOW-017: quantities are never split).
-  const tenders = Object.entries(byMethod).filter(([, amount]) => amount > 0).map(([method, amount]) => ({ method, amount }));
-  const main = tenders.reduce((best, t) => (t.amount > (best?.amount ?? -1) ? t : best), null)?.method ?? 'cash';
-  const paid = payOrder(next, { lines: order.lines, method: main === 'bank' ? 'card' : 'cash', payments: tenders.length > 1 ? tenders : null, partner_id: order.partner_id });
-  next = write(paid.db, 'pos.order', paid.id, { config_id: order.config_id, settlement_of: orderId, tip_amount: order.tip_amount, discount_total: discountsOf(order.lines), payment_ids: tenders });
-  next = write(next, 'pos.order', orderId, { state: 'paid', session_id: null, payment_ids: payments.map((p) => ({ ...p })), change, loyalty_points_earned: round(points) });
-  return { db: next, change };
+
+  const paid = payOrder(next, {
+    lines: order.lines,
+    ...(tenders.length ? { payments: tenders } : { method: primaryMethodId }),
+    partner_id: order.partner_id,
+    config_id: resolvedConfigId,
+    preset_id: effectivePresetId,
+  });
+  next = write(paid.db, 'pos.order', paid.id, { settlement_of: orderId, tip_amount: order.tip_amount, discount_total: discountsOf(order.lines) });
+  next = write(next, 'pos.order', orderId, {
+    state: 'paid',
+    session_id: null,
+    payment_ids: payments.map((p) => ({ ...p })),
+    change,
+    loyalty_points_earned: round(points),
+    ...(order.config_id ? {} : { config_id: resolvedConfigId }),
+  });
+  return { db: next, change, id: paid.id, name: paid.name, total: paid.total };
 }
 
 /** Report session settlements and refunds, excluding unbooked drafts. */
@@ -185,8 +253,30 @@ export function zReport(db, sessionId) {
 }
 
 export function refundBill(db, order) {
+  if (!order) throw new Error('Order not found');
+  const session = openSession(db);
+  if (!session) throw new Error('Open a session first');
+  if (order.state !== 'paid') throw new Error('Only paid orders can be refunded');
+  const orderComp = orderCompany(db, order);
+  if ((session.company_id ?? 1) !== orderComp) {
+    throw new Error('POS session company does not match the order company');
+  }
+  if (session.config_id && order.config_id && session.config_id !== order.config_id) {
+    throw new Error('POS configuration does not match the session');
+  }
   const settlements = search(db, 'pos.order').filter((o) => o.settlement_of === order.id);
   if (!settlements.length) return refundOrder(db, order).db;
+  for (const settlement of settlements) {
+    if (settlement.state !== 'paid') throw new Error('Only paid orders can be refunded');
+    if (search(db, 'pos.order').some((o) => o.refund_of === settlement.id)) throw new Error('This order was already refunded');
+    const sComp = orderCompany(db, settlement);
+    if ((session.company_id ?? 1) !== sComp) {
+      throw new Error('POS session company does not match the order company');
+    }
+    if (session.config_id && settlement.config_id && session.config_id !== settlement.config_id) {
+      throw new Error('POS configuration does not match the session');
+    }
+  }
   let next = db;
   for (const settlement of settlements) next = refundOrder(next, settlement).db;
   return write(next, 'pos.order', order.id, { state: 'refunded' });
@@ -206,10 +296,49 @@ export const parseSplit = (text) => String(text).split(',').map((part) => part.t
 });
 
 export const categoryCompleteName = (db, r) => {
-  if (!r?.parent_id || !db) return r?.name ?? '';
-  const parent = read(db, 'pos.category', r.parent_id);
-  return parent ? `${categoryCompleteName(db, parent)} / ${r.name}` : (r.name ?? '');
+  const names = [];
+  const seen = new Set();
+  for (let category = r; category && !seen.has(category.id); category = (db?.records['pos.category'] ?? []).find((c) => c.id === category.parent_id)) {
+    seen.add(category.id);
+    names.unshift(category.name ?? '');
+  }
+  return names.join(' / ');
 };
+
+export { posPaymentMethods } from './pos.js';
+
+export function posCategories(db, configId) {
+  return (search(db, 'pos.category') ?? []).filter((c) => c.active !== false && (!c.pos_config_ids?.length || c.pos_config_ids.includes(configId)));
+}
+
+export function posCategoryDescendants(categories, categoryId) {
+  const ids = new Set([categoryId]);
+  const addChildren = (pid) => {
+    for (const c of categories) {
+      if (c.parent_id === pid && !ids.has(c.id)) {
+        ids.add(c.id);
+        addChildren(c.id);
+      }
+    }
+  };
+  addChildren(categoryId);
+  return ids;
+}
+
+export function posProducts(db, { configId = null, selectedCatId = null, query = '' } = {}) {
+  const config = configId ? read(db, 'pos.config', configId) : null;
+  const configCompId = config?.company_id ?? (db?.settings?.current_company_id ?? 1);
+  const categories = posCategories(db, configId);
+  const activeCatIds = selectedCatId ? posCategoryDescendants(categories, selectedCatId) : null;
+  const currentCat = selectedCatId ? read(db, 'pos.category', selectedCatId) : null;
+  const baseProducts = companyFilter(db, (db?.records?.product ?? []).filter((p) => p.active !== false && p.available_in_pos !== false && p.sale_ok !== false));
+  const products = baseProducts.filter((p) => p.company_id == null || p.company_id === configCompId);
+  return products.filter((p) => {
+    if (query && !p.name?.toLowerCase().includes(query.toLowerCase())) return false;
+    if (!selectedCatId) return true;
+    return (p.pos_categ_ids ?? []).some((id) => activeCatIds.has(id)) || p.categ === currentCat?.name;
+  });
+}
 
 export const posPlusModels = {
   'pos.payment.method': {
@@ -241,6 +370,17 @@ export const posPlusModels = {
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({ sequence: 10, color: 0, pos_config_ids: [], active: true }),
+    guard: (db, before, r) => {
+      const visited = new Set([r.id]);
+      for (let id = r.parent_id; id;) {
+        if (visited.has(id)) return 'A category cannot be its own ancestor';
+        visited.add(id);
+        const parent = (db.records['pos.category'] ?? []).find((c) => c.id === id);
+        if (!parent) return 'Select an existing parent category';
+        id = parent.parent_id;
+      }
+      return null;
+    },
     list: ['complete_name', 'sequence', 'active'],
     form: { title: 'name', groups: [['parent_id', 'sequence', 'color'], ['pos_config_ids', 'active']] },
   },
@@ -278,10 +418,11 @@ export const posPlusModels = {
     label: 'Point of Sale',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       module_restaurant: { type: 'boolean', label: 'Restaurant' },
       iface_tipproduct: { type: 'boolean', label: 'Tips' },
       tip_product_id: { type: 'many2one', relation: 'product', label: 'Tip Product' },
-      payment_method_ids: { ...paymentsField, label: 'Payment Methods', fields: { name: { type: 'char', label: 'Name' }, journal: { type: 'selection', label: 'Journal', options: methodOptions } }, newLine: () => ({ name: 'Cash', journal: 'cash' }) },
+      payment_method_ids: { type: 'many2many', relation: 'pos.payment.method', label: 'Payment Methods' },
       loyalty_enabled: { type: 'boolean', label: 'Loyalty' },
       available_preset_ids: { type: 'many2many', relation: 'pos.preset', label: 'Presets' },
       default_preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Default Preset' },
@@ -289,11 +430,11 @@ export const posPlusModels = {
       rounding_method_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method' },
       only_round_cash_method: { type: 'boolean', label: 'Only Round Cash' },
     },
-    defaults: () => ({ module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, payment_method_ids: [], available_preset_ids: [], cash_rounding: false, only_round_cash_method: false }),
+    defaults: () => ({ company_id: 1, module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, available_preset_ids: [], cash_rounding: false, only_round_cash_method: false }),
     list: ['name', 'module_restaurant', 'loyalty_enabled', 'cash_rounding'],
     form: {
       title: 'name',
-      groups: [['module_restaurant', 'cash_rounding', 'rounding_method_id', 'only_round_cash_method']],
+      groups: [['company_id', 'module_restaurant', 'cash_rounding', 'rounding_method_id', 'only_round_cash_method']],
       tabs: [
         { label: 'Payments', fields: ['payment_method_ids', 'iface_tipproduct', 'tip_product_id'] },
         { label: 'Order Types', fields: ['available_preset_ids', 'default_preset_id'] },
@@ -325,7 +466,22 @@ export const posPlusModels = {
     fields: {
       ...baseOrder.fields,
       payment_method_id: { type: 'many2one', relation: 'pos.payment.method', label: 'Payment Method' },
+      accounting_entries: { type: 'one2many', label: 'Journal Entries', readonly: true, hidden: true, fields: { move_id: { type: 'integer', ref: 'account.move', label: 'Journal Entry' } } },
       preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Preset' },
+      preset_snapshot: { type: 'json', label: 'Preset Snapshot', readonly: true, hidden: true },
+      fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      rounding_difference: { type: 'monetary', label: 'Rounding Difference', readonly: true, hidden: true },
+      return_layers: {
+        type: 'one2many', label: 'Return Layers', readonly: true, hidden: true,
+        fields: {
+          index: { type: 'integer', label: 'Line Index' },
+          layer_id: { type: 'many2one', relation: 'stock.valuation.layer', ref: 'stock.valuation.layer', label: 'Valuation Layer' },
+        },
+        newLine: () => ({ index: 0, layer_id: null }),
+      },
+      stock_costs: { type: 'json', label: 'Stock Costs', readonly: true, hidden: true },
+      request_key: { type: 'char', label: 'Reference', readonly: true, hidden: true },
+      request_fingerprint: { type: 'char', label: 'Reference', readonly: true, hidden: true },
       lines: { ...baseOrder.fields.lines, fields: { ...baseOrder.fields.lines.fields, name: { type: 'char', label: 'Description' }, is_tip: { type: 'boolean', label: 'Tip', hidden: true }, payment_rounding: { type: 'boolean', label: 'Payment Rounding', hidden: true } } },
       state: { ...baseOrder.fields.state, options: [['draft', 'Draft'], ...baseOrder.fields.state.options, ['cancel', 'Cancelled']] },
       config_id: { type: 'many2one', relation: 'pos.config', label: 'Point of Sale' },
@@ -345,7 +501,7 @@ export const posPlusModels = {
         newLine: () => ({ programId: null, cardCode: '', gift: false, spent: 0 }),
       },
     },
-    defaults: (id) => ({ ...baseOrder.defaults(id), state: 'draft', partner_id: null, customer_count: 1, tip_amount: 0, payment_ids: [], loyalty_points_earned: 0 }),
+    defaults: (id) => ({ ...baseOrder.defaults(id), state: 'draft', partner_id: null, customer_count: 1, tip_amount: 0, payment_ids: [], loyalty_points_earned: 0, return_layers: [] }),
     form: {
       ...baseOrder.form,
       statusbar: 'state', lockedWhen: (r) => r.state !== 'draft',

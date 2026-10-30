@@ -21,9 +21,25 @@ const FIELDS = {
   'calendar.event': { interviewer: hidden('char', 'Interviewer') }, // recruitplus.js double-booking check
   'hr.employee': { timesheet_cost: hidden('monetary', 'Timesheet Cost per Hour', { readonly: false }), hourly_cost: hidden('monetary', 'Hourly Cost', { readonly: false }) },
   'mrp.production': { operation_cost_move_id: m2o('account.move', 'Operation Cost Entry') }, // workorder.js: posted once
-  'pos.order': { stock_costs: hidden('json', 'Stock Costs'), request_key: hidden('char', 'Reference'), request_fingerprint: hidden('char', 'Reference') }, // pos.js: refunds use the original unit cost
+  'pos.order': {
+    stock_costs: hidden('json', 'Stock Costs'),
+    request_key: hidden('char', 'Reference'),
+    request_fingerprint: hidden('char', 'Reference'),
+    preset_snapshot: hidden('json', 'Preset Snapshot'),
+    rounding_difference: hidden('monetary', 'Rounding Difference'),
+    return_layers: {
+      type: 'one2many', label: 'Return Layers', readonly: true, hidden: true,
+      fields: {
+        index: { type: 'integer', label: 'Line Index' },
+        layer_id: { type: 'many2one', relation: 'stock.valuation.layer', ref: 'stock.valuation.layer', label: 'Valuation Layer' },
+      },
+      newLine: () => ({ index: 0, layer_id: null }),
+    },
+  },
+  'pos.session': { config_id: m2o('pos.config', 'Point of Sale') },
   product: { qty_rented: hidden('float', 'Quantity Rented') }, // extra.js: rented stock stays in valuation
   'project.project': { last_update_status: hidden('selection', 'Last Update Status', { options: [['on_track', 'On Track'], ['at_risk', 'At Risk'], ['off_track', 'Off Track'], ['on_hold', 'On Hold'], ['done', 'Done']] }) },
+  'purchase.requisition': { partner_id: m2o('res.partner', 'Partner') },
   'res.partner': { supplier_rank: hidden('integer', 'Supplier Rank') },
   'sale.order': {
     currency_id: m2o('res.currency', 'Currency'), // sales.js: invoices keep the order currency
@@ -35,7 +51,7 @@ const FIELDS = {
   },
   'sale.rental': { pickup_picking_id: m2o('stock.picking', 'Pickup'), return_picking_id: m2o('stock.picking', 'Return') },
   'stock.picking': { repair_id: m2o('repair.order', 'Repair Order') },
-  'stock.valuation.layer': { counterpart: hidden('char', 'Counterpart Account') }, // valuation.js journal entry
+  'stock.valuation.layer': { counterpart: hidden('char', 'Counterpart Account'), reversed_layer_id: m2o('stock.valuation.layer', 'Reversed Layer') }, // valuation.js journal entry
   // Read by the helpdesk SLA "last change" and the sitemap's lastmod; kept when imported or set.
   'helpdesk.ticket': { write_date: hidden('char', 'Last Updated on') },
   'website.page': { write_date: hidden('char', 'Last Updated on') },

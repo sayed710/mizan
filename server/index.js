@@ -801,7 +801,7 @@ async function api(req, res, path) {
     return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
   }
   // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
-  if (['/api/button', '/api/pos/pay', '/api/pos/close'].includes(path) && req.method === 'POST') {
+  if (['/api/button', '/api/pos/pay', '/api/pos/close', '/api/pos/refund'].includes(path) && req.method === 'POST') {
     try {
       const body = await readJson(req);
       const snapshot = scopeFor(user);

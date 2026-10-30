@@ -173,7 +173,7 @@ export function migratePosMethods(db) {
   for (const company_id of companies) {
     for (const [name, type, journal] of [['Cash', 'cash', 'CSH1'], ['Card', 'bank', 'BNK1']]) {
       if (!(next.records['pos.payment.method'] ?? []).some((m) => (m.company_id ?? 1) === company_id && m.type === type && m.name === name)) {
-        next = create(next, 'pos.payment.method', { name, type, company_id, journal_id: journalId(next, journal), config_ids: [] }).db;
+        next = create(next, 'pos.payment.method', { name, type, company_id, journal_id: journalId(next, journal, company_id), config_ids: [] }).db;
       }
     }
   }
@@ -184,7 +184,7 @@ export function migratePosMethods(db) {
       if (typeof p === 'object' && p !== null) {
         const name = p.name || (p.journal === 'cash' ? 'Cash' : 'Card');
         const type = p.type || (p.journal === 'cash' ? 'cash' : 'bank');
-        const journal = journalId(next, p.journal === 'cash' ? 'CSH1' : 'BNK1');
+        const journal = journalId(next, p.journal === 'cash' ? 'CSH1' : 'BNK1', compId);
         let existing = (next.records['pos.payment.method'] ?? []).find((m) => (m.company_id ?? 1) === compId && m.name === name && m.type === type);
         if (!existing) {
           const res = create(next, 'pos.payment.method', { name, type, company_id: compId, journal_id: journal, config_ids: [c.id] });
@@ -198,41 +198,145 @@ export function migratePosMethods(db) {
 
   for (const c of (next.records['pos.config'] ?? [])) {
     const compId = c.company_id ?? 1;
-    for (const type of ['cash', 'bank']) {
-      const defMethod = (next.records['pos.payment.method'] ?? []).find((m) => (m.company_id ?? 1) === compId && m.type === type);
-      if (defMethod && !defMethod.config_ids?.includes(c.id)) {
-        next = write(next, 'pos.payment.method', defMethod.id, { config_ids: [...(defMethod.config_ids ?? []), c.id] });
+    const hasExplicit = Array.isArray(c.payment_method_ids) && c.payment_method_ids.length > 0;
+    if (!hasExplicit) {
+      for (const type of ['cash', 'bank']) {
+        const defMethod = (next.records['pos.payment.method'] ?? []).find((m) => (m.company_id ?? 1) === compId && m.type === type);
+        if (defMethod && !defMethod.config_ids?.includes(c.id)) {
+          next = write(next, 'pos.payment.method', defMethod.id, { config_ids: [...(defMethod.config_ids ?? []), c.id] });
+        }
       }
     }
   }
 
-  const method = (company, typeOrName) => (next.records['pos.payment.method'] ?? []).find((m) => (m.company_id ?? 1) === company && (m.name === typeOrName || m.type === (typeOrName === 'cash' ? 'cash' : 'bank')))?.id;
+  const method = (company, typeOrName) => {
+    const candidates = (next.records['pos.payment.method'] ?? []).filter((m) => (m.company_id ?? 1) === company);
+    const exact = candidates.find((m) => m.name?.toLowerCase() === String(typeOrName ?? '').toLowerCase());
+    if (exact) return exact.id;
+    const type = ({ cash: 'cash', card: 'bank', bank: 'bank' })[typeOrName];
+    return type ? candidates.find((m) => m.type === type)?.id : null;
+  };
+
+  const methodForOrder = (order, typeOrName) => {
+    const compId = order.company_id ?? 1;
+    const cfg = order.config_id ? (next.records['pos.config'] ?? []).find((c) => c.id === order.config_id) : null;
+    const configMethodIds = new Set(cfg?.payment_method_ids ?? []);
+    const allMethods = (next.records['pos.payment.method'] ?? []).filter((m) => (m.company_id ?? 1) === compId);
+    const configMethods = allMethods.filter((m) => configMethodIds.has(m.id) || (m.config_ids ?? []).includes(order.config_id));
+    const targetName = String(typeOrName ?? '').toLowerCase();
+    const targetType = ({ cash: 'cash', card: 'bank', bank: 'bank' })[typeOrName];
+
+    const exactConfig = configMethods.find((m) => m.name?.toLowerCase() === targetName);
+    if (exactConfig) return exactConfig.id;
+    if (targetType) {
+      const typeConfig = configMethods.find((m) => m.type === targetType);
+      if (typeConfig) return typeConfig.id;
+    }
+    const exactCompany = allMethods.find((m) => m.name?.toLowerCase() === targetName);
+    if (exactCompany) return exactCompany.id;
+    if (targetType) {
+      const typeCompany = allMethods.find((m) => m.type === targetType);
+      if (typeCompany) return typeCompany.id;
+    }
+    return null;
+  };
 
   const configs = (next.records['pos.config'] ?? []).map((c) => {
     const compId = c.company_id ?? 1;
+    const methodIds = [];
+    if (Array.isArray(c.payment_method_ids) && c.payment_method_ids.length > 0) {
+      for (const p of c.payment_method_ids) {
+        if (typeof p === 'number') {
+          if (!methodIds.includes(p)) methodIds.push(p);
+        } else if (typeof p === 'object' && p !== null) {
+          const mid = p.payment_method_id ?? method(compId, p.name) ?? method(compId, p.journal);
+          if (mid && !methodIds.includes(mid)) methodIds.push(mid);
+        }
+      }
+    } else {
+      for (const type of ['cash', 'bank']) {
+        const defMethod = (next.records['pos.payment.method'] ?? []).find((m) => (m.company_id ?? 1) === compId && m.type === type);
+        if (defMethod && !methodIds.includes(defMethod.id)) methodIds.push(defMethod.id);
+      }
+    }
     return {
       ...c,
-      payment_method_ids: (c.payment_method_ids ?? []).map((p) => (typeof p === 'object' && p !== null ? { ...p, payment_method_id: p.payment_method_id ?? method(compId, p.name) ?? method(compId, p.journal) } : p)),
+      payment_method_ids: methodIds,
       available_preset_ids: c.available_preset_ids ?? [],
       cash_rounding: c.cash_rounding ?? false,
       only_round_cash_method: c.only_round_cash_method ?? false,
     };
   });
 
+  for (const c of configs) {
+    for (const mid of c.payment_method_ids) {
+      const m = (next.records['pos.payment.method'] ?? []).find((rec) => rec.id === mid);
+      if (m && !m.config_ids?.includes(c.id)) {
+        next = write(next, 'pos.payment.method', m.id, { config_ids: [...(m.config_ids ?? []), c.id] });
+      }
+    }
+  }
+
   const orders = (next.records['pos.order'] ?? []).map((o) => {
-    const compId = o.company_id ?? 1;
-    const defaultMethod = method(compId, o.payment_method ?? 'cash');
+    const defaultMethod = methodForOrder(o, o.payment_method ?? 'cash');
     return {
       ...o,
       payment_method_id: o.payment_method_id ?? defaultMethod,
       payment_ids: (o.payment_ids ?? []).map((p) => ({
         ...p,
-        payment_method_id: p.payment_method_id ?? method(compId, p.method ?? p.name ?? 'cash'),
+        payment_method_id: p.payment_method_id ?? methodForOrder(o, p.name ?? p.method ?? 'cash'),
       })),
     };
   });
 
   return { ...next, records: { ...next.records, ...(next.records['pos.config'] ? { 'pos.config': configs } : {}), ...(next.records['pos.order'] ? { 'pos.order': orders } : {}) } };
+}
+
+function repairPosMethods(db) {
+  let next = db;
+  const methods = next.records['pos.payment.method'] ?? [];
+  const configs = next.records['pos.config'] ?? [];
+  const orders = (next.records['pos.order'] ?? []).map((o) => {
+    const compId = o.company_id ?? 1;
+    const cfg = o.config_id ? configs.find((c) => c.id === o.config_id) : null;
+    const configMethodIds = new Set(cfg?.payment_method_ids ?? []);
+    const companyMethods = methods.filter((m) => (m.company_id ?? 1) === compId);
+    const configMethods = companyMethods.filter((m) => cfg && (Array.isArray(cfg.payment_method_ids)
+      ? configMethodIds.has(m.id)
+      : (m.config_ids ?? []).includes(cfg.id)));
+    // An inactive method can still be a valid historical selection. When the order
+    // has no configuration, company membership is the only available constraint.
+    const validMethod = (id) => companyMethods.some((m) => m.id === id && (!cfg || configMethods.includes(m)));
+
+    const resolveMethod = (typeOrName) => {
+      const targetName = String(typeOrName ?? '').toLowerCase();
+      const targetType = ({ cash: 'cash', card: 'bank', bank: 'bank' })[typeOrName];
+      return (
+        configMethods.find((m) => m.name?.toLowerCase() === targetName)?.id ??
+        (targetType ? configMethods.find((m) => m.type === targetType)?.id : null) ??
+        companyMethods.find((m) => m.name?.toLowerCase() === targetName)?.id ??
+        (targetType ? companyMethods.find((m) => m.type === targetType)?.id : null) ??
+        null
+      );
+    };
+
+    const payment_ids = (o.payment_ids ?? []).map((p) => {
+      const currentMethod = p.payment_method_id ? methods.find((m) => m.id === p.payment_method_id) : null;
+      const resolvedId = validMethod(p.payment_method_id)
+        ? p.payment_method_id
+        : (resolveMethod(p.name ?? p.method ?? currentMethod?.name ?? currentMethod?.type) ?? p.payment_method_id ?? null);
+      return { ...p, payment_method_id: resolvedId };
+    });
+    const mainMethod = validMethod(o.payment_method_id)
+      ? o.payment_method_id
+      : (payment_ids[0]?.payment_method_id ?? resolveMethod(o.payment_method) ?? o.payment_method_id ?? null);
+    return {
+      ...o,
+      payment_method_id: mainMethod,
+      payment_ids,
+    };
+  });
+  return { ...next, records: { ...next.records, 'pos.order': orders } };
 }
 
 /** Tag lists stored as names (['Tax']) become lines pointing at documents.tag records, creating missing tags. */
@@ -273,6 +377,7 @@ export const MIGRATIONS = [
   { version: 8, name: 'Product categories: preserve and link legacy names', up: migrateProductCategories },
   { version: 9, name: 'CRM and task stages: configurable models, lost reasons, tags', up: migrateStages },
   { version: 10, name: 'POS: migrate payment methods', up: migratePosMethods },
+  { version: 11, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

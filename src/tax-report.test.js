@@ -4,7 +4,7 @@ import { create, search, read, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { taxReport, taxesByTax } from './models/finance.js';
-import { payOrder, startSession } from './models/pos.js';
+import { payOrder, refundOrder, startSession } from './models/pos.js';
 import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 
@@ -78,6 +78,23 @@ test('zero-rated exports keep a durable taxable base without changing return tot
   const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }]);
   assert.deepEqual(taxReport(posted.db, {}), taxReport(tax.db, {}));
   assert.deepEqual(row(taxesByTax(posted.db), 'Zero export'), { side: 'sale', name: 'Zero export', base: 100, tax: 0 });
+});
+
+test('POS full refund reverses zero-rated and taxable bases in the tax report', () => {
+  let db = seed();
+  const zero = create(db, 'account.tax', { name: 'POS zero export', amount: 0, type_tax_use: 'sale' });
+  db = startSession(zero.db, 0).db;
+  const sale = payOrder(db, { lines: [
+    { product_id: 1, qty: 1, price_unit: 10, ...taxSnapshot(read(db, 'account.tax', zero.id)) },
+    line(db, 'VAT 14%', { price_unit: 50 }),
+  ], method: 'cash' });
+  assert.deepEqual(row(taxesByTax(sale.db), 'POS zero export'), { side: 'sale', name: 'POS zero export', base: 10, tax: 0 });
+  const beforeVat = row(taxesByTax(db), 'VAT 14%') ?? { base: 0, tax: 0 };
+  const refund = refundOrder(sale.db, read(sale.db, 'pos.order', sale.id));
+  assert.deepEqual(row(taxesByTax(refund.db), 'POS zero export'), { side: 'sale', name: 'POS zero export', base: 0, tax: 0 });
+  const afterVat = row(taxesByTax(refund.db), 'VAT 14%');
+  assert.deepEqual([afterVat.base, afterVat.tax], [beforeVat.base, beforeVat.tax]);
+  assert.deepEqual(taxReport(refund.db, {}), taxReport(db, {}));
 });
 
 test('without new documents the return and its rows still reconcile on the seeded data', () => {
