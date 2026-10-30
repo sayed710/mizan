@@ -20,6 +20,7 @@ import {
 import { findAnalyticDistribution } from './models/analyticplus.js';
 import { taxReport } from './models/finance.js';
 import { models } from './models/index.js';
+import { createCompany, ensureMainCompany } from './models/company.js';
 
 const taxNamed = (db, name, use = 'sale') => search(db, 'account.tax').find((t) => t.name === name && t.type_tax_use === use);
 const invoiceLine = (db, taxName, use, vals = {}) => ({
@@ -66,6 +67,43 @@ test('direct return state writes cannot bypass actions or alter locked fields du
   assert.throws(() => write(db, 'account.return', made.id, { state: 'new' }), /return|closing|transition/i);
 });
 
+test('sync rejects forged return transitions and accepts linked review, submit, reset and pay', () => {
+  let db = seed();
+  const type = search(db, 'account.return.type')[0];
+  db = postEntry(db, { journal: 'MISC', date: '2025-04-15', company: 1, lines: [
+    { account: '101401', debit: 14 }, { account: '251000', credit: 14, tax_name: 'VAT' },
+  ] }).db;
+  const made = create(db, 'account.return', { name: 'Sync VAT', type_id: type.id, company_id: 1, date_from: '2025-04-01', date_to: '2025-04-30' });
+  db = made.db;
+  const buttons = models['account.return'].form.buttons;
+  const run = (label) => {
+    const next = buttons.find((button) => button.label === label).run(db, read(db, 'account.return', made.id)).db;
+    db = applyDiff(db, diffDb(db, next), { isAdmin: true });
+  };
+  const forged = (base, changes) => ({ upserts: { 'account.return': [{ ...read(base, 'account.return', made.id), ...changes }] } });
+  assert.throws(() => applyDiff(db, forged(db, { state: 'submitted' }), { isAdmin: true }), /transition/i);
+  assert.throws(() => applyDiff(db, forged(db, { state: 'paid', is_completed: true }), { isAdmin: true }), /transition/i);
+  run('Review');
+  assert.throws(() => applyDiff(db, forged(db, { state: 'submitted', date_lock: '2025-04-30', date_submission: today() }), { isAdmin: true }), /closing/i);
+  const fake = postEntry(db, { journal: 'MISC', date: '2025-04-30', company: 1, lines: [
+    { account: '101401', debit: 14 }, { account: '251000', credit: 14 },
+  ] });
+  assert.throws(() => applyDiff(fake.db, forged(fake.db, { state: 'submitted', date_lock: '2025-04-30', date_submission: today(), closing_move_ids: [fake.id] }), { isAdmin: true }), /closing/i);
+  run('Submit');
+  const closing = read(db, 'account.return', made.id).closing_move_ids[0];
+  assert.equal(read(db, 'account.move', closing).tax_return_id, made.id);
+  assert.throws(() => applyDiff(db, { upserts: { 'account.move': [{ ...read(db, 'account.move', closing), tax_return_id: null }] } }, { isAdmin: true }), /locked|posted/i);
+  assert.throws(() => applyDiff(db, forged(db, { closing_move_ids: [] }), { isAdmin: true }), /closing links/i);
+  run('Reset to Draft');
+  assert.equal(read(db, 'account.move', closing).state, 'cancel');
+  assert.equal(db.settings.tax_lock_date, null);
+  run('Review');
+  run('Submit');
+  run('Pay');
+  assert.equal(read(db, 'account.return', made.id).state, 'paid');
+  assert.equal(read(db, 'account.payment', read(db, 'account.return', made.id).payment_id).state, 'posted');
+});
+
 test('submission revalidates drafts created after review through form actions', () => {
   const initial = seed();
   const type = search(initial, 'account.return.type')[0];
@@ -86,7 +124,7 @@ test('a forged tax closing reference cannot bypass a period lock', () => {
   ] }), /locked/i);
 });
 
-test('only a return submission can post its generated closing into a locked period', () => {
+test('a return closing cannot post into a globally locked period', () => {
   let db = updateSettings(seed(), { lock_date: '2025-03-31' });
   const bank = search(db, 'account.account').find((a) => a.code === '101401');
   const payable = search(db, 'account.account').find((a) => a.code === '211000');
@@ -101,17 +139,12 @@ test('only a return submission can post its generated closing into a locked peri
   const ret = create(db, 'account.return', { name: 'Legitimate VAT', type_id: type.id, company_id: 1, date_from: '2025-03-01', date_to: '2025-03-31' });
   const actions = models['account.return'].form.buttons;
   db = actions.find((a) => a.label === 'Review').run(ret.db, read(ret.db, 'account.return', ret.id)).db;
-  db = actions.find((a) => a.label === 'Submit').run(db, read(db, 'account.return', ret.id)).db;
-  const result = read(db, 'account.return', ret.id);
-  const closing = read(db, 'account.move', result.closing_move_ids[0]);
-  assert.equal(result.state, 'submitted');
-  assert.equal(closing.state, 'posted');
-  assert.equal(closing.date, '2025-03-31');
-  assert.equal(closing.company_id, 1);
+  assert.throws(() => actions.find((a) => a.label === 'Submit').run(db, read(db, 'account.return', ret.id)), /locked/i);
+  assert.equal(read(db, 'account.return', ret.id).state, 'reviewed');
   assert.equal(db.settings.lock_date, '2025-03-31');
 });
 
-test('sync round trips preserve manual locks through out-of-order return resets', () => {
+test('sync round trips preserve manual locks and reset returns in lock order', () => {
   let db = updateSettings(seed(), { lock_date: '2024-12-31' });
   const type = search(db, 'account.return.type')[0];
   const actions = models['account.return'].form.buttons;
@@ -124,9 +157,13 @@ test('sync round trips preserve manual locks through out-of-order return resets'
   db = second.db;
   run('Review', second.id);
   run('Submit', second.id);
-  assert.equal(db.settings.lock_sources.manual, '2024-12-31');
+  assert.equal(db.settings.lock_date, '2024-12-31');
+  assert.equal(db.settings.tax_lock_date, '2025-02-28');
   const closingId = read(db, 'account.return', first.id).closing_move_ids[0];
   assert.equal(read(db, 'account.move', closingId).tax_return_id, first.id);
+  assert.throws(() => actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)), /locked/i);
+  run('Reset to Draft', second.id);
+  assert.equal(db.settings.tax_lock_date, '2025-01-31');
   const reset = actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)).db;
   const forged = diffDb(db, reset);
   const closing = forged.upserts['account.move'].find((move) => move.id === closingId);
@@ -134,8 +171,7 @@ test('sync round trips preserve manual locks through out-of-order return resets'
   closing.ref = 'Altered during reset';
   assert.throws(() => applyDiff(db, forged, { isAdmin: true }), /locked|draft/i);
   run('Reset to Draft', first.id);
-  assert.equal(db.settings.lock_date, '2025-02-28');
-  run('Reset to Draft', second.id);
+  assert.equal(db.settings.tax_lock_date, null);
   assert.equal(db.settings.lock_date, '2024-12-31');
 });
 
@@ -151,9 +187,36 @@ test('journal posting resolves duplicate account codes in the entry company', ()
   assert.deepEqual(read(entry.db, 'account.move', entry.id).line_ids.map((l) => l.account_id), [account.id, cash.id]);
 });
 
+test('journal entries sync with exact, shared and other-company account fallbacks', () => {
+  let db = seed();
+  const company = create(db, 'res.company', { name: 'Entry company' });
+  const otherCompany = create(company.db, 'res.company', { name: 'Other company' });
+  db = otherCompany.db;
+  const account = (code, name, companyId) => {
+    const made = create(db, 'account.account', { code, name, company_id: companyId });
+    db = made.db;
+    return made.id;
+  };
+  const first = account('987001', 'Other exact code', otherCompany.id);
+  account('987001', 'Shared exact code', null);
+  const exact = account('987001', 'Exact company code', company.id);
+  account('987002', 'Other shared code', otherCompany.id);
+  const shared = account('987002', 'Shared fallback', null);
+  const fallback = account('987003', 'Other fallback', otherCompany.id);
+  const makeEntry = (companyId) => {
+    const entry = postEntry(db, { journal: 'MISC', date: '2025-01-15', company: companyId, lines: [
+      { account: '987001', debit: 10 }, { account: '987002', debit: 10 },
+      { account: '987003', debit: 10 }, { account: '101401', credit: 30 },
+    ] });
+    return read(applyDiff(db, diffDb(db, entry.db), { isAdmin: true }), 'account.move', entry.id);
+  };
+  assert.deepEqual(makeEntry(company.id).line_ids.slice(0, 3).map((line) => line.account_id), [exact, shared, fallback]);
+  assert.equal(makeEntry(null).line_ids[0].account_id, first);
+});
+
 test('tax return actions post closing and payment to the company chart when account codes repeat', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Separate chart company' });
+  const company = createCompany(db, { name: 'Separate chart company' });
   db = company.db;
   const accounts = {};
   for (const code of ['251000', '131000', '101401']) {
@@ -441,7 +504,7 @@ test('company isolation: tax report, journal items, and closing entries isolate 
   db = postMove(inv1.db, inv1.id);
 
   // Ensure Company 2 exists and post invoice in Company 2 (500 tax)
-  const co2 = create(db, 'res.company', { name: 'Company Two' });
+  const co2 = createCompany(db, { name: 'Company Two' });
   db = co2.db;
   const inv2 = create(db, 'account.move', {
     company_id: co2.id, move_type: 'out_invoice', partner_id: 1, invoice_date: from,
@@ -473,7 +536,7 @@ test('company isolation: tax report, journal items, and closing entries isolate 
     name: 'Co2 VAT Return',
     type_id: co2Type.id,
     date_from: from,
-    date_to: to,
+    date_to: addDays(to, 1),
     company_id: co2.id,
     state: 'reviewed',
   });
@@ -631,12 +694,12 @@ test('negative return: posts debit to tax receivable and registers inbound payme
   assert.equal(settledClosing.line_ids[settledClosing.payments[0].line_index].account_id, refundP.destination_account_id);
 });
 
-test('manual lock preservation on reset and closing cancellation under later lock', () => {
+test('manual locks are preserved and prevent closing cancellation inside their period', () => {
   let db = seed();
   const vatType = search(db, 'account.return.type').find((t) => t.name === 'VAT Return');
 
   // 1. Pre-existing manual lock date preserved on reset
-  db = updateSettings(db, { lock_date: '2026-01-31' });
+  db = updateSettings(db, { lock_date: '2025-12-31' });
   const r1 = create(db, 'account.return', {
     name: 'VAT Jan 2026',
     type_id: vatType.id,
@@ -646,11 +709,11 @@ test('manual lock preservation on reset and closing cancellation under later loc
     state: 'reviewed',
   });
   const sub1 = submitReturn(r1.db, r1.id);
-  assert.equal(sub1.settings?.lock_date, '2026-01-31');
+  assert.equal(sub1.settings?.lock_date, '2025-12-31');
 
   // Resetting r1 must NOT erase the manual lock date
   const reset1 = resetReturnToDraft(sub1, r1.id);
-  assert.equal(reset1.settings?.lock_date, '2026-01-31', 'Manual lock date preserved on reset');
+  assert.equal(reset1.settings?.lock_date, '2025-12-31', 'Manual lock date preserved on reset');
 
   // 2. Cancellation under later lock
   const r2 = create(reset1, 'account.return', {
@@ -662,17 +725,17 @@ test('manual lock preservation on reset and closing cancellation under later loc
     state: 'reviewed',
   });
   const sub2 = submitReturn(r2.db, r2.id);
-  assert.equal(sub2.settings?.lock_date, '2026-02-28');
+  assert.equal(sub2.settings?.lock_date, '2025-12-31');
+  assert.equal(sub2.settings?.tax_lock_date, '2026-02-28');
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
   const laterLocked = updateSettings(sub2, { lock_date: '2026-12-31' });
 
-  // Resetting r2 cancels its closing move cleanly despite the later lock
-  const reset2 = resetReturnToDraft(laterLocked, r2.id);
-  const cancelledMove = read(reset2, 'account.move', closingId);
-  assert.equal(cancelledMove.state, 'cancel');
-  assert.equal(reset2.settings?.lock_date, '2026-12-31', 'Later lock remains active');
+  // A later global lock also protects the closing from cancellation.
+  assert.throws(() => resetReturnToDraft(laterLocked, r2.id), /locked/i);
+  assert.equal(read(laterLocked, 'account.move', closingId).state, 'posted');
+  assert.equal(laterLocked.settings?.lock_date, '2026-12-31', 'Later lock remains active');
 });
 
 test('states workflow transitions and immutability of submitted/paid returns', () => {
@@ -811,6 +874,7 @@ test('out-payment rule: vendor bill payments and batch payments require allow_ou
   const bill = create(db, 'account.move', {
     move_type: 'in_invoice',
     partner_id: vendor.id,
+    partner_bank_id: bankBlocked.id,
     invoice_date: today(),
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
   });
@@ -870,7 +934,7 @@ test('out-payment rule: vendor bill payments and batch payments require allow_ou
   assert.equal(directPayment.partner_bank_id, bankBlocked.id);
 
   const bill2 = create(paidMoveDb, 'account.move', {
-    move_type: 'in_invoice', partner_id: vendor.id, invoice_date: today(),
+    move_type: 'in_invoice', partner_id: vendor.id, partner_bank_id: bankBlocked.id, invoice_date: today(),
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }],
   });
   const posted2 = postMove(bill2.db, bill2.id);
@@ -885,7 +949,7 @@ test('out-payment rule: vendor bill payments and batch payments require allow_ou
   assert.equal(search(batchPaid, 'account.payment').find((p) => p.invoice_id === bill2.id).partner_bank_id, bankBlocked.id);
 });
 
-test('outbound payment actions require and consistently persist the bill recipient bank', () => {
+test('outbound payment actions allow no recipient bank and persist a chosen bill bank', () => {
   let db = seed();
   const vendor = create(db, 'res.partner', { name: 'Action bank vendor' });
   db = vendor.db;
@@ -897,14 +961,16 @@ test('outbound payment actions require and consistently persist the bill recipie
   const confirmPayment = models['account.payment'].form.buttons.find((b) => b.label === 'Confirm');
   const noBankBill = makeBill(db, null);
   const draft = create(noBankBill.db, 'account.payment', { partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100, invoice_id: noBankBill.id });
-  assert.throws(() => confirmPayment.run(draft.db, read(draft.db, 'account.payment', draft.id)), /bank account.*required/i);
+  const paidWithoutBank = confirmPayment.run(draft.db, read(draft.db, 'account.payment', draft.id)).db;
+  assert.equal(read(paidWithoutBank, 'account.payment', draft.id).state, 'posted');
+  assert.equal(read(paidWithoutBank, 'account.move', noBankBill.id).amount_paid, 100);
   const standaloneMissing = create(noBankBill.db, 'account.payment', { partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100 });
-  assert.throws(() => confirmPayment.run(standaloneMissing.db, read(standaloneMissing.db, 'account.payment', standaloneMissing.id)), /bank account.*required/i);
+  assert.equal(read(confirmPayment.run(standaloneMissing.db, read(standaloneMissing.db, 'account.payment', standaloneMissing.id)).db, 'account.payment', standaloneMissing.id).state, 'posted');
   const missingSelection = write(draft.db, 'account.payment', draft.id, { partner_bank_id: 999999 });
   assert.throws(() => confirmPayment.run(missingSelection, read(missingSelection, 'account.payment', draft.id)), /invalid or inactive/i);
   const batch = create(noBankBill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 1, lines: [{ move_id: noBankBill.id, amount: 100 }] });
   const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
-  assert.throws(() => validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)), /bank account.*required/i);
+  assert.equal(read(validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db, 'account.batch.payment', batch.id).state, 'posted');
 
   const first = create(draft.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'FIRST' });
   const second = create(first.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SECOND' });
@@ -932,7 +998,7 @@ test('outbound payment actions require and consistently persist the bill recipie
     const payment = search(result, 'account.payment').find((p) => p.invoice_id === direct.id);
     assert.equal(read(result, 'account.move', direct.id).amount_paid, 100);
     assert.equal(payment.state, 'posted');
-    assert.equal(payment.partner_bank_id, first.id);
+    assert.ok(!payment.partner_bank_id);
   } finally {
     if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
   }
@@ -1097,19 +1163,81 @@ test('invoice analytic defaults follow posting accounts and refresh through form
   const changed = moveDef.onchange({ ...move, partner_id: other.id, invoice_line_ids: [line] }, 'partner_id', db);
   assert.deepEqual(changed.invoice_line_ids[0].analytic_distribution, { [b]: 100 });
   const unmatched = moveDef.onchange({ ...move, partner_id: 0, invoice_line_ids: [line] }, 'partner_id', db);
-  assert.deepEqual(unmatched.invoice_line_ids[0].analytic_distribution, {});
+  assert.deepEqual(unmatched.invoice_line_ids[0].analytic_distribution, { [a]: 100 });
   const clearedAccount = lineChange({ ...line, account_id: source.id }, 'account_id', db, { ...move, fiscal_position_id: null });
   assert.deepEqual(clearedAccount.analytic_distribution, {});
   const positionChanged = moveDef.onchange({ ...move, fiscal_position_id: null, invoice_line_ids: [line] }, 'fiscal_position_id', db);
-  assert.deepEqual(positionChanged.invoice_line_ids[0].analytic_distribution, {});
+  assert.deepEqual(positionChanged.invoice_line_ids[0].analytic_distribution, { [a]: 100 });
   const noCompany = moveDef.onchange({ ...move, company_id: null, invoice_line_ids: [line] }, 'company_id', db);
-  assert.deepEqual(noCompany.invoice_line_ids[0].analytic_distribution, {});
+  assert.deepEqual(noCompany.invoice_line_ids[0].analytic_distribution, { [a]: 100 });
   const made = create(db, 'account.move', { ...move, invoice_line_ids: [{ product_id: product.id, qty: 1, price_unit: 100, tax: 0 }] });
   const posted = moveDef.form.buttons.find((b) => b.label === 'Confirm').run(made.db, read(made.db, 'account.move', made.id)).db;
   const invoice = read(posted, 'account.move', made.id);
   assert.deepEqual(invoice.invoice_line_ids[0].analytic_distribution, { [a]: 100 });
   assert.ok(invoice.line_ids.some((l) => l.account_id === mapped.id));
   assert.equal(search(posted, 'account.analytic.line').find((l) => l.move_id === made.id).general_account, '633330');
+});
+
+test('invoice line defaults stay isolated from sales order product changes', () => {
+  let db = seed();
+  const [manual, first] = search(db, 'account.analytic.account').map((a) => a.id);
+  const second = manual;
+  const source = create(db, 'account.account', { code: '455710', name: 'Default income' });
+  const other = create(source.db, 'account.account', { code: '455720', name: 'Other income' });
+  const product = create(other.db, 'product', { name: 'Invoice service', type: 'service', list_price: 123, property_account_income_id: source.id });
+  db = create(product.db, 'account.analytic.distribution.model', { product_id: product.id, account_prefix: '455710', analytic_distribution: { [first]: 100 } }).db;
+  db = create(db, 'account.analytic.distribution.model', { product_id: product.id, account_prefix: '455720', analytic_distribution: { [second]: 100 } }).db;
+  const line = { product_id: product.id, qty: 1, price_unit: 0, analytic_distribution: { [manual]: 100 } };
+  const sale = create(db, 'sale.order', { partner_id: 1, order_line: [] });
+  const saleLine = models['sale.order'].fields.order_line.onchange(line, 'product_id', sale.db, read(sale.db, 'sale.order', sale.id));
+  const saleEdited = write(sale.db, 'sale.order', sale.id, { order_line: [saleLine] });
+  const saleSaved = applyDiff(sale.db, diffDb(sale.db, saleEdited), { isAdmin: true });
+  assert.deepEqual(read(saleSaved, 'sale.order', sale.id).order_line[0].analytic_distribution, { [manual]: 100 });
+  assert.equal(read(saleSaved, 'sale.order', sale.id).order_line[0].price_unit, 123);
+
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1 });
+  const onchange = models['account.move'].fields.invoice_line_ids.onchange;
+  const move = read(invoice.db, 'account.move', invoice.id);
+  const productLine = onchange(line, 'product_id', invoice.db, move);
+  assert.equal(productLine.price_unit, 123);
+  assert.deepEqual(productLine.analytic_distribution, { [first]: 100 });
+  const accountLine = onchange({ ...productLine, account_id: other.id, price_unit: 77 }, 'account_id', invoice.db, move);
+  assert.equal(accountLine.price_unit, 77);
+  assert.deepEqual(accountLine.analytic_distribution, { [second]: 100 });
+  const invoiceEdited = write(invoice.db, 'account.move', invoice.id, { invoice_line_ids: [accountLine] });
+  const invoiceSaved = applyDiff(invoice.db, diffDb(invoice.db, invoiceEdited), { isAdmin: true });
+  assert.deepEqual(read(invoiceSaved, 'account.move', invoice.id).invoice_line_ids[0].analytic_distribution, { [second]: 100 });
+});
+
+test('invoice writes preserve manual analytics without a model and apply matching defaults', () => {
+  let db = seed();
+  const [manual, automatic] = search(db, 'account.analytic.account').map((a) => a.id);
+  const source = create(db, 'account.account', { code: '623210', name: 'Manual expense' });
+  const mapped = create(source.db, 'account.account', { code: '623211', name: 'Mapped expense' });
+  const position = create(mapped.db, 'account.fiscal.position', { name: 'Analytic mapping', account_ids: [{ account_src_id: source.id, account_dest_id: mapped.id }] });
+  const partner = create(position.db, 'res.partner', { name: 'Original vendor' });
+  const target = create(partner.db, 'res.partner', { name: 'Matching vendor' });
+  const unmatched = create(target.db, 'res.partner', { name: 'Unmatched vendor' });
+  const company = create(unmatched.db, 'res.company', { name: 'Analytic company' });
+  const product = create(company.db, 'product', { name: 'Analytic service', type: 'service', property_account_expense_id: source.id });
+  db = create(product.db, 'account.analytic.distribution.model', { partner_id: target.id, company_id: 1, analytic_distribution: { [automatic]: 100 } }).db;
+  db = create(db, 'account.analytic.distribution.model', { partner_id: partner.id, company_id: 1, account_prefix: '623211', analytic_distribution: { [automatic]: 100 } }).db;
+  db = create(db, 'account.analytic.distribution.model', { partner_id: partner.id, company_id: company.id, analytic_distribution: { [automatic]: 100 } }).db;
+  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: partner.id, company_id: 1,
+    invoice_line_ids: [{ product_id: product.id, qty: 1, price_unit: 100, tax: 0, analytic_distribution: { [manual]: 100 } }] });
+  const distribution = (updated) => read(updated, 'account.move', bill.id).invoice_line_ids[0].analytic_distribution;
+  for (const [field, noMatch, match] of [
+    ['partner_id', unmatched.id, target.id],
+    ['fiscal_position_id', null, position.id],
+    ['company_id', 1, company.id],
+  ]) {
+    const unchanged = write(bill.db, 'account.move', bill.id, { [field]: noMatch });
+    const changed = write(bill.db, 'account.move', bill.id, { [field]: match });
+    assert.deepEqual(distribution(applyDiff(bill.db, diffDb(bill.db, unchanged), { isAdmin: true })), { [manual]: 100 }, field);
+    assert.deepEqual(distribution(applyDiff(bill.db, diffDb(bill.db, changed), { isAdmin: true })), { [automatic]: 100 }, field);
+  }
+  const emptyModel = create(bill.db, 'account.analytic.distribution.model', { partner_id: unmatched.id, company_id: 1, analytic_distribution: {} });
+  assert.deepEqual(distribution(write(emptyModel.db, 'account.move', bill.id, { partner_id: unmatched.id })), {});
 });
 
 test('bill analytic defaults use the stock interim account actually posted', () => {
@@ -1182,17 +1310,39 @@ test('analytic distribution models: matches most specific model and propagates o
   assert.deepEqual(postedRec.invoice_line_ids[0].analytic_distribution, { [acc2]: 100 });
 });
 
+test('company writes leave return types alone until explicit company initialization', () => {
+  let db = seed();
+  const mainType = search(db, 'account.return.type').find((type) => type.company_id === 1);
+  db = write(db, 'account.return.type', mainType.id, { deadline_periodicity: 'year' });
+  const renamed = write(db, 'res.company', 1, { phone: '123456' });
+  const synced = applyDiff(db, diffDb(db, renamed), { isAdmin: true });
+  assert.equal(read(synced, 'account.return.type', mainType.id).deadline_periodicity, 'year');
+
+  const direct = create(synced, 'res.company', { name: 'Direct company' });
+  const directSaved = applyDiff(synced, diffDb(synced, direct.db), { isAdmin: true });
+  assert.equal(search(directSaved, 'account.return.type').filter((type) => type.company_id === direct.id).length, 0);
+  const initialized = ensureMainCompany(directSaved);
+  assert.equal(search(initialized, 'account.return.type').filter((type) => type.company_id === direct.id).length, 1);
+  assert.equal(read(initialized, 'account.return.type', mainType.id).deadline_periodicity, 'monthly');
+  assert.strictEqual(ensureMainCompany(initialized), initialized);
+
+  const created = createCompany(initialized, { name: 'Initialized company', tax_periodicity: 'trimester' });
+  const type = search(created.db, 'account.return.type').find((record) => record.company_id === created.id);
+  assert.equal(type.deadline_periodicity, 'trimester');
+  assert.equal(search(created.db, 'account.return.type').filter((record) => record.company_id === created.id).length, 1);
+});
+
 test('generation after periodicity changes fills uncovered dates without overlapping existing returns', () => {
   let db = seed();
   const year = Number(today().slice(0, 4)) - 1;
   const start = `${year}-01-01`;
-  const company = create(db, 'res.company', { name: 'Changing tax periods', tax_periodicity: 'monthly', tax_start_date: start });
+  const company = createCompany(db, { name: 'Changing tax periods', tax_periodicity: 'monthly', tax_start_date: start });
   db = company.db;
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
   const action = models['account.return.type'].form.buttons.find((b) => b.label === 'Generate Returns');
   const first = create(db, 'account.return', { name: 'Already filed January', type_id: type.id, company_id: company.id, date_from: start, date_to: `${year}-01-31` });
   const third = create(first.db, 'account.return', { name: 'Archived March', type_id: type.id, company_id: company.id, date_from: `${year}-03-01`, date_to: `${year}-03-31`, active: false });
-  db = write(third.db, 'res.company', company.id, { tax_periodicity: 'trimester' });
+  db = ensureMainCompany(write(third.db, 'res.company', company.id, { tax_periodicity: 'trimester' }));
   assert.equal(read(db, 'account.return.type', type.id).deadline_periodicity, 'trimester');
   db = action.run(db, read(db, 'account.return.type', type.id)).db;
   const returns = db.records['account.return'].filter((r) => r.type_id === type.id).sort((a, b) => a.date_from.localeCompare(b.date_from));
@@ -1201,14 +1351,14 @@ test('generation after periodicity changes fills uncovered dates without overlap
   const count = returns.length;
   db = action.run(db, read(db, 'account.return.type', type.id)).db;
   assert.equal(db.records['account.return'].filter((r) => r.type_id === type.id).length, count);
-  db = write(db, 'res.company', company.id, { tax_periodicity: 'monthly' });
+  db = ensureMainCompany(write(db, 'res.company', company.id, { tax_periodicity: 'monthly' }));
   db = action.run(db, read(db, 'account.return.type', type.id)).db;
   assert.equal(db.records['account.return'].filter((r) => r.type_id === type.id).length, count);
 });
 
 test('generation without configured start recovers earlier company ledger history', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Historical company', tax_periodicity: 'trimester' });
+  const company = createCompany(db, { name: 'Historical company', tax_periodicity: 'trimester' });
   db = company.db;
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
   assert.equal(type.deadline_start_date, null);
@@ -1233,10 +1383,10 @@ test('company tax periodicity setting, start date, and period generation', () =>
   const company = search(db, 'res.company')[0];
 
   // Update company tax periodicity to trimester and start date to 2025-05-15
-  const updatedCo = write(db, 'res.company', company.id, {
+  const updatedCo = ensureMainCompany(write(db, 'res.company', company.id, {
     tax_periodicity: 'trimester',
     tax_start_date: '2025-05-15',
-  });
+  }));
   const vatType = search(updatedCo, 'account.return.type').find((t) => (t.company_id ?? 1) === company.id && t.name === 'VAT Return');
   assert.equal(vatType.deadline_periodicity, 'trimester');
   assert.equal(vatType.deadline_start_date, '2025-05-15');
@@ -1251,7 +1401,7 @@ test('company tax periodicity setting, start date, and period generation', () =>
   assert.ok(!periods.some((p) => p.from < '2025-05-15'));
 });
 
-test('review compares invoice tax source to independently posted tax account balances', () => {
+test('review and submit use posted tax balances rather than re-deriving source lines', () => {
   let db = seed();
   const type = search(db, 'account.return.type')[0];
   const saleTax = search(db, 'account.account').find((a) => a.code === '251000');
@@ -1269,14 +1419,38 @@ test('review compares invoice tax source to independently posted tax account bal
   const ret = create(bad.db, 'account.return', { name: 'Source reconciliation', type_id: type.id, company_id: 1, date_from: '2020-05-01', date_to: '2020-05-31' });
   const actions = models['account.return'].form.buttons;
   const review = actions.find((b) => b.label === 'Review');
-  assert.throws(() => review.run(ret.db, read(ret.db, 'account.return', ret.id)), /tax account.*invoice|invoice.*tax account/i);
+  const firstReviewed = review.run(ret.db, read(ret.db, 'account.return', ret.id)).db;
+  assert.equal(read(firstReviewed, 'account.return', ret.id).total_amount_to_pay, 100);
+  const firstSubmitted = actions.find((b) => b.label === 'Submit').run(firstReviewed, read(firstReviewed, 'account.return', ret.id)).db;
+  assert.equal(read(firstSubmitted, 'account.return', ret.id).total_amount_to_pay, 100);
   const cleanReturn = create(db, 'account.return', { name: 'Post-review invoice', type_id: type.id, company_id: 1, date_from: '2020-05-01', date_to: '2020-05-31' });
   const reviewed = review.run(cleanReturn.db, read(cleanReturn.db, 'account.return', cleanReturn.id)).db;
   const late = create(reviewed, 'account.move', read(bad.db, 'account.move', bad.id));
-  assert.throws(() => actions.find((b) => b.label === 'Submit').run(late.db, read(late.db, 'account.return', cleanReturn.id)), /tax account.*invoice|invoice.*tax account/i);
+  const submitted = actions.find((b) => b.label === 'Submit').run(late.db, read(late.db, 'account.return', cleanReturn.id)).db;
+  assert.equal(read(submitted, 'account.return', cleanReturn.id).total_amount_to_pay, 100);
 });
 
-test('tax review uses the invoice posting exchange rate after rates change', () => {
+test('review and submit accept invoice rounding booked on the largest tax', () => {
+  let db = seed();
+  const type = search(db, 'account.return.type')[0];
+  const rounding = create(db, 'account.cash.rounding', { name: 'Round up to five cents', rounding: 0.05, rounding_method: 'UP', strategy: 'biggest_tax' });
+  const inv = create(rounding.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: 1,
+    invoice_date: '2020-07-15', invoice_cash_rounding_id: rounding.id,
+    invoice_line_ids: [invoiceLine(rounding.db, 'VAT 14%', 'sale', { price_unit: 10.02 })] });
+  const confirm = models['account.move'].form.buttons.find((button) => button.label === 'Confirm');
+  db = confirm.run(inv.db, read(inv.db, 'account.move', inv.id)).db;
+  const taxLine = read(db, 'account.move', inv.id).line_ids.find((line) => line.tax_name === 'VAT 14%');
+  assert.equal(taxLine.credit, 1.43);
+  const ret = create(db, 'account.return', { name: 'Rounded VAT', type_id: type.id, company_id: 1, date_from: '2020-07-01', date_to: '2020-07-31' });
+  const buttons = models['account.return'].form.buttons;
+  const reviewed = buttons.find((button) => button.label === 'Review').run(ret.db, read(ret.db, 'account.return', ret.id)).db;
+  assert.equal(read(reviewed, 'account.return', ret.id).total_amount_to_pay, 1.43);
+  const submitted = buttons.find((button) => button.label === 'Submit').run(reviewed, read(reviewed, 'account.return', ret.id)).db;
+  assert.equal(read(submitted, 'account.return', ret.id).total_amount_to_pay, 1.43);
+  assert.equal(read(submitted, 'account.move', read(submitted, 'account.return', ret.id).closing_move_ids[0]).state, 'posted');
+});
+
+test('tax review uses posted foreign-currency journal amounts after rates change', () => {
   let db = seed();
   const currency = create(db, 'res.currency', { name: 'TAX-FOREIGN', rate_ids: [{ date: '2020-01-01', rate: 2 }] });
   const type = search(currency.db, 'account.return.type')[0];
@@ -1285,11 +1459,13 @@ test('tax review uses the invoice posting exchange rate after rates change', () 
   const confirm = models['account.move'].form.buttons.find((b) => b.label === 'Confirm');
   db = confirm.run(invoice.db, read(invoice.db, 'account.move', invoice.id)).db;
   const postedInvoice = read(db, 'account.move', invoice.id);
-  assert.throws(() => write(db, 'account.move', invoice.id, { tax_rate_at_posting: 4 }), /posted entries cannot be edited/i);
-  // Older stored invoices have no rate snapshot, but their journal items retain document-currency amounts.
+  assert.equal(Object.hasOwn(postedInvoice, 'tax_rate_at_posting'), false);
+  assert.equal(models['account.move'].fields.tax_rate_at_posting, undefined);
+  // Older stored invoices may have neither a rate snapshot nor document-currency amounts.
   const legacy = create(invoice.db, 'account.move', {
     name: 'INV/2020/99998', move_type: 'out_invoice', state: 'posted', partner_id: 1, company_id: 1,
-    currency_id: currency.id, invoice_date: '2020-06-15', invoice_line_ids: postedInvoice.invoice_line_ids, line_ids: postedInvoice.line_ids,
+    currency_id: currency.id, invoice_date: '2020-06-15', invoice_line_ids: postedInvoice.invoice_line_ids,
+    line_ids: postedInvoice.line_ids.map(({ amount_currency: _amountCurrency, ...line }) => line),
   });
   let legacyDb = write(legacy.db, 'res.currency', currency.id, { rate_ids: [{ date: '2020-01-01', rate: 4 }] });
   const legacyReturn = create(legacyDb, 'account.return', { name: 'Legacy foreign VAT', type_id: type.id, company_id: 1, date_from: '2020-06-01', date_to: '2020-06-30' });
@@ -1343,7 +1519,7 @@ test('unbalanced tax account ledger check in review and relational fields', () =
   assert.equal(models['account.return'].fields.attachment_ids.relation, 'documents.document');
 });
 
-test('lock on submit: locks period on date_to and refuses new or edited moves in the period', () => {
+test('submit applies a tax-only lock to taxed invoices and tax account entries', () => {
   let db = seed();
   const vatType = search(db, 'account.return.type').find((t) => t.name === 'VAT Return');
   const pastStart = '2026-01-01';
@@ -1361,18 +1537,24 @@ test('lock on submit: locks period on date_to and refuses new or edited moves in
   const submittedDb = submitReturn(db, retRes.id);
   const ret = read(submittedDb, 'account.return', retRes.id);
   assert.equal(ret.date_lock, pastEnd);
-  assert.ok(submittedDb.settings?.lock_date >= pastEnd, 'Global lock date reflects submitted period');
+  assert.equal(submittedDb.settings?.tax_lock_date, pastEnd);
+  assert.ok(!submittedDb.settings?.lock_date);
+  const synced = applyDiff(db, diffDb(db, submittedDb), { isAdmin: true });
+  assert.equal(synced.settings.tax_lock_date, pastEnd);
 
-  // Attempting to post an invoice in the locked period must fail
-  const inv = create(submittedDb, 'account.move', {
+  const entry = postEntry(synced, { journal: 'MISC', date: '2026-01-15', lines: [
+    { account: '101401', debit: 50 }, { account: '400000', credit: 50 },
+  ] });
+  assert.equal(read(entry.db, 'account.move', entry.id).state, 'posted');
+  assert.throws(() => postEntry(entry.db, { journal: 'MISC', date: '2026-01-15', lines: [
+    { account: '101401', debit: 50 }, { account: '251000', credit: 50 },
+  ] }), /locked/i);
+  const inv = create(entry.db, 'account.move', {
     move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-15',
-    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 0 }],
+    invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 50, tax: 14 }],
   });
-  assert.throws(
-    () => postMove(inv.db, inv.id),
-    /locked/i,
-    'Moves in submitted return period must be refused by lock'
-  );
+  const confirm = models['account.move'].form.buttons.find((button) => button.label === 'Confirm');
+  assert.throws(() => confirm.run(inv.db, read(inv.db, 'account.move', inv.id)), /locked/i);
 });
 
 test('reset rules: reset to draft cancels closing move and unlocks, but is forbidden after pay', () => {

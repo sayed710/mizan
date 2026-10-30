@@ -1,6 +1,6 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, read, search, unlink, write } from '../orm.js';
-import { setAnalyticDistributionHook, subtotal, today } from './common.js';
+import { subtotal, today } from './common.js';
 import { financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { invoiceLineAccount } from './ledger.js';
@@ -31,9 +31,9 @@ export function normalizeDistribution(distribution, db) {
 }
 
 /** Find the most specific matching analytic distribution model for line context. */
-export function findAnalyticDistribution(db, { partner_id, partner_category_id, product_id, product_categ_id, account_id, account_code, company_id } = {}) {
+export function findAnalyticDistribution(db, { partner_id, partner_category_id, product_id, product_categ_id, account_id, account_code, company_id } = {}, fallback = {}) {
   const models = search(db, 'account.analytic.distribution.model');
-  if (!models?.length) return {};
+  if (!models?.length) return fallback;
 
   const partner = partner_id ? read(db, 'res.partner', partner_id) : null;
   const product = product_id ? read(db, 'product', product_id) : null;
@@ -71,22 +71,20 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
     matched.push({ model: m, score, seq: Number(m.sequence) || 10 });
   }
 
-  if (!matched.length) return {};
+  if (!matched.length) return fallback;
   matched.sort((a, b) => b.score - a.score || a.seq - b.seq);
   return matched[0].model.analytic_distribution ?? {};
 }
 
 /** Resolve a fresh default using the same account that will be posted. */
-export function defaultDistributionForLine(db, line, move) {
+export function defaultDistributionForLine(db, line, move, fallback = {}) {
   return findAnalyticDistribution(db, {
     partner_id: move?.partner_id,
     product_id: line.product_id,
     account_id: invoiceLineAccount(db, move, line),
     company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : 1,
-  });
+  }, fallback);
 }
-
-setAnalyticDistributionHook(defaultDistributionForLine);
 
 /** Read a distribution, preserving the legacy single-account allocation. */
 export function distributionOfLine(line, db, move) {

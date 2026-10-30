@@ -114,8 +114,7 @@ export function postMove(db, id) {
   const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
   const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines,
-    tax_rate_at_posting: rateAt(db, r.currency_id, r.invoice_date ?? today(), r.company_id) }), id);
+  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
   return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, { ...updatedR, name }) : posted;
 }
@@ -216,7 +215,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
     recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id });
-    if (!r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
+    if (recipientBankId && !r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
   }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
   const excess = Math.round((amount - value) * 100) / 100;
@@ -376,7 +375,16 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
-const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } } };
+const invoiceLineField = {
+  ...invoiceLineBase,
+  fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' } },
+  onchange: (line, key, db, move) => {
+    const updated = invoiceLineBase.onchange(line, key, db, move);
+    return db && ['product_id', 'account_id'].includes(key)
+      ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) }
+      : updated;
+  },
+};
 
 const lineItem = {
   type: 'one2many',
@@ -455,7 +463,7 @@ export const accountingModels = {
           : null;
         const context = { ...r, ...fiscal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
-          ? { invoice_line_ids: r.invoice_line_ids.map((line) => ({ ...line, analytic_distribution: defaultDistributionForLine(db, line, context) })) }
+          ? { invoice_line_ids: r.invoice_line_ids.map((line) => ({ ...line, analytic_distribution: defaultDistributionForLine(db, line, context, line.analytic_distribution ?? {}) })) }
           : {};
         return {
           ...fiscal,
@@ -479,7 +487,6 @@ export const accountingModels = {
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
-      tax_rate_at_posting: { type: 'float', label: 'Posting Exchange Rate', readonly: true, hidden: true },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       invoice_cash_rounding_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding' },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },

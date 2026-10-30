@@ -154,6 +154,40 @@ test('tax return relation input selects, saves, removes and links documents and 
   await React.act(async () => root.unmount());
 });
 
+test('many-to-many tags use registered menus and leave unreachable records unlinked', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { FieldInput } = await import('./ui.jsx');
+  const { targetOf } = await import('./models/index.js');
+  const { search } = await import('./orm.js');
+  const { seed } = await import('./seed.js');
+  let db = seed();
+  const partner = search(db, 'res.partner')[0];
+  const rootEl = makeEl('div');
+  rootEl.ownerDocument = globalThis.document;
+  const root = createRoot(rootEl);
+  const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
+  const render = async (relation, value) => React.act(async () => root.render(React.createElement(FieldInput, {
+    db, field: { type: 'many2many', relation }, value, readonly: true,
+  })));
+  await render('res.partner', [partner.id]);
+  assert.equal(props(find(rootEl, (node) => node.tagName === 'A')).href, `${targetOf('res.partner')}/${partner.id}`);
+  db = { ...db, settings: { ...db.settings, uninstalled: ['contacts'] } };
+  await render('res.partner', [partner.id]);
+  assert.equal(props(find(rootEl, (node) => node.tagName === 'A')).href, `${targetOf('res.partner', ['contacts'])}/${partner.id}`);
+  assert.notEqual(targetOf('res.partner', ['contacts']), targetOf('res.partner'));
+  const payment = search(db, 'account.payment')[0];
+  assert.equal(targetOf('account.payment'), '#/');
+  await render('account.payment', [payment.id]);
+  assert.equal(find(rootEl, (node) => node.tagName === 'A'), null);
+  assert.ok(rootEl.textContent.includes(payment.name));
+  await render('res.partner', [999999]);
+  assert.equal(find(rootEl, (node) => node.tagName === 'A'), null);
+  assert.ok(rootEl.textContent.includes('#999999'));
+  await React.act(async () => root.unmount());
+});
+
 test('tax return form persists attachment selection and opens the selected records', async () => {
   const { makeEl } = setupDom();
   globalThis.location = { hash: '#/accounting/tax-returns' };

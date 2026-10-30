@@ -71,11 +71,6 @@ export function amounts(lines = []) {
   return { untaxed: cents(untaxed), tax: cents(tax), total: cents(cents(untaxed) + cents(tax)) };
 }
 
-let _analyticDistributionHook = null;
-export function setAnalyticDistributionHook(fn) {
-  _analyticDistributionHook = fn;
-}
-
 /** One2many product lines; `priceField` is the product field copied into the unit price on product change. */
 export const productLines = (label, priceField) => ({
   type: 'one2many',
@@ -102,15 +97,7 @@ export const productLines = (label, priceField) => ({
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
   onchange: (line, key, db, record) => {
     if (key === 'tax_id') return { ...line, ...taxSnapshot(read(db, 'account.tax', line.tax_id)) };
-    if (!['product_id', 'uom_id', 'account_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
-    const analyticDefault = () => (_analyticDistributionHook && db
-      ? _analyticDistributionHook(db, line, { ...record, move_type: record?.move_type ?? (priceField === 'cost' ? 'in_invoice' : 'out_invoice') })
-      : null);
-    // An account edit only refreshes analytics; pricing and unit conversion belong to product/UoM changes.
-    if (key === 'account_id') {
-      const dist = analyticDefault();
-      return dist ? { ...line, analytic_distribution: dist } : line;
-    }
+    if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);
     const stock = product?.uom_id ?? uomForLegacy(db, product?.uom ?? 'unit')?.id;
     const uom_id = line.uom_id || (priceField === 'cost' ? product?.uom_po_id ?? product?.uom_id : product?.uom_id);
@@ -118,8 +105,7 @@ export const productLines = (label, priceField) => ({
     const base = product?.[priceField] ?? 0;
     const price = record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, qty, base) : base;
     const tax = key === 'product_id' ? productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id) : null;
-    const dist = key === 'product_id' ? analyticDefault() : null;
-    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ?? {}), ...(dist ? { analytic_distribution: dist } : {}) };
+    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ?? {}) };
   },
 });
 

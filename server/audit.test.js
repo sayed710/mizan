@@ -72,7 +72,7 @@ test('an edit through /api/diff is logged with the login, server time and old an
   }
 });
 
-test('locked-period tax closing requires the server submission action, not a forged diff', async () => {
+test('global locks block forged entries and tax submission until unlocked', async () => {
   const { url, stop } = await startServer();
   try {
     const admin = client(url);
@@ -94,13 +94,19 @@ test('locked-period tax closing requires the server submission action, not a for
     const rejected = await admin('POST', '/api/diff', diffDb(db, forged));
     assert.equal(rejected.status, 400);
     assert.match(rejected.body.error, /locked/i);
+    const blocked = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
+    assert.equal(blocked.status, 400);
+    assert.match(blocked.body.error, /locked/i);
+    const unlocked = await admin('POST', '/api/diff', diffDb(db, updateSettings(db, { lock_date: null })));
+    assert.equal(unlocked.status, 200);
     const submitted = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
     const saved = (await admin('GET', '/api/db')).body;
     const result = read(saved, 'account.return', ret.id);
     assert.equal(result.state, 'submitted');
     assert.equal(read(saved, 'account.move', result.closing_move_ids[0]).state, 'posted');
-    assert.equal(saved.settings.lock_date, '2020-03-31');
+    assert.equal(saved.settings.lock_date, null);
+    assert.equal(saved.settings.tax_lock_date, '2020-03-31');
   } finally {
     await stop();
   }

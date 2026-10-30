@@ -1,6 +1,6 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useEffect, useState } from 'react';
-import { models } from './models/index.js';
+import { models, targetOf } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
@@ -253,16 +253,15 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   if (field.type === 'many2many') {
     const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
     const locked = readonly || field.readonly || field.compute;
-    const paths = { 'account.move': '#/accounting/entries', 'documents.document': '#/documents/all', 'helpdesk.ticket': '#/helpdesk/tickets' };
+    const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
     const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id));
     return (
       <div className="many2many-tags">
         {ids.map((item) => {
           const related = read(db, field.relation, item);
           const name = related?.name ?? `#${item}`;
-          const target = paths[field.relation];
           return <span key={item} className="tag">
-            {target && related ? <a href={`${target}/${item}`} className="tag-link">{name}</a> : name}
+            {target !== '#/' && related ? <a href={`${target}/${item}`} className="tag-link">{name}</a> : name}
             {!locked && <button type="button" aria-label={`${t('Remove')} ${name}`} onClick={() => onChange(ids.filter((i) => i !== item))}>×</button>}
           </span>;
         })}

@@ -1,7 +1,6 @@
 export function setupDom() {
   const listeners = new Map();
   const makeEl = (tag = 'div') => {
-    let _text;
     const node = {
       nodeType: 1,
       tagName: tag.toUpperCase(),
@@ -43,12 +42,10 @@ export function setupDom() {
       querySelector: () => null,
       querySelectorAll: () => [],
       get textContent() {
-        if (_text !== undefined) return _text;
         return this.childNodes.map((c) => (c.nodeType === 3 ? c.nodeValue : c.textContent)).join('');
       },
       set textContent(v) {
-        _text = String(v);
-        this.childNodes = [{ nodeType: 3, nodeValue: String(v) }];
+        this.childNodes = v ? [{ nodeType: 3, nodeValue: String(v) }] : [];
       },
     };
     return node;

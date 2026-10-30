@@ -227,8 +227,6 @@ export const companyModels = {
     },
     defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly' }),
     guard: companyGuard,
-    afterCreate: (db) => ensureReturnTypes(db),
-    afterWrite: (db) => ensureReturnTypes(db),
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },

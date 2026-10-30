@@ -270,16 +270,7 @@ export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.mess
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));
 
-export const updateSettings = (db, vals) => {
-  const nextSettings = { ...db.settings, ...vals };
-  if ('lock_date' in vals && !vals.lock_sources) {
-    nextSettings.lock_sources = {
-      ...(nextSettings.lock_sources ?? {}),
-      manual: vals.lock_date || null,
-    };
-  }
-  return { ...db, settings: nextSettings };
-};
+export const updateSettings = (db, vals) => ({ ...db, settings: { ...db.settings, ...vals } });
 
 const groupKey = (field, v) => {
   if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;

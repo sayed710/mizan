@@ -37,7 +37,7 @@ export const JOURNALS = [
 
 export const accountId = (db, code, company) => {
   const matches = (db.records['account.account'] ?? []).filter((a) => a.code === code);
-  return (company ? matches.find((a) => a.company_id === company) ?? matches.find((a) => !a.company_id) : matches[0])?.id ?? null;
+  return (company ? matches.find((a) => a.company_id === company) ?? matches.find((a) => !a.company_id) ?? matches[0] : matches[0])?.id ?? null;
 };
 export const journalId = (db, code) => (db.records['account.journal'] ?? []).find((j) => j.code === code)?.id ?? null;
 
@@ -58,7 +58,7 @@ export function invoiceLineAccount(db, move, line) {
 
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
 export function invoiceLines(db, move) {
-  // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits â†” credits).
+  // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   // Foreign-currency invoices are booked in the company currency at the invoice-date rate.
@@ -134,7 +134,7 @@ export function invoiceLines(db, move) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, date = today(), ref = '', lines, company = null, is_tax_closing = false, is_tax_payment = false, tax_return_id = null }) {
+export function postEntry(db, { journal, date = today(), ref = '', lines, company = null, is_tax_payment = false, tax_return_id = null }) {
   const line_ids = lines.map((l) => {
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
@@ -145,7 +145,6 @@ export function postEntry(db, { journal, date = today(), ref = '', lines, compan
   return create(db, 'account.move', {
     move_type: 'entry', state: 'posted', journal_id: journalId(db, journal), invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
-    ...(is_tax_closing ? { is_tax_closing: true } : {}),
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
   });
@@ -161,7 +160,7 @@ export function paymentJournal(db, journalId) {
 /** Posted journal items with their move date, optionally limited to [from, to] and company. */
 export function journalItems(db, { from, to, company_id, company } = {}) {
   const targetCompany = company_id ?? company;
-  const closingMoves = new Set((db.records?.['account.return'] ?? []).flatMap((r) => r.closing_move_ids ?? []));
+  const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
   const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
   return search(db, 'account.move')
     .filter((m) => m.state === 'posted'
@@ -169,7 +168,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
       && (!to || (m.invoice_date ?? m.date) <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany))
     .flatMap((m) => {
-      const isTaxClosing = closingMoves.has(m.id) || (!!m.is_tax_closing && !!m.tax_return_id);
+      const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
       return (m.line_ids ?? []).map((l) => ({
         ...l,
@@ -183,7 +182,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
     });
 }
 
-/** Balance per account (debit âˆ’ credit) over the given items. */
+/** Balance per account (debit − credit) over the given items. */
 export function balances(db, items) {
   const map = new Map();
   for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + (Number(l.debit) || 0) - (Number(l.credit) || 0));

@@ -1,9 +1,13 @@
 // Tax Returns and Return Types (Odoo 20 parity).
-import { create, read, write } from '../orm.js';
+import { create, read, updateSettings, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId } from './ledger.js';
 import { postPayment } from './pay.js';
-import { moveDate, postTaxReturnClosing, syncLockDate, taxClosingProofMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
+import { moveDate, postTaxReturnClosing, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
+
+/** The tax lock follows the latest submitted or paid return. */
+const syncTaxLockDate = (db, excludeId = null) => updateSettings(db, { tax_lock_date: (db.records?.['account.return'] ?? [])
+  .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state)).map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? null });
 
 /** Ensure a VAT return type exists for each company, matching its periodicity setting. */
 export function ensureReturnTypes(db) {
@@ -227,7 +231,7 @@ export function submitReturn(db, returnId) {
     is_completed: false,
   });
 
-  return syncLockDate(nextDb);
+  return syncTaxLockDate(nextDb);
 }
 
 /** Pay a submitted tax return: registers outbound payment or inbound refund to payment_partner_id. */
@@ -298,11 +302,11 @@ export function payReturn(db, returnId) {
     nextDb = postPayment(created.db, read(created.db, 'account.payment', created.id));
   }
 
-  return write(nextDb, 'account.return', ret.id, {
+  return syncTaxLockDate(write(nextDb, 'account.return', ret.id, {
     state: 'paid',
     is_completed: true,
     ...(paymentId ? { payment_id: paymentId } : {}),
-  });
+  }));
 }
 
 /** Reset to draft: cancels closing move and unlocks period, forbidden after pay. */
@@ -313,9 +317,9 @@ export function resetReturnToDraft(db, returnId) {
     throw new Error('Paid returns cannot be reset to draft');
   }
 
-  let nextDb = db;
+  let nextDb = syncTaxLockDate(db, ret.id);
 
-  // Cancel closing moves
+  // Cancel closing moves after removing this return's tax lock.
   for (const moveId of ret.closing_move_ids ?? []) {
     const m = read(nextDb, 'account.move', moveId);
     if (m && m.state !== 'cancel') {
@@ -331,34 +335,40 @@ export function resetReturnToDraft(db, returnId) {
     date_lock: null,
     date_submission: null,
     is_completed: false,
-    closing_move_ids: [],
   });
 
-  return syncLockDate(nextDb, { excludeReturnId: ret.id });
+  return syncTaxLockDate(nextDb);
 }
 
-function returnGuard(db, before, after, ctx) {
+function returnGuard(db, before, after) {
   if (before?.state === 'paid' && after.state !== 'paid') {
     return 'Paid returns cannot be reset to draft';
   }
   const transitions = { new: ['reviewed'], reviewed: ['new', 'submitted'], submitted: ['new', 'paid'], paid: [] };
   const directPay = before && ['new', 'reviewed'].includes(before.state) && after.state === 'paid'
     && read(db, 'account.return.type', after.type_id)?.states_workflow === 'generic_state_only_pay'
-    && taxClosingProofMatchesReturn(ctx, after);
+    && taxClosingMatchesReturn(db, after);
+  if (!before && ['submitted', 'paid'].includes(after.state)) return 'Tax return transition is not allowed';
   if (before && before.state !== after.state && !transitions[before.state]?.includes(after.state) && !directPay) {
     return 'Tax return transition is not allowed';
   }
-  if (before?.state === 'reviewed' && after.state === 'submitted') {
-    const moves = (after.closing_move_ids ?? []).map((id) => read(db, 'account.move', id));
-    if (!moves.length || moves.some((move) => !move || move.state !== 'posted' || move.date !== after.date_to || (move.company_id ?? 1) !== after.company_id)
-      || after.date_lock !== after.date_to || !after.date_submission) {
-      return 'Tax return submission requires a posted closing move';
+  if ((before?.state === 'reviewed' && after.state === 'submitted') || directPay) {
+    if (!taxClosingMatchesReturn(db, after) || after.date_lock !== after.date_to || !after.date_submission) {
+      return 'Tax return submission requires a posted linked closing move with matching amounts';
     }
+  }
+  if (directPay) {
+    const payment = after.payment_id && read(db, 'account.payment', after.payment_id);
+    if (!after.is_completed || (Number(after.total_amount_to_pay) && (payment?.state !== 'posted' || payment.return_id !== after.id
+      || Number(payment.amount) !== Math.abs(Number(after.total_amount_to_pay))))) return 'Tax return payment requires a posted payment';
   }
   if (before && ['submitted', 'paid'].includes(before.state)) {
     const LOCKED = ['type_id', 'date_from', 'date_to', 'company_id', 'total_amount_to_pay'];
     if (LOCKED.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
       return 'Submitted or paid tax returns cannot be modified';
+    }
+    if (JSON.stringify(before.closing_move_ids ?? []) !== JSON.stringify(after.closing_move_ids ?? [])) {
+      return 'Submitted or paid tax return closing links cannot be modified';
     }
     if (before.state === 'submitted' && after.state === 'new') {
       if ((before.closing_move_ids ?? []).some((id) => read(db, 'account.move', id)?.state !== 'cancel')) {
@@ -366,7 +376,8 @@ function returnGuard(db, before, after, ctx) {
       }
     } else if (before.state === 'submitted' && after.state === 'paid') {
       const payment = after.payment_id && read(db, 'account.payment', after.payment_id);
-      if (!after.is_completed || (Number(after.total_amount_to_pay) && (payment?.state !== 'posted' || payment.return_id !== after.id))) {
+      if (!after.is_completed || !taxClosingMatchesReturn(db, after) || (Number(after.total_amount_to_pay) && (payment?.state !== 'posted' || payment.return_id !== after.id
+        || Number(payment.amount) !== Math.abs(Number(after.total_amount_to_pay))))) {
         return 'Tax return payment requires a posted payment';
       }
     }

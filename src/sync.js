@@ -326,7 +326,7 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
  * @param {any} d
  * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null, login?: string | null, companies?: any, readOnly?: Set<string> | null }} [options]
  */
-export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null, taxClosingProofs = [] } = {}) {
+export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
@@ -385,7 +385,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, taxClosingProofs, previousDb: db });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);
@@ -465,8 +465,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
       lock_date: lockValue(s.lock_date, db.settings.lock_date),
-      lock_sources: s.lock_sources && typeof s.lock_sources === 'object' && !Array.isArray(s.lock_sources) && (s.lock_sources.manual === null || isRealDate(s.lock_sources.manual))
-        ? { manual: s.lock_sources.manual } : db.settings.lock_sources,
+      tax_lock_date: lockValue(s.tax_lock_date, db.settings.tax_lock_date),
       sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.

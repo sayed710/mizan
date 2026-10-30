@@ -92,14 +92,7 @@ export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, 
     return chosen.id;
   }
 
-  const partnerBanks = allBanks.filter((b) => b.partner_id === partnerId && b.active !== false);
-  if (!partnerBanks.length) throw new Error('A recipient bank account is required');
-
-  const allowed = partnerBanks.find((b) => b.allow_out_payment);
-  if (!allowed) {
-    throw new Error('The bank account does not allow outbound payments');
-  }
-  return allowed.id;
+  return null;
 }
 
 export const partnerBankModels = {

@@ -1,9 +1,9 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
-import { postNote, postNotes, read, search, updateSettings, write, writeMany } from '../orm.js';
+import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
-import { accountId, isBalanced, journalId, journalItems, paymentJournal, postEntry } from './ledger.js';
-import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { taxGroups, TRANSITION } from './taxes.js';
+import { accountId, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
+import { toCompany } from './currency.js';
+import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
 import { round } from '../money.js';
 
@@ -21,7 +21,7 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'tax_rate_at_posting', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
+const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 export const moveDate = (m) => (m?.move_type === 'entry' && m?.date ? m.date : m?.invoice_date ?? m?.date ?? today());
@@ -54,28 +54,15 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
-/** Recompute the active global lock date across all active independent sources (manual, closed fiscal years, submitted/paid returns). */
-export function activeLockDate(db, { excludeReturnId = null, excludeYearId = null } = {}) {
-  const yearLocks = (db.records?.['account.fiscal.year'] ?? [])
-    .filter((y) => y.id !== excludeYearId && y.state === 'closed')
-    .map((y) => y.date_to);
-  const returnLocks = (db.records?.['account.return'] ?? [])
-    .filter((r) => r.id !== excludeReturnId && ['submitted', 'paid'].includes(r.state))
-    .map((r) => r.date_to);
-  const manual = db.settings?.lock_sources?.manual !== undefined
-    ? db.settings.lock_sources.manual
-    : (yearLocks.includes(db.settings?.lock_date) || returnLocks.includes(db.settings?.lock_date) ? null : db.settings?.lock_date ?? null);
-  return [manual, ...yearLocks, ...returnLocks].filter(Boolean).sort().at(-1) ?? '';
-}
-
-/** Synchronize db.settings.lock_date and independent lock sources. */
-export function syncLockDate(db, opts = {}) {
-  const manual = db.settings?.lock_sources?.manual !== undefined
-    ? db.settings.lock_sources.manual
-    : (db.settings?.lock_date ?? null);
-  const lock = activeLockDate(db, opts);
-  const lock_sources = { ...(db.settings?.lock_sources ?? {}), manual };
-  return updateSettings(db, { lock_date: lock || '', lock_sources });
+/** Tax locks apply only to entries carrying tax information or touching a tax account. */
+function taxLockFor(db, move, settings = db.settings) {
+  if (!move || !settings?.tax_lock_date) return '';
+  const accounts = taxAccounts(db, move.company_id);
+  const ids = new Set([...accounts.sale, ...accounts.purchase,
+    accountId(db, TRANSITION.sale, move.company_id), accountId(db, TRANSITION.purchase, move.company_id)]);
+  const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
+    || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
+  return taxable ? settings.tax_lock_date : '';
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
@@ -101,13 +88,17 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'tax_rate_at_posting', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
-function postedMoveRule(before, after) {
+function postedMoveRule(db, before, after) {
   if (before?.state === 'posted' && after.state === 'posted' && changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
   if (before?.state === 'posted' && after.state !== 'posted') {
-    if (after.state !== 'draft') return 'Posted entries go back to draft before anything else';
+    // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.
+    const ret = before.tax_return_id && read(db, 'account.return', before.tax_return_id);
+    const closingReset = after.state === 'cancel' && ret?.state === 'new' && (ret.closing_move_ids ?? []).includes(before.id)
+      && !changedFields(before, after, [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => key !== 'state'));
+    if (after.state !== 'draft' && !closingReset) return 'Posted entries go back to draft before anything else';
     if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
@@ -224,78 +215,35 @@ export function paymentInvariant(db, after) {
 
 /** Whether a fiscal year names this entry as its closing or reopening entry. */
 const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some((y) => y.closing_move_id === id || y.opening_move_id === id);
+const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 
 /** A closed fiscal year locks its period whoever closed it. */
 export function closedYearLock(db) {
   return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
 }
 
-// Only the synchronous, validated tax-closing operation below can grant this ephemeral permission. It is never
-// stored in the database or accepted from an ORM record, request context, reference, or client-supplied flag.
-const taxClosingAuthorization = new WeakMap();
-const taxClosingProofByLines = new WeakMap();
-const taxClosingProofDetails = new WeakMap();
-
-/** Opaque proof objects for newly generated closing moves in a trusted server action's diff. */
-export function taxClosingProofs(db, diff) {
-  const ids = new Set((diff.upserts?.['account.move'] ?? []).map((move) => move.id));
-  return (db.records['account.move'] ?? []).filter((move) => ids.has(move.id) && Array.isArray(move.line_ids)).map((move) => taxClosingProofByLines.get(move.line_ids)).filter(Boolean);
-}
-
-/** Only a genuine server-generated closing can attest a direct-pay transition collapsed into one sync. */
-export function taxClosingProofMatchesReturn(ctx, ret) {
-  return (ctx?.taxClosingProofs ?? []).some((token) => {
-    const proof = taxClosingProofDetails.get(token);
-    return proof && proof.returnId === ret.id && proof.company === ret.company_id && proof.date === ret.date_to
-      && (ret.closing_move_ids ?? []).includes(proof.moveId) && round(Number(ret.total_amount_to_pay) || 0) === proof.payable;
-  });
-}
-
-// A sync collapses the reset's posted ? draft ? cancelled writes into one change. Bind the
-// exception to the stored return and the complete resulting reset, with no other move edits.
-function isSyncedReturnReset(db, before, after, ctx) {
-  if (!ctx?.previousDb || before?.state !== 'posted' || after.state !== 'cancel'
-    || !before.is_tax_closing || !before.tax_return_id || bookedByBank(db, before.id)) return false;
-  const oldReturn = read(ctx.previousDb, 'account.return', before.tax_return_id);
-  const newReturn = read(db, 'account.return', before.tax_return_id);
-  if (oldReturn?.state !== 'submitted' || !(oldReturn.closing_move_ids ?? []).includes(before.id)
-    || newReturn?.state !== 'new' || (newReturn.closing_move_ids ?? []).length) return false;
-  const { state: _oldState, ...oldMove } = before;
-  const { state: _newState, ...newMove } = after;
-  return !changedFields(oldMove, newMove, [...new Set([...Object.keys(oldMove), ...Object.keys(newMove)])]);
-}
-
 export function moveGuard(db, before, after, ctx) {
-  const reset = isSyncedReturnReset(db, before, after, ctx);
-  return lockRule(db, before, after, ctx, reset) ?? accountsError(db, before, after) ?? (reset ? null : postedMoveRule(before, after));
+  return lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after);
 }
 
-
-function lockRule(db, before, after, ctx, returnReset = false) {
+function lockRule(db, before, after, ctx) {
   if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
-  // An internally generated closing may post despite a pre-existing lock, but only for its exact validated entry.
-  const local = !before && taxClosingAuthorization.get(db);
-  const proof = !before && (ctx?.taxClosingProofs ?? []).map((token) => taxClosingProofDetails.get(token)).find((entry) => entry?.moveId === after.id);
-  const authorized = local || proof;
-  const relatedReturn = authorized && read(db, 'account.return', authorized.returnId);
-  const linked = local ? relatedReturn?.state === 'reviewed'
-    : ['submitted', 'paid'].includes(relatedReturn?.state) && (relatedReturn.closing_move_ids ?? []).includes(after.id);
-  if (authorized && linked && after.move_type === 'entry' && after.state === 'posted' && after.company_id === authorized.company
-    && after.date === authorized.date && after.invoice_date === authorized.date && after.journal_id === authorized.journal
-    && after.ref === authorized.ref && JSON.stringify((after.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit, l.credit])) === authorized.lines) return null;
-  if (returnReset) return null;
-  // Existing return closings may be cancelled by the reset workflow.
-
-  const isReturnClosing = (db.records?.['account.return'] ?? []).some((r) => (r.closing_move_ids ?? []).includes((before ?? after).id) && r.state !== 'paid');
-  if (isReturnClosing && ['draft', 'cancel'].includes(after.state) && !changedFields(before, after, ['line_ids', 'invoice_line_ids', 'date', 'invoice_date', 'journal_id', 'company_id'])) {
-    return null;
-  }
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
-  const lock = [...[before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)), yearLock].sort().at(-1);
+  // A sync may contain an earlier tax-lock removal as well as the resulting move changes.
+  // Never lower it past any return that is still submitted or paid in the staged records.
+  const proposed = ctx?.settings?.tax_lock_date;
+  const current = db.settings?.tax_lock_date;
+  const remaining = (db.records?.['account.return'] ?? []).filter((r) => ['submitted', 'paid'].includes(r.state))
+    .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+  const validDate = typeof proposed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(proposed)
+    && !Number.isNaN(Date.parse(proposed)) && new Date(proposed).toISOString().slice(0, 10) === proposed;
+  const lowered = current && (proposed === null || validDate) && (proposed ?? '') < current;
+  const taxSettings = lowered ? { ...db.settings, tax_lock_date: [proposed, remaining].filter(Boolean).sort().at(-1) ?? null } : db.settings;
+  const lock = [...[before, after].filter(Boolean).flatMap((m) => [lockDateFor(db.settings, m), taxLockFor(db, m, taxSettings)]), yearLock].sort().at(-1);
   if (!lock) return null;
   const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
   if (!touchesLocked) return null;
@@ -309,7 +257,7 @@ function lockRule(db, before, after, ctx, returnReset = false) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [lockDateFor(db.settings, before), closedYearLock(db)].sort().at(-1);
+  const lock = before && [lockDateFor(db.settings, before), taxLockFor(db, before), closedYearLock(db)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -343,8 +291,9 @@ export const datedLockDelete = (booked) => (db, r) => {
 export function moveDeleteGuard(db, move, staged = db) {
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
+  if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
+  const lock = [lockDateFor(db.settings, move), taxLockFor(db, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
@@ -382,7 +331,7 @@ function taxItems(db, period) {
   });
 }
 
-/** VAT return for a period, read from the ledger: output tax (sales) âˆ’ input tax (purchases) = payable. */
+/** VAT return for a period, read from the ledger: output tax (sales) − input tax (purchases) = payable. */
 export function taxReport(db, period) {
   const items = taxItems(db, period);
   const sum = (side) => round(items.filter((l) => l.side === side).reduce((s, l) => s + l.tax, 0));
@@ -418,49 +367,12 @@ export function validateTaxReturnPeriod(db, ret) {
     throw new Error('Unbalanced tax account: untagged entry exists on tax account');
   }
 
-  // The tax report itself is ledger-based. Independently recompute invoice tax from the stored source lines,
-  // then compare each tax/account group with its posted journal items (including refunds and currency rounding).
-  // Cash-basis tax is booked to transition accounts on the invoice and enters the report on later payments.
-  const invoices = search(db, 'account.move').filter((m) => m.state === 'posted'
-    && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(m.move_type)
-    && (m.company_id ?? 1) === (ret.company_id ?? 1) && moveDate(m) >= ret.date_from && moveDate(m) <= ret.date_to);
-  for (const invoice of invoices) {
-    const purchase = ['in_invoice', 'in_refund'].includes(invoice.move_type);
-    const refund = ['out_refund', 'in_refund'].includes(invoice.move_type);
-    const sign = (purchase ? 1 : -1) * (refund ? -1 : 1);
-    const fallback = accountId(db, purchase ? '131000' : '251000');
-    const ownCurrency = companyCurrency(db, invoice.company_id)
-      ?? (db.records['res.currency'] ?? []).find((currency) => currency.name === db.settings?.currency)?.id ?? null;
-    // Older foreign invoices did not save their posting rate. Their original currency amounts still provide an
-    // independent control, without recalculating company values using a subsequently edited exchange rate.
-    const legacyForeign = !(Number(invoice.tax_rate_at_posting) > 0) && invoice.currency_id && invoice.currency_id !== ownCurrency;
-    const rate = legacyForeign ? 1 : Number(invoice.tax_rate_at_posting) > 0
-      ? Number(invoice.tax_rate_at_posting) : rateAt(db, invoice.currency_id, invoice.invoice_date ?? today(), invoice.company_id);
-    const expected = taxGroups((invoice.invoice_line_ids ?? []).filter((line) => !line.tax_cash_basis),
-      (line) => line.tax_account_id || fallback, rate);
-    const sums = new Map();
-    const add = (account, name, amount) => {
-      const key = JSON.stringify([account, name]);
-      sums.set(key, (sums.get(key) ?? 0) + amount);
-    };
-    for (const group of expected) if (taxAccountIds.has(group.account_id)) add(group.account_id, group.tax_name, sign * group.amount);
-    for (const line of invoice.line_ids ?? []) if (taxAccountIds.has(line.account_id)) {
-      const postedAmount = legacyForeign ? Number(line.amount_currency) || 0 : (Number(line.debit) || 0) - (Number(line.credit) || 0);
-      add(line.account_id, line.tax_name, -postedAmount);
-    }
-    if ([...sums.values()].some((amount) => Math.abs(round(amount)) > 0.005)) {
-      throw new Error(`Unbalanced tax account: invoice ${invoice.name} tax differs from its journal items`);
-    }
-  }
-
   return taxReport(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id });
 }
 
 
-/** Construct and post only the validated closing of a reviewed return, never a caller-supplied journal entry. */
-export function postTaxReturnClosing(db, returnId) {
-  const ret = read(db, 'account.return', returnId);
-  if (!ret || ret.state !== 'reviewed') throw new Error('A reviewed tax return is required for closing');
+/** Calculate the closing from posted tax accounts and the return's payment configuration. */
+function taxClosingSpec(db, ret) {
   const type = read(db, 'account.return.type', ret.type_id);
   if (!type || (type.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
   const report = validateTaxReturnPeriod(db, ret);
@@ -487,23 +399,38 @@ export function postTaxReturnClosing(db, returnId) {
   if (report.payable > 0) lines.push({ account: payable, credit: report.payable, partner_id: partner });
   else if (report.payable < 0) lines.push({ account: receivable, debit: -report.payable, partner_id: partner });
   if (!lines.length) lines.push({ account: payable, debit: 0, credit: 0 }, { account: receivable, debit: 0, credit: 0 });
-  const ref = `Tax Closing: ${ret.name}`;
-  const expected = lines.map((line) => {
-    const net = round((line.debit ?? 0) - (line.credit ?? 0));
-    return [accountId(db, line.account, ret.company_id), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
-  });
-  if (taxClosingAuthorization.has(db)) throw new Error('A tax closing is already in progress');
-  const authorization = { returnId: ret.id, company: ret.company_id, date: ret.date_to, journal: journalId(db, 'MISC'), ref, lines: JSON.stringify(expected), payable: report.payable };
-  taxClosingAuthorization.set(db, authorization);
+  return { lines, payable: report.payable };
+}
+
+/** Validate a submitted closing against its linked return and the posted ledger. */
+export function taxClosingMatchesReturn(db, ret) {
+  const ids = ret.closing_move_ids ?? [];
+  if (ids.length !== 1) return false;
+  const move = read(db, 'account.move', ids[0]);
+  if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
+    || move.date !== ret.date_to || move.invoice_date !== ret.date_to || (move.company_id ?? 1) !== (ret.company_id ?? 1)) return false;
+  // The candidate link may not yet be written on a local transition.
+  const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === ret.id ? ret : r) } };
   try {
-    const entry = postEntry(db, { journal: 'MISC', date: ret.date_to, ref, lines, company: ret.company_id, is_tax_closing: true, tax_return_id: ret.id });
-    const proof = {};
-    taxClosingProofDetails.set(proof, { ...authorization, moveId: entry.id });
-    taxClosingProofByLines.set(entry.db.records['account.move'].find((move) => move.id === entry.id).line_ids, proof);
-    return { ...entry, payable: report.payable };
-  } finally {
-    taxClosingAuthorization.delete(db);
+    const spec = taxClosingSpec(staged, ret);
+    const expected = spec.lines.map((line) => {
+      const net = round((line.debit ?? 0) - (line.credit ?? 0));
+      return [accountId(db, line.account, ret.company_id), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
+    });
+    const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
+    return round(Number(ret.total_amount_to_pay) || 0) === spec.payable && JSON.stringify(actual) === JSON.stringify(expected);
+  } catch {
+    return false;
   }
+}
+
+/** Construct and post only the validated closing of a reviewed return. */
+export function postTaxReturnClosing(db, returnId) {
+  const ret = read(db, 'account.return', returnId);
+  if (!ret || ret.state !== 'reviewed') throw new Error('A reviewed tax return is required for closing');
+  const { lines, payable } = taxClosingSpec(db, ret);
+  const entry = postEntry(db, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company: ret.company_id, tax_return_id: ret.id });
+  return { ...entry, payable };
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
@@ -596,7 +523,7 @@ export function runFollowUps(db, at = today()) {
     const partner = partners.get(f.partner_id);
     if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) continue;
     const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue â€” ${list}. ${level.message ?? ''}`.trim()]);
+    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim()]);
     updates.set(partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
   }
   return writeMany(postNotes(db, notes), 'res.partner', updates);
