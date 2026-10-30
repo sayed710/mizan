@@ -53,7 +53,7 @@ function noteEntries(was = [], now = []) {
   const notes = (list) => new Map(list.filter((m) => m.kind === 'note').map((m) => [m.id, m]));
   const before = notes(was);
   const after = notes(now);
-  const entry = (m, action, a, b) => ({ model: 'mail.message', res_id: m.res_id, action, changes: { thread: [m.model, m.model], body: [a, b] } });
+  const entry = (m, action, a, b) => ({ model: 'mail.message', res_id: m.res_id, action, ...(m.company_id ? { company_id: m.company_id } : {}), changes: { thread: [m.model, m.model], body: [a, b] } });
   return [
     ...[...after].filter(([id, m]) => !before.has(id) || before.get(id).body !== m.body).map(([id, m]) => entry(m, before.has(id) ? 'write' : 'create', before.get(id)?.body ?? null, m.body)),
     ...[...before].filter(([id]) => !after.has(id)).map(([, m]) => entry(m, 'delete', m.body, null)),

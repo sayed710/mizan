@@ -14,6 +14,8 @@ import { applyDiff, assignIds, diffDb, repairSeq } from '../src/sync.js';
 import { runOperation } from '../src/operations.js';
 import { backupSummary, checkBackup } from '../src/backup.js';
 import { auditEntries } from '../src/audit.js';
+import { backfillAuditOwnership } from './audit-ownership.js';
+import { scopeAuditRows } from '../src/companyView.js';
 import { installCustomFields } from '../src/models/studio.js';
 import { claimWriter, loadRepaired, openStorage } from './storage.js';
 import { runPosting } from './posting.js';
@@ -62,7 +64,7 @@ const ACTIONS = {
 const SMTP = smtpConfig();
 import { menuModelsForApps, modelsForApps, redactForApps, writableModelsForApps, readOnlyForApps } from '../src/models/index.js';
 import { runScheduledJobs } from '../src/models/scheduler.js';
-import { restrictRecords, setCompanies, visibleTo } from '../src/models/company.js';
+import { restrictRecords, scopeAuditChanges, setCompanies, visibleTo } from '../src/models/company.js';
 import { scheduleSnapshots } from './backup.js';
 import { checkConfig } from './config.js';
 import { log, redactPath } from './log.js';
@@ -119,7 +121,7 @@ const parseCompanies = (v) => {
 };
 const userOf = (row) => ({
   id: row.id, login: row.login, name: row.name, isAdmin: !!row.is_admin, apps: parseApps(row.apps),
-  companies: row.is_admin ? null : parseCompanies(row.companies), selection: row.selection ?? null,
+  companies: parseCompanies(row.companies), selection: row.selection ?? null,
 });
 
 // ---- database: one row per record, incremental saves (see storage.js) ----
@@ -164,8 +166,10 @@ const writeSql = (text, ...args) => {
 const storage = openStorage(sql, { beforeWrite: ownLease });
 ownLease();
 if (!sql.prepare('PRAGMA table_info(idempotency)').all().some((c) => c.name === 'response')) sql.exec('ALTER TABLE idempotency ADD COLUMN response TEXT');
+if (!sql.prepare('PRAGMA table_info(audit_log)').all().some((c) => c.name === 'company_id')) sql.exec('ALTER TABLE audit_log ADD COLUMN company_id INTEGER');
 const blobs = openBlobs(sql, { beforeWrite: ownLease });
 let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
+backfillAuditOwnership(sql, db, ownLease);
 {
   const moved = blobs.externalize(db); // Migrate legacy inline uploads after schema/sequence repair.
   if (moved !== db) { storage.save(db, moved); db = moved; }
@@ -173,7 +177,7 @@ let db = loadRepaired(storage, (loaded) => repairSeq(migrate(loaded)));
 /** Persist and adopt a new database state; `full` rewrites everything (reset, first start). */
 let revision = 0;
 const startedAt = Date.now().toString(36);
-const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, action, changes) VALUES (?, ?, ?, ?, ?, ?)');
+const logChange = sql.prepare('INSERT INTO audit_log (at, actor, model, res_id, action, changes, company_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
 /**
  * Store `next` and log, with server time and who did it, every record it creates, changes or deletes. The log is
  * append-only: nothing in the app updates or deletes its rows. A full replace (restore, reset) is logged as one row.
@@ -187,7 +191,12 @@ const commitDb = (raw, { full = false, actor = 'system', action = 'replace', aud
   storage.save(full ? null : db, next, () => {
     alongside();
     if (full) writeSql("INSERT INTO kv (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", String(nextEpoch));
-    for (const e of entries) logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes));
+    for (const e of entries) {
+      const source = e.action === 'delete' ? db : next;
+      const model = e.model === 'mail.message' ? e.changes.thread?.[0] : e.model;
+      const record = source.records?.[model]?.find((r) => r.id === e.res_id);
+      logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes), e.company_id ?? (record ? (model === 'res.company' ? record.id : record.company_id || 1) : null));
+    }
   });
   epoch = nextEpoch;
   db = next;
@@ -199,7 +208,7 @@ const withAudit = (actor, model, resId, action, changes, step) => {
   try {
     ownLease();
     const out = step();
-    if (out?.changes !== 0) logChange.run(new Date().toISOString(), actor, model, typeof resId === 'function' ? resId(out) : resId ?? 0, action, JSON.stringify(changes));
+    if (out?.changes !== 0) logChange.run(new Date().toISOString(), actor, model, typeof resId === 'function' ? resId(out) : resId ?? 0, action, JSON.stringify(changes), null);
     sql.exec('COMMIT');
     return out;
   } catch (e) {
@@ -332,6 +341,13 @@ const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsFo
 const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 /** Company ids a user may work in (null = all). */
 const companiesFor = (u) => (u.companies ? new Set(u.companies) : null);
+// Null audit ownership was not established by the migration and must not be inferred at read time.
+sql.function('audit_visible', (companyId, model, id, changes, grants) => {
+  if (grants === null) return 1;
+  if (companyId == null) return 0;
+  const row = { company_id: companyId, model: model === 'mail.message' ? JSON.parse(changes).thread?.[0] : model, res_id: id };
+  return scopeAuditRows({ ...db, settings: { ...db.settings, allowed_company_ids: JSON.parse(grants) } }, [row]).length;
+});
 /**
  * The user's own company switcher state, kept to the companies they may use: each user has their own current and
  * selected companies instead of one setting shared by everyone.
@@ -360,7 +376,7 @@ const saveSelection = (u, selection) => {
 const visibleDb = (u, { models = true } = {}) => {
   const allowed = models ? readableFor(u) : null;
   const companies = companiesFor(u);
-  const { records: inCompanies, hidden } = restrictRecords(db, companies);
+  const { records: inCompanies } = restrictRecords(db, companies);
   const records = allowed ? Object.fromEntries(Object.entries(inCompanies).filter(([model]) => allowed.has(model))) : inCompanies;
   const selection = selectionFor(u);
   // A user limited to some companies gets those companies' identity, not the group-wide VAT number and bank account.
@@ -372,7 +388,8 @@ const visibleDb = (u, { models = true } = {}) => {
   const visible = {
     ...db,
     records,
-    messages: db.messages.filter((m) => (!allowed || allowed.has(m.model)) && !hidden.has(`${m.model}:${m.res_id}`)),
+    messages: (companies ? scopeAuditRows({ ...db, settings: { ...db.settings, allowed_company_ids: [...companies] } }, db.messages) : db.messages)
+      .filter((m) => !allowed || allowed.has(m.model)),
     settings: { ...db.settings, ...identity, ...selection },
   };
   return models && allowed ? redactForApps(visible, u.apps) : visible;
@@ -795,10 +812,18 @@ async function api(req, res, path) {
     if (before !== null && !Number.isSafeInteger(before)) return send(res, 400, { error: 'before must be an audit entry id' });
     const id = q.has('id') ? Number(q.get('id')) : null;
     if (q.has('id') && (!/^\d+$/.test(q.get('id')) || !Number.isSafeInteger(id))) return send(res, 400, { error: 'id must be a nonnegative record id' });
-    const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4) ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), id, limit, before);
-    return send(res, 200, rows.map((r) => ({ ...r, changes: JSON.parse(r.changes) })));
+    const granted = companiesFor(user);
+    const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
+    const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
+    const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
+      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
+        AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)
+      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected));
+    return send(res, 200, rows.map((r) => {
+      const parsed = JSON.parse(r.changes);
+      const changes = filterCompanies ? scopeAuditChanges(r.model, parsed, filterCompanies) : parsed;
+      return { ...r, changes };
+    }));
   }
   // Journal-posting actions (POS sales, payslips) run on the server with system rights; see posting.js.
   if (['/api/button', '/api/pos/pay', '/api/pos/close'].includes(path) && req.method === 'POST') {

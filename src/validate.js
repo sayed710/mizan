@@ -20,6 +20,7 @@ const fail = (where) => { throw new Error(`Invalid value for ${where}`); };
 
 /** Returns a clean copy of `value` for `field`, or throws. null/undefined/'' are always allowed (empty). */
 export function cleanValue(field, value, where) {
+  if (field.type === 'distribution' && value === '') fail(where);
   if (value === null || value === undefined || value === '') return value ?? null;
   switch (field.type) {
     case 'char': case 'text':
@@ -111,6 +112,7 @@ export function cleanRecord(model, rec) {
 export const cleanMessage = (m) => (isPlain(m) && typeof m.id === 'string' && models[m.model] && Number.isInteger(m.res_id) ? {
   id: m.id.slice(0, 64), model: m.model, res_id: m.res_id, body: String(m.body ?? '').slice(0, 10000),
   kind: m.kind === 'note' ? 'note' : 'tracking', author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
+  ...(m.source_model === 'account.move' && Number.isSafeInteger(m.source_id) && m.source_id > 0 ? { source_model: m.source_model, source_id: m.source_id } : {}),
 } : null);
 
 /** favorites: { model: [{ name, search }] } with bounded size. */

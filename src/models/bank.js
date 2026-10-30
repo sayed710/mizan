@@ -82,7 +82,7 @@ function lineGuard(db, before, after) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'counterpart', 'unique_import_id', 'payment_ref', 'active'], (l) => l.state === 'reconciled' || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
+    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'counterpart', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' ? 'A reconciled bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).

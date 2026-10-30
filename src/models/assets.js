@@ -2,6 +2,7 @@
 import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
+import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 
 const DAY = 86400000;
@@ -71,13 +72,16 @@ export function confirmAsset(db, asset) {
 /** Post each unposted board line dated on or before `upTo`; the asset closes once all are posted. */
 export function postDepreciation(db, asset, upTo = today()) {
   if (asset.state !== 'open') return db;
+  const journalCode = (asset.journal_id && read(db, 'account.journal', asset.journal_id)?.code) || 'MISC';
+  const expenseCode = (asset.account_expense_id && read(db, 'account.account', asset.account_expense_id)?.code) || '680000';
+  const deprCode = (asset.account_depreciation_id && read(db, 'account.account', asset.account_depreciation_id)?.code) || '152000';
   const { db: next, lines } = (asset.depreciation_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, lines: [...acc.lines, l] };
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'MISC', date: l.date, ref: `${asset.name} depreciation ${l.date}`,
-      lines: [{ account: '680000', debit: l.amount }, { account: '152000', credit: l.amount }],
+      journal: journalCode, company: asset.company_id, date: l.date, ref: `${asset.name} depreciation ${l.date}`,
+      lines: [{ account: expenseCode, debit: l.amount, analytic_distribution: asset.analytic_distribution }, { account: deprCode, credit: l.amount }],
     });
-    return { db: booked, lines: [...acc.lines, { ...l, posted: true, move_id: id }] };
+    return { db: postAnalytic(booked, id), lines: [...acc.lines, { ...l, posted: true, move_id: id }] };
   }, { db, lines: [] });
   return write(next, 'account.asset', asset.id, { depreciation_ids: lines, state: lines.every((l) => l.posted) ? 'close' : 'open' });
 }
@@ -94,15 +98,18 @@ export function disposeAsset(db, asset, { date, saleValue = 0 }) {
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
   const sale = cents(saleValue);
   const loss = original - accumulated - sale;
+  const assetCode = (asset.account_asset_id && read(depreciated, 'account.account', asset.account_asset_id)?.code) || '151000';
+  const depreciationCode = (asset.account_depreciation_id && read(depreciated, 'account.account', asset.account_depreciation_id)?.code) || '152000';
+  const journalCode = (asset.journal_id && read(depreciated, 'account.journal', asset.journal_id)?.code) || 'MISC';
   const lines = [
-    { account: '151000', credit: original / 100 },
-    accumulated > 0 && { account: '152000', debit: accumulated / 100 },
+    { account: assetCode, credit: original / 100 },
+    accumulated > 0 && { account: depreciationCode, debit: accumulated / 100 },
     sale > 0 && { account: '101401', debit: sale / 100 },
-    loss > 0 && { account: '690300', debit: loss / 100 },
-    loss < 0 && { account: '450300', credit: -loss / 100 },
+    loss > 0 && { account: '690300', debit: loss / 100, analytic_distribution: asset.analytic_distribution },
+    loss < 0 && { account: '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
-  const { db: booked } = postEntry(depreciated, { journal: 'MISC', date, ref: `${asset.name} disposal`, lines });
-  return write(booked, 'account.asset', asset.id, { depreciation_ids: kept, state: 'close', disposal_date: date, sale_value: sale / 100 });
+  const { db: booked, id } = postEntry(depreciated, { journal: journalCode, company: asset.company_id, date, ref: `${asset.name} disposal`, lines });
+  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, state: 'close', disposal_date: date, sale_value: sale / 100 });
 }
 
 function sellOrDispose(db, r) {
@@ -126,6 +133,12 @@ export const assetModels = {
       method_progress_factor: { type: 'float', label: 'Declining Factor' },
       prorata: { type: 'boolean', label: 'Prorata Temporis' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
+      model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account' },
+      account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
+      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       bill_id: { type: 'many2one', relation: 'account.move', label: 'Bill' },
       bill_line: { type: 'integer', label: 'Bill Line', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['open', 'Running'], ['paused', 'Paused'], ['close', 'Closed'], ['cancel', 'Cancelled']] },
@@ -147,10 +160,35 @@ export const assetModels = {
       sale_value: { type: 'monetary', label: 'Sale Price' },
     },
     defaults: () => ({ acquisition_date: today(), method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, state: 'draft', depreciation_ids: [] }),
+    createDefaults: (db, vals) => {
+      const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
+      if (!model) return {};
+      return Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_expense_id', 'journal_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]]));
+    },
+    onchange: (r, key, db) => {
+      if (key === 'model_id' && r.model_id) {
+        const model = read(db, 'account.asset.model', r.model_id);
+        if (model) {
+          return {
+            method: model.method ?? r.method,
+            method_number: model.method_number ?? r.method_number,
+            method_period: model.method_period ?? r.method_period,
+            method_progress_factor: model.method_progress_factor ?? r.method_progress_factor,
+            prorata: model.prorata !== undefined ? model.prorata : r.prorata,
+            account_asset_id: model.account_asset_id ?? r.account_asset_id,
+            account_depreciation_id: model.account_depreciation_id ?? r.account_depreciation_id,
+            account_expense_id: model.account_expense_id ?? r.account_expense_id,
+            journal_id: model.journal_id ?? r.journal_id,
+            analytic_distribution: model.analytic_distribution ?? r.analytic_distribution,
+          };
+        }
+      }
+      return {};
+    },
     groupBys: ['state', 'method'],
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'open' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'close' }]],
     kanban: { title: 'name', lines: ['original_value', 'book_value', 'method'], badge: 'state' },
-    list: ['acquisition_date', 'name', 'partner_id', 'original_value', 'book_value', 'method', 'state'],
+    list: ['acquisition_date', 'name', 'partner_id', 'model_id', 'original_value', 'book_value', 'method', 'state'],
     form: {
       statusbar: 'state',
       lockedWhen: (r) => ['close', 'cancel'].includes(r.state),
@@ -164,7 +202,7 @@ export const assetModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'disposal_date', 'sale_value']],
+      groups: [['model_id', 'original_value', 'salvage_value', 'already_depreciated', 'book_value', 'acquisition_date', 'partner_id', 'bill_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_expense_id'], ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution', 'disposal_date', 'sale_value']],
       tabs: [{ label: 'Depreciation Board', fields: ['depreciation_ids'] }],
       chatter: true,
     },

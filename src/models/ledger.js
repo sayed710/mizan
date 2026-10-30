@@ -131,7 +131,7 @@ export function postEntry(db, { journal, date = today(), ref = '', lines, compan
   const line_ids = lines.map((l) => {
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
+    return { account_id: accountId(db, l.account), partner_id: l.partner_id ?? null, name: l.name ?? ref, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const prefix = `${journal}/${date.slice(0, 4)}/`;

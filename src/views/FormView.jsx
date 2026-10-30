@@ -11,6 +11,7 @@ import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
+import { saveFormRecord } from './formSave.js';
 import { RecordAnalysis } from './Analysis.jsx';
 
 /** Integrations whose buttons fall back to only recording a send when not configured. */
@@ -52,7 +53,7 @@ function newDefaults(db, model, leaf, params) {
     [...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k, v]) => [k.slice(8), v]),
   );
   const rel = parseRel(db, model, params.get('rel'));
-  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
+  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...(def.createDefaults?.(db, fromUrl) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
 }
 
 function Field({ db, model, name, value, onChange, readonly, record }) {
@@ -261,7 +262,7 @@ export function FormView({ leaf, id, base, params }) {
       const curRev = ++revRef.current;
       if (isNew) {
         const values = { ...changes, ...extra };
-        const res = create(getDb(), model, { ...current, ...extra });
+        const res = saveFormRecord(getDb(), model, null, { ...current, ...extra });
         const expectedHash = `${base}/${res.id}${query}`;
         commit(res.db, { quiet: true }).then((r) => {
           if (r.ok || curRev !== revRef.current) return;
@@ -276,7 +277,7 @@ export function FormView({ leaf, id, base, params }) {
       }
       const vals = { ...changes, ...extra };
       if (Object.keys(vals).length) {
-        commit(write(getDb(), model, rec.id, vals), { quiet: true }).then((r) => {
+        commit(saveFormRecord(getDb(), model, rec.id, vals).db, { quiet: true }).then((r) => {
           if (r.ok || curRev !== revRef.current) return;
           setChanges((c) => ({ ...vals, ...c }));
           setError(r.error);

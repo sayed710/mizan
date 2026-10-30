@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany, ensureMainCompany, setCompanies } from './models/company.js';
+import { createCompany, ensureMainCompany, setCompanies, visibleTo } from './models/company.js';
 import { actionRecords, companyViewDb, relationCandidates, viewRecords } from './companyView.js';
 import { journalCards } from './models/finance.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -78,8 +78,11 @@ test('dashboard snapshot filters every model without changing the source databas
   db = setCompanies(db, { current: 2, allowed: [2] });
   const snapshot = structuredClone(db);
   const scoped = companyViewDb(db);
+  assert.ok(search(db, 'product').some((r) => visibleTo(new Set([2]), 'product', r, db) && r.qty_available > 0));
   for (const model of Object.keys(db.records)) {
-    assert.deepEqual(search(scoped, model), viewRecords(db, model));
+    const expected = search(db, model).filter((r) => visibleTo(new Set([2]), model, r, db));
+    // Company 1 owns legacy on-hand quantities, so they are hidden in this view.
+    assert.deepEqual(search(scoped, model), model === 'product' ? expected.map((r) => ({ ...r, qty_available: 0 })) : expected);
   }
   assert.ok(journalCards(scoped).every((c) => c.journal.company_id !== 1));
   assert.equal(journalCards(db).find((c) => c.journal.id === journal.id).draft, 2);
