@@ -111,11 +111,11 @@ test('only a return submission can post its generated closing into a locked peri
   assert.equal(db.settings.lock_date, '2025-03-31');
 });
 
-test('resetting tax returns out of order does not resurrect an inactive return lock', () => {
+test('sync round trips preserve manual locks through out-of-order return resets', () => {
   let db = updateSettings(seed(), { lock_date: '2024-12-31' });
   const type = search(db, 'account.return.type')[0];
   const actions = models['account.return'].form.buttons;
-  const run = (label, id) => { db = actions.find((action) => action.label === label).run(db, read(db, 'account.return', id)).db; };
+  const run = (label, id) => { const next = actions.find((action) => action.label === label).run(db, read(db, 'account.return', id)).db; db = applyDiff(db, diffDb(db, next), { isAdmin: true }); };
   const first = create(db, 'account.return', { name: 'First return', type_id: type.id, company_id: 1, date_from: '2025-01-01', date_to: '2025-01-31' });
   db = first.db;
   run('Review', first.id);
@@ -124,6 +124,15 @@ test('resetting tax returns out of order does not resurrect an inactive return l
   db = second.db;
   run('Review', second.id);
   run('Submit', second.id);
+  assert.equal(db.settings.lock_sources.manual, '2024-12-31');
+  const closingId = read(db, 'account.return', first.id).closing_move_ids[0];
+  assert.equal(read(db, 'account.move', closingId).tax_return_id, first.id);
+  const reset = actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)).db;
+  const forged = diffDb(db, reset);
+  const closing = forged.upserts['account.move'].find((move) => move.id === closingId);
+  forged.bases['account.move'][closingId].ref = read(db, 'account.move', closingId).ref;
+  closing.ref = 'Altered during reset';
+  assert.throws(() => applyDiff(db, forged, { isAdmin: true }), /locked|draft/i);
   run('Reset to Draft', first.id);
   assert.equal(db.settings.lock_date, '2025-02-28');
   run('Reset to Draft', second.id);
@@ -968,9 +977,9 @@ test('batch payment form action posts each bill settlement to the selected bank'
   }
 });
 
-test('migration v6: sequence advance, preserved formatting, and uniqueness of archived accounts', () => {
+test('migration v11: sequence advance, preserved formatting, and uniqueness of archived accounts', () => {
   const legacy = {
-    schema_version: 5,
+    schema_version: 10,
     records: {
       'res.partner': [
         { id: 101, name: 'Old Partner With Bank', bank_account: 'eg 55 9999 0001' },
@@ -984,7 +993,7 @@ test('migration v6: sequence advance, preserved formatting, and uniqueness of ar
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 6);
+  assert.equal(migrated.schema_version, 11);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');
@@ -1527,4 +1536,13 @@ test('closing and payment entries on tax accounts do not fail subsequent or over
   assert.doesNotThrow(() => {
     reviewReturn(retQ1.db, retQ1.id);
   }, 'Overlapping return review must distinguish closing and settlement entries from untagged tax errors');
+});
+
+test('ordinary tax entries remain reportable when their reference resembles a return settlement', () => {
+  let db = seed();
+  for (const ref of ['Tax Closing: ordinary', 'Tax Return Payment: ordinary', 'Tax Return Refund: ordinary']) {
+    db = postEntry(db, { journal: 'MISC', date: '2025-03-01', ref, lines: [{ account: '251000', credit: 10, tax_name: 'VAT' }, { account: '101401', debit: 10 }] }).db;
+  }
+  const report = taxReport(db, { from: '2025-03-01', to: '2025-03-31' });
+  assert.equal(report.output, 30);
 });

@@ -123,7 +123,8 @@ test('reversing an order prepayment clears the stored payment state without undo
 });
 
 test('reversed outbound batch payments cancel their check lines while preserving posted history', () => {
-  const bill = invoice(seed(), 100, { move_type: 'in_invoice', force_post: true });
+  const bank = create(seed(), 'res.partner.bank', { partner_id: 1, account_number: 'REVERSE100', allow_out_payment: true });
+  const bill = invoice(bank.db, 100, { move_type: 'in_invoice', force_post: true });
   const batch = create(bill.db, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 100, lines: [{ move_id: bill.id, amount: 100 }] });
   const paid = postBatch(batch.db, read(batch.db, 'account.batch.payment', batch.id));
   const payment = search(paid, 'account.payment').find((p) => p.invoice_id === bill.id);

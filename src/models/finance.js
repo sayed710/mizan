@@ -251,12 +251,27 @@ export function taxClosingProofMatchesReturn(ctx, ret) {
   });
 }
 
+// A sync collapses the reset's posted ? draft ? cancelled writes into one change. Bind the
+// exception to the stored return and the complete resulting reset, with no other move edits.
+function isSyncedReturnReset(db, before, after, ctx) {
+  if (!ctx?.previousDb || before?.state !== 'posted' || after.state !== 'cancel'
+    || !before.is_tax_closing || !before.tax_return_id || bookedByBank(db, before.id)) return false;
+  const oldReturn = read(ctx.previousDb, 'account.return', before.tax_return_id);
+  const newReturn = read(db, 'account.return', before.tax_return_id);
+  if (oldReturn?.state !== 'submitted' || !(oldReturn.closing_move_ids ?? []).includes(before.id)
+    || newReturn?.state !== 'new' || (newReturn.closing_move_ids ?? []).length) return false;
+  const { state: _oldState, ...oldMove } = before;
+  const { state: _newState, ...newMove } = after;
+  return !changedFields(oldMove, newMove, [...new Set([...Object.keys(oldMove), ...Object.keys(newMove)])]);
+}
+
 export function moveGuard(db, before, after, ctx) {
-  return lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
+  const reset = isSyncedReturnReset(db, before, after, ctx);
+  return lockRule(db, before, after, ctx, reset) ?? accountsError(db, before, after) ?? (reset ? null : postedMoveRule(before, after));
 }
 
 
-function lockRule(db, before, after, ctx) {
+function lockRule(db, before, after, ctx, returnReset = false) {
   if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
@@ -271,6 +286,7 @@ function lockRule(db, before, after, ctx) {
   if (authorized && linked && after.move_type === 'entry' && after.state === 'posted' && after.company_id === authorized.company
     && after.date === authorized.date && after.invoice_date === authorized.date && after.journal_id === authorized.journal
     && after.ref === authorized.ref && JSON.stringify((after.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit, l.credit])) === authorized.lines) return null;
+  if (returnReset) return null;
   // Existing return closings may be cancelled by the reset workflow.
 
   const isReturnClosing = (db.records?.['account.return'] ?? []).some((r) => (r.closing_move_ids ?? []).includes((before ?? after).id) && r.state !== 'paid');
@@ -366,7 +382,7 @@ function taxItems(db, period) {
   });
 }
 
-/** VAT return for a period, read from the ledger: output tax (sales) − input tax (purchases) = payable. */
+/** VAT return for a period, read from the ledger: output tax (sales) âˆ’ input tax (purchases) = payable. */
 export function taxReport(db, period) {
   const items = taxItems(db, period);
   const sum = (side) => round(items.filter((l) => l.side === side).reduce((s, l) => s + l.tax, 0));
@@ -580,7 +596,7 @@ export function runFollowUps(db, at = today()) {
     const partner = partners.get(f.partner_id);
     if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) continue;
     const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim()]);
+    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue â€” ${list}. ${level.message ?? ''}`.trim()]);
     updates.set(partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
   }
   return writeMany(postNotes(db, notes), 'res.partner', updates);

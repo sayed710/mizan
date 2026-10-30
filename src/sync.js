@@ -385,7 +385,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, taxClosingProofs });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, taxClosingProofs, previousDb: db });
     if (err) throw new Error(err);
   }
   const marks = highWater(db.numbering, db.records);
@@ -465,6 +465,8 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
       lock_date: lockValue(s.lock_date, db.settings.lock_date),
+      lock_sources: s.lock_sources && typeof s.lock_sources === 'object' && !Array.isArray(s.lock_sources) && (s.lock_sources.manual === null || isRealDate(s.lock_sources.manual))
+        ? { manual: s.lock_sources.manual } : db.settings.lock_sources,
       sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.
