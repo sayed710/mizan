@@ -15,6 +15,17 @@ export function applicationEffectiveDate(payment, invoice) {
   return paymentDate || invoiceDate || '';
 }
 
+/** Whether an application is active at a cutoff. Posting-order history already establishes inclusion. */
+export function applicationActiveAt(db, payment, invoice, date, { postingHistory = false } = {}) {
+  if (!postingHistory) {
+    const effective = applicationEffectiveDate(payment, invoice);
+    if (!effective || effective > date) return false;
+  }
+  if (!payment.reversed) return true;
+  const reversalDate = read(db, 'account.move', payment.reversal_move_id)?.invoice_date ?? payment.reversal_date;
+  return !!reversalDate && reversalDate > date;
+}
+
 /** Derive each application's booked value in its original settlement order. */
 export function settlementCompanyAllocations(db, invoice) {
   const booked = invoiceCompanyBalance(db, invoice);
@@ -22,7 +33,7 @@ export function settlementCompanyAllocations(db, invoice) {
   const history = [];
   for (const payment of invoice.payments ?? []) {
     const effDate = applicationEffectiveDate(payment, invoice);
-    const prior = history.filter(({ row }) => !row.reversed || (read(db, 'account.move', row.reversal_move_id)?.invoice_date ?? row.reversal_date ?? '') > effDate);
+    const prior = history.filter(({ row }) => applicationActiveAt(db, row, invoice, effDate, { postingHistory: true }));
     const applied = round(prior.reduce((sum, item) => sum + Number(item.row.amount || 0), 0));
     const allocated = round(prior.reduce((sum, item) => sum + item.value, 0));
     const remaining = Math.max(0, round(booked - allocated));

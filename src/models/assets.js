@@ -65,23 +65,16 @@ function validate(db, asset) {
   if (!j) throw new Error('Asset journal not found');
   if (j.company_id && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
 
-  const assetAccId = asset.account_asset_id ?? accountId(db, '151000', company) ?? accountId(db, '151000');
-  if (assetAccId) {
-    const acc = read(db, 'account.account', assetAccId);
+  for (const [field, code, label] of [
+    ['account_asset_id', '151000', 'Asset'],
+    ['account_depreciation_id', '152000', 'Depreciation'],
+    ['account_depreciation_expense_id', '680000', 'Expense'],
+  ]) {
+    const id = asset[field] ?? accountId(db, code, company) ?? accountId(db, code);
+    if (!id) continue;
+    const acc = read(db, 'account.account', id);
     if (!acc) throw new Error('Asset account not found');
-    if (acc.company_id && acc.company_id !== company) throw new Error(`Asset account ${acc.code || acc.name} belongs to another company`);
-  }
-  const depAccId = asset.account_depreciation_id ?? accountId(db, '152000', company) ?? accountId(db, '152000');
-  if (depAccId) {
-    const acc = read(db, 'account.account', depAccId);
-    if (!acc) throw new Error('Asset account not found');
-    if (acc.company_id && acc.company_id !== company) throw new Error(`Depreciation account ${acc.code || acc.name} belongs to another company`);
-  }
-  const expAccId = asset.account_depreciation_expense_id ?? accountId(db, '680000', company) ?? accountId(db, '680000');
-  if (expAccId) {
-    const acc = read(db, 'account.account', expAccId);
-    if (!acc) throw new Error('Asset account not found');
-    if (acc.company_id && acc.company_id !== company) throw new Error(`Expense account ${acc.code || acc.name} belongs to another company`);
+    if (acc.company_id && acc.company_id !== company) throw new Error(`${label} account ${acc.code || acc.name} belongs to another company`);
   }
 }
 

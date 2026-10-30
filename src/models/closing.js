@@ -4,7 +4,7 @@ import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { round } from '../money.js';
-import { applicationEffectiveDate, settlementCompanyAllocations } from './settlement.js';
+import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
@@ -159,13 +159,7 @@ export function unrealizedExchange(db, date) {
     const activePaid = payments.filter((p) => !p.reversed).reduce((s, p) => s + p.amount, 0);
     const untrackedPaid = Math.max(0, round((Number(m.amount_paid) || 0) - activePaid));
     const allocations = settlementCompanyAllocations(db, m);
-    const paid = allocations.filter(({ row: p }) => {
-      const effDate = applicationEffectiveDate(p, m);
-      if (!effDate || effDate > date) return false;
-      if (!p.reversed) return true;
-      const revDate = (p.reversal_move_id ? read(db, 'account.move', p.reversal_move_id)?.invoice_date : null) || p.reversal_date;
-      return revDate ? revDate > date : false;
-    });
+    const paid = allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, date));
     const paidForeign = round(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
     const residual = round(m.amount_total - untrackedPaid - paidForeign);
     if (residual <= 0) return [];

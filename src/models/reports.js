@@ -77,9 +77,6 @@ export function defaultCashFlowActivity(code, account_type, name = '') {
 /** Determine the cash flow activity (operating, investing, financing) for an account. */
 export function accountCashFlowActivity(db, account) {
   if (!account) return 'operating';
-  if (account.cash_flow_activity && ['operating', 'investing', 'financing'].includes(account.cash_flow_activity)) {
-    return account.cash_flow_activity;
-  }
   const checkTag = (val) => {
     if (!val) return null;
     const s = String(val).toLowerCase();
@@ -94,16 +91,6 @@ export function accountCashFlowActivity(db, account) {
       const match = checkTag(rec?.name ?? t);
       if (match) return match;
     }
-  }
-  if (Array.isArray(account.tags)) {
-    for (const t of account.tags) {
-      const match = checkTag(typeof t === 'object' ? t?.name : t);
-      if (match) return match;
-    }
-  }
-  if (typeof account.tags === 'string') {
-    const match = checkTag(account.tags);
-    if (match) return match;
   }
   return defaultCashFlowActivity(account.code, account.account_type, account.name);
 }

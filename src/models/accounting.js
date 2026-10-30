@@ -395,7 +395,6 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
-      cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating Activities'], ['investing', 'Investing Activities'], ['financing', 'Financing Activities']] },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags' },
     },
     defaults: () => ({ account_type: 'expense' }),
@@ -406,7 +405,7 @@ export const accountingModels = {
     views: ['list', 'kanban'],
     form: {
       title: 'name',
-      groups: [['code', 'account_type'], ['reconcile', 'cash_flow_activity']],
+      groups: [['code', 'account_type'], ['reconcile', 'tag_ids']],
     },
   },
 

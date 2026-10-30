@@ -35,22 +35,17 @@ export const JOURNALS = [
   ['POSS', 'Point of Sale', 'sale', '400000'],
 ];
 
-export const accountId = (db, code, company = null) => {
-  const accounts = db.records['account.account'] ?? [];
+const idByCode = (db, model, code, company) => {
+  const records = db.records[model] ?? [];
   if (company) {
-    const match = accounts.find((a) => a.code === code && a.company_id === company);
+    const match = records.find((record) => record.code === code && record.company_id === company);
     if (match) return match.id;
   }
-  return accounts.find((a) => a.code === code && (!company || !a.company_id || a.company_id === company))?.id ?? accounts.find((a) => a.code === code)?.id ?? null;
+  return records.find((record) => record.code === code && (!company || !record.company_id || record.company_id === company))?.id ?? records.find((record) => record.code === code)?.id ?? null;
 };
-export const journalId = (db, code, company = null) => {
-  const journals = db.records['account.journal'] ?? [];
-  if (company) {
-    const match = journals.find((j) => j.code === code && j.company_id === company);
-    if (match) return match.id;
-  }
-  return journals.find((j) => j.code === code && (!company || !j.company_id || j.company_id === company))?.id ?? journals.find((j) => j.code === code)?.id ?? null;
-};
+
+export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
+export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
 
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);

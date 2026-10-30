@@ -1,11 +1,11 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
-import { postEntry } from './models/ledger.js';
+import { accountId, postEntry } from './models/ledger.js';
 import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from './models/reports.js';
 
 // Wide enough to hold every posted entry (the seed's opening entry, invoices, payments and bill, plus the
@@ -100,6 +100,20 @@ test('cash flow splits every cash movement into operating, investing and financi
   assert.deepEqual([week.opening, week.closing, week.net], [155500, 188936, 33436]);
   assert.deepEqual([week.operating, week.investing, week.financing], [8436, -25000, 50000]);
   assert.equal(week.net, week.operating + week.investing + week.financing);
+});
+
+test('cash flow follows account activity tags and falls back when tags are removed', () => {
+  let db = seed();
+  const asset = accountId(db, '151000');
+  const financing = search(db, 'account.account.tag').find((tag) => tag.name === 'Financing Activities');
+  const period = { from: '2040-01-01', to: '2040-01-01' };
+  db = postEntry(db, { journal: 'MISC', date: period.from, lines: [{ account: '151000', debit: 100 }, { account: '101401', credit: 100 }] }).db;
+  const sections = () => { const flow = cashFlow(db, period); return [flow.operating, flow.investing, flow.financing]; };
+  assert.deepEqual(sections(), [0, -100, 0]);
+  db = write(db, 'account.account', asset, { tag_ids: [financing.id] });
+  assert.deepEqual(sections(), [0, 0, -100]);
+  db = write(db, 'account.account', asset, { tag_ids: [] });
+  assert.deepEqual(sections(), [0, -100, 0]);
 });
 
 test('executive summary reports margins, liquidity and days sales outstanding', () => {

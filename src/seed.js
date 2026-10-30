@@ -91,14 +91,16 @@ export function seed() {
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
 
+  const cashFlowTags = {
+    operating: add('account.account.tag', { name: 'Operating Activities' }),
+    investing: add('account.account.tag', { name: 'Investing Activities' }),
+    financing: add('account.account.tag', { name: 'Financing Activities' }),
+  };
   CHART.forEach(([code, name, account_type]) => add('account.account', {
     code, name, account_type,
     reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-    cash_flow_activity: defaultCashFlowActivity(code, account_type, name),
+    tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
   }));
-  add('account.account.tag', { name: 'Operating Activities' });
-  add('account.account.tag', { name: 'Investing Activities' });
-  add('account.account.tag', { name: 'Financing Activities' });
   JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
