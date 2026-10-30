@@ -7,7 +7,7 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
-import { payMove, postMove } from './models/accounting.js';
+import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
@@ -438,6 +438,11 @@ export function seed() {
   set('res.partner', 3, { property_payment_term_id: t30 });
   add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
   add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+
+  // Standard Incoterms 2020
+  INCOTERMS_2020.forEach(([code, name]) => {
+    add('account.incoterm', { code, name, active: true });
+  });
 
   // eCommerce: payment providers, website categories, published carriers, a selectable pricelist and desk variants.
   add('payment.provider', { name: 'Wire Transfer', code: 'wire', state: 'enabled', pending_msg: 'Please transfer the amount to IBAN EG00 0000 0000 0000 0000 0000 0000, using your order number as the reference.', done_msg: 'Your order will ship once we receive the transfer.' });

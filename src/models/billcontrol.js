@@ -47,7 +47,9 @@ function createBill(db, r) {
     move_type: 'in_invoice', partner_id: po.partner_id, purchase_id: po.id, invoice_origin: po.name,
     invoice_date: today(), invoice_payment_term_id: term?.id ?? null,
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
-    currency_id: po.currency_id ?? null, fiscal_position_id: po.fiscal_position_id ?? null, invoice_line_ids: lines,
+    currency_id: po.currency_id ?? null, fiscal_position_id: po.fiscal_position_id ?? null,
+    incoterm_id: po.incoterm_id ?? null, incoterm_location: po.incoterm_location ?? null,
+    invoice_line_ids: lines,
   });
   const next = write(out.db, 'purchase.order', po.id, { order_line: policyLines(db, po).map((l, i) => ({ ...l, qty_invoiced: number(l.qty_invoiced) + eligible[i].toBill })) });
   return { db: next, go: `#/accounting/bills/${out.id}` };

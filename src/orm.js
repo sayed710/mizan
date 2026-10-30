@@ -2,6 +2,7 @@
 // Pure ORM over a plain db object: { records: {model: [rec]}, seq: {model: n}, messages: [] }.
 // Every function returns a new db; nothing is mutated.
 import { models } from './registry.js';
+import { distributionError } from './analytic_distribution.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD' } });
 
@@ -11,7 +12,8 @@ export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 /** Master data shared by all companies (Odoo shares these by default). */
 export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type',
-  'account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category']);
+  'account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
+  'account.incoterm', 'account.account.tag', 'account.asset.model']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 export const getActiveCompany = () => activeCompany;
@@ -53,11 +55,11 @@ export function read(db, model, id) {
 }
 
 /** @returns {string|null} error message when a required field is empty */
-export function validate(model, vals) {
+export function validate(model, vals, db) {
   const missing = Object.entries(models[model].fields).find(
     ([k, f]) => f.required && (vals[k] == null || vals[k] === ''),
   );
-  return missing ? `${missing[1].label} is required` : null;
+  return missing ? `${missing[1].label} is required` : distributionError(models[model].fields, vals, db);
 }
 
 /**
@@ -91,7 +93,7 @@ let author = 'Admin';
 /** Name stamped on chatter messages created by this client/process. */
 export const setAuthor = (name) => { author = name; };
 
-const message = (model, resId, body, kind) => ({
+const message = (model, resId, body, kind, record, source) => ({
   id: crypto.randomUUID(),
   model,
   res_id: resId,
@@ -99,6 +101,7 @@ const message = (model, resId, body, kind) => ({
   kind,
   author,
   date: new Date().toISOString(),
+  ...(source ? { source_model: source.model, source_id: source.id, company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(model) ? { company_id: record.company_id || 1 } : {}),
 });
 
 export function create(db, model, vals) {
@@ -110,7 +113,7 @@ export function create(db, model, vals) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec) ?? models[model].guard?.(db, null, rec);
+  const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   return {
@@ -118,7 +121,7 @@ export function create(db, model, vals) {
       ...db,
       records: { ...db.records, [model]: [...(db.records[model] ?? []), rec] },
       seq: { ...db.seq, [model]: id },
-      messages: [...db.messages, message(model, id, `${models[model].label}: record created`, 'tracking')],
+      messages: [...db.messages, message(model, id, `${models[model].label}: record created`, 'tracking', rec)],
     },
     id,
   };
@@ -130,7 +133,7 @@ function trackingMessages(db, model, before, vals) {
   return Object.entries(vals)
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
-      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking');
+      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking', before);
       const label = (x) => {
         if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
         if (fields[k].type === 'many2one' && fields[k].relation) {
@@ -139,7 +142,7 @@ function trackingMessages(db, model, before, vals) {
         }
         return x;
       };
-      return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking');
+      return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking', before);
     });
 }
 
@@ -149,7 +152,7 @@ function prepareWrite(db, model, before, vals) {
   // Model onchange also runs for programmatic writes (kanban drag, status bar), so dependent fields stay consistent.
   const clean = { ...base, ...Object.fromEntries(Object.keys(base).flatMap((k) => Object.entries(models[model].onchange?.({ ...before, ...base }, k, db) ?? {})).filter(([k]) => !(k in base))) };
   const after = { ...before, ...clean };
-  const err = validate(model, after) ?? models[model].guard?.(db, before, after);
+  const err = validate(model, after, db) ?? models[model].guard?.(db, before, after);
   if (err) throw new Error(err);
   checkDeclared(model, after);
   return { after, clean };
@@ -193,7 +196,7 @@ export function writeMany(db, model, updates) {
 
 /** Add several chatter notes at once: `notes` are [model, id, body]. */
 export const postNotes = (db, notes) => (notes.length
-  ? { ...db, messages: [...db.messages, ...notes.map(([model, id, body]) => message(model, id, body, 'note'))] } : db);
+  ? { ...db, messages: [...db.messages, ...notes.map(([model, id, body, source]) => message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source))] } : db);
 
 /**
  * The first record that still points at one of `ids` of `model` (a many2one, or a many2one inside one2many lines),
@@ -223,7 +226,7 @@ export function unlink(db, model, ids) {
   const next = {
     ...db,
     records: { ...db.records, [model]: (db.records[model] ?? []).filter((r) => !drop.has(r.id)) },
-    messages: db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
+    messages: model === 'account.move' ? [...db.messages, ...removed.map((r) => message(model, r.id, 'Record deleted', 'tracking', r))] : db.messages.filter((m) => !(m.model === model && drop.has(m.res_id))),
   };
   const result = removed.reduce((acc, r) => models[model].onUnlink?.(acc, r) ?? acc, next);
   // Checked after onUnlink, so records it removes along with these don't block the delete.
@@ -233,8 +236,8 @@ export function unlink(db, model, ids) {
 }
 
 /** A tracking (audit) message, as `write` posts for a changed tracked field. */
-export const postTracking = (db, model, id, body, by = author) => ({ ...db, messages: [...db.messages, { ...message(model, id, body, 'tracking'), author: by }] });
-export const postNote = (db, model, id, body) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note')] });
+export const postTracking = (db, model, id, body, by = author) => ({ ...db, messages: [...db.messages, { ...message(model, id, body, 'tracking', (db.records[model] ?? []).find((r) => r.id === id)), author: by }] });
+export const postNote = (db, model, id, body, source) => ({ ...db, messages: [...db.messages, message(model, id, body, 'note', (db.records[model] ?? []).find((r) => r.id === id), source)] });
 
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));

@@ -12,15 +12,27 @@ function MenuGroup({ app, menu, active }) {
   useDismiss(open, () => setOpen(false), ref);
   // Opening from the keyboard moves focus into the menu, as in other menu buttons.
   useEffect(() => { if (open) ref.current?.querySelector('[role=menuitem]')?.focus({ preventScroll: true }); }, [open]);
-  const isActive = menu.children.some((c) => c.key === active);
+  const hasKey = (item) => (item.children ? item.children.some(hasKey) : item.key === active);
+  const isActive = menu.children.some(hasKey);
+  const renderItem = (c) => {
+    if (c.children) {
+      return (
+        <div key={c.label} className="nav-submenu-group">
+          <div className="nav-dropdown-header muted" style={{ padding: '4px 10px', fontSize: '0.75rem', fontWeight: 600, textTransform: 'uppercase' }}>{t(c.label)}</div>
+          {c.children.map(renderItem)}
+        </div>
+      );
+    }
+    return (
+      <a key={c.key} role="menuitem" href={`#/${app.id}/${c.key}`} className={c.key === active ? 'active' : ''} onClick={() => setOpen(false)}>{t(c.label)}</a>
+    );
+  };
   return (
     <div className="nav-group" ref={ref}>
       <button type="button" className={isActive ? 'active' : ''} aria-expanded={open} onClick={() => setOpen(!open)}>{t(menu.label)}</button>
       {open && (
         <div className="nav-dropdown" role="menu" onKeyDown={menuKeys}>
-          {menu.children.map((c) => (
-            <a key={c.key} role="menuitem" href={`#/${app.id}/${c.key}`} className={c.key === active ? 'active' : ''} onClick={() => setOpen(false)}>{t(c.label)}</a>
-          ))}
+          {menu.children.map(renderItem)}
         </div>
       )}
     </div>

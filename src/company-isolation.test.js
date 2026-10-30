@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany, visibleTo } from './models/company.js';
+import { createCompany, restrictRecords, visibleTo } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 // Two companies with one lead each.
@@ -87,4 +87,127 @@ test('REST search only matches names the API user can see, and new records go to
   const made = handleApi({ method: 'POST', path: '/api/v1/crm.lead', query: new URLSearchParams(), body: { name: 'Via REST' }, db: lead.db, user, companies: only2, company: 2 });
   assert.equal(made.status, 201);
   assert.equal(made.body.company_id, 2);
+});
+
+test('nested per-company arrays: restricted user sees only allowed lines, preserves hidden lines, and cannot write foreign lines', () => {
+  const { db } = twoCompanies();
+  const only1 = { companies: new Set([1]), isAdmin: false, author: 'Clerk' };
+
+  // Setup partner with followup_lines in company 1 and company 2
+  const p = create(db, 'res.partner', {
+    name: 'Shared Partner Multi Lines',
+    followup_lines: [
+      { company_id: 1, followup_level_delay: 15, followup_date: '2026-01-01' },
+      { company_id: 2, followup_level_delay: 30, followup_date: '2026-01-02' },
+    ],
+  });
+  let currentDb = p.db;
+
+  // 1. restrictRecords filters foreign followup_lines in restricted snapshots
+  const { records: snapshot } = restrictRecords(currentDb, new Set([1]));
+  const partnerInSnapshot = snapshot['res.partner'].find((x) => x.id === p.id);
+  assert.equal(partnerInSnapshot.followup_lines.length, 1);
+  assert.equal(partnerInSnapshot.followup_lines[0].company_id, 1);
+
+  // 2. Normal write from restricted client preserves hidden foreign followup_lines
+  const clientDb = { ...currentDb, records: snapshot };
+  const renamed = {
+    ...clientDb,
+    records: {
+      ...clientDb.records,
+      'res.partner': clientDb.records['res.partner'].map((x) => (x.id === p.id ? { ...x, name: 'Renamed Partner' } : x)),
+    },
+  };
+  const diffRename = diffDb(clientDb, renamed);
+  const applied = applyDiff(currentDb, diffRename, only1);
+  const updatedPartner = applied.records['res.partner'].find((x) => x.id === p.id);
+  assert.equal(updatedPartner.name, 'Renamed Partner');
+  assert.equal(updatedPartner.followup_lines.length, 2);
+  assert.ok(updatedPartner.followup_lines.some((l) => l.company_id === 1));
+  assert.ok(updatedPartner.followup_lines.some((l) => l.company_id === 2));
+
+  // 3. Writing foreign followup_lines is rejected
+  const foreignLineDiff = {
+    upserts: {
+      'res.partner': [{
+        id: p.id,
+        followup_lines: [{ company_id: 2, followup_level_delay: 45 }],
+      }],
+    },
+    deletes: {},
+  };
+  assert.throws(() => applyDiff(currentDb, foreignLineDiff, only1), /No access to this company/);
+
+  // 4. Writing foreign secure_chain_heads on account.journal is rejected
+  const foreignHeadDiff = {
+    upserts: {
+      'account.journal': [{
+        id: 1,
+        secure_chain_heads: [{ company_id: 2, count: 1, last_hash: 'h' }],
+      }],
+    },
+    deletes: {},
+  };
+  assert.throws(() => applyDiff(currentDb, foreignHeadDiff, only1), /No access to this company/);
+});
+
+test('restricted snapshot and write cannot touch another company\'s progress', () => {
+  const { db } = twoCompanies();
+  const only1 = { companies: new Set([1]), isAdmin: false, author: 'Clerk' };
+
+  const p = create(db, 'res.partner', {
+    name: 'Shared Customer Isolated Progress',
+    followup_lines: [
+      { company_id: 1, followup_level_delay: 15, followup_date: '2026-01-01' },
+      { company_id: 2, followup_level_delay: 30, followup_date: '2026-01-02' },
+    ],
+  });
+  const currentDb = p.db;
+
+  // 1. Restricted snapshot contains only allowed company progress and no scalar bypass fields
+  const { records: snapshot } = restrictRecords(currentDb, new Set([1]));
+  const partnerInSnapshot = snapshot['res.partner'].find((x) => x.id === p.id);
+  assert.equal(partnerInSnapshot.followup_lines.length, 1);
+  assert.equal(partnerInSnapshot.followup_lines[0].company_id, 1);
+  assert.equal(partnerInSnapshot.followup_lines[0].followup_level_delay, 15);
+  assert.equal(partnerInSnapshot.followup_level_delay, undefined);
+  assert.equal(partnerInSnapshot.followup_date, undefined);
+  assert.equal(partnerInSnapshot.followup_level, undefined);
+
+  // 2. Restricted write updates company 1 progress but cannot touch company 2 progress
+  const clientDb = { ...currentDb, records: snapshot };
+  const updatedBy1 = {
+    ...clientDb,
+    records: {
+      ...clientDb.records,
+      'res.partner': clientDb.records['res.partner'].map((x) => (x.id === p.id ? {
+        ...x,
+        phone: '+20 111 222 3333',
+        followup_lines: [{ company_id: 1, followup_level_delay: 45, followup_date: '2026-02-01' }],
+      } : x)),
+    },
+  };
+  const diff1 = diffDb(clientDb, updatedBy1);
+  const applied = applyDiff(currentDb, diff1, only1);
+  const resultPartner = applied.records['res.partner'].find((x) => x.id === p.id);
+  assert.equal(resultPartner.phone, '+20 111 222 3333');
+  assert.equal(resultPartner.followup_lines.length, 2);
+  const c1Prog = resultPartner.followup_lines.find((l) => l.company_id === 1);
+  const c2Prog = resultPartner.followup_lines.find((l) => l.company_id === 2);
+  assert.equal(c1Prog.followup_level_delay, 45);
+  assert.equal(c1Prog.followup_date, '2026-02-01');
+  assert.equal(c2Prog.followup_level_delay, 30, 'company 2 progress remains untouched');
+  assert.equal(c2Prog.followup_date, '2026-01-02', 'company 2 date remains untouched');
+
+  // 3. Foreign line modification is rejected
+  const badDiff = {
+    upserts: {
+      'res.partner': [{
+        id: p.id,
+        followup_lines: [{ company_id: 2, followup_level_delay: 0 }],
+      }],
+    },
+    deletes: {},
+  };
+  assert.throws(() => applyDiff(currentDb, badDiff, only1), /No access to this company/);
 });

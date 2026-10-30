@@ -10,6 +10,8 @@ import { checkMandatoryPlans, postAnalytic, removeAnalytic } from './analyticplu
 import { checkBillMatch, priceDifferenceLines } from './billcontrol.js';
 import { cashRound, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
+import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
+import { t } from '../i18n.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -191,7 +193,9 @@ function draftAssetsFromBill(db, bill) {
   const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
   const already = new Set((db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id).map((a) => a.bill_line));
   return invoiceBaseGroups(db, bill).reduce((next, group) => {
-    if (!fixed.has(group.account)) return next;
+    const account = read(next, 'account.account', group.account);
+    const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
+    if (!fixed.has(group.account) && !model) return next;
     const booked = (bill.line_ids ?? []).find((l) => l.name === 'Purchases' && l.account_id === group.account && (l.tax_zero ? l.tax_name : '') === group.zero);
     const amount = (booked?.debit || 0) - (booked?.credit || 0);
     for (const { index, value } of allocateInvoiceGroup(group, amount)) {
@@ -201,7 +205,8 @@ function draftAssetsFromBill(db, bill) {
       next = create(next, 'account.asset', {
         name: line.name || product?.name || bill.name, original_value: value, acquisition_date: bill.invoice_date ?? today(),
         partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-        account_asset_id: group.account,
+        account_asset_id: model?.account_asset_id ?? group.account,
+        ...(model ? { model_id: model.id, method: model.method ?? 'linear', method_number: model.method_number ?? 5, method_period: model.method_period ?? '12', method_progress_factor: model.method_progress_factor ?? 0.3, prorata: Boolean(model.prorata), account_depreciation_id: model.account_depreciation_id ?? null, account_expense_id: model.account_expense_id ?? null, journal_id: model.journal_id ?? null, analytic_distribution: model.analytic_distribution ?? null } : {}),
       }).db;
     }
     return next;
@@ -386,6 +391,11 @@ const lineItem = {
     tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
+    tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
+    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
+    tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
+    tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
+    analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };
@@ -398,9 +408,11 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
-      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
+      asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
     },
     defaults: () => ({ account_type: 'expense' }),
+    guard: (db, before, after) => (after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'accounts') ? 'Select only account tags' : null,
     protectDelete: accountDeleteGuard,
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
@@ -408,7 +420,7 @@ export const accountingModels = {
     views: ['list', 'kanban'],
     form: {
       title: 'name',
-      groups: [['code', 'account_type'], ['reconcile', 'tag_ids']],
+      groups: [['code', 'account_type', 'asset_model_id'], ['reconcile', 'tag_ids']],
     },
   },
 
@@ -423,26 +435,35 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
+    guard: secureHeadsGuard,
+    protectDelete: (db, journal) => (journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null,
     fields: {
       name: { type: 'char', label: 'Journal Name', required: true },
       code: { type: 'char', label: 'Short Code', required: true },
       type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
+      restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
+      secure_chain_heads: { type: 'one2many', label: 'Secure Chain Heads', hidden: true, fields: {
+        company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+        count: { type: 'integer', label: 'Count' }, last_sequence: { type: 'integer', label: 'Sequence' },
+        last_hash: { type: 'char', label: 'Hash' }, last_move_id: { type: 'many2one', relation: 'account.move', label: 'Last Entry' },
+        last_move_name: { type: 'char', label: 'Last Entry Number' },
+      } },
     },
-    defaults: () => ({ type: 'general' }),
+    defaults: () => ({ type: 'general', restrict_mode_hash_table: false }),
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['code', 'name', 'type', 'default_account_id'],
+    list: ['code', 'name', 'type', 'default_account_id', 'restrict_mode_hash_table'],
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['default_account_id']],
+      groups: [['code', 'type'], ['default_account_id', 'restrict_mode_hash_table']],
     },
   },
 
   'account.move': {
     label: 'Invoices',
     guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
-    invariant: (db, after, before) => lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
+    invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
@@ -501,6 +522,11 @@ export const accountingModels = {
       correction_of_id: { type: 'many2one', relation: 'account.move', label: 'Correction of', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
+      inalterable_hash: { type: 'char', label: 'Inalterability Hash', readonly: true },
+      inalterable_hash_version: { type: 'integer', label: 'Hash Version', readonly: true, hidden: true },
+      secure_sequence_number: { type: 'integer', label: 'Inalterability Sequence Number', readonly: true },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
+      incoterm_location: { type: 'char', label: 'Incoterm Location' },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
@@ -522,7 +548,7 @@ export const accountingModels = {
     form: {
       statusbar: 'state',
       statusbarHide: ['cancel'],
-      lockedWhen: (r) => r.state !== 'draft',
+      lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
@@ -532,18 +558,215 @@ export const accountingModels = {
         { label: 'Credit Note', when: (r) => r.state === 'posted' && ['out_invoice', 'in_invoice'].includes(r.move_type), run: creditNote },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
-        { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
-        { label: 'Cancel', when: (r) => r.state === 'draft', run: (db, r) => ({ db: syncInvoicedQty(removeAnalytic(write(db, 'account.move', r.id, { state: 'cancel' }), r.id), r) }) },
+        { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !r.inalterable_hash && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
+        { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, run: (db, r) => ({ db: syncInvoicedQty(removeAnalytic(write(db, 'account.move', r.id, { state: 'cancel' }), r.id), r) }) },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date']],
+      groups: [['partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'inalterable_hash', 'secure_sequence_number']],
       tabs: (r) => (isInvoice(r)
-        ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration'] }]
+        ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),
       footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
       chatter: true,
     },
   },
 };
+
+export const INCOTERMS_2020 = [
+  ['EXW', 'Ex Works'],
+  ['FCA', 'Free Carrier'],
+  ['FAS', 'Free Alongside Ship'],
+  ['FOB', 'Free On Board'],
+  ['CFR', 'Cost and Freight'],
+  ['CIF', 'Cost, Insurance and Freight'],
+  ['CPT', 'Carriage Paid To'],
+  ['CIP', 'Carriage and Insurance Paid To'],
+  ['DAP', 'Delivered at Place'],
+  ['DPU', 'Delivered at Place Unloaded'],
+  ['DDP', 'Delivered Duty Paid'],
+];
+
+Object.assign(accountingModels, {
+  'account.incoterm': {
+    label: 'Incoterms',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      code: { type: 'char', label: 'Code', required: true },
+      active: { type: 'boolean', label: 'Active' },
+      display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.code && r.name ? `${r.code} - ${r.name}` : r.code || r.name || '') },
+    },
+    defaults: () => ({ active: true }),
+    list: ['code', 'name', 'active'],
+    form: {
+      title: 'code',
+      groups: [['code', 'name'], ['active']],
+    },
+  },
+
+  'account.tax.unit': {
+    label: 'Tax Units',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      country: { type: 'char', label: 'Country' },
+      vat: { type: 'char', label: 'Tax ID' },
+      company_ids: { type: 'many2many', relation: 'res.company', label: 'Companies', required: true },
+      main_company_id: { type: 'many2one', relation: 'res.company', label: 'Main Company', required: true },
+    },
+    defaults: () => ({ company_ids: [] }),
+    guard: (db, before, after) => {
+      const companies = Array.isArray(after.company_ids) ? after.company_ids : [];
+      if (new Set(companies).size < 2) return 'A tax unit must contain at least 2 companies';
+      if (!after.main_company_id || !companies.includes(after.main_company_id)) return 'The main company must be one of the tax unit companies';
+      if (companies.some((id) => !read(db, 'res.company', id))) return 'Select existing companies';
+      return null;
+    },
+    list: ['name', 'country', 'vat', 'main_company_id'],
+    form: {
+      title: 'name',
+      groups: [['name', 'country', 'vat'], ['main_company_id', 'company_ids']],
+    },
+  },
+
+  'account.account.tag': {
+    label: 'Account Tags',
+    guard: (db, before, after) => before && before.applicability !== after.applicability && ['account.account', 'account.tax'].some((model) => (db.records[model] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id))) ? 'A tag in use cannot change applicability' : null,
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+      applicability: {
+        type: 'selection',
+        label: 'Applicability',
+        required: true,
+        options: [
+          ['accounts', 'Accounts'],
+          ['taxes', 'Taxes'],
+          ['products', 'Products'],
+        ],
+      },
+      color: { type: 'integer', label: 'Color' },
+      active: { type: 'boolean', label: 'Active' },
+      country: { type: 'char', label: 'Country' },
+      balance_negate: { type: 'boolean', label: 'Negate Balance' },
+    },
+    defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
+    list: ['name', 'applicability', 'country', 'balance_negate', 'active'],
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'applicability', 'color'],
+        ['country', 'balance_negate', 'active'],
+      ],
+    },
+  },
+
+  'account.asset.model': {
+    label: 'Depreciation Models',
+    fields: {
+      name: { type: 'char', label: 'Model Name', required: true },
+      method: {
+        type: 'selection',
+        label: 'Depreciation Method',
+        required: true,
+        options: [
+          ['linear', 'Linear'],
+          ['degressive', 'Degressive'],
+          ['degressive_then_linear', 'Degressive Then Linear'],
+        ],
+      },
+      method_number: { type: 'integer', label: 'Number of Depreciations', required: true },
+      method_period: {
+        type: 'selection',
+        label: 'Period Length',
+        required: true,
+        options: [
+          ['1', 'Monthly'],
+          ['12', 'Yearly'],
+        ],
+      },
+      method_progress_factor: { type: 'float', label: 'Degressive Factor' },
+      prorata: { type: 'boolean', label: 'Prorata Temporis' },
+      account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Asset Account' },
+      account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
+      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
+    },
+    defaults: () => ({ method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false }),
+    list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_expense_id'],
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_expense_id'],
+        ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution'],
+      ],
+    },
+  },
+
+  'account.secure.entries.wizard': {
+    label: 'Secure Entries',
+    fields: {
+      company: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      hash_date: { type: 'date', label: 'Secure entries up to', required: true },
+      max_hash_date: { type: 'date', label: 'Max Hash Date', readonly: true },
+      warnings: { type: 'text', label: 'Warnings', readonly: true },
+      entries_count: { type: 'integer', label: 'Number of Entries to Secure', readonly: true },
+      move_to_hash_ids: { type: 'many2many', relation: 'account.move', label: 'Entries to Secure', readonly: true },
+      not_hashable_unlocked_move_ids: { type: 'many2many', relation: 'account.move', label: 'Draft Entries', readonly: true },
+      chains_to_hash_with_gaps: { type: 'char', label: 'Chains with Gaps', readonly: true },
+    },
+    onchange: (r, key, db) => {
+      if (['hash_date', 'company'].includes(key)) {
+        const analysis = analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date });
+        return {
+          warnings: analysis.warnings,
+          entries_count: analysis.entries_count,
+          move_to_hash_ids: analysis.move_to_hash_ids,
+          not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
+          chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
+          max_hash_date: analysis.max_hash_date,
+        };
+      }
+      return {};
+    },
+    createDefaults: (db, vals) => {
+      const analysis = analyzeJournalChains(db, { companyId: vals?.company, hashDate: vals?.hash_date });
+      return {
+        company: vals?.company ?? analysis.company,
+        hash_date: vals?.hash_date ?? analysis.hash_date,
+        max_hash_date: analysis.max_hash_date,
+        warnings: analysis.warnings,
+        entries_count: analysis.entries_count,
+        move_to_hash_ids: analysis.move_to_hash_ids,
+        not_hashable_unlocked_move_ids: analysis.not_hashable_unlocked_move_ids,
+        chains_to_hash_with_gaps: analysis.chains_to_hash_with_gaps,
+      };
+    },
+    defaults: () => ({ move_to_hash_ids: [], not_hashable_unlocked_move_ids: [] }),
+    list: ['company', 'hash_date', 'max_hash_date', 'chains_to_hash_with_gaps'],
+    form: {
+      title: 'Secure Entries',
+      buttons: [
+        {
+          label: 'Confirm',
+          primary: true,
+          when: (r, db) => !analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date }).not_hashable_unlocked_move_ids?.length,
+          run: (db, r) => {
+            const analysis = analyzeJournalChains(db, { companyId: r.company, hashDate: r.hash_date });
+            if (analysis.not_hashable_unlocked_move_ids?.length) {
+              throw new Error(t('Cannot secure entries while draft entries exist on or before the secured date'));
+            }
+            const count = analysis.entries_count;
+            return { db: secureEntries(db, { companyId: r.company, hashDate: r.hash_date }), ...(count ? { go: '#/accounting/entries' } : { message: t('No entries were secured; the hard lock date was not changed.') }) };
+          },
+        },
+        { label: 'Cancel', run: (db) => ({ db, go: '#/accounting/entries' }) },
+      ],
+      groups: [['company', 'hash_date', 'max_hash_date', 'entries_count'], ['chains_to_hash_with_gaps', 'warnings']],
+      tabs: [
+        { label: 'Entries to Secure', fields: ['move_to_hash_ids'] },
+        { label: 'Draft Entries', fields: ['not_hashable_unlocked_move_ids'] },
+      ],
+    },
+  },
+});

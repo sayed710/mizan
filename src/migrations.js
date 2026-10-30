@@ -11,6 +11,7 @@ import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
 import { journalId } from './models/ledger.js';
+import { INCOTERMS_2020 } from './models/accounting.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -364,6 +365,37 @@ function documentTagLines(db) {
   return next;
 }
 
+export function migrateIncoterms(db) {
+  let next = db;
+  const existing = new Set((next.records['account.incoterm'] ?? []).map((i) => i.code));
+  for (const [code, name] of INCOTERMS_2020) {
+    if (!existing.has(code)) {
+      next = create(next, 'account.incoterm', { code, name, active: true }).db;
+    }
+  }
+  return next;
+}
+
+export function migrateFollowUps(db) {
+  if (!db?.records?.['res.partner']) return db;
+  const partners = db.records['res.partner'].map((p) => {
+    const { followup_level_delay, followup_date, followup_level, ...rest } = p;
+    const company = p.company_id || 1;
+    const lines = [...(p.followup_lines ?? [])];
+    const hasLegacy = followup_level_delay != null || followup_date != null || followup_level != null;
+    if (hasLegacy && !lines.some((l) => l.company_id === company)) {
+      lines.push({
+        company_id: company,
+        followup_level_delay: followup_level_delay ?? null,
+        followup_date: followup_date ?? null,
+        followup_level: followup_level ?? null,
+      });
+    }
+    return lines.length ? { ...rest, followup_lines: lines } : rest;
+  });
+  return { ...db, records: { ...db.records, 'res.partner': partners } };
+}
+
 export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
@@ -377,7 +409,9 @@ export const MIGRATIONS = [
   { version: 8, name: 'Product categories: preserve and link legacy names', up: migrateProductCategories },
   { version: 9, name: 'CRM and task stages: configurable models, lost reasons, tags', up: migrateStages },
   { version: 10, name: 'POS: migrate payment methods', up: migratePosMethods },
-  { version: 11, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
+  { version: 11, name: 'Invoicing: seed standard Incoterms 2020', up: migrateIncoterms },
+  { version: 12, name: 'Follow-ups: store follow-up progress per partner and company', up: migrateFollowUps },
+  { version: 13, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -75,15 +75,64 @@ test('the audit trail logs every change, keeps numbered entries and cannot be sw
 });
 
 test('automatic reminders log each reached level once per customer', async () => {
-  const { runFollowUps } = await import('./models/finance.js');
+  const { partnerFollowUp, runFollowUps } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
   const first = runFollowUps(db);
-  assert.equal(read(first, 'res.partner', 5).followup_level_delay, 15);
+  assert.equal(partnerFollowUp(read(first, 'res.partner', 5), 1)?.followup_level_delay, 15);
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
+  assert.ok(messagesOf(first, 'res.partner', 5).some((m) => m.body.includes('overdue \u2014 ')));
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
   const later = runFollowUps(first, addDays(today(), 12));
-  assert.equal(read(later, 'res.partner', 5).followup_level_delay, 30);
+  assert.equal(partnerFollowUp(read(later, 'res.partner', 5), 1)?.followup_level_delay, 30);
+});
+
+test('successive scheduled runs track follow-up progress per company and never move backwards', async () => {
+  const { runFollowUps, partnerFollowUp } = await import('./models/finance.js');
+  const { messagesOf } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  const base = seed();
+  const branch = createCompany(base, { name: 'Branch Two', currency_id: base.records['res.company'][0].currency_id });
+  let curDb = branch.db;
+
+  curDb = invoice(curDb, {
+    partner_id: 5,
+    company_id: 1,
+    invoice_date: addDays(today(), -50),
+    invoice_date_due: addDays(today(), -20),
+  }).db;
+
+  curDb = invoice(curDb, {
+    partner_id: 5,
+    company_id: branch.id,
+    invoice_date: addDays(today(), -65),
+    invoice_date_due: addDays(today(), -35),
+  }).db;
+
+  curDb = invoice(curDb, {
+    partner_id: 5,
+    company_id: branch.id,
+    invoice_date: addDays(today(), -15),
+    invoice_date_due: addDays(today(), -5),
+  }).db;
+
+  const first = runFollowUps(curDb);
+  const p1 = read(first, 'res.partner', 5);
+  assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 15);
+  assert.equal(partnerFollowUp(p1, branch.id)?.followup_level_delay, 30);
+  assert.equal(messagesOf(first, 'res.partner', 5).length, 2);
+
+  const repeat = runFollowUps(first);
+  assert.equal(messagesOf(repeat, 'res.partner', 5).length, 2);
+  const pRepeat = read(repeat, 'res.partner', 5);
+  assert.equal(partnerFollowUp(pRepeat, 1)?.followup_level_delay, 15);
+  assert.equal(partnerFollowUp(pRepeat, branch.id)?.followup_level_delay, 30);
+
+  const later = runFollowUps(first, addDays(today(), 15));
+  const pLater = read(later, 'res.partner', 5);
+  assert.equal(partnerFollowUp(pLater, 1)?.followup_level_delay, 30);
+  assert.equal(partnerFollowUp(pLater, branch.id)?.followup_level_delay, 30);
+  assert.equal(messagesOf(later, 'res.partner', 5).length, 3);
 });
 
 test('sales and purchase lock dates only lock their side; the hard lock locks everything', () => {
@@ -111,23 +160,149 @@ test('journal cards count drafts, unpaid and late invoices, and bank balance wit
 });
 
 test('a reminder opened in the mail app is logged on the customer with each amount in its currency', async () => {
-  const { followUpText, logManualFollowUp } = await import('./models/finance.js');
+  const { followUpText, logManualFollowUp, partnerFollowUp } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
   const f = followUps(db).find((x) => x.partner_id === 5);
   assert.match(followUpText(db, f), /\d \S+$/m);
   const next = logManualFollowUp(db, 5);
-  assert.equal(read(next, 'res.partner', 5).followup_date, today());
-  assert.equal(read(next, 'res.partner', 5).followup_level_delay, 15);
+  assert.equal(partnerFollowUp(read(next, 'res.partner', 5), 1)?.followup_date, today());
+  assert.equal(partnerFollowUp(read(next, 'res.partner', 5), 1)?.followup_level_delay, 15);
   assert.ok(messagesOf(next, 'res.partner', 5).some((m) => /Payment reminder sent by email/.test(m.body)));
   assert.throws(() => logManualFollowUp(seed(), 5), /no overdue/);
 });
 
 test('a manual reminder cannot regress the last recorded follow-up level', async () => {
-  const { logManualFollowUp } = await import('./models/finance.js');
+  const { logManualFollowUp, partnerFollowUp } = await import('./models/finance.js');
   const made = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -30), invoice_date_due: addDays(today(), -20) });
-  const db = write(made.db, 'res.partner', 5, { followup_level_delay: 45 });
+  const db = write(made.db, 'res.partner', 5, {
+    followup_lines: [{ company_id: 1, followup_level_delay: 45, followup_date: today() }],
+  });
   const next = logManualFollowUp(db, 5);
-  assert.equal(read(next, 'res.partner', 5).followup_level_delay, 45);
-  assert.equal(read(next, 'res.partner', 5).followup_date, today());
+  assert.equal(partnerFollowUp(read(next, 'res.partner', 5), 1)?.followup_level_delay, 45);
+  assert.equal(partnerFollowUp(read(next, 'res.partner', 5), 1)?.followup_date, today());
 });
+
+test('manual reminders work per company: two companies with 40-day and 5-day overdue invoices get their own levels and isolated email bodies', async () => {
+  const { createCompany } = await import('./models/company.js');
+  const { followUpCompanies, followUpText, logManualFollowUp, partnerFollowUp } = await import('./models/finance.js');
+  const { messagesOf } = await import('./orm.js');
+
+  const base = seed();
+  const branch = createCompany(base, { name: 'Finance Branch', currency_id: base.records['res.company'][0].currency_id });
+
+  const inv1 = invoice(branch.db, {
+    partner_id: 5,
+    company_id: 1,
+    invoice_date: addDays(today(), -50),
+    invoice_date_due: addDays(today(), -40),
+  });
+
+  const inv2 = invoice(inv1.db, {
+    partner_id: 5,
+    company_id: branch.id,
+    invoice_date: addDays(today(), -15),
+    invoice_date_due: addDays(today(), -5),
+  });
+
+  const fList = followUps(inv2.db).find((x) => x.partner_id === 5);
+  const groups = followUpCompanies(fList);
+  assert.equal(groups.length, 2, 'split into two company groups');
+
+  const group1 = groups.find((g) => g.company_id === 1);
+  const group2 = groups.find((g) => g.company_id === branch.id);
+  assert.ok(group1 && group2);
+
+  const text1 = followUpText(inv2.db, group1);
+  const text2 = followUpText(inv2.db, group2);
+  assert.ok(text1.includes(group1.invoices[0].name));
+  assert.ok(!text1.includes(group2.invoices[0].name));
+  assert.ok(text2.includes(group2.invoices[0].name));
+  assert.ok(!text2.includes(group1.invoices[0].name));
+
+  const after = logManualFollowUp(inv2.db, 5);
+  const p = read(after, 'res.partner', 5);
+
+  const prog1 = partnerFollowUp(p, 1);
+  const prog2 = partnerFollowUp(p, branch.id);
+
+  assert.equal(prog1?.followup_level_delay, 30, 'company 1 with 40-day overdue gets 30-day level');
+  assert.equal(prog2?.followup_level_delay, null, 'company 2 with 5-day overdue gets no level');
+  assert.equal(prog2?.followup_date, today());
+
+  const msgs = messagesOf(after, 'res.partner', 5);
+  const note1 = msgs.find((m) => m.company_id === 1 && m.body.includes(group1.invoices[0].name));
+  const note2 = msgs.find((m) => m.company_id === branch.id && m.body.includes(group2.invoices[0].name));
+
+  assert.ok(note1, 'chatter note for company 1');
+  assert.ok(note2, 'chatter note for company 2');
+  assert.match(note1.body, /Second reminder/);
+  assert.doesNotMatch(note1.body, new RegExp(group2.invoices[0].name));
+  assert.doesNotMatch(note2.body, /Second reminder|First reminder/);
+  assert.doesNotMatch(note2.body, new RegExp(group1.invoices[0].name));
+});
+
+test('a partner that catches up and then gets a new overdue invoice starts again at the first level', async () => {
+  const { runFollowUps, partnerFollowUp } = await import('./models/finance.js');
+  const { payWithDiscount } = await import('./models/accounting.js');
+  const { messagesOf } = await import('./orm.js');
+  // 1. Customer with invoice overdue by 35 days reaches level 2 (delay 30)
+  const inv1 = invoice(seed(), {
+    partner_id: 5,
+    company_id: 1,
+    invoice_date: addDays(today(), -65),
+    invoice_date_due: addDays(today(), -35),
+  });
+  const run1 = runFollowUps(inv1.db);
+  const p1 = read(run1, 'res.partner', 5);
+  assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 30);
+  assert.ok(messagesOf(run1, 'res.partner', 5).some((m) => /Second reminder/.test(m.body)));
+
+  // 2. Partner catches up (invoice paid in full: residual = 0)
+  const paidDb = payWithDiscount(run1, inv1.id, 1140);
+  const runCatchUp = runFollowUps(paidDb);
+  const pCatchUp = read(runCatchUp, 'res.partner', 5);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_level_delay, null);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_level, null);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_date, null);
+
+  // 3. Partner gets a new overdue invoice, overdue by 20 days (delay 15 level, not 30)
+  const inv2 = invoice(runCatchUp, {
+    partner_id: 5,
+    company_id: 1,
+    invoice_date: addDays(today(), -50),
+    invoice_date_due: addDays(today(), -20),
+  });
+  const run2 = runFollowUps(inv2.db);
+  const p2 = read(run2, 'res.partner', 5);
+  assert.equal(partnerFollowUp(p2, 1)?.followup_level_delay, 15, 'restarts at first level (delay 15)');
+  assert.ok(messagesOf(run2, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
+});
+
+test('manual reminder before first level clears progress through catch-up after payment', async () => {
+  const { logManualFollowUp, runFollowUps, partnerFollowUp } = await import('./models/finance.js');
+  const { payWithDiscount } = await import('./models/accounting.js');
+
+  // Customer with invoice overdue by 5 days (first level delay is 15)
+  const inv = invoice(seed(), {
+    partner_id: 5,
+    company_id: 1,
+    invoice_date: addDays(today(), -15),
+    invoice_date_due: addDays(today(), -5),
+  });
+
+  // Manual reminder sent before the first level: stores followup_date with no delay
+  const reminded = logManualFollowUp(inv.db, 5);
+  const pReminded = read(reminded, 'res.partner', 5);
+  assert.equal(partnerFollowUp(pReminded, 1)?.followup_level_delay, null);
+  assert.equal(partnerFollowUp(pReminded, 1)?.followup_date, today());
+
+  // Customer catches up (invoice paid in full: residual = 0)
+  const paidDb = payWithDiscount(reminded, inv.id, 1140);
+  const runCatchUp = runFollowUps(paidDb);
+  const pCatchUp = read(runCatchUp, 'res.partner', 5);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_level_delay, null);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_level, null);
+  assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_date, null, 'followup_date must be cleared after catch-up');
+});
+

@@ -198,6 +198,9 @@ const allApps = [
         { key: 'consolidations', label: 'Consolidations', model: 'consolidation.chart' },
         { key: 'consolidation-periods', label: 'Consolidation Periods', model: 'consolidation.period' },
         { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+        { label: 'Closing', children: [
+          { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
+        ] },
       ] },
       { label: 'Reporting', children: [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
@@ -218,21 +221,35 @@ const allApps = [
         { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
         { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
       ] },
+      { label: 'Review', children: [
+        { label: 'Control', children: [
+          { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
+          { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
+        ] },
+      ] },
       { label: 'Configuration', children: [
-        { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
-        { key: 'journals', label: 'Journals', model: 'account.journal' },
-        { key: 'taxes', label: 'Taxes', model: 'account.tax' },
-        { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
-        { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
-        { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
-        { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
-        { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
-        { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
-        { key: 'budgets', label: 'Budgets', model: 'account.budget' },
-        { key: 'currencies', label: 'Currencies', model: 'res.currency' },
-        { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
-        { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
-        { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
+        { label: 'Invoicing', children: [
+          { key: 'incoterms', label: 'Incoterms', model: 'account.incoterm' },
+        ] },
+        { label: 'Accounting', children: [
+          { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
+          { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'taxes', label: 'Taxes', model: 'account.tax' },
+          { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
+          { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
+          { key: 'depreciation-models', label: 'Depreciation Models', model: 'account.asset.model' },
+          { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
+          { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
+          { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
+          { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
+          { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
+          { key: 'budgets', label: 'Budgets', model: 'account.budget' },
+          { key: 'currencies', label: 'Currencies', model: 'res.currency' },
+          { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
+          { key: 'cash-roundings', label: 'Cash Roundings', model: 'account.cash.rounding' },
+          { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
+        ] },
       ] },
     ],
   },
@@ -621,7 +638,10 @@ const withAnalyses = (app) => {
 };
 export const apps = [...allApps].map(withAnalyses).sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
-export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
+export const leavesOf = (app) => {
+  const walk = (items) => (items ?? []).flatMap((m) => (m.children ? walk(m.children) : [m]));
+  return walk(app?.menus);
+};
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus may change them. */
@@ -641,7 +661,8 @@ const PRIVATE_FIELDS = {
 };
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
-export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year'];
+export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year',
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));

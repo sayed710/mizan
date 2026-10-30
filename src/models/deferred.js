@@ -2,6 +2,7 @@
 import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
+import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
@@ -32,10 +33,10 @@ export function postDueEntries(db, d, upTo = today()) {
   const { db: next, board } = (d.board ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, board: [...acc.board, l] };
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'MISC', date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
-      lines: [{ account: debit, debit: l.amount, partner_id: d.partner_id ?? undefined }, { account: credit, credit: l.amount, partner_id: d.partner_id ?? undefined }],
+      journal: 'MISC', company: d.company_id, date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
+      lines: [{ account: debit, debit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'expense' ? { analytic_distribution: d.analytic_distribution } : {}) }, { account: credit, credit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'revenue' ? { analytic_distribution: d.analytic_distribution } : {}) }],
     });
-    return { db: booked, board: [...acc.board, { ...l, posted: true, move_id: id }] };
+    return { db: postAnalytic(booked, id), board: [...acc.board, { ...l, posted: true, move_id: id }] };
   }, { db, board: [] });
   return write(next, 'account.deferral', d.id, { board, state: board.every((l) => l.posted) ? 'done' : 'running' });
 }
@@ -50,6 +51,7 @@ export const deferredModels = {
       start_date: { type: 'date', label: 'Start Date' },
       months: { type: 'integer', label: 'Months' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['running', 'Running'], ['done', 'Done'], ['cancel', 'Cancelled']] },
       board: {
         type: 'one2many',
@@ -76,7 +78,7 @@ export const deferredModels = {
         { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['kind', 'partner_id', 'amount'], ['start_date', 'months']],
+      groups: [['kind', 'partner_id', 'amount', 'analytic_distribution'], ['start_date', 'months']],
       tabs: [{ label: 'Recognition Board', fields: ['board'] }],
       chatter: true,
     },

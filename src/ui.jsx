@@ -6,6 +6,7 @@ import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { parseAmount } from './models/common.js';
+import { parseDistributionInput } from './analytic_distribution.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -46,6 +47,7 @@ export function display(db, field, value, rec = null) {
     case 'many2many': return (value ?? []).map((id) => { const r = read(db, field.relation, id); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
+    case 'distribution': return JSON.stringify(value);
     case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
     case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -248,15 +250,44 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 export const isLabelable = (field, readonly) =>
   !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
 
+function DistributionInput({ value, onChange, ...props }) {
+  const [draft, setDraft] = useState(() => typeof value === 'string' ? value : JSON.stringify(value ?? {}));
+  useEffect(() => { if (!Number.isNaN(value)) setDraft(typeof value === 'string' ? value : JSON.stringify(value ?? {})); }, [value]);
+  return <textarea {...props} value={draft} onChange={(e) => {
+    const next = e.target.value;
+    setDraft(next);
+    onChange(parseDistributionInput(next));
+  }} />;
+}
+
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
-  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
+  if (readonly || field.readonly || field.compute) {
+    if (field.type === 'many2many' && field.relation && Array.isArray(value)) {
+      return (
+        <span className="readonly">
+          {value.map((valId, i) => {
+            const r = read(db, field.relation, valId);
+            const labelText = r?.display_name ?? r?.name ?? `#${valId}`;
+            return (
+              <span key={valId}>
+                {i > 0 && ', '}
+                <a href={`#/open/${field.relation}/${valId}`}>{labelText}</a>
+              </span>
+            );
+          })}
+        </span>
+      );
+    }
+    return <span className="readonly">{display(db, field, value, record)}</span>;
+  }
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
   const text = (type = 'text', extra = {}) => (
     <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
+    case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':

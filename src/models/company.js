@@ -27,7 +27,8 @@ export function setCompanies(db, { current, allowed }) {
 }
 
 // Configuration is shared even when older ORM versions stamped it with company 1.
-const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category']);
+const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
+  'account.incoterm', 'account.account.tag', 'account.asset.model']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
@@ -49,13 +50,102 @@ export function visibleTo(companies, model, r, db = null) {
   return companies.has(r.company_id);
 }
 
+export const NESTED_COMPANY_FIELDS = {
+  'account.journal': ['secure_chain_heads'],
+  'res.partner': ['followup_lines'],
+  'consolidation.chart': ['company_ids'],
+  'consolidation.period': ['rate_ids'],
+};
+
+/**
+ * Scopes nested per-company arrays within a record:
+ * - When reading (write=false): filters nested arrays to only entries belonging to allowed companies.
+ * - When writing (write=true): rejects writes that include entries for foreign companies, and preserves hidden entries from `prior`.
+ */
+export function scopeNestedCompanyArrays(model, rec, companies, { prior = null, submitted = null, write = false } = {}) {
+  const fields = NESTED_COMPANY_FIELDS[model];
+  if (!companies || !fields || !rec) return rec;
+
+  if (write) {
+    const checkSource = submitted ?? rec;
+    for (const field of fields) {
+      if (submitted && !(field in submitted)) continue;
+      const lines = checkSource[field];
+      if (Array.isArray(lines)) {
+        for (const line of lines) {
+          if (line && line.company_id != null && !companies.has(line.company_id)) {
+            throw new Error(`No access to this company's ${model} records`);
+          }
+        }
+      }
+    }
+
+    if (prior) {
+      for (const field of fields) {
+        if (Array.isArray(prior[field])) {
+          const hidden = prior[field].filter((line) => line?.company_id != null && !companies.has(line.company_id));
+          if (hidden.length) {
+            const userLines = Array.isArray(rec[field])
+              ? rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id))
+              : (prior[field] ?? []).filter((line) => line?.company_id != null && companies.has(line.company_id));
+            rec[field] = [...hidden, ...userLines];
+          }
+        }
+      }
+    }
+    return rec;
+  }
+
+  let modified = false;
+  const out = { ...rec };
+  for (const field of fields) {
+    if (Array.isArray(rec[field])) {
+      out[field] = rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id));
+      modified = true;
+    }
+  }
+  return modified ? out : rec;
+}
+
+/**
+ * Scopes an audit entry's changes dictionary: filters nested per-company arrays in old and new values.
+ */
+export function scopeAuditChanges(model, changes, companies) {
+  if (!companies || !NESTED_COMPANY_FIELDS[model] || !changes) return changes;
+  const oldVals = {};
+  const newVals = {};
+  for (const [k, v] of Object.entries(changes)) {
+    if (Array.isArray(v) && v.length === 2) {
+      oldVals[k] = v[0];
+      newVals[k] = v[1];
+    }
+  }
+  const scopedOld = scopeNestedCompanyArrays(model, oldVals, companies);
+  const scopedNew = scopeNestedCompanyArrays(model, newVals, companies);
+  const out = {};
+  for (const [k, v] of Object.entries(changes)) {
+    if (Array.isArray(v) && v.length === 2) {
+      out[k] = [
+        scopedOld[k] === undefined ? null : scopedOld[k],
+        scopedNew[k] === undefined ? null : scopedNew[k],
+      ];
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 /** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */
 export function restrictRecords(db, companies) {
   if (!companies) return { records: db.records, hidden: new Set() };
   const records = {};
   const hidden = new Set();
   for (const [model, list] of Object.entries(db.records)) {
-    records[model] = list.filter((r) => visibleTo(companies, model, r, db));
+    const filtered = list
+      .filter((r) => visibleTo(companies, model, r, db))
+      .map((r) => scopeNestedCompanyArrays(model, r, companies));
+    records[model] = filtered;
     if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r, db)).forEach((r) => hidden.add(`${model}:${r.id}`));
   }
   return { records, hidden };
@@ -99,6 +189,7 @@ export function withCompany(models) {
 }
 
 function companyGuard(db, before, r) {
+  if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);
@@ -214,6 +305,7 @@ export const companyModels = {
       resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
+      hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
       logo: { type: 'text', label: 'Logo' }, active: { type: 'boolean', label: 'Active' },

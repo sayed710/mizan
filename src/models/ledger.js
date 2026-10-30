@@ -190,7 +190,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
 
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accId, partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
+    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const journalCode = j?.code ?? journal;

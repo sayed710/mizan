@@ -2,10 +2,11 @@
 // Record-level diff between two db snapshots, applied server-side so concurrent edits
 // to different records don't overwrite each other.
 import { models } from './registry.js';
-import { postTracking, referenceTo, validate } from './orm.js';
+import { analyticAccountKey } from './analytic_distribution.js';
+import { postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
-import { setCompanies, visibleTo } from './models/company.js';
+import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
@@ -115,14 +116,14 @@ export const ID_WINDOW = 1_000_000;
  * Apply only the fields an edit changed onto the stored record, refusing it when one of them no longer has the value
  * the edit started from. Without a base the record is taken as sent, preserving omitted fields on locked records.
  */
-function merge(model, stored, raw, base) {
+function merge(model, stored, raw, base, visibleStored = stored) {
   if (!base || typeof base !== 'object' || Array.isArray(base)) {
     // Legacy partial updates must not erase the state or content of a locked record.
     return stored && models[model].form?.lockedWhen?.(stored) ? { ...stored, ...raw } : raw;
   }
   const label = models[model].label ?? model;
   if (!stored) throw new ConflictError(`${label} #${raw.id} was deleted by someone else; reload and try again`);
-  const stale = Object.keys(base).find((k) => same(stored[k]) !== same(base[k]));
+  const stale = Object.keys(base).find((k) => same(visibleStored[k]) !== same(base[k]));
   if (stale) throw new ConflictError(`${label} #${raw.id} was changed by someone else (${stale}); your edit was not saved, reload and try again`);
   const out = { ...stored };
   for (const k of Object.keys(base)) {
@@ -209,13 +210,28 @@ export function repairSeq(db) {
   return changed ? { ...db, seq } : db;
 }
 
+/** Validate original keys before remapping, and never overwrite an allocation. */
+function remapDistribution(distribution, remapped) {
+  if (!distribution || typeof distribution !== 'object' || Array.isArray(distribution)) return distribution;
+  const result = {};
+  for (const [key, share] of Object.entries(distribution)) {
+    const id = analyticAccountKey(key);
+    const target = remapped['account.analytic.account']?.[id] ?? id;
+    if (!Number.isSafeInteger(target) || target < 1) throw new Error('Select a valid analytic account');
+    if (Object.hasOwn(result, target)) throw new Error('Analytic distribution account remapping collision');
+    result[target] = share;
+  }
+  return result;
+}
+
 /** Point many2one, line and res_model/res_id references in a record at remapped ids. */
 function remapRefs(model, rec, remapped) {
   const to = (relation, v) => (Number.isInteger(v) && remapped[relation]?.[v]) || v;
   const out = { ...rec };
   for (const [key, f] of Object.entries(models[model]?.fields ?? {})) {
     if (!(key in out)) continue;
-    if (f.type === 'many2one' && f.relation) out[key] = to(f.relation, out[key]);
+    if (key === 'analytic_distribution' && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) out[key] = remapDistribution(out[key], remapped);
+    else if (f.type === 'many2one' && f.relation) out[key] = to(f.relation, out[key]);
     else if (f.type === 'many2many' && Array.isArray(out[key])) out[key] = out[key].map((id) => to(f.relation, id));
     else if (f.type === 'one2many' && Array.isArray(out[key])) {
       out[key] = out[key].map((line) => {
@@ -225,7 +241,7 @@ function remapRefs(model, rec, remapped) {
         const subs = Object.entries(f.fields ?? {}).filter(([k, s]) => target(s) && k in line);
         const distribution = line.analytic_distribution;
         const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
-          ? { analytic_distribution: Object.fromEntries(Object.entries(distribution).map(([id, share]) => [to('account.analytic.account', Number(id)), share])) }
+          ? { analytic_distribution: remapDistribution(distribution, remapped) }
           : null;
         return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...analytic } : line;
       });
@@ -268,7 +284,7 @@ export function remapDiff(d, remapped) {
   const deletes = Object.fromEntries(Object.entries(d.deletes ?? {}).map(([model, ids]) => [model,
     Array.isArray(ids) ? ids.map((id) => remapped[model]?.[id] ?? id) : ids]));
   const messages = Array.isArray(d.messages)
-    ? d.messages.map((m) => (m && remapped[m.model]?.[m.res_id] ? { ...m, res_id: remapped[m.model][m.res_id] } : m)) : d.messages;
+    ? d.messages.map((m) => (m ? { ...m, res_id: remapped[m.model]?.[m.res_id] ?? m.res_id, ...(m.source_model ? { source_id: remapped[m.source_model]?.[m.source_id] ?? m.source_id } : {}) } : m)) : d.messages;
   const created = Object.fromEntries(Object.entries(d.created ?? {}).map(([model, ids]) => [model,
     Array.isArray(ids) ? ids.map((id) => remapped[model]?.[id] ?? id) : ids]));
   const company = (id) => remapped['res.company']?.[id] ?? id;
@@ -372,7 +388,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
       const input = model === 'account.move' && !prior ? (({ fx_payment_move_id, fx_invoice_id, ...rest }) => rest)(submitted) : submitted;
-      const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id]));
+      const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
+      const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
+      if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
       const denied = companyError(model, rec, current.get(rec.id), storedRecord(model, rec.id));
       if (denied) throw new Error(denied);
       const old = current.get(rec.id);
@@ -405,7 +423,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
-    const err = validate(model, rec) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
+    const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
       ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies });
     if (err) throw new Error(err);
   }
@@ -462,14 +480,20 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     return old && (d.deletes?.[m.model] ?? []).includes(m.res_id) && !companyError(m.model, old);
   };
   const hiddenMessages = new Set(db.messages.filter((m) => !onVisibleRecord(m) && !removedVisibleRecord(m)).map((m) => m.id));
+  if (companies) for (const m of db.messages) if (m.company_id && !companies.has(m.company_id)) hiddenMessages.add(m.id);
   const modelOf = new Map(db.messages.map((m) => [m.id, m.model]));
   const removed = new Set((Array.isArray(d.removedMessages) ? d.removedMessages : [])
     .filter((id) => !kept.has(id) && !hiddenMessages.has(id) && (!allowed || allowed.has(modelOf.get(id)))));
   const incoming = (Array.isArray(d.messages) ? d.messages : [])
     .map(cleanMessage)
-    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)) && onVisibleRecord(m))
+    .filter((m) => m && !known.has(m.id) && (!allowed || allowed.has(m.model)) && (onVisibleRecord(m) || removedVisibleRecord(m)))
     // Who and when come from the server: a client cannot backdate a chatter entry or sign it as someone else.
-    .map((m) => ({ ...m, author: author ?? m.author, date: author ? new Date().toISOString() : m.date }));
+    .map((m) => {
+      const record = (records[m.model] ?? []).find((r) => r.id === m.res_id) ?? storedRecord(m.model, m.res_id);
+      const source = m.source_model && (records[m.source_model] ?? []).find((r) => r.id === m.source_id);
+      if (m.source_model && (!source || m.model !== 'res.partner' || source.partner_id !== m.res_id || companyError(m.source_model, storedRecord(m.source_model, m.source_id), source))) throw new Error('Invalid message source');
+      return { ...m, ...(source ? { company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(m.model) ? { company_id: record.company_id || 1 } : {}), author: author ?? m.author, date: author ? new Date().toISOString() : m.date };
+    });
   // Company details, installed apps and Studio fields are admin-only; selections and favorites are not.
   const s = d.settings && typeof d.settings === 'object' ? d.settings : null;
   const company = s && ('current_company_id' in s || 'allowed_company_ids' in s)

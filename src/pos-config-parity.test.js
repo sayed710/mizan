@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { closeSession, openSession, payCart, payOrder, posOrderTotal, refundOrder, sessionTotals, startSession } from './models/pos.js';
 import { payWithMethods, posCategories, posPaymentMethods, posProducts, refundBill, zReport } from './models/posplus.js';
 import { runOperation } from './operations.js';
@@ -884,7 +884,7 @@ test('migration 11 repairs schema 10 databases by resolving tenders within order
     seq: { ...base.seq, 'pos.payment.method': 102, 'pos.config': 2, 'pos.order': 1 },
   };
   const repaired = migrate(schema10Db);
-  assert.equal(repaired.schema_version, 11);
+  assert.equal(repaired.schema_version, SCHEMA_VERSION);
   const order = read(repaired, 'pos.order', 1);
   assert.equal(order.payment_method_id, 102, 'Order tender repaired to match the configuration payment method');
   assert.equal(order.payment_ids[0].payment_method_id, 102);

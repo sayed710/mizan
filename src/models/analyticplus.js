@@ -12,25 +12,9 @@ const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];
 const inPeriod = (r, from, to) => (!from || r.date >= from) && (!to || r.date <= to);
-const planOf = (account) => account.plan_id ? `plan:${account.plan_id}` : `legacy:${account.plan || 'project'}`;
-
-/** Validate percentages; optional db resolves accounts and independent plan totals. */
-export function normalizeDistribution(distribution, db) {
-  if (distribution == null) return {};
-  if (typeof distribution !== 'object' || Array.isArray(distribution)) throw new Error('Analytic distribution must be an object');
-  const totals = new Map();
-  const entries = Object.entries(distribution).map(([id, percent]) => {
-    if (!/^[1-9]\d*$/.test(id)) throw new Error('Select a valid analytic account');
-    if (typeof percent !== 'number' || !Number.isFinite(percent) || percent < 0) throw new Error('Analytic percentages must be non-negative numbers');
-    const account = db && read(db, 'account.analytic.account', Number(id));
-    if (db && !account) throw new Error('Analytic account not found');
-    const plan = db ? planOf(account) : 'all';
-    totals.set(plan, (totals.get(plan) ?? 0) + percent);
-    return [id, percent];
-  });
-  if ([...totals.values()].some((n) => n > 100 + 1e-9)) throw new Error('Analytic distribution cannot exceed 100% per plan');
-  return Object.fromEntries(entries);
-}
+const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
+export { normalizeDistribution } from '../analytic_distribution.js';
+import { normalizeDistribution } from '../analytic_distribution.js';
 
 /** Read a distribution, preserving the legacy single-account allocation. */
 export function distributionOfLine(line) {
@@ -53,6 +37,12 @@ export function checkMandatoryPlans(db, move) {
 
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
 export function analyticLinesForMove(db, move) {
+  if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => ({
+    name: line.name || move.name || '/', date: move.invoice_date || today(), account_id: Number(id),
+    amount: round(((Number(line.credit) || 0) - (Number(line.debit) || 0)) * percent / 100),
+    general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
+    partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+  })));
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
   checkMandatoryPlans(db, move);
   const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
@@ -92,13 +82,14 @@ export function postAnalytic(db, moveId) {
   const move = read(db, 'account.move', moveId);
   if (!move) throw new Error('Invoice or bill not found');
   if (move.state !== 'posted') throw new Error('Post the invoice or bill before creating analytic lines');
-  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && ['invoice', 'vendor_bill'].includes(r.category))) return db;
+  const category = move.move_type === 'entry' ? 'journal_entry' : move.move_type === 'in_invoice' ? 'vendor_bill' : 'invoice';
+  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && r.category === category)) return db;
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }
 
 /** Remove generated allocations on reset or cancellation, preserving timesheets. */
 export function removeAnalytic(db, moveId) {
-  const ids = (db.records['account.analytic.line'] ?? []).filter((r) => r.move_id === moveId && ['invoice', 'vendor_bill'].includes(r.category)).map((r) => r.id);
+  const ids = (db.records['account.analytic.line'] ?? []).filter((r) => r.move_id === moveId && ['invoice', 'vendor_bill', 'journal_entry'].includes(r.category)).map((r) => r.id);
   return ids.length ? unlink(db, 'account.analytic.line', ids) : db;
 }
 
@@ -184,7 +175,7 @@ export const analyticPlusModels = {
       move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice / Bill' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
-      category: { type: 'selection', label: 'Category', options: [['invoice', 'Invoice'], ['vendor_bill', 'Vendor Bill'], ['timesheet', 'Timesheet'], ['other', 'Other']] },
+      category: { type: 'selection', label: 'Category', options: [['invoice', 'Invoice'], ['vendor_bill', 'Vendor Bill'], ['journal_entry', 'Journal Entry'], ['timesheet', 'Timesheet'], ['other', 'Other']] },
     },
     defaults: () => ({ ...timesheetModel.defaults(), amount: 0, category: 'timesheet' }),
     form: { ...timesheetModel.form, groups: [...timesheetModel.form.groups, ['account_id', 'amount', 'category'], ['general_account', 'move_id', 'partner_id', 'product_id']] },

@@ -28,6 +28,8 @@ export function checkCreditLimit(db, partnerId, amount) {
 }
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
+/** Hashed fields that can never change once an entry receives an inalterability hash. */
+const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
@@ -59,6 +61,8 @@ export function lockDateFor(settings = {}, move = {}) {
   const side = String(move.move_type ?? '').startsWith('out_') ? settings.sale_lock_date : String(move.move_type ?? '').startsWith('in_') ? settings.purchase_lock_date : null;
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
+
+const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
 const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id));
@@ -253,8 +257,15 @@ export function closedYearLock(db) {
   return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
 }
 
+function securedMoveRule(before, after) {
+  if (!before?.inalterable_hash) return null;
+  if (after.state !== 'posted') return 'Secured entries cannot be reset to draft or cancelled';
+  if (changedFields(before, after, HASHED_FIELDS)) return 'Secured entries cannot be modified';
+  return null;
+}
+
 export function moveGuard(db, before, after) {
-  return lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
 }
 
 
@@ -265,12 +276,14 @@ function lockRule(db, before, after) {
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
-  const lock = [...[before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)), yearLock].sort().at(-1);
-  if (!lock) return null;
-  const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
-  if (!touchesLocked) return null;
+  const beforeLock = before ? [companyLockDate(db, before), yearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after), yearLock].sort().at(-1);
+  const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
+  const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
+  if (!beforeLocked && !afterLocked) return null;
+  const lock = [beforeLocked && beforeLock, afterLocked && afterLock].filter(Boolean).sort().at(-1);
   const changed = !before || changedFields(before, after, LOCKED_FIELDS)
-    || (before && moveDate(before) <= lock && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, lock));
+    || (beforeLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, beforeLock));
   return changed ? `The period up to ${lock} is locked` : null;
 }
 
@@ -279,7 +292,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [lockDateFor(db.settings, before), closedYearLock(db)].sort().at(-1);
+  const lock = before && [companyLockDate(db, before), closedYearLock(db)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -296,25 +309,28 @@ export function lockedSettlementInvariant(db, after, before) {
  * lock they cannot change, and nothing new can be booked into the locked period.
  */
 export const datedLockGuard = (fields, booked) => (db, before, after) => {
-  const lock = lockDateFor(db.settings, {});
-  if (!lock) return null;
-  const inLock = (r) => r && booked(r) && String(r.date ?? today()) <= lock;
-  if (!inLock(before) && !inLock(after)) return null;
+  const locks = [before, after].filter((r) => r && booked(r))
+    .map((r) => ({ record: r, lock: companyLockDate(db, r) }))
+    .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
+    .map(({ lock }) => lock);
+  if (!locks.length) return null;
+  const lock = locks.sort().at(-1);
   return !before || changedFields(before, after, fields) ? `The period up to ${lock} is locked` : null;
 };
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
 export const datedLockDelete = (booked) => (db, r) => {
-  const lock = lockDateFor(db.settings, {});
+  const lock = companyLockDate(db, r);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move, staged = db) {
+  if (move.inalterable_hash || staged?.inalterable_hash) return 'Secured entries with an inalterability hash cannot be deleted';
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
+  const lock = [companyLockDate(db, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
@@ -477,6 +493,49 @@ export function followUps(db, at = today()) {
   return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
+// A shared contact can have invoices in several companies; never combine their private notes.
+export const followUpCompanies = (f) => {
+  const groups = new Map();
+  for (const invoice of f.invoices) {
+    const cId = invoice.company_id ?? 1;
+    if (!groups.has(cId)) groups.set(cId, []);
+    groups.get(cId).push(invoice);
+  }
+  return [...groups.entries()].map(([company_id, invoices]) => ({
+    ...f, company_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
+  }));
+};
+const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, company_id: f.company_id ?? f.invoices[0].company_id ?? 1 });
+
+/**
+ * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
+ * invoice is logged on the contact once (the contact remembers the last level sent).
+ */
+export function partnerFollowUp(partner, companyId = 1) {
+  if (!partner) return null;
+  const line = (partner.followup_lines ?? []).find((l) => l.company_id === companyId);
+  return line ?? null;
+}
+
+export function updatePartnerFollowUp(partner, companyId, vals) {
+  const existing = [...(partner.followup_lines ?? [])];
+  const idx = existing.findIndex((l) => l.company_id === companyId);
+  const current = idx >= 0 ? existing[idx] : null;
+  const updated = {
+    company_id: companyId,
+    followup_level_delay: vals.followup_level_delay !== undefined ? vals.followup_level_delay : current?.followup_level_delay ?? null,
+    followup_date: vals.followup_date !== undefined ? vals.followup_date : current?.followup_date ?? null,
+    followup_level: vals.followup_level !== undefined ? vals.followup_level : current?.followup_level ?? null,
+  };
+  if (idx >= 0) existing[idx] = updated;
+  else existing.push(updated);
+
+  return {
+    ...partner,
+    followup_lines: existing,
+  };
+}
+
 /**
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
@@ -485,21 +544,55 @@ export function runFollowUps(db, at = today()) {
   const levels = search(db, 'account.followup.level').sort((a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0));
   if (!levels.length) return db;
   const overdue = followUps(db, at);
-  // Customers who caught up start again from the first level next time.
-  const late = new Set(overdue.map((f) => f.partner_id));
+  const overdueGroups = overdue.flatMap(followUpCompanies);
+  const activeLate = new Set(overdueGroups.map((f) => `${f.partner_id}:${f.invoices[0].company_id ?? 1}`));
+
   const partners = new Map((db.records['res.partner'] ?? []).map((p) => [p.id, p]));
-  const updates = new Map(search(db, 'res.partner').filter((p) => p.followup_level_delay != null && !late.has(p.id))
-    .map((p) => [p.id, { followup_level_delay: null }]));
-  // Notes and level changes are collected, then written in one batch so the job stays linear in the data.
+  const partnerUpdates = new Map();
+
+  for (const partner of partners.values()) {
+    const lines = partner.followup_lines ?? [];
+    for (const line of lines) {
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null;
+      if (hasProgress && !activeLate.has(`${partner.id}:${line.company_id}`)) {
+        const current = partnerUpdates.get(partner.id) ?? partner;
+        partnerUpdates.set(partner.id, updatePartnerFollowUp(current, line.company_id, { followup_level_delay: null, followup_level: null, followup_date: null }));
+      }
+    }
+  }
+
   const notes = [];
-  for (const f of overdue) {
+  for (const f of overdueGroups) {
+    const companyId = f.invoices[0].company_id ?? 1;
     const days = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
     const level = [...levels].reverse().find((l) => days >= (Number(l.delay) || 0));
     const partner = partners.get(f.partner_id);
-    if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) continue;
+    if (!level || !partner) continue;
+
+    const currentPartner = partnerUpdates.get(partner.id) ?? partner;
+    const progress = partnerFollowUp(currentPartner, companyId);
+    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
+
+    if (currentDelay >= Number(level.delay)) continue;
+
     const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim()]);
-    updates.set(partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
+    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim(), reminderSource(f)]);
+
+    const updated = updatePartnerFollowUp(currentPartner, companyId, {
+      followup_level_delay: Number(level.delay),
+      followup_date: at,
+      followup_level: level.id,
+    });
+    partnerUpdates.set(partner.id, updated);
+  }
+
+  if (!notes.length && !partnerUpdates.size) return db;
+
+  const updates = new Map();
+  for (const [id, p] of partnerUpdates) {
+    updates.set(id, {
+      followup_lines: p.followup_lines,
+    });
   }
   return writeMany(postNotes(db, notes), 'res.partner', updates);
 }
@@ -510,15 +603,46 @@ const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.nam
 export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
 
 /** Record a reminder sent by hand: a note on the contact, the date, and the follow-up level it reached. */
-export function logManualFollowUp(db, partnerId, at = today()) {
-  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+  const f = reminder ?? followUps(scope, at).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
-  const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
-  const level = search(db, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0)).find((l) => late >= (Number(l.delay) || 0));
-  const noted = postNote(db, 'res.partner', partnerId, `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(db, f)}`);
-  const previous = read(db, 'res.partner', partnerId).followup_level_delay;
-  return write(noted, 'res.partner', partnerId, { followup_date: at, ...(level && (previous == null || Number(level.delay) > Number(previous)) ? { followup_level_delay: Number(level.delay) } : {}) });
+  const allGroups = followUpCompanies(f);
+  const targetCompany = companyId ?? reminder?.company_id ?? null;
+  const groups = targetCompany ? allGroups.filter((g) => g.company_id === targetCompany) : allGroups;
+  if (!groups.length) throw new Error('This customer has no overdue invoices');
+
+  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
+
+  let nextDb = db;
+  let partner = read(db, 'res.partner', partnerId);
+
+  for (const part of groups) {
+    const cId = part.company_id;
+    const late = Math.floor((new Date(at) - new Date(part.oldest)) / 864e5);
+    const level = levels.find((l) => late >= (Number(l.delay) || 0));
+
+    const noteBody = `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}`;
+    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
+
+    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
+    if (level && (previous == null || Number(level.delay) > Number(previous))) {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_level_delay: Number(level.delay),
+        followup_date: at,
+        followup_level: level.id,
+      });
+    } else {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_date: at,
+      });
+    }
+  }
+
+  return write(nextDb, 'res.partner', partnerId, {
+    followup_lines: partner.followup_lines,
+  });
 }
+
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
