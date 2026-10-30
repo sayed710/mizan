@@ -65,12 +65,18 @@ export function invoiceBaseGroups(db, move) {
     return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
-    const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
+    const original = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
+    const deferred = l.deferred_start_date || l.deferred_end_date;
+    if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
+    const company = read(db, 'res.company', move.company_id ?? 1);
+    const account = deferred ? (company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] ?? accountId(db, sale ? '212000' : '132000', move.company_id)) : original;
+    const selected = read(db, 'account.account', account);
+    if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
     const zero = !lineTaxOf(l) ? (l.tax_name || taxLabel(l)) : '';
     const key = `${account}:${zero}`;
     const group = byAccount.get(key) ?? { account, zero, amount: 0, lines: [] };
     group.amount += subtotal(l);
-    group.lines.push({ index, amount: subtotal(l) });
+    group.lines.push({ index, amount: subtotal(l), ...(deferred ? { original_account_id: original } : {}) });
     byAccount.set(key, group);
   }
   return [...byAccount.values()];
@@ -89,7 +95,7 @@ export function allocateJournalSources(amount, sources, rate = 1) {
   const direction = Math.sign(gap);
   const ranked = [...shares].sort((a, b) => direction * (b.remainder - a.remainder) || a.index - b.index);
   for (let i = 0; i < Math.abs(gap); i++) ranked[i % ranked.length].whole += direction;
-  return sources.map((source, i) => ({ index: source.index, amount: shares[i].whole / 100 || 0 }));
+  return sources.map((source, i) => ({ index: source.index, amount: shares[i].whole / 100 || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
@@ -269,4 +275,3 @@ export function balanceSheet(db, at = today()) {
     totalAssets: total(assets), totalLiabilities: total(liabilities), totalEquity: round(total(equity) + earnings),
   };
 }
-

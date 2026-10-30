@@ -12,6 +12,7 @@ import { cashRound, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
 import { t } from '../i18n.js';
+import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -160,12 +161,23 @@ export function postMove(db, id) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
-  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV');
+  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id);
   const line_ids = [...invoiceLines(db, { ...r, name }), ...priceDifferenceLines(db, { ...r, name })];
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: r.invoice_line_ids }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
-  return r.move_type === 'in_invoice' ? draftAssetsFromBill(posted, read(posted, 'account.move', id)) : posted;
+  const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
+  return r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
+}
+
+/** Reverse an asset depreciation entry and make its board line available again. */
+export function reverseDepreciation(db, move) {
+  const asset = (db.records['account.asset'] ?? []).find((a) => (a.depreciation_ids ?? []).some((line) => line.posted && line.move_id === move.id));
+  if (!asset || move.state !== 'posted' || asset.disposal_date) throw new Error('Select an active posted depreciation entry');
+  if ((db.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === move.id)) throw new Error('This depreciation has already been reversed');
+  const reversed = postEntry(db, { journal: move.journal_id, company: move.company_id ?? 1, date: today(), ref: `Reversal of ${move.name}`, lines: move.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id })) });
+  const linked = write(reversed.db, 'account.move', reversed.id, { reversed_entry_id: move.id });
+  return write(linked, 'account.asset', asset.id, { state: 'open', depreciation_ids: asset.depreciation_ids.map((l) => l.move_id === move.id ? { ...l, posted: false, move_id: null } : l) });
 }
 
 /** Credit notes of an invoice that are not cancelled, other than `exceptId`. */
@@ -411,7 +423,7 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
-const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+const invoiceLineField = { ...invoiceLineBase, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
@@ -427,6 +439,7 @@ const lineItem = {
     date_maturity: { type: 'date', label: 'Due Date' },
     invoice_sources: { type: 'one2many', label: 'Invoice Sources', hidden: true, fields: {
       index: { type: 'integer', label: 'Line' }, amount: { type: 'monetary', label: 'Amount' },
+      original_account_id: { type: 'many2one', relation: 'account.account', label: 'Recognition Account' },
     } },
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
@@ -511,6 +524,7 @@ export const accountingModels = {
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     onWrite: (db, after, before, vals) => {
+      if (before.state === 'posted' && after.state !== 'posted') db = reverseInvoiceDeferrals(db, before);
       if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
     },
@@ -599,6 +613,7 @@ export const accountingModels = {
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
+        { label: 'Reverse Entry', when: (r, db) => r.state === 'posted' && r.move_type === 'entry' && (db.records['account.asset'] ?? []).some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id)), run: (db, r) => ({ db: reverseDepreciation(db, r) }) },
         { label: 'Create Landed Costs', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted', run: (db, r) => {
           if ((db.records['stock.landed.cost'] ?? []).some((lc) => lc.bill_id === r.id)) throw new Error('Landed costs have already been created for this bill');
           const warnings = [];

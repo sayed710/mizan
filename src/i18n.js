@@ -23,6 +23,21 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Model Expense Account (Fallback)': 'حساب مصروف النموذج (البديل)',
+  'Depreciation Expense Account (Override)': 'حساب مصروف الإهلاك (الأولوية)',
+  'Deferred Start Date': 'تاريخ بدء التأجيل',
+  'Deferred End Date': 'تاريخ انتهاء التأجيل',
+  'Recognition Account': 'حساب الاعتراف',
+  'Reverse Entry': 'عكس القيد',
+  'Source Line': 'سطر المصدر',
+  'Deferred Account': 'حساب التأجيل',
+  'Gain Account': 'حساب الأرباح',
+  'Deferred Revenue Account': 'حساب الإيرادات المؤجلة',
+  'Deferred Expense Account': 'حساب المصروفات المؤجلة',
+  'Deferred Entry Generation': 'إنشاء قيود التأجيل',
+  'On Validation': 'عند الاعتماد',
+  'Cancelled Depreciation': 'الإهلاك الملغى',
+  'Generate Company Deferrals': 'إنشاء قيود التأجيل للشركة',
   'Values': 'القيم',
   'Full Path': 'المسار الكامل',
   'Stock Valuation Account': 'حساب تقييم المخزون',
