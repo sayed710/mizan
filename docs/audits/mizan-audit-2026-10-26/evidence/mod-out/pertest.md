@@ -1,0 +1,31 @@
+| file tests/neg | file tests/neg | file tests/neg | file tests/neg |
+|---|---|---|---|
+| server/appointments.test.js 3/2 | server/blog.test.js 5/4 | server/integrations.test.js 7/3 | server/livechat.test.js 4/3 |
+| server/mailtrack.test.js 5/1 | server/portal.test.js 11/6 | server/public-forms.test.js 3/3 | server/shop.test.js 9/3 |
+| server/smtp.test.js 2/1 | server/storage.test.js 2/0 | server/website.test.js 6/4 | server/whatsapp.test.js 4/3 |
+| analytic-wiring.test.js 1/0 | analyticplus.test.js 11/6 | appointments.test.js 9/3 | appraisalplus.test.js 11/9 |
+| approvalsplus.test.js 14/9 | apps2.test.js 4/0 | apps3.test.js 5/0 | assets.test.js 10/1 |
+| attendanceplus.test.js 12/7 | automation.test.js 4/1 | bank.test.js 3/1 | batch.test.js 6/4 |
+| billcontrol.test.js 8/4 | blog.test.js 8/3 | closing.test.js 12/5 | company.test.js 9/4 |
+| companyView.test.js 6/1 | consolidation.test.js 7/2 | crmteams.test.js 3/0 | csv.test.js 2/0 |
+| currency.test.js 4/0 | deferred.test.js 4/1 | documentsplus.test.js 10/8 | elearning.test.js 10/7 |
+| events.test.js 5/4 | eventsplus.test.js 7/2 | expense.test.js 3/0 | expenseplus.test.js 12/8 |
+| extra.test.js 4/1 | finance.test.js 10/5 | fleetplus.test.js 10/5 | frontdeskplus.test.js 8/6 |
+| fsm.test.js 6/3 | helpdesk.test.js 8/2 | knowledge.test.js 11/3 | ledger.test.js 5/1 |
+| livechat.test.js 8/5 | loans.test.js 10/2 | logistics.test.js 3/1 | loyalty.test.js 9/4 |
+| lunch.test.js 9/3 | mailing.test.js 10/2 | maintplus.test.js 12/5 | more.test.js 4/1 |
+| mrp.test.js 3/2 | onchange.test.js 4/1 | orm.test.js 11/1 | pay.test.js 6/1 |
+| payments.test.js 7/5 | payroll.test.js 10/0 | picking.test.js 6/3 | planningplus.test.js 9/3 |
+| pos.test.js 1/1 | posplus.test.js 10/7 | pricelist.test.js 2/0 | projectplus.test.js 9/3 |
+| purchaseplus.test.js 9/4 | qr.test.js 4/1 | qualityplus.test.js 8/0 | quoteplus.test.js 8/6 |
+| reconcile.test.js 5/2 | recruitment.test.js 1/0 | recruitplus.test.js 6/2 | rental.test.js 2/1 |
+| rentalplus.test.js 10/6 | repairplus.test.js 7/3 | reportCompare.test.js 7/1 | reports.test.js 7/0 |
+| review-fixes.test.js 6/3 | review-fixes2.test.js 5/2 | review-fixes3.test.js 10/3 | review-fixes4.test.js 8/2 |
+| review-fixes8.test.js 4/1 | routes.test.js 5/1 | sales-invoicing.test.js 2/2 | security.test.js 4/3 |
+| shop.test.js 5/0 | signplus.test.js 13/10 | skillsplus.test.js 8/7 | sms.test.js 4/1 |
+| social.test.js 4/2 | spreadsheet.test.js 4/0 | statements.test.js 3/1 | studio.test.js 3/0 |
+| subscription.test.js 5/1 | subscriptionplus.test.js 10/4 | surveys.test.js 5/1 | sync.test.js 5/1 |
+| taxes.test.js 6/0 | terms.test.js 9/1 | timeoff.test.js 3/2 | timesheetplus.test.js 8/5 |
+| uom-flows.test.js 7/1 | uom.test.js 9/4 | valuation-wiring.test.js 12/4 | valuation.test.js 13/3 |
+| variants.test.js 2/0 | warehouse.test.js 10/5 | websiteplus.test.js 12/7 | whatsapp.test.js 8/5 |
+| workorder.test.js 8/6 |  |  |  |

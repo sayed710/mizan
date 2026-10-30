@@ -1,0 +1,17 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const { applyDiff, diffDb } = await import(W + '/src/sync.js');
+const { create, search } = await import(W + '/src/orm.js');
+const { modelsForApps } = await import(W + '/src/models/index.js');
+const crm = modelsForApps(['crm']);
+console.log('crm allowed has uom.uom:', crm.has('uom.uom'), '| mail.activity:', crm.has('mail.activity'));
+let s = seed();
+const c2 = create(s, 'res.company', { name: 'Second Co', currency_id: s.records['res.currency']?.[0]?.id ?? null });
+s = applyDiff(s, diffDb(s, c2.db));
+const inv2 = create(s, 'account.move', { move_type: 'out_invoice', company_id: c2.id, partner_id: s.records['res.partner'][0].id, invoice_line_ids: [] });
+s = applyDiff(s, diffDb(s, inv2.db));
+const E = { upserts: {}, deletes: {}, messages: [], removedMessages: [] };
+const s1 = applyDiff(s, { ...E, settings: { current_company_id: 1, allowed_company_ids: [1] } }, { isAdmin: false });
+const s2 = applyDiff(s1, { ...E, settings: { current_company_id: c2.id, allowed_company_ids: [c2.id] } }, { isAdmin: false, allowed: crm });
+console.log('user A selects company 1 -> settings', s1.settings.current_company_id, s1.settings.allowed_company_ids, '| CRM-only user B selects company', c2.id, '-> shared settings now', s2.settings.current_company_id, s2.settings.allowed_company_ids);
+console.log('records of company', c2.id, 'in the db every user downloads:', Object.entries(s2.records).flatMap(([m, r]) => r.filter((x) => x.company_id === c2.id).map((x) => m + '#' + x.id)).join(', '));

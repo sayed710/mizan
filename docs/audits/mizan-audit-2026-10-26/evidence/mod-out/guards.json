@@ -1,0 +1,436 @@
+[
+ {
+  "model": "crm.lead",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [
+   "src/security.test.js",
+   "src/studio.test.js",
+   "src/sync.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "stock.picking",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "product",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [
+   "src/companyView.test.js",
+   "src/uom-flows.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "sale.order",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [
+   "src/company.test.js",
+   "src/security.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "purchase.order",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "account.journal",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "account.move",
+  "gname": "guard",
+  "pname": "moveDeleteGuard",
+  "guardTests": [
+   "src/company.test.js",
+   "src/finance.test.js",
+   "src/review-fixes.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "hr.employee",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "project.project",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "project.task",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "helpdesk.ticket",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [
+   "src/sync.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "hr.expense",
+  "gname": "guard",
+  "pname": "protectDelete",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.leave",
+  "gname": "leaveGuard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "account.analytic.line",
+  "gname": "timesheetGuard",
+  "pname": "",
+  "guardTests": [
+   "src/timesheetplus.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "event.registration",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [
+   "src/review-fixes2.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "website.page",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "planning.slot",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "mailing.mailing",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "maintenance.equipment",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "maintenance.request",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "fleet.odometer",
+  "gname": "odometerGuard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.attendance",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.appraisal",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "lunch.order",
+  "gname": "orderGuard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "frontdesk.visitor",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.referral",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "account.payment",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "slide.channel.partner",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "fleet.fuel.log",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "rental.pricing",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "loyalty.program",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "loyalty.card",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "restaurant.floor",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "documents.folder",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "documents.workflow.rule",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.appraisal.goal",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.expense.sheet",
+  "gname": "",
+  "pname": "protectDelete",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "sale.subscription.plan",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.attendance.overtime.rule",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.skill.type",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.employee.skill",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.resume.line",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "hr.referral.reward",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "account.fiscal.year",
+  "gname": "yearGuard",
+  "pname": "protectDelete",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "website.menu",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "website.redirect",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "uom.category",
+  "gname": "",
+  "pname": "protectDelete",
+  "guardTests": [
+   "src/uom.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "uom.uom",
+  "gname": "guardUom",
+  "pname": "protectDelete",
+  "guardTests": [
+   "src/uom.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "product.packaging",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "knowledge.article",
+  "gname": "articleGuard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "lunch.supplier",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "sale.order.template",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "appointment.booking",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "whatsapp.template",
+  "gname": "templateGuard",
+  "pname": "",
+  "guardTests": [
+   "src/whatsapp.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "res.company",
+  "gname": "companyGuard",
+  "pname": "",
+  "guardTests": [
+   "src/company.test.js"
+  ],
+  "pdTests": []
+ },
+ {
+  "model": "stock.warehouse",
+  "gname": "guard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "consolidation.chart",
+  "gname": "chartGuard",
+  "pname": "",
+  "guardTests": [],
+  "pdTests": []
+ },
+ {
+  "model": "consolidation.period",
+  "gname": "periodGuard",
+  "pname": "protectDelete",
+  "guardTests": [],
+  "pdTests": []
+ }
+]

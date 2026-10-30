@@ -1,0 +1,21 @@
+const { chromium } = require('playwright');
+const fs = require('fs');
+const [BASE, DBFILE, DIR] = process.argv.slice(2);
+const dbJson = fs.readFileSync(DBFILE, 'utf8');
+(async () => {
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+  await ctx.addInitScript((d) => { try { if (!sessionStorage.getItem('seeded')) { localStorage.setItem('mizan-db-v32', d); sessionStorage.setItem('seeded', '1'); } localStorage.setItem('mizan-lang', 'en'); } catch {} }, dbJson);
+  const page = await ctx.newPage();
+  page.on('dialog', (d) => d.dismiss());
+  await page.goto(BASE + '/#/accounting/invoices/10?view=list'); await page.waitForSelector('.form-page'); await page.waitForTimeout(200);
+  const form = await page.evaluate(() => ({ currency: [...document.querySelectorAll('.field')].find((f) => /Currency/.test(f.textContent))?.textContent, totals: document.querySelector('dl.totals')?.innerText.replace(/\n/g, ' | '), lines: document.querySelector('.tab-panel table')?.innerText.split('\n').slice(0, 3).join(' | ') }));
+  console.log('FORM', JSON.stringify(form));
+  await page.screenshot({ path: `${DIR}/fx-invoice-form-en.png` });
+  await page.evaluate(() => { location.hash = '#/accounting/dashboard'; }); await page.waitForTimeout(250);
+  const dash = await page.evaluate(() => [...document.querySelectorAll('.kpi')].map((k) => k.innerText.replace(/\n/g, ': ')).join(' | ') + ' || Top: ' + document.querySelector('.ranking')?.innerText.replace(/\n/g, ' '));
+  console.log('DASHBOARD', dash);
+  await page.evaluate(() => { location.hash = '#/accounting/invoices?view=list'; }); await page.waitForTimeout(200);
+  console.log('LIST FOOTER', await page.evaluate(() => document.querySelector('table.list tfoot')?.innerText.replace(/\s+/g, ' ')));
+  await browser.close();
+})();

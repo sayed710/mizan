@@ -1,0 +1,20 @@
+// Repro: Sign app "Send" emails nothing; the internal user signs on the external signer's behalf via a prompt prefilled with the partner's name.
+const root = process.argv[2];
+const { create, read, search, messagesOf } = await import(root + '/src/orm.js');
+const { seed } = await import(root + '/src/seed.js');
+const { models } = await import(root + '/src/models/index.js');
+const { addDays, today } = await import(root + '/src/models/common.js');
+let db = seed();
+const partner = search(db, 'res.partner').find((p) => p.email);
+const r0 = create(db, 'sign.request', { name: 'NDA', partner_id: partner.id, signer_ids: [{ partner_id: partner.id, role: 'customer' }], deadline: addDays(today(), 10) });
+db = r0.db;
+const btn = (l) => models['sign.request'].form.buttons.find((b) => b.label === l);
+const msgsBefore = db.messages.length;
+db = btn('Send').run(db, read(db, 'sign.request', r0.id)).db;
+const sent = read(db, 'sign.request', r0.id);
+console.log('send msg:', JSON.stringify(db.messages.slice(msgsBefore).map((m) => m.body)));
+console.log('after Send: state', sent.state, 'token issued', !!sent.signer_ids[0].token, 'new messages', db.messages.length - msgsBefore);
+let asked = null; globalThis.prompt = (q, d) => { asked = d; return d; };
+db = btn('Sign').run(db, read(db, 'sign.request', r0.id)).db;
+const signed = read(db, 'sign.request', r0.id);
+console.log('internal user prompt prefilled with signer name:', JSON.stringify(asked), '=== partner', partner.name === asked, '-> state', signed.state, 'signature', JSON.stringify(signed.signature));

@@ -1,0 +1,21 @@
+// A posted SAR invoice: what do the form footer, list totals and Dashboard tiles show vs the booked company-currency amount?
+const W = process.argv[2];
+const { seed } = await import(`${W}/src/seed.js`);
+const { create, read, search } = await import(`${W}/src/orm.js`);
+const { postMove } = await import(`${W}/src/models/accounting.js`);
+const ui = await import(`${W}/src/ui.jsx`).catch((e) => ({ err: e.message }));
+let db = seed();
+const sar = search(db, 'res.currency').find((c) => c.name === 'SAR');
+const partner = search(db, 'res.partner').find((p) => p.id);
+const date = new Date().toISOString().slice(0, 10);
+const res = create(db, 'account.move', { move_type: 'out_invoice', partner_id: partner.id, currency_id: sar.id, invoice_date: date, invoice_line_ids: [{ name: 'Consulting', qty: 1, price_unit: 37500, tax: 0 }] });
+db = postMove(res.db, res.id);
+const inv = read(db, 'account.move', res.id);
+const accounts = new Map(search(db, 'account.account').map((a) => [a.id, a.code]));
+const recv = (inv.line_ids ?? []).filter((l) => accounts.get(l.account_id) === '121000' || l.account === '121000');
+console.log('company currency (settings):', db.settings.currency, '| invoice currency: SAR rate', JSON.stringify(sar.rate_ids));
+console.log('invoice amount_total (document currency):', inv.amount_total, '| amount_residual:', inv.amount_residual);
+console.log('receivable journal line(s) booked:', JSON.stringify(recv.map((l) => ({ debit: l.debit, credit: l.credit, amount_currency: l.amount_currency }))));
+console.log('line_ids sample keys:', Object.keys((inv.line_ids ?? [])[0] ?? {}).join(','));
+const fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: db.settings.currency || 'USD' });
+console.log('UI money(amount_total) as rendered in form footer / list / Dashboard "Invoiced this month":', fmt.format(inv.amount_total));
