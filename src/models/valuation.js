@@ -3,7 +3,7 @@ import { create, getActiveCompany, postNote, read, search, setActiveCompany, wri
 import { nextName, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
-import { round } from '../money.js';
+import { allocateCents, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 
 const layers = (db, id) => search(db, 'stock.valuation.layer').filter((l) => l.product_id === id);
@@ -13,7 +13,9 @@ const valueOf = (ls) => round(ls.reduce((s, l) => s + l.value, 0));
 const stockQuantity = (db, p) => {
   const company = getActiveCompany();
   const qs = (db.records['stock.quant'] ?? []).filter((q) => q.product_id === p.id);
-  return company && qs.length ? qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0) : Number(p.qty_available) || 0;
+  if (company && qs.length) return qs.filter((q) => (q.company_id ?? 1) === company).reduce((s, q) => s + q.quantity, 0);
+  if (company && company !== (p.company_id ?? 1)) return 0;
+  return Number(p.qty_available) || 0;
 };
 const product = (db, id) => {
   const p = read(db, 'product', id);
@@ -179,7 +181,7 @@ export function moveValued(db, lines, sign, options = {}) {
     if (['manual_periodic', 'periodic'].includes(productProperty(next, p, 'property_valuation'))) {
       // Periodic products carry no cost layers, but on-hand quantities still cannot go negative.
       if (sign < 0 && qty * -sign > (Number(p.qty_available) || 0) + 1e-8) throw new Error('Not enough stock to deliver');
-      return moveStock(next, [{ ...l, ...options.stockLine }], sign);
+      return moveStock(next, [{ ...l, ...options.stockLine, picking_id: options.pickingId ?? options.stockLine?.picking_id ?? l.picking_id }], sign);
     }
     const spec = { ...options, ...l.valuation_options, stockLine: { ...l, ...options.stockLine } };
     return sign > 0 ? receive(next, p.id, qty, l.unit_cost ?? p.cost ?? 0, spec) : deliver(next, p.id, qty, spec).db;
@@ -194,11 +196,9 @@ export function capitalizeStock(db, productId, amount, { date = today(), referen
   const p = product(next, productId);
   const remaining = layers(next, productId).filter((l) => l.remaining_qty > 0);
   if (!(p.qty_available > 0)) throw new Error('Stock is required to capitalize additional costs');
-  let allocated = 0;
+  const shares = remaining.length ? allocateCents(amount, remaining.map((l) => l.remaining_qty)) : [];
   for (const [i, l] of remaining.entries()) {
-    const share = i === remaining.length - 1 ? round(amount - allocated) : round(amount * l.remaining_qty / p.qty_available);
-    allocated = round(allocated + share);
-    next = write(next, 'stock.valuation.layer', l.id, { remaining_value: round(l.remaining_value + share) });
+    next = write(next, 'stock.valuation.layer', l.id, { remaining_value: round(l.remaining_value + shares[i]) });
   }
   next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + amount / p.qty_available) });
   return create(next, 'stock.valuation.layer', { product_id: p.id, date, reference, description: reference,
@@ -333,6 +333,8 @@ export const valuationModels = {
       kind: { type: 'selection', label: 'Kind', options: [['in', 'Receipt'], ['out', 'Delivery'], ['adjustment', 'Inventory Adjustment'], ['revaluation', 'Revaluation'], ['landed', 'Landed Cost']] },
     },
     defaults: () => ({ date: today(), remaining_qty: 0, remaining_value: 0 }),
+    guard: (db, before, layer) => before && ['product_id', 'company_id', 'picking_id', 'date', 'quantity', 'value', 'unit_cost', 'kind', 'opening'].some((key) => JSON.stringify(before[key] ?? null) !== JSON.stringify(layer[key] ?? null)) ? 'Stock valuation history cannot be changed' : null,
+    protectDelete: () => 'Stock valuation history cannot be deleted',
     list: ['date', 'product_id', 'quantity', 'unit_cost', 'value', 'remaining_qty', 'remaining_value', 'reference', 'move_id'],
     form: { title: 'description', lockedWhen: () => true, groups: [['product_id', 'date', 'kind', 'reference', 'picking_id'], ['quantity', 'unit_cost', 'value', 'remaining_qty', 'remaining_value', 'move_id']] },
   },

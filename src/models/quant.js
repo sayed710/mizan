@@ -5,6 +5,7 @@ import { applyCount, startCount } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { closedYearLock, lockDateFor } from './finance.js';
 import { uomForLegacy } from './uom.js';
+import { quantReservationMap } from './picking.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
 const records = (db, model) => db.records[model] ?? [];
@@ -48,7 +49,7 @@ export function ensureQuants(db, productIds) {
       residual -= missing;
     }
     if (residual || !records(next, 'stock.quant').some((q) => q.product_id === p.id)) {
-      const company = p.company_id || companyOf(next);
+      const company = p.company_id || 1;
       const loc = defaultLocation(next, company);
       next = change(loc.db, p.id, loc.id, null, company, residual);
     }
@@ -67,7 +68,12 @@ export function moveQuantStock(db, lines, sign) {
     const location = read(loc.db, 'stock.location', loc.id);
     if (location?.usage !== 'internal' || (location.company_id ?? 1) !== company) throw new Error('Select an internal location in the same company');
     next = loc.db;
-    const lot = l.lot_id || companyRows(next, 'stock.lot', company).find((r) => r.product_id === p.id && r.name === l.lot_name)?.id;
+    const lot = l.lot_id || (['lot', 'serial'].includes(p.tracking) && l.lot_name ? companyRows(next, 'stock.lot', company).find((r) => r.product_id === p.id && r.name === l.lot_name)?.id : null);
+    const selectedLot = lot && read(next, 'stock.lot', lot);
+    if (['lot', 'serial'].includes(p.tracking) && l.lot_name && !lot) throw new Error(`Lot ${l.lot_name} is not in stock for this company`);
+    if (lot && (!selectedLot || selectedLot.product_id !== p.id || (selectedLot.company_id ?? 1) !== company || (l.lot_name && selectedLot.name !== l.lot_name))) throw new Error('Select a lot for this product and company');
+    const q = companyRows(next, 'stock.quant', company).find((r) => r.product_id === p.id && r.location_id === loc.id && (r.lot_id || null) === (lot || null));
+    if (sign * Number(l.qty || 0) < 0 && (Number(q?.quantity) || 0) + sign * Number(l.qty || 0) < -1e-8) throw new Error('Not enough stock at the source location');
     next = change(next, p.id, loc.id, lot, company, sign * Number(l.qty || 0));
     const total = records(next, 'stock.quant').filter((q) => q.product_id === p.id).reduce((s, q) => s + q.quantity, 0);
     next = write(next, 'product', p.id, { qty_available: total });
@@ -79,6 +85,9 @@ export function moveQuantStock(db, lines, sign) {
 export function transferQuants(db, picking) {
   let next = db;
   for (const line of picking.move_ids ?? []) {
+    const product = read(next, 'product', line.product_id);
+    if (['lot', 'serial'].includes(product?.tracking) && !line.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
+    if (product?.tracking === 'serial' && Number(line.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
     next = moveQuantStock(next, [{ ...line, location_id: picking.location_id, company_id: picking.company_id }], -1);
     next = moveQuantStock(next, [{ ...line, location_id: picking.location_dest_id, company_id: picking.company_id }], 1);
   }
@@ -91,7 +100,7 @@ function selectedRows(db, ids) {
   return ids?.length ? visible.filter((q) => ids.includes(q.id)) : visible;
 }
 export function clearInventory(db, ids) {
-  return selectedRows(db, ids).reduce((next, q) => write(next, 'stock.quant', q.id, { inventory_quantity: null, inventory_quantity_set: false }), db);
+  return selectedRows(db, ids).reduce((next, q) => write(next, 'stock.quant', q.id, { inventory_quantity: null, inventory_quantity_set: false, inventory_revision: null }), db);
 }
 function validDate(date) {
   return typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
@@ -107,6 +116,7 @@ export function applyInventory(db, ids, { date = today() } = {}) {
   if (!validDate(date)) throw new Error('Enter a valid count date');
   if (date <= [lockDateFor(db.settings), closedYearLock(db)].sort().at(-1)) throw new Error('The accounting period is locked');
   const rows = selectedRows(db, ids).filter((q) => q.inventory_quantity_set);
+  if (rows.some((q) => q.inventory_revision == null || q.inventory_revision !== (q.stock_revision ?? 0))) throw new Error('Stock changed since this count was recorded; count it again');
   const previousCompany = getActiveCompany();
   setActiveCompany(companyOf(db));
   try {
@@ -140,29 +150,7 @@ export function applyInventory(db, ids, { date = today() } = {}) {
 }
 
 function reserved(db, q) {
-  // Allocate every reservation once, preserving location and lot constraints.
-  const candidates = companyRows(db, 'stock.quant', q.company_id).filter((r) => r.product_id === q.product_id).sort((a, b) => a.id - b.id);
-  const allocated = new Map(candidates.map((r) => [r.id, 0]));
-  const allocate = (amount, location, lotName) => {
-    let left = amount;
-    for (const r of candidates) {
-      if (location && r.location_id !== location || lotName && read(db, 'stock.lot', r.lot_id)?.name !== lotName) continue;
-      const take = Math.min(left, Math.max(0, r.quantity - allocated.get(r.id)));
-      allocated.set(r.id, allocated.get(r.id) + take);
-      left -= take;
-      if (left <= 0) break;
-    }
-  };
-  for (const p of companyRows(db, 'stock.picking', q.company_id).filter((p) => p.state === 'ready' && p.picking_type === 'outgoing')) {
-    for (const line of p.move_ids ?? []) {
-      if (line.product_id !== q.product_id) continue;
-      allocate(Number(line.qty) || 0, p.location_id, line.lot_name);
-    }
-  }
-  for (const mo of companyRows(db, 'mrp.production', q.company_id).filter((m) => m.state === 'confirmed' && m.components_availability === 'available')) {
-    for (const line of mo.move_raw ?? []) if (line.product_id === q.product_id) allocate(Number(line.to_consume) || 0);
-  }
-  return allocated.get(q.id) || 0;
+  return quantReservationMap(db, q.product_id, q.company_id ?? 1).get(q.id) || 0;
 }
 const relation = (relation, label, readonly = false) => ({ type: 'many2one', relation, label, readonly });
 export const quantModels = {
@@ -187,9 +175,12 @@ export const quantModels = {
       inventory_date: { type: 'date', label: 'Scheduled Count Date' },
       user_id: relation('hr.employee', 'Counter'),
       inventory_quantity_set: { type: 'boolean', label: 'Count Set', readonly: true },
+      stock_revision: { type: 'integer', label: 'On Hand', readonly: true, hidden: true },
+      inventory_revision: { type: 'integer', label: 'Count Set', readonly: true, hidden: true },
     },
-    defaults: () => ({ quantity: 0, inventory_quantity: null, inventory_quantity_set: false }),
-    onchange: (r, key) => key === 'inventory_quantity' ? { inventory_quantity_set: r.inventory_quantity != null && r.inventory_quantity !== '' } : {},
+    defaults: () => ({ quantity: 0, stock_revision: 0, inventory_quantity: null, inventory_quantity_set: false, inventory_revision: null }),
+    onchange: (r, key) => key === 'inventory_quantity' ? { inventory_quantity_set: r.inventory_quantity != null && r.inventory_quantity !== '', inventory_revision: r.inventory_quantity != null && r.inventory_quantity !== '' ? (r.stock_revision ?? 0) : null }
+      : key === 'quantity' ? { stock_revision: (r.stock_revision ?? 0) + 1 } : {},
     guard: (db, before, q) => {
       const loc = read(db, 'stock.location', q.location_id);
       if (!loc || loc.usage !== 'internal' || (loc.company_id ?? 1) !== q.company_id) return 'Select an internal location in the same company';

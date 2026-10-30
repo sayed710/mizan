@@ -1,5 +1,5 @@
 import { addDays, today } from './common.js';
-import { cents } from '../money.js';
+import { allocateCents, cents } from '../money.js';
 
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
@@ -20,16 +20,20 @@ export function installments(term, total, invoiceDate) {
   const fixedCents = lines.reduce((sum, line) => sum + (line.value_type === 'fixed' ? cents(line.value) : 0), 0);
   if (fixedCents > totalCents) throw new Error('Fixed amounts exceed the total');
 
-  const amounts = lines.map((line) => line.value_type === 'fixed'
-    ? cents(line.value)
-    : Math.round(totalCents * (Number(line.value) || 0) / 100));
-  const assigned = amounts.reduce((sum, amount) => sum + amount, 0);
-  amounts[amounts.length - 1] += totalCents - assigned;
-
-  return lines.map((line, index) => ({
-    date: lineDate(line, invoiceDate),
-    amount: amounts[index] / 100,
-  }));
+  const variable = lines.map((line, index) => ({ line, index })).filter(({ line }) => line.value_type !== 'fixed');
+  const amounts = lines.map((line) => line.value_type === 'fixed' ? cents(line.value) / 100 : 0);
+  const rest = (totalCents - fixedCents) / 100;
+  if (variable.length) {
+    // The last percentage line is the balance, as in the original payment-term semantics.
+    const weights = variable.map(({ line }) => Math.max(0, Number(line.value) || 0));
+    const preceding = weights.slice(0, -1).reduce((sum, value) => sum + value, 0);
+    weights[weights.length - 1] = Math.max(0, (totalCents ? (totalCents - fixedCents) * 100 / totalCents : 100) - preceding) || 0;
+    const shares = allocateCents(rest, weights.some(Boolean) ? weights : weights.map(() => 1));
+    variable.forEach(({ index }, i) => { amounts[index] = shares[i]; });
+  } else {
+    amounts[amounts.length - 1] += rest;
+  }
+  return lines.map((line, index) => ({ date: lineDate(line, invoiceDate), amount: amounts[index] }));
 }
 
 /** Due date of the final installment (dates do not depend on the amount). */

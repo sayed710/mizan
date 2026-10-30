@@ -11,9 +11,9 @@ const schedule = (vals) => {
   return { db: computeBoard(db, read(db, 'account.deferral', id)), id };
 };
 
-test('the board splits evenly at month ends and the last line absorbs rounding', () => {
+test('the board splits cents evenly at month ends by largest remainder', () => {
   assert.deepEqual(deferralBoard(1000, '2026-01-15', 3), [
-    { date: '2026-01-31', amount: 333.33 }, { date: '2026-02-28', amount: 333.33 }, { date: '2026-03-31', amount: 333.34 },
+    { date: '2026-01-31', amount: 333.34 }, { date: '2026-02-28', amount: 333.33 }, { date: '2026-03-31', amount: 333.33 },
   ]);
   assert.equal(deferralBoard(100, '2028-02-10', 1)[0].date, '2028-02-29');
   assert.equal(deferralBoard(120, '2026-11-01', 3).at(-1).date, '2027-01-31');
