@@ -4,12 +4,13 @@ import { register } from 'node:module';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 import { create } from './orm.js';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
 test('the shared analysis renderer scopes both calculations and related names to selected companies', async () => {
-  const base = seed();
-  const hidden = create(base, 'hr.employee', { name: 'Hidden branch employee', company_id: 2 });
+  const company = createCompany(seed(), { name: 'Branch' });
+  const hidden = create(company.db, 'hr.employee', { name: 'Hidden branch employee', company_id: company.id });
   const db = { ...hidden.db, settings: { ...hidden.db.settings, current_company_id: 1, allowed_company_ids: [1] } };
   const { AnalysisResult } = await import('./views/Analysis.jsx');
   let executed = false;

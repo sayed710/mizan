@@ -3,10 +3,10 @@ import { create, read, search, unlink, write } from '../orm.js';
 import { today } from './common.js';
 import { analyticActuals, financeModels } from './finance.js';
 import { moreModels } from './more.js';
+import { accountId, invoiceLines } from './ledger.js';
 import { mapAccount } from './taxes.js';
-import { allocateInvoiceGroup, invoiceBaseGroups, invoiceLines } from './ledger.js';
-import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
+import { round } from '../money.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
@@ -49,16 +49,14 @@ export function analyticLinesForMove(db, move) {
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   const journalLines = move.line_ids?.length ? move.line_ids : invoiceLines(db, move);
   const allocations = new Map();
-  for (const group of invoiceBaseGroups(db, move)) {
-    const booked = journalLines.find((l) => l.name === (purchase ? 'Purchases' : 'Sales') && l.account_id === group.account && (l.tax_zero ? l.tax_name : '') === group.zero);
-    const net = purchase ? (booked?.debit || 0) - (booked?.credit || 0) : (booked?.credit || 0) - (booked?.debit || 0);
-    for (const { index, value } of allocateInvoiceGroup(group, net * (refund ? -1 : 1))) allocations.set(index, value);
+  for (const journalLine of journalLines) {
+    for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id });
   }
   return (move.invoice_line_ids ?? []).flatMap((line, index) => {
     const product = read(db, 'product', line.product_id);
-    const fallback = search(db, 'account.account').find((a) => a.code === (purchase ? '600000' : '400000'))?.id;
-    const account = mapAccount(db, move.fiscal_position_id, line.account_id || productProperty(db, product, purchase ? 'property_account_expense_id' : 'property_account_income_id') || fallback);
-    const lineAmount = allocations.get(index);
+    const allocation = allocations.get(index);
+    const account = move.line_ids?.length ? allocation?.account : mapAccount(db, move.fiscal_position_id, line.account_id || productProperty(db, product, purchase ? 'property_account_expense_id' : 'property_account_income_id') || accountId(db, purchase ? '600000' : '400000', move.company_id));
+    const lineAmount = allocation?.amount ?? 0;
     const totals = new Map();
     return Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => {
       const plan = planOf(read(db, 'account.analytic.account', Number(id)));

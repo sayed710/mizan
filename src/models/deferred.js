@@ -3,18 +3,18 @@ import { read, write } from '../orm.js';
 import { today } from './common.js';
 import { postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
-import { cents } from '../money.js';
+import { allocateCents } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
 
-/** One line per month, dated at month end from `startDate`'s month; the last line absorbs rounding. */
+/** One line per month, dated at month end from `startDate`'s month. */
 export function deferralBoard(amount, startDate, months) {
   const [y, m] = startDate.split('-').map(Number);
-  const share = Math.round(cents(amount) / months);
+  const shares = allocateCents(amount, Array(months).fill(1));
   return Array.from({ length: months }, (_, i) => ({
     date: monthEnd(y + Math.floor((m - 1 + i) / 12), ((m - 1 + i) % 12) + 1),
-    amount: (i === months - 1 ? cents(amount) - share * (months - 1) : share) / 100,
+    amount: shares[i],
   }));
 }
 
@@ -32,6 +32,7 @@ export function postDueEntries(db, d, upTo = today()) {
   const [debit, credit] = ACCOUNTS[d.kind] ?? ACCOUNTS.revenue;
   const { db: next, board } = (d.board ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, board: [...acc.board, l] };
+    if (!l.amount) return { ...acc, board: [...acc.board, { ...l, posted: true, move_id: null }] };
     const { db: booked, id } = postEntry(acc.db, {
       journal: 'MISC', company: d.company_id, date: l.date, ref: `${d.name} ${l.date.slice(0, 7)}`,
       lines: [{ account: debit, debit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'expense' ? { analytic_distribution: d.analytic_distribution } : {}) }, { account: credit, credit: l.amount, partner_id: d.partner_id ?? undefined, ...(d.kind === 'revenue' ? { analytic_distribution: d.analytic_distribution } : {}) }],

@@ -1,6 +1,6 @@
 import { read, search, write } from '../orm.js';
 import { nextName, pad, today } from './common.js';
-import { salesModels } from './sales.js';
+import { models } from '../registry.js';
 
 /** Confirm a draft batch transfer, validating its picking lines and assigning a sequence name. */
 export function confirmBatch(db, batch) {
@@ -33,7 +33,7 @@ export function confirmBatch(db, batch) {
 
 /** Validate each non-done transfer in a batch in line order and mark the batch done. */
 export function validateBatch(db, batch) {
-  const validate = salesModels['stock.picking'].form.buttons.find((b) => b.label === 'Validate');
+  const validate = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate');
   const done = (batch.picking_lines ?? []).reduce((acc, line) => {
     const picking = read(acc, 'stock.picking', line.picking_id);
     return picking && picking.state !== 'done' ? validate.run(acc, picking).db : acc;
@@ -120,6 +120,7 @@ export const batchModels = {
     label: 'Packages',
     fields: {
       name: { type: 'char', label: 'Package Reference', required: true },
+      route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' },
       package_type: {
         type: 'selection',
         label: 'Package Type',
@@ -152,7 +153,7 @@ export const batchModels = {
     list: ['name', 'package_type', 'picking_id', 'weight'],
     form: {
       title: 'name',
-      groups: [['package_type', 'weight'], ['picking_id']],
+      groups: [['package_type', 'weight', 'route_id'], ['picking_id']],
       tabs: [{ label: 'Content', fields: ['content'] }],
       chatter: true,
     },

@@ -177,6 +177,10 @@ export function seed() {
   ] });
   [[2, 6000], [3, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
 
+  const wh = add('stock.location', { name: 'WH', usage: 'view' });
+  ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));
+  db = ensureMainWarehouse(ensureMainCompany(db));
+
   // Sales: one quotation, one confirmed + invoiced + paid, one confirmed not invoiced.
   add('sale.order', { partner_id: 1, order_line: lines([[1, 40], [6, 8]]) });
   const so2 = add('sale.order', { partner_id: 4, date_order: addDays(today(), -20), order_line: lines([[2, 12], [4, 12]]) });
@@ -411,8 +415,6 @@ export function seed() {
 
   add('stock.lot', { name: 'SDC-0001', product_id: read(db, 'product', 14) ? 14 : null, qty: 1 });
   add('phone.call', { name: 'Follow-up on HQ chairs', partner_id: 1, phone: '+20 2 2345 6789', direction: 'out', duration: 6 });
-  const wh = add('stock.location', { name: 'WH', usage: 'view' });
-  ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));
   set('product', 4, { route: 'mto_buy', vendor_id: 2 });
   set('product', 2, { route: 'mto_make' });
   add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });

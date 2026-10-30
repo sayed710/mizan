@@ -1,12 +1,12 @@
 // Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Point of Sale.
-import { create, read, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { addDays, amountFields, amounts, pad, productLines, today } from './common.js';
 import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
-import { freeQty } from './picking.js';
+import { freeQty, reservePicking } from './picking.js';
 import { round as round2 } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 
@@ -127,14 +127,15 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
     const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
     if (cost) stocked = capitalizeStock(stocked, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: operation.id });
   }
-  const closed = write(stocked, 'mrp.production', mo.id, {
+  let closed = write(stocked, 'mrp.production', mo.id, {
     state: 'done', date_finished: today(), product_qty: producing, qty_producing: producing,
     move_raw: moves.map((m, i) => ({ ...m, to_consume: round2((Number(m.to_consume) || 0) * ratio), consumed: used[i].qty })),
     workorders: (mo.workorders ?? []).map((w) => ({ ...w, state: 'done', duration: Number(w.duration) || Number(w.duration_expected) || 0 })),
   });
+  if (mo.sale_id) for (const waiting of search(closed, 'stock.picking').filter((p) => p.sale_id === mo.sale_id && p.state === 'waiting' && !p.move_orig_picking_id)) closed = reservePicking(closed, waiting);
   if (producing >= planned) return { db: closed };
   const rest = create(closed, 'mrp.production', {
-    product_id: mo.product_id, bom_id: mo.bom_id, product_qty: round2(planned - producing), origin: mo.name, backorder_of: mo.id,
+    product_id: mo.product_id, bom_id: mo.bom_id, product_qty: round2(planned - producing), origin: mo.name, backorder_of: mo.id, sale_id: mo.sale_id, so_line: mo.so_line, company_id: mo.company_id,
     user_id: mo.user_id ?? null, date_deadline: mo.date_deadline ?? null, priority: mo.priority ?? 0,
   });
   return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
@@ -262,6 +263,8 @@ export const moreModels = {
       date_finished: { type: 'date', label: 'Finished on', readonly: true },
       user_id: employee('Responsible'),
       origin: { type: 'char', label: 'Source', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
+      so_line: { type: 'integer', label: 'Order Line', readonly: true, hidden: true },
       priority: { type: 'priority', label: 'Priority' },
       date_start: { type: 'date', label: 'Scheduled Date' },
       lot_name: { type: 'char', label: 'Lot/Serial Number' },

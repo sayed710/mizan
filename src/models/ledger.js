@@ -3,7 +3,7 @@ import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
 import { TRANSITION, lineTaxOf, mapAccount, taxGroups } from './taxes.js';
-import { cashRound, round } from '../money.js';
+import { cents, cashRound, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { installments } from './terms.js';
 
@@ -60,7 +60,8 @@ export function invoiceBaseGroups(db, move) {
   const byAccount = new Map();
   const productAccount = (l) => {
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
-    if (!sale && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200', move.company_id);
+    const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
+    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200', move.company_id);
     return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
@@ -75,18 +76,20 @@ export function invoiceBaseGroups(db, move) {
   return [...byAccount.values()];
 }
 
-/** Allocate a booked base group's cents across its source lines. */
-export function allocateInvoiceGroup(group, amount) {
-  const cents = Math.round(amount * 100);
-  let cumulative = 0;
-  let allocated = 0;
-  return group.lines.map(({ index, amount: lineAmount }) => {
-    cumulative += lineAmount;
-    const through = group.amount ? Math.round(cents * cumulative / group.amount) : 0;
-    const value = (through - allocated) / 100;
-    allocated = through;
-    return { index, value };
+/** Split a posted journal item's company cents across its contributing lines. */
+export function allocateJournalSources(amount, sources, rate = 1) {
+  if (!sources.length) return [];
+  const factor = Number.isFinite(rate) && rate ? rate : 1;
+  const shares = sources.map((source, index) => {
+    const exact = (Number(source.amount) || 0) * factor * 100;
+    const whole = Math.trunc(exact);
+    return { index, whole, remainder: exact - whole };
   });
+  const gap = cents(amount) - shares.reduce((sum, share) => sum + share.whole, 0);
+  const direction = Math.sign(gap);
+  const ranked = [...shares].sort((a, b) => direction * (b.remainder - a.remainder) || a.index - b.index);
+  for (let i = 0; i < Math.abs(gap); i++) ranked[i % ranked.length].whole += direction;
+  return sources.map((source, i) => ({ index: source.index, amount: shares[i].whole / 100 || 0 }));
 }
 
 /** Journal items for a customer invoice / vendor bill (positive amounts only, rounded to cents). */
@@ -98,7 +101,7 @@ export function invoiceLines(db, move) {
   const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero }) => [account, round(amount / rate), round(amount), zero]);
+  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero, lines }) => [account, round(amount / rate), round(amount), zero, lines]);
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
   const rawTotalDoc = round(amounts(move.invoice_line_ids).total);
   const totalDoc = rounding ? cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method) : rawTotalDoc;
@@ -120,7 +123,7 @@ export function invoiceLines(db, move) {
   const gap = round(total - bases.reduce((s, [, a]) => s + a, 0) - taxes.reduce((s, g) => s + g.amount, 0) - (rounding && !adjustTax && diff ? diff : 0));
   if (gap && bases.length) {
     const largest = bases.reduce((best, b, i) => (Math.abs(b[1]) > Math.abs(bases[best][1]) ? i : best), 0);
-    bases[largest] = [bases[largest][0], round(bases[largest][1] + gap), bases[largest][2], bases[largest][3]];
+    bases[largest][1] = round(bases[largest][1] + gap);
   }
 
   // A document is foreign when its currency is not the company's (an equal rate on the day does not change that).
@@ -158,10 +161,21 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...roundingLines,
-  ].filter((l) => l.debit || l.credit || l.amount_currency);
+  ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length);
+}
+
+/** Recover a bill line's share from its protected posted journal item, never current configuration. */
+export function postedBillLine(move, index) {
+  if (move?.state !== 'posted' || move.move_type !== 'in_invoice') return null;
+  const matches = (move.line_ids ?? []).flatMap((line) => (line.invoice_sources ?? [])
+    .filter((source) => source.index === index).map((source) => ({ line, source })));
+  if (matches.length !== 1) return null;
+  const { line, source } = matches[0];
+  if (round((line.invoice_sources ?? []).reduce((sum, item) => sum + item.amount, 0)) !== round((Number(line.debit) || 0) - (Number(line.credit) || 0))) return null;
+  return { amount: source.amount, account: line.account_id };
 }
 
 /**

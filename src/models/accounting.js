@@ -1,6 +1,6 @@
 import { create, postNote, read, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
-import { ACCOUNT_TYPES, allocateInvoiceGroup, badLineSign, invoiceBaseGroups, invoiceLines, isBalanced, journalId, paymentJournal, postEntry } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -192,24 +192,19 @@ function offsetCreditNote(db, noteId) {
 function draftAssetsFromBill(db, bill) {
   const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
   const already = new Set((db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id).map((a) => a.bill_line));
-  return invoiceBaseGroups(db, bill).reduce((next, group) => {
-    const account = read(next, 'account.account', group.account);
+  return (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+    const booked = postedBillLine(bill, index);
+    if (!booked || booked.amount === 0 || already.has(index)) return next;
+    const account = read(next, 'account.account', booked.account);
     const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
-    if (!fixed.has(group.account) && !model) return next;
-    const booked = (bill.line_ids ?? []).find((l) => l.name === 'Purchases' && l.account_id === group.account && (l.tax_zero ? l.tax_name : '') === group.zero);
-    const amount = (booked?.debit || 0) - (booked?.credit || 0);
-    for (const { index, value } of allocateInvoiceGroup(group, amount)) {
-      if (value === 0 || already.has(index)) continue;
-      const line = bill.invoice_line_ids[index];
-      const product = read(next, 'product', line.product_id);
-      next = create(next, 'account.asset', {
-        name: line.name || product?.name || bill.name, original_value: value, acquisition_date: bill.invoice_date ?? today(),
-        partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-        account_asset_id: model?.account_asset_id ?? group.account,
-        ...(model ? { model_id: model.id, method: model.method ?? 'linear', method_number: model.method_number ?? 5, method_period: model.method_period ?? '12', method_progress_factor: model.method_progress_factor ?? 0.3, prorata: Boolean(model.prorata), account_depreciation_id: model.account_depreciation_id ?? null, account_expense_id: model.account_expense_id ?? null, journal_id: model.journal_id ?? null, analytic_distribution: model.analytic_distribution ?? null } : {}),
-      }).db;
-    }
-    return next;
+    if (!fixed.has(booked.account) && !model) return next;
+    const product = read(next, 'product', line.product_id);
+    return create(next, 'account.asset', {
+      name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
+      partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
+      account_asset_id: model?.account_asset_id ?? booked.account,
+      ...(model ? { model_id: model.id, method: model.method ?? 'linear', method_number: model.method_number ?? 5, method_period: model.method_period ?? '12', method_progress_factor: model.method_progress_factor ?? 0.3, prorata: Boolean(model.prorata), account_depreciation_id: model.account_depreciation_id ?? null, account_expense_id: model.account_expense_id ?? null, journal_id: model.journal_id ?? null, analytic_distribution: model.analytic_distribution ?? null } : {}),
+    }).db;
   }, db);
 }
 
@@ -386,6 +381,9 @@ const lineItem = {
     currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
     amount_currency: { type: 'monetary', label: 'Amount in Currency' },
     date_maturity: { type: 'date', label: 'Due Date' },
+    invoice_sources: { type: 'one2many', label: 'Invoice Sources', hidden: true, fields: {
+      index: { type: 'integer', label: 'Line' }, amount: { type: 'monetary', label: 'Amount' },
+    } },
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
     tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
@@ -551,6 +549,30 @@ export const accountingModels = {
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
+        { label: 'Create Landed Costs', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted', run: (db, r) => {
+          if ((db.records['stock.landed.cost'] ?? []).some((lc) => lc.bill_id === r.id)) throw new Error('Landed costs have already been created for this bill');
+          const warnings = [];
+          const legacy = !(r.line_ids ?? []).some((line) => Array.isArray(line.invoice_sources));
+          const lines = (r.invoice_line_ids ?? []).flatMap((l, index) => {
+            const product = read(db, 'product', l.product_id);
+            if (!product?.landed_cost_ok) return [];
+            if (legacy) {
+              warnings.push(`Bill line ${index + 1} (${product.name}): posted expense could not be identified unambiguously. Record it as a manual landed cost instead.`);
+              return [];
+            }
+            const posted = postedBillLine(r, index);
+            if (!posted) throw new Error('Bill line has no identifiable posted journal amount');
+            const { amount, account } = posted;
+            return [{ name: product.name || 'Freight', amount, account_id: account, split_method: 'quantity', source_bill_line: index, source_bill_amount: amount, source_bill_account_id: account }];
+          });
+          if (!lines.length) {
+            if (warnings.length) throw new Error(warnings.join('\n'));
+            throw new Error('Select a landed cost product on the vendor bill');
+          }
+          const source_warning = warnings.join('\n');
+          const created = create(db, 'stock.landed.cost', { name: r.name, bill_id: r.id, company_id: r.company_id, cost_lines: lines, source_warning });
+          return { db: source_warning ? postNote(created.db, 'stock.landed.cost', created.id, source_warning) : created.db, go: `#/inventory/landed/${created.id}` };
+        } },
         // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },

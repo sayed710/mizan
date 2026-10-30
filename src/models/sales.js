@@ -1,7 +1,7 @@
-import { create, read, search, write } from '../orm.js';
+import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { adjustQuantity, moveValued, revalue } from './valuation.js';
-import { addShipping, applyLots, shippingPrice } from './logistics.js';
-import { procure } from './routes.js';
+import { addShipping, applyLots, checkTrackedLine, shippingPrice } from './logistics.js';
+import { procure, routeAction } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { moveQuantStock } from './quant.js';
 import { checkCreditLimit } from './finance.js';
@@ -13,6 +13,8 @@ import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
+
+const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
 export function moveStock(db, lines = [], sign) {
@@ -115,7 +117,7 @@ export function overDeliveryError(db, picking) {
     const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
     return over ? `Returning ${over[1]} ${name(over[0])} is more than ${original?.name ?? 'the original transfer'} has left to return (${left.get(over[0]) ?? 0})` : null;
   }
-  const order = picking.picking_type === 'outgoing' && picking.sale_id && read(db, 'sale.order', picking.sale_id);
+  const order = ['outgoing', 'dropship'].includes(picking.picking_type) && !picking.return_of && picking.sale_id && read(db, 'sale.order', picking.sale_id);
   if (!order) return null;
   const left = undelivered(db, order);
   const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
@@ -190,7 +192,7 @@ function invoiceFrom(db, order, moveType, originField) {
 
 const orderLines = (label, priceField = 'list_price') => {
   const base = productLines(label, priceField);
-  return { ...base, fields: { ...base.fields, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true } } };
+  return { ...base, fields: { ...base.fields, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true }, route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' }, package_id: { type: 'many2one', relation: 'stock.quant.package', label: 'Package' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, readonly: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true } } };
 };
 const invoiceStatus = (r, confirmed) => {
   if (r.state !== confirmed) return 'no';
@@ -257,7 +259,7 @@ export const salesModels = {
     label: 'Transfers',
     fields: {
       name: { type: 'char', label: 'Reference', readonly: true },
-      picking_type: { type: 'selection', label: 'Operation Type', options: [['incoming', 'Receipt'], ['outgoing', 'Delivery'], ['internal', 'Internal Transfer']] },
+      picking_type: { type: 'selection', label: 'Operation Type', options: [['incoming', 'Receipt'], ['outgoing', 'Delivery'], ['internal', 'Internal Transfer'], ['dropship', 'Dropship']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
       origin: { type: 'char', label: 'Source Document' },
       scheduled_date: { type: 'date', label: 'Scheduled Date' },
@@ -277,11 +279,18 @@ export const salesModels = {
         type: 'one2many',
         label: 'Operations',
         // qty is the demand; quantity is what was actually done (empty = all of the demand).
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, so_line: { type: 'integer', label: 'Order Line', hidden: true } },
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true }, po_line: { type: 'integer', label: 'Order Line', hidden: true } },
         newLine: () => ({ product_id: null, qty: 1, quantity: null, lot_name: '' }),
       },
     },
     defaults: (id) => ({ name: `WH/${pad(id)}`, picking_type: 'outgoing', scheduled_date: today(), state: 'draft', move_ids: [] }),
+    protectDelete: (db, r) => {
+      if (r.state === 'done') return 'Completed transfers cannot be deleted; create a return instead';
+      if ((db.records['stock.picking'] ?? []).some((p) => p.move_orig_picking_id === r.id)) return 'Referenced transfers cannot be deleted';
+      return null;
+    },
+    guard: (db, before, r) => before?.state === 'done' && ['name', 'state', 'picking_type', 'company_id', 'partner_id', 'origin', 'scheduled_date', 'date_done', 'location_id', 'location_dest_id', 'move_ids', 'sale_id', 'purchase_id', 'return_of', 'backorder_id', 'move_orig_picking_id', 'warehouse_id', 'warehouse_route', 'carrier_id', 'carrier_tracking_ref'].some((key) => stableValue(before[key]) !== stableValue(r[key]))
+      ? 'Completed transfers cannot be changed; create a return instead' : null,
     filters: [
       [{ id: 'receipts', label: 'Receipts', fn: (r) => r.picking_type === 'incoming' }, { id: 'deliveries', label: 'Deliveries', fn: (r) => r.picking_type === 'outgoing' }],
       [{ id: 'ready', label: 'Ready', fn: (r) => r.state === 'ready' }, { id: 'waiting', label: 'Waiting', fn: (r) => r.state === 'waiting' }, { id: 'late', label: 'Late', fn: (r) => ['ready', 'waiting'].includes(r.state) && r.scheduled_date < today() }, { id: 'backorders', label: 'Backorders', fn: (r) => !!r.backorder_id }],
@@ -303,48 +312,99 @@ export const salesModels = {
           // Done quantities below the demand ask whether the rest becomes a backorder (Odoo's backorder wizard).
           label: 'Validate', primary: true, when: (r) => ['ready', 'waiting'].includes(r.state),
           run: (db, r) => {
-            const quality = canValidatePicking(db, r);
-            if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
-            const over = overDeliveryError(db, r);
-            if (over) throw new Error(over);
-            const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
-            const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
-            const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
-              const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
-              const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
-              // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
-              const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
-              const purchase = (po?.order_line ?? []).map((l) => {
-                const product = read(d, 'product', l.product_id);
-                const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
-                const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
-                return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
-                  price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
-              });
-              const lines = p.move_ids.map((m) => {
-                const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
-                const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
-                let left = Number(m.qty);
-                let value = 0;
-                for (const l of purchase.filter((l) => l.product_id === m.product_id)) {
-                  const take = Math.min(left, l.remaining);
-                  value += take * Number(l.price_unit);
-                  l.remaining -= take;
-                  left -= take;
+            const previousCompany = getActiveCompany();
+            if (previousCompany && previousCompany !== (r.company_id ?? 1)) throw new Error('Transfer is not accessible in this company');
+            setActiveCompany(r.company_id ?? 1);
+            try {
+              const quality = canValidatePicking(db, r);
+              if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
+              const over = overDeliveryError(db, r);
+              if (over) throw new Error(over);
+              const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
+              const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
+              const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
+                const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
+                if (p.picking_type === 'dropship') {
+                  let nextD = d;
+                  const company = p.company_id ?? getActiveCompany() ?? 1;
+                  const moveIds = [];
+                  for (const m of p.move_ids) {
+                    const product = read(nextD, 'product', m.product_id);
+                    checkTrackedLine(product, m);
+                    if (product?.tracking && product.tracking !== 'none') {
+                      let lot = (nextD.records['stock.lot'] ?? []).find((l) => l.product_id === product.id && l.name === m.lot_name && (l.company_id ?? 1) === company);
+                      if (!lot) {
+                        const createdLot = create(nextD, 'stock.lot', { name: m.lot_name, product_id: product.id, company_id: company, qty: 0, expiration_date: m.expiration_date || null });
+                        nextD = createdLot.db;
+                        lot = read(nextD, 'stock.lot', createdLot.id);
+                      }
+                      moveIds.push({ ...m, lot_id: lot.id });
+                    } else moveIds.push(m);
+                  }
+                  return { db: nextD, move_ids: moveIds };
                 }
-                const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
-                  : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
-              });
-              return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
-                stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
-            } });
-            let next = out.db;
-            if (r.purchase_id && !r.return_of && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
-            const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
-            // A return takes its quantities back off the order; anything else adds to what was delivered.
-            if (order) next = (r.return_of ? removeLineQty : addLineQty)(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
-            return { db: next };
+                const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
+                // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
+                const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
+                const purchase = (po?.order_line ?? []).map((l) => {
+                  const product = read(d, 'product', l.product_id);
+                  const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
+                  const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
+                  return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
+                    price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
+                });
+                const billed = [];
+                if (po && sign > 0 && !original) for (const bill of (d.records['account.move'] ?? []).filter((b) => b.purchase_id === po.id && b.move_type === 'in_invoice' && b.state === 'posted' && (b.company_id ?? 1) === (p.company_id ?? 1)).sort((a, b) => a.id - b.id)) {
+                  const bound = new Map();
+                  for (const move of d.records['stock.move'] ?? []) for (const link of move.invoice_links ?? []) if (link.invoice_id === bill.id) bound.set(move.product_id, (bound.get(move.product_id) ?? 0) + Number(link.qty || 0));
+                  for (const allocation of bill.stock_allocations ?? []) {
+                    if (allocation.layer_id || !(allocation.qty > 0)) continue;
+                    const skip = Math.min(allocation.qty, bound.get(allocation.product_id) ?? 0);
+                    bound.set(allocation.product_id, (bound.get(allocation.product_id) ?? 0) - skip);
+                    if (allocation.qty > skip) billed.push({ product_id: allocation.product_id, remaining: allocation.qty - skip, unit_cost: allocation.value / allocation.qty });
+                  }
+                }
+                const lines = p.move_ids.map((m) => {
+                  const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
+                  const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
+                  let left = Number(m.qty);
+                  let value = 0;
+                  for (const l of purchase.filter((l) => l.product_id === m.product_id)) {
+                    const take = Math.min(left, l.remaining);
+                    let unpriced = take;
+                    for (const allocation of billed.filter((a) => a.product_id === m.product_id && a.remaining > 0)) {
+                      const part = Math.min(unpriced, allocation.remaining);
+                      value += part * allocation.unit_cost;
+                      allocation.remaining -= part;
+                      unpriced -= part;
+                      if (unpriced <= 1e-8) break;
+                    }
+                    value += unpriced * Number(l.price_unit);
+                    l.remaining -= take;
+                    left -= take;
+                  }
+                  const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
+                    : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
+                  return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
+                });
+                return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
+                  stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
+              } });
+              let next = out.db;
+              const adjust = r.return_of ? removeLineQty : addLineQty;
+              if (r.sale_id) next = adjust(next, 'sale.order', read(next, 'sale.order', r.sale_id), 'qty_delivered', out.done);
+              if (r.purchase_id && (!r.sale_id || r.picking_type === 'dropship')) {
+                const po = read(next, 'purchase.order', r.purchase_id);
+                const moves = r.picking_type === 'dropship' ? out.done.map((m) => ({ ...m, so_line: m.po_line })) : out.done;
+                next = adjust(next, 'purchase.order', po, 'qty_delivered', moves);
+                const updated = read(next, 'purchase.order', r.purchase_id);
+                next = write(next, 'purchase.order', r.purchase_id, { receipt_done: updated.order_line.every((l) => Number(l.qty_delivered || 0) >= Number(l.qty || 0)) });
+                if (updated.sale_id && r.picking_type !== 'dropship') {
+                  for (const waiting of search(next, 'stock.picking').filter((p) => p.sale_id === updated.sale_id && p.state === 'waiting' && !p.move_orig_picking_id)) next = reservePicking(next, waiting);
+                }
+              }
+              return { db: next };
+            } finally { setActiveCompany(previousCompany); }
           },
         },
         { label: 'Return', when: (r) => r.state === 'done', run: (db, r) => { const out = returnPicking(db, r); return { db: out.db, go: `#/inventory/transfers/${out.id}` }; } },
@@ -379,7 +439,10 @@ export const salesModels = {
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
       pos_categ_ids: { type: 'many2many', relation: 'pos.category', label: 'Point of Sale Categories' },
+      route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' },
       weight: { type: 'float', label: 'Weight (kg)' },
+      volume: { type: 'float', label: 'Volume' },
+      landed_cost_ok: { type: 'boolean', label: 'Landed Cost' },
       route: { type: 'selection', label: 'Route', options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] },
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       tracking: { type: 'selection', label: 'Tracking', options: [['none', 'No Tracking'], ['lot', 'By Lots'], ['serial', 'By Unique Serial Number']] },
@@ -440,7 +503,7 @@ export const salesModels = {
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
         { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
         { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'volume', 'tracking', 'landed_cost_ok'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'route_id', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },
@@ -539,7 +602,12 @@ export const salesModels = {
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
             checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
-            const { db: procured, stockLines } = procure(write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale' }), r);
+            const lines = (r.order_line ?? []).map((l) => {
+              const product = read(db, 'product', l.product_id);
+              return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
+            });
+            const confirmed = write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale', order_line: lines });
+            const { db: procured, stockLines } = procure(confirmed, read(confirmed, 'sale.order', r.id));
             return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_shipping_id ?? r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null, scheduled_date: r.commitment_date }) };
           },
         },
@@ -574,6 +642,7 @@ export const salesModels = {
       invoice_status: { type: 'selection', label: 'Billing Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'purchase') },
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       order_line: orderLines('Products', 'cost'),
       ...amountFields('order_line'),
     },
@@ -600,8 +669,18 @@ export const salesModels = {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
           // Dropship orders go vendor → customer directly: no receipt into our stock.
           run: (db, r) => {
-            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase', ...(r.dropship_partner_id ? { receipt_done: true } : {}) });
-            return { db: r.dropship_partner_id ? confirmed : createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
+            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase' });
+            if (!r.dropship_partner_id) return { db: createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
+            const moves = r.order_line.map((l, i) => ({ product_id: l.product_id, qty: toStock(confirmed, l, Number(l.qty)), so_line: l.so_line, po_line: i }));
+            let next = confirmed;
+            const external = (name) => {
+              let location = (next.records['stock.location'] ?? []).find((l) => l.name === name && l.usage === 'view' && (l.company_id ?? 1) === (r.company_id ?? 1));
+              if (!location) { const made = create(next, 'stock.location', { name, usage: 'view', company_id: r.company_id ?? 1 }); next = made.db; location = read(next, 'stock.location', made.id); }
+              return location.id;
+            };
+            const source = external('Vendors');
+            const destination = external('Customers');
+            return { db: create(next, 'stock.picking', { picking_type: 'dropship', state: 'ready', partner_id: r.dropship_partner_id, origin: r.name, sale_id: r.sale_id, purchase_id: r.id, company_id: r.company_id, location_id: source, location_dest_id: destination, move_ids: moves }).db };
           },
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase' && invoiceStatus(r, 'purchase') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },

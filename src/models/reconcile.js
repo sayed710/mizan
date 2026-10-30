@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { accountId, postEntry } from './ledger.js';
 import { candidates, reconcileWith } from './bank.js';
-import { round } from '../money.js';
+import { allocateCents, round } from '../money.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -37,15 +37,16 @@ export function ruleMatches(rule, line) {
   return amountMatches(rule, amount) && labelMatches(rule, line.payment_ref);
 }
 
-/** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest; the last line absorbs rounding. */
+/** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest. */
 function splitCounterparts(lines, balance) {
   const fixed = lines.filter((l) => l.amount_type === 'fixed');
   const rest = round(balance - fixed.reduce((s, l) => s + (Number(l.amount) || 0), 0));
   const pct = lines.filter((l) => l.amount_type !== 'fixed').reduce((s, l) => s + (Number(l.amount) || 0), 0);
   if (rest < 0 || Math.abs(rest * (1 - pct / 100)) >= 0.005) throw new Error('The counterpart lines do not cover the whole amount');
-  const values = lines.map((l) => (l.amount_type === 'fixed' ? round(Number(l.amount) || 0) : round((rest * (Number(l.amount) || 0)) / 100)));
-  values[values.length - 1] = round(balance - values.slice(0, -1).reduce((s, v) => s + v, 0));
-  return lines.map((l, i) => ({ ...l, value: values[i] }));
+  const variable = lines.filter((l) => l.amount_type !== 'fixed');
+  const shares = variable.length && rest ? allocateCents(rest, variable.map((l) => Number(l.amount) || 0)) : variable.map(() => 0);
+  let index = 0;
+  return lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? round(Number(l.amount) || 0) : shares[index++] }));
 }
 
 function writeOff(db, rule, line) {

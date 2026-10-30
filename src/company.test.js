@@ -11,8 +11,9 @@ import { seed } from './seed.js';
 after(() => setActiveCompany(null));
 
 test('records belong to the active company; shared master data stays visible', () => {
-  const db0 = seed();
-  setActiveCompany(2);
+  const company = createCompany(seed(), { name: 'Branch' });
+  const db0 = company.db;
+  setActiveCompany(company.id);
   const { db, id } = create(db0, 'crm.lead', { name: 'Branch lead' });
   assert.equal(read(db, 'crm.lead', id).company_id, 2);
   assert.deepEqual(search(db, 'crm.lead').map((l) => l.id), [id]);

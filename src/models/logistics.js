@@ -1,5 +1,5 @@
 // Delivery methods, lots & serial numbers, phone calls, IoT devices.
-import { create, read, search, write } from '../orm.js';
+import { create, getActiveCompany, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { round } from '../money.js';
 
@@ -31,6 +31,13 @@ export function addShipping(db, order, price) {
   return write(db, 'sale.order', order.id, { order_line: [...lines, { product_id: ship.id, qty: 1, price_unit: round(price), discount: 0, tax: 14 }] });
 }
 
+/** Check the common requirements for a tracked transfer line. */
+export function checkTrackedLine(product, line) {
+  if (!product?.tracking || product.tracking === 'none') return;
+  if (!line.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
+  if (product.tracking === 'serial' && Number(line.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
+}
+
 /**
  * Validate lots on a transfer: tracked products need a lot/serial per line; serials are unique units.
  * Incoming creates/raises lots, outgoing lowers them. Returns the new db.
@@ -40,12 +47,12 @@ export function applyLots(db, picking, sign) {
   for (const m of picking.move_ids ?? []) {
     const product = read(next, 'product', m.product_id);
     if (!product || !product.tracking || product.tracking === 'none') continue;
-    if (!m.lot_name) throw new Error(`${product.name} is tracked: enter a lot/serial number`);
-    if (product.tracking === 'serial' && Number(m.qty) !== 1) throw new Error(`${product.name}: one line per serial number (quantity 1)`);
-    const lot = search(next, 'stock.lot').find((l) => l.product_id === product.id && l.name === m.lot_name);
+    checkTrackedLine(product, m);
+    const company = picking.company_id ?? getActiveCompany() ?? 1;
+    const lot = (next.records['stock.lot'] ?? []).find((l) => l.product_id === product.id && l.name === m.lot_name && (l.company_id ?? 1) === company);
     if (!lot) {
       if (sign < 0) throw new Error(`Lot ${m.lot_name} of ${product.name} is not in stock`);
-      next = create(next, 'stock.lot', { name: m.lot_name, product_id: product.id, qty: Number(m.qty), expiration_date: m.expiration_date || null }).db;
+      next = create(next, 'stock.lot', { name: m.lot_name, product_id: product.id, company_id: company, qty: Number(m.qty), expiration_date: m.expiration_date || null }).db;
     } else {
       const qty = (Number(lot.qty) || 0) + sign * Number(m.qty);
       if (qty < 0) throw new Error(`Lot ${m.lot_name} has only ${lot.qty} units`);
@@ -109,6 +116,14 @@ export const logisticsModels = {
       expired: { type: 'boolean', label: 'Expired', compute: (r) => !!r.expiration_date && r.expiration_date < today() },
     },
     defaults: () => ({ qty: 0 }),
+    guard: (db, before, lot) => {
+      const company = lot.company_id ?? 1;
+      if ((db.records['stock.lot'] ?? []).some((other) => other.id !== lot.id && (other.company_id ?? 1) === company && other.product_id === lot.product_id && other.name === lot.name)) return 'Lot name must be unique for this product and company';
+      if (!Number.isFinite(Number(lot.qty)) || Number(lot.qty) < 0) return 'Lot quantity must be nonnegative';
+      if (read(db, 'product', lot.product_id)?.tracking === 'serial' && Number(lot.qty) > 1) return 'A serial number cannot have more than one unit';
+      if (before && ['name', 'product_id', 'company_id'].some((key) => (before[key] ?? null) !== (lot[key] ?? null)) && (db.records['stock.quant'] ?? []).some((q) => q.lot_id === lot.id)) return 'A lot in stock cannot change its identity';
+      return null;
+    },
     filters: [[{ id: 'in_stock', label: 'In Stock', fn: (r) => r.qty > 0 }, { id: 'expired', label: 'Expired', fn: (r) => r.expiration_date && r.expiration_date < today() }]],
     groupBys: ['product_id', 'expiration_date'],
     kanban: { title: 'name', lines: ['product_id', 'qty', 'expiration_date'] },

@@ -16,7 +16,7 @@ export const productConfigModels = {
     label: 'Product Categories', fields: {
       name: { type: 'char', label: 'Name', required: true },
       display_name: { type: 'char', label: 'Full Path', compute: (r, db) => categoryPath(db, r.id) },
-      parent_id: relation('product.category', 'Parent Category'), company_id: relation('res.company', 'Company'),
+      parent_id: relation('product.category', 'Parent Category'), route_id: relation('stock.route', 'Route'), company_id: relation('res.company', 'Company'),
       property_cost_method: costing, property_valuation: valuation,
       property_account_income_id: account('Income Account'), property_account_expense_id: account('Expense Account'),
       property_stock_valuation_account_id: account('Stock Valuation Account'), property_stock_journal: relation('account.journal', 'Stock Journal'),
@@ -24,7 +24,7 @@ export const productConfigModels = {
     },
     guard: (db, before, r) => { let id = r.parent_id; const seen = new Set([before?.id ?? r.id]); while (id) { if (seen.has(id)) return 'Category hierarchy cannot contain a cycle'; seen.add(id); id = read(db, 'product.category', id)?.parent_id; } return null; },
     list: ['display_name', 'parent_id', 'property_cost_method', 'property_valuation'],
-    form: { title: 'name', groups: [['parent_id', 'company_id', 'removal_strategy'], ['property_cost_method', 'property_valuation'], ['property_account_income_id', 'property_account_expense_id', 'property_stock_valuation_account_id', 'property_stock_journal']] },
+    form: { title: 'name', groups: [['parent_id', 'company_id', 'removal_strategy', 'route_id'], ['property_cost_method', 'property_valuation'], ['property_account_income_id', 'property_account_expense_id', 'property_stock_valuation_account_id', 'property_stock_journal']] },
   },
   'product.attribute': {
     label: 'Attributes', fields: { name: { type: 'char', label: 'Name', required: true }, active: { type: 'boolean', label: 'Active' }, display_type: { type: 'selection', label: 'Display Type', required: true, options: [['radio', 'Radio'], ['pills', 'Pills'], ['select', 'Select'], ['color', 'Color'], ['multi', 'Multi-checkbox']] }, sequence: { type: 'integer', label: 'Sequence' }, visibility: { type: 'selection', label: 'Visibility', options: [['visible', 'Visible'], ['hidden', 'Hidden']] }, value_ids: { ...many('product.attribute.value', 'Values'), compute: (r, db) => (db.records['product.attribute.value'] ?? []).filter((v) => v.attribute_id === r.id).map((v) => v.id) } },

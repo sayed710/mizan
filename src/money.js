@@ -13,6 +13,22 @@ export function round(n, digits = 2) {
 /** `n` as integer minor units (cents), rounded the same way. */
 export const cents = (n) => Math.round(round(n) * 100);
 
+/** Split rounded cents proportionally, with stable largest-remainder ties and the total's sign. */
+export function allocateCents(amount, weights) {
+  const total = cents(amount);
+  const basis = weights.reduce((sum, weight) => sum + weight, 0);
+  if (!Number.isFinite(basis) || basis <= 0 || weights.some((weight) => !Number.isFinite(weight) || weight < 0)) throw new Error('The selected allocation basis must be positive');
+  const shares = weights.map((weight, index) => {
+    const exact = Math.abs(total) * (weight / basis);
+    const whole = Math.floor(exact);
+    return { index, whole, fraction: exact - whole };
+  });
+  const ranked = [...shares].sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  const leftover = Math.abs(total) - shares.reduce((sum, share) => sum + share.whole, 0);
+  for (let i = 0; i < leftover; i++) ranked[i].whole++;
+  return shares.map((share) => Math.sign(total) * share.whole / 100 || 0);
+}
+
 /** Round a monetary amount to an increment, with directions measured away from zero. */
 export function cashRound(amount, increment, method) {
   const value = Number(amount);
