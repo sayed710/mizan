@@ -123,3 +123,25 @@ test('assigning ids does not resurrect a concurrently deleted edited record', ()
   const edited = { ...first.db, records: { ...first.db.records, 'hr.department': first.db.records['hr.department'].map((r) => r.id === first.id ? { ...r, name: 'Renamed' } : r) } };
   assert.throws(() => save(deleted, first.db, edited), /deleted by someone else/);
 });
+
+test('upsert on a model with more than 125,000 stored records does not exceed call stack size', () => {
+  const base = seed();
+  const COUNT = 130_000;
+  const dummy = { active: true, company_id: 1, name: 'Lead' };
+  const records = Array.from({ length: COUNT }, (_, i) => ({ id: i + 1, ...dummy }));
+  const server = {
+    ...base,
+    records: { ...base.records, 'crm.lead': records },
+    seq: { ...base.seq, 'crm.lead': COUNT },
+  };
+  const client = { ...server };
+  const next = {
+    ...client,
+    records: {
+      ...client.records,
+      'crm.lead': client.records['crm.lead'].map((r) => (r.id === 1 ? { ...r, name: 'Updated' } : r)),
+    },
+  };
+  const { db } = save(server, client, next);
+  assert.equal(db.records['crm.lead'].find((r) => r.id === 1).name, 'Updated');
+});

@@ -358,7 +358,12 @@ function taxItems(db, period) {
     const side = l.tax_side || (!transitions.has(l.account_id) && documentSide) || manualSide;
     if (!side) return [];
     const balance = (Number(l.debit) || 0) - (Number(l.credit) || 0);
-    return [{ ...l, side, tax: l.tax_zero ? 0 : side === 'sale' ? -balance : balance }];
+    // Invoice tax bases retain the signed document base; a refund reverses that sign.
+    // Zero-value items already carry the refund sign, as do zero-rated base lines.
+    const invoiceBase = documentSide && balance && !l.tax_zero
+      ? (Number(l.tax_base) || 0) * (move.move_type.endsWith('_refund') ? -1 : 1)
+      : null;
+    return [{ ...l, side, tax: l.tax_zero ? 0 : side === 'sale' ? -balance : balance, invoiceBase }];
   });
 }
 
@@ -383,7 +388,8 @@ export function taxesByTax(db, period = {}) {
     const name = l.tax_name || 'Untagged';
     const key = `${l.side}|${name}`;
     const row = rows.get(key) ?? { side: l.side, name, base: 0, tax: 0 };
-    rows.set(key, { ...row, base: round(row.base + (l.tax ? Math.sign(l.tax) : 1) * (Number(l.tax_base) || 0)), tax: round(row.tax + l.tax) });
+    const base = l.invoiceBase ?? (l.tax_base_signed ? (Number(l.tax_base) || 0) : (l.tax ? Math.sign(l.tax) : 1) * (Number(l.tax_base) || 0));
+    rows.set(key, { ...row, base: round(row.base + base), tax: round(row.tax + l.tax) });
   }
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }

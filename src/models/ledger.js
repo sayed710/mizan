@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, lineTaxOf, mapAccount, taxGroups } from './taxes.js';
+import { TRANSITION, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
 import { cents, cashRound, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { installments } from './terms.js';
@@ -66,7 +66,7 @@ export function invoiceBaseGroups(db, move) {
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     const account = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
-    const zero = !lineTaxOf(l) && l.tax_name ? l.tax_name : '';
+    const zero = !lineTaxOf(l) ? (l.tax_name || taxLabel(l)) : '';
     const key = `${account}:${zero}`;
     const group = byAccount.get(key) ?? { account, zero, amount: 0, lines: [] };
     group.amount += subtotal(l);
@@ -111,7 +111,7 @@ export function invoiceLines(db, move) {
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
-  const taxes = taxGroups(move.invoice_line_ids, (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) : l.tax_account_id || taxAcc), rate);
+  const taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) : l.tax_account_id || taxAcc), rate);
   const actualTaxes = taxes.filter((g) => g.amount !== 0 || g.document_amount !== 0);
   const adjustTax = Boolean(rounding && rounding.strategy === 'biggest_tax' && actualTaxes.length && diffDoc !== 0);
   if (adjustTax) {
@@ -161,10 +161,10 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_side: sale ? 'sale' : 'purchase', tax_zero: true } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...roundingLines,
-  ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length);
+  ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
 
 /** Recover a bill line's share from its protected posted journal item, never current configuration. */
@@ -204,7 +204,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
 
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
     const net = round((l.debit ?? 0) - (l.credit ?? 0));
-    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
+    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: round(l.tax_base ?? 0), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
   });
   if (!isBalanced(line_ids)) throw new Error('Journal entry is not balanced');
   const journalCode = j?.code ?? journal;

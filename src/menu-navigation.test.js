@@ -17,6 +17,28 @@ function setupDom() {
       setAttribute(name, value) { this[name] = String(value); },
       removeAttribute(name) { delete this[name]; },
       contains(child) { return child === this || this.childNodes.some((c) => c.contains?.(child)); },
+      closest(selector) {
+        let cur = this;
+        const targetTag = selector.toUpperCase();
+        while (cur && cur.nodeType === 1) {
+          if (cur.tagName === targetTag) return cur;
+          cur = cur.parentNode;
+        }
+        return null;
+      },
+      dispatchEvent(event) {
+        let cur = this;
+        let canceled = false;
+        Object.defineProperty(event, 'target', { value: this, configurable: true });
+        while (cur) {
+          Object.defineProperty(event, 'currentTarget', { value: cur, configurable: true });
+          const ok = EventTarget.prototype.dispatchEvent.call(cur, event);
+          if (!ok) canceled = true;
+          if (!event.bubbles || event.cancelBubble) break;
+          cur = cur.parentNode;
+        }
+        return !canceled;
+      },
       focus() { document.activeElement = this; },
       querySelector(selector) { return find(this, (n) => selector === '[role=menuitem]' ? n.role === 'menuitem' : n['aria-expanded'] != null); },
       querySelectorAll() { return []; },
@@ -81,6 +103,51 @@ test('Operations → Receipts updates the page and closes both menus in StrictMo
     assert.equal(operations['aria-expanded'], 'false');
     assert.equal(toggle['aria-expanded'], 'false');
     assert.equal(find(container, (n) => n.role === 'menu'), null);
+  } finally {
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('clicking a submenu button keeps the mobile panel open, while anchor clicks and same-hash navigation close it', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore } = await import('./store.js');
+  await initStore();
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(React.StrictMode, null, React.createElement(App))));
+    const toggle = find(container, (n) => n.tagName === 'BUTTON' && n['aria-controls'] === 'nav-menus');
+    await React.act(async () => {
+      toggle.dispatchEvent(new Event('click', { bubbles: true }));
+    });
+    assert.equal(toggle['aria-expanded'], 'true', 'mobile menu panel opened');
+
+    const operations = find(container, (n) => n.tagName === 'BUTTON' && n.textContent === 'Operations');
+    await React.act(async () => {
+      operations.dispatchEvent(new Event('click', { bubbles: true }));
+    });
+    assert.equal(toggle['aria-expanded'], 'true', 'mobile menu panel must remain open when opening submenu');
+    assert.equal(operations['aria-expanded'], 'true', 'submenu Operations opened');
+
+    const appTitle = find(container, (n) => n.tagName === 'A' && n.textContent === 'Inventory');
+    assert.ok(appTitle);
+    await React.act(async () => {
+      appTitle.dispatchEvent(new Event('click', { bubbles: true }));
+    });
+    assert.equal(toggle['aria-expanded'], 'false', 'app-title link closes panel on same-hash navigation');
+
+    await React.act(async () => {
+      toggle.dispatchEvent(new Event('click', { bubbles: true }));
+    });
+    assert.equal(toggle['aria-expanded'], 'true');
+    const transfersLink = find(container, (n) => n.tagName === 'A' && n.textContent === 'Transfers');
+    assert.ok(transfersLink);
+    await React.act(async () => {
+      transfersLink.dispatchEvent(new Event('click', { bubbles: true }));
+    });
+    assert.equal(toggle['aria-expanded'], 'false', 'menu link click closes panel');
   } finally {
     await React.act(async () => root.unmount());
   }
