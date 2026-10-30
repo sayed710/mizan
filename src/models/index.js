@@ -207,6 +207,10 @@ const allApps = [
       { label: 'Review', children: [
         { key: 'tax-returns', label: 'Tax Returns', model: 'account.return' },
         { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
+        { label: 'Control', children: [
+          { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
+          { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
+        ] },
       ] },
       { label: 'Reporting', children: [
         { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
@@ -226,12 +230,6 @@ const allApps = [
         { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
         { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
         { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
-      ] },
-      { label: 'Review', children: [
-        { label: 'Control', children: [
-          { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
-          { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
-        ] },
       ] },
       { label: 'Configuration', children: [
         { label: 'Invoicing', children: [
