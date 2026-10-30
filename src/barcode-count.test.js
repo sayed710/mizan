@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { read, search } from './orm.js';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 import { adjustQuantity, countProduct } from './models/valuation.js';
 import { modelsForApps } from './models/index.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -42,9 +43,10 @@ test('a count from a stale view is refused, so a second counter cannot overwrite
 });
 
 test('a count made in company 2 books its count, layer and entry under company 2', () => {
-  const db = seed();
+  const company = createCompany(seed(), { name: 'Company two' });
+  const db = company.db;
   const before = read(db, 'product', 2).qty_available;
-  const next = countProduct(db, { productId: 2, counted: before + 1, observed: before, company: 2 });
+  const next = countProduct(db, { productId: 2, counted: before + 1, observed: before, company: company.id });
   const added = (model) => next.records[model].filter((r) => !db.records[model]?.some((o) => o.id === r.id));
   for (const model of ['stock.inventory.count', 'stock.valuation.layer', 'account.move']) {
     assert.ok(added(model).length, model);

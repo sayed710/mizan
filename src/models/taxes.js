@@ -58,7 +58,7 @@ export function taxGroups(lines, accountOf, rate = 1) {
 
 /** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
 export const cashBasisTaxes = (lines, rate = 1) =>
-  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis), (l) => l.tax_account_id, rate).filter((g) => g.amount);
+  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis && lineTaxOf(l) !== 0), (l) => l.tax_account_id, rate).filter((g) => g.amount || g.base);
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
@@ -74,6 +74,7 @@ const TAX_TYPES = [['sale', 'Sales'], ['purchase', 'Purchases'], ['none', 'None'
 export const taxModels = {
   'account.tax': {
     label: 'Taxes',
+    guard: (db, before, after) => (after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes') ? 'Select only tax tags' : null,
     fields: {
       name: { type: 'char', label: 'Tax Name', required: true },
       amount_type: { type: 'selection', label: 'Tax Computation', options: [['percent', 'Percentage'], ['fixed', 'Fixed']] },
@@ -84,16 +85,17 @@ export const taxModels = {
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       account_id: { type: 'many2one', relation: 'account.account', label: 'Tax Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
+      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'taxes' },
       active: { type: 'boolean', label: 'Active' },
     },
-    defaults: () => ({ amount_type: 'percent', amount: 14, type_tax_use: 'sale', tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT' }),
+    defaults: () => ({ amount_type: 'percent', amount: 14, type_tax_use: 'sale', tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', tag_ids: [] }),
     groupBys: ['type_tax_use', 'tax_group'],
     filters: [[{ id: 'sale', label: 'Sales', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchases', fn: (r) => r.type_tax_use === 'purchase' }]],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
-    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'tax_exigibility'],
+    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'tax_exigibility', 'tag_ids'],
     form: {
       title: 'name',
-      groups: [['amount_type', 'amount', 'description', 'type_tax_use'], ['account_id', 'tax_group', 'price_include', 'tax_exigibility', 'active']],
+      groups: [['amount_type', 'amount', 'description', 'type_tax_use', 'tag_ids'], ['account_id', 'tax_group', 'price_include', 'tax_exigibility', 'active']],
       chatter: true,
     },
   },

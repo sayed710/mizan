@@ -1,17 +1,128 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, read, search, unlink, write } from './orm.js';
+import { models } from './models/index.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { extraModels } from './models/extra.js';
 import { availability, bestPrice, holdDeposit, pickupPicking, rentalHours, rentalPlusModels, rentalSchedule, returnPicking, settleDeposit } from './models/rentalplus.js';
 import { seed } from './seed.js';
+import { accountingCompany, assertEntryCompany } from './test-support/accounting-company.js';
+import { applyDiff, diffDb } from './sync.js';
+import { migrate } from './migrations.js';
 
 const rental = (db, vals = {}) => create(db, 'sale.rental', {
   partner_id: 1, product_id: 4, qty: 2, pickup_date: '2035-01-10', return_date: '2035-01-15', price_per_day: 20, ...vals,
 });
 const pricing = (db, period, price, duration = 1) => create(db, 'rental.pricing', { product_id: 4, period, duration, price }).db;
 const balance = (db, moves, code) => moves.flatMap((m) => m.line_ids).filter((l) => l.account_id === accountId(db, code)).reduce((sum, l) => sum + l.debit - l.credit, 0);
+
+test('a legacy rental with counters is flagged and its counters are unchanged after migration', () => {
+  const order = rental(seed(), { state: 'returned', invoiced: true, late_fee_invoiced: 40 });
+  const upgraded = migrate({ ...order.db, schema_version: 10 });
+  const record = read(upgraded, 'sale.rental', order.id);
+  assert.equal(record.invoiced, true);
+  assert.equal(record.late_fee_invoiced, 40);
+  assert.equal(record.billing_invoiced, true);
+  assert.equal(record.billing_late_fee, 40);
+  assert.equal(record.legacy_billing_review, true);
+  const buttons = models['sale.rental'].form.buttons;
+  assert.equal(buttons.find((b) => b.label === 'Create Invoice').when(record), false);
+  assert.equal(buttons.find((b) => b.label === 'Invoice Late Fee').when(record), false);
+  const review = buttons.find((b) => b.label === 'Reconcile Legacy Billing');
+  assert.equal(review.when(record), true);
+  const resolved = review.run(upgraded, record, { invoiced: 'yes', late_fee_invoiced: 20, note: 'Audited billing' }).db;
+  const current = read(resolved, 'sale.rental', order.id);
+  assert.equal(current.legacy_billing_review, false);
+  assert.equal(current.invoiced, true);
+  assert.equal(current.late_fee_invoiced, 20);
+  assert.equal(current.billing_invoiced, true);
+  assert.equal(current.billing_late_fee, 20);
+  assert.equal(current.legacy_billing_review_note, 'Audited billing');
+});
+
+for (const operation of ['cancel', 'delete']) test(`cancelling or deleting an unrelated invoice whose text resembles a rental never changes any rental counter (${operation})`, () => {
+  const order = rental(seed(), { state: 'returned', invoiced: true, late_fee_invoiced: 40 });
+  const rentalRecord = read(order.db, 'sale.rental', order.id);
+  const invoice = create(order.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: rentalRecord.partner_id,
+    invoice_origin: rentalRecord.name,
+    invoice_line_ids: [
+      { product_id: rentalRecord.product_id, name: 'Rental', qty: 1, price_unit: 20 },
+      { product_id: rentalRecord.product_id, name: 'Late return (2 day(s))', qty: 1, price_unit: 40 },
+    ],
+  });
+  const action = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+  const next = operation === 'cancel' ? action(invoice.db, 'account.move', invoice.id, 'Cancel') : unlink(invoice.db, 'account.move', [invoice.id]);
+  const current = read(next, 'sale.rental', order.id);
+  assert.equal(current.invoiced, true);
+  assert.equal(current.late_fee_invoiced, 40);
+  assert.equal(current.billing_invoiced, true);
+  assert.equal(current.billing_late_fee, 40);
+});
+
+test('a new rental invoice still updates the counters', () => {
+  const order = rental(seed(), { state: 'picked', pickup_date: '2035-01-01', return_date: '2035-01-05', qty: 2 });
+  const button = (label) => models['sale.rental'].form.buttons.find((b) => b.label === label);
+  assert.equal(read(order.db, 'sale.rental', order.id).billing_invoiced, false);
+  const invoiced = button('Create Invoice').run(order.db, read(order.db, 'sale.rental', order.id)).db;
+  assert.equal(read(invoiced, 'sale.rental', order.id).billing_invoiced, true);
+});
+
+test('cancelled or deleted rental invoices and late fees become invoiceable again', () => {
+  const order = rental(seed(), { state: 'returned', pickup_date: '2035-01-01', return_date: '2035-01-05', actual_return_date: '2035-01-07', qty: 1, late_fee_factor: 1 });
+  const action = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+  const rentalButton = (label) => models['sale.rental'].form.buttons.find((b) => b.label === label);
+  let db = action(order.db, 'sale.rental', order.id, 'Create Invoice');
+  let invoice = search(db, 'account.move').find((m) => m.invoice_origin === read(db, 'sale.rental', order.id).name);
+  assert.equal(read(db, 'sale.rental', order.id).billing_late_fee, 40);
+  db = action(db, 'account.move', invoice.id, 'Cancel');
+  assert.equal(rentalButton('Create Invoice').when(read(db, 'sale.rental', order.id)), true);
+  assert.equal(read(db, 'sale.rental', order.id).billing_late_fee, 0);
+  db = action(db, 'sale.rental', order.id, 'Create Invoice');
+  invoice = search(db, 'account.move').filter((m) => m.invoice_origin === read(db, 'sale.rental', order.id).name).at(-1);
+  db = unlink(db, 'account.move', [invoice.id]);
+  assert.equal(rentalButton('Create Invoice').when(read(db, 'sale.rental', order.id)), true);
+  db = action(db, 'sale.rental', order.id, 'Create Invoice');
+  db = write(db, 'sale.rental', order.id, { actual_return_date: '2035-01-08' });
+  db = action(db, 'sale.rental', order.id, 'Invoice Late Fee');
+  const late = search(db, 'account.move').filter((m) => m.invoice_origin === read(db, 'sale.rental', order.id).name).at(-1);
+  assert.equal(read(db, 'sale.rental', order.id).billing_late_fee, 60);
+  db = action(db, 'account.move', late.id, 'Cancel');
+  assert.equal(read(db, 'sale.rental', order.id).billing_late_fee, 40);
+  assert.equal(rentalButton('Invoice Late Fee').when(read(db, 'sale.rental', order.id)), true);
+  db = action(db, 'sale.rental', order.id, 'Invoice Late Fee');
+  const replacement = search(db, 'account.move').filter((m) => m.invoice_origin === read(db, 'sale.rental', order.id).name).at(-1);
+  assert.equal(replacement.invoice_line_ids[0].price_unit, 20);
+  db = unlink(db, 'account.move', [replacement.id]);
+  assert.equal(read(db, 'sale.rental', order.id).billing_late_fee, 40);
+});
+
+test('rental quotation and invoice use the cheapest intermediate rule combination', () => {
+  const db = pricing(pricing(seed(), 'hour', 6, 4), 'hour', 4, 3);
+  const order = rental(db, { qty: 2, pickup_date: '2035-01-01T00:00:00Z', return_date: '2035-01-01T10:00:00Z' });
+  const button = (label) => models['sale.rental'].form.buttons.find((b) => b.label === label);
+  assert.equal(read(order.db, 'sale.rental', order.id).amount_total, 28);
+  const reserved = button('Confirm').run(order.db, read(order.db, 'sale.rental', order.id)).db;
+  const picked = button('Pickup').run(reserved, read(reserved, 'sale.rental', order.id)).db;
+  const invoiced = button('Create Invoice').run(picked, read(picked, 'sale.rental', order.id)).db;
+  const invoice = search(invoiced, 'account.move').find((m) => m.invoice_origin === read(invoiced, 'sale.rental', order.id).name);
+  assert.equal(invoice.amount_untaxed, 28);
+});
+
+test('rental quotation and invoice preserve the agreed duration price for each unit', () => {
+  const db = pricing(pricing(seed(), 'day', 20), 'week', 100);
+  const order = rental(db, { qty: 2, pickup_date: '2035-01-01', return_date: '2035-01-10' });
+  const button = (label) => rentalPlusModels['sale.rental'].form.buttons.find((b) => b.label === label);
+  assert.equal(read(order.db, 'sale.rental', order.id).amount_total, 280);
+  const reserved = button('Confirm').run(order.db, read(order.db, 'sale.rental', order.id)).db;
+  const changed = pricing(reserved, 'week', 10);
+  const picked = button('Pickup').run(changed, read(changed, 'sale.rental', order.id)).db;
+  const invoiced = button('Create Invoice').run(picked, read(picked, 'sale.rental', order.id)).db;
+  const invoice = search(invoiced, 'account.move').find((m) => m.invoice_origin === read(invoiced, 'sale.rental', order.id).name);
+  assert.equal(invoice.amount_untaxed, 280);
+});
 
 test('rental pricing combines weeks and days, rounds up when cheaper, and considers shorter rules alone', () => {
   const db = pricing(pricing(seed(), 'day', 20), 'week', 100);
@@ -99,6 +210,24 @@ for (const damage of [0, 35.25, 100]) {
     assert.deepEqual(base.db, snapshot);
   });
 }
+
+test('rental deposit hold and damage settlement stay in the rental company', () => {
+  const branch = accountingCompany(seed());
+  const order = rental(branch.db, { company_id: branch.id, state: 'reserved' });
+  const hold = models['sale.rental'].form.buttons.find((b) => b.label === 'Hold Deposit');
+  const result = hold.run(order.db, read(order.db, 'sale.rental', order.id), [100]);
+  const id = Number(result.go.split('/').at(-1));
+  const deposit = read(result.db, 'rental.deposit', id);
+  assert.equal(deposit.company_id, branch.id);
+  assertEntryCompany(assert, result.db, read(result.db, 'account.move', deposit.move_id), branch.id);
+  const settle = models['rental.deposit'].form.buttons.find((b) => b.label === 'Withhold for Damage');
+  const done = settle.run(result.db, deposit, [25, 'Damage']).db;
+  assertEntryCompany(assert, done, read(done, 'account.move', read(done, 'rental.deposit', id).settlement_move_id), branch.id);
+  const savedHold = applyDiff(order.db, diffDb(order.db, result.db), { isAdmin: true });
+  const saved = applyDiff(savedHold, diffDb(result.db, done), { isAdmin: true });
+  assert.equal(read(saved, 'rental.deposit', id).company_id, branch.id);
+  assertEntryCompany(assert, saved, read(saved, 'account.move', read(saved, 'rental.deposit', id).settlement_move_id), branch.id);
+});
 
 test('deposits reject missing records, nonpositive holds and invalid damage without changing the db', () => {
   const base = rental(seed());

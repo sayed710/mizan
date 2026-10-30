@@ -1,11 +1,12 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useEffect, useState } from 'react';
-import { models } from './models/index.js';
+import { models, targetOf } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { parseAmount } from './models/common.js';
+import { parseDistributionInput } from './analytic_distribution.js';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -42,9 +43,11 @@ export function display(db, field, value, rec = null) {
     case 'monetary': return money(value, currencyCode(db, rec));
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
-    case 'many2one': return read(db, field.relation, Number(value))?.name ?? '';
+    case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
+    case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
     case 'boolean': return value ? t('Yes') : '';
     case 'tags': return value.join(', ');
+    case 'distribution': return JSON.stringify(value);
     case 'binary': return value?.name ?? '';
     case 'date': return formatDate(value);
     case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -191,7 +194,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
                     ? display(db, f, l[k], record)
-                    : <FieldInput db={db} field={f} value={l[k]} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    : <FieldInput db={db} field={f} value={l[k]} record={l} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
               {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
@@ -221,6 +224,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
  */
 function NumberInput({ id, value, onChange, integer, ...rest }) {
   const [draft, setDraft] = useState(null);
+  const [prevValue, setPrevValue] = useState(value);
+  if (value !== prevValue) {
+    setPrevValue(value);
+    setDraft(null);
+  }
   const parsed = draft == null ? null : parseAmount(draft);
   const invalid = draft != null && draft.trim() !== '' && (Number.isNaN(parsed) || (integer && !Number.isInteger(parsed)));
   return (
@@ -232,6 +240,7 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
         const n = parseAmount(raw);
         if (raw.trim() === '') onChange(null);
         else if (!Number.isNaN(n) && (!integer || Number.isInteger(n))) onChange(n);
+        else onChange(NaN);
       }}
       onBlur={() => { if (!invalid) setDraft(null); }} />
   );
@@ -241,8 +250,49 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 export const isLabelable = (field, readonly) =>
   !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
 
+function DistributionInput({ value, onChange, ...props }) {
+  const [draft, setDraft] = useState(() => typeof value === 'string' ? value : JSON.stringify(value ?? {}));
+  useEffect(() => { if (!Number.isNaN(value)) setDraft(typeof value === 'string' ? value : JSON.stringify(value ?? {})); }, [value]);
+  return <textarea {...props} value={draft} onChange={(e) => {
+    const next = e.target.value;
+    setDraft(next);
+    onChange(parseDistributionInput(next));
+  }} />;
+}
+
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
+  if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
+    return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
+      const related = read(db, field.relation, valId);
+      return <span key={valId}>{i > 0 && ', '}<a href={`#/open/${field.relation}/${valId}`}>{related?.display_name ?? related?.name ?? `#${valId}`}</a></span>;
+    })}</span>;
+  }
+  if (field.type === 'many2many') {
+    const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
+    const locked = readonly || field.readonly || field.compute;
+    const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
+    const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record)));
+    return (
+      <div className="many2many-tags">
+        {ids.map((item) => {
+          const related = read(db, field.relation, item);
+          const name = related?.display_name ?? related?.name ?? `#${item}`;
+          return <span key={item} className="tag">
+            {target !== '#/' && related ? <a href={`${target}/${item}`} className="tag-link">{name}</a> : name}
+            {!locked && <button type="button" aria-label={`${t('Remove')} ${name}`} onClick={() => onChange(ids.filter((i) => i !== item))}>×</button>}
+          </span>;
+        })}
+        {!locked && <select id={id} aria-label={label} aria-required={field.required || undefined} value="" onChange={(e) => {
+          const selected = Number(e.target.value);
+          if (candidates.some((candidate) => candidate.id === selected)) onChange([...ids, selected]);
+        }}>
+          <option value="">{t('Add')}</option>
+          {candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.display_name ?? candidate.name ?? `#${candidate.id}`}</option>)}
+        </select>}
+      </div>
+    );
+  }
   if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
@@ -250,6 +300,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
+    case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':
@@ -260,6 +311,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
     case 'selection':
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+          {!field.required && <option value="" />}
           {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
@@ -267,7 +319,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
-          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;

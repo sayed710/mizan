@@ -1,5 +1,8 @@
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
+import { postCompanyDeferrals } from './deferred.js';
+import { today } from './common.js';
+import { ensureReturnTypes } from './taxreturn.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -8,7 +11,7 @@ import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.j
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'stock.picking', 'stock.quant', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };
@@ -26,9 +29,12 @@ export function setCompanies(db, { current, allowed }) {
   return updateSettings(db, { current_company_id: current, allowed_company_ids: ids });
 }
 
+// Configuration is shared even when older ORM versions stamped it with company 1.
+const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
+  'account.incoterm', 'account.account.tag', 'account.asset.model']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
-  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type']);
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
 
@@ -41,9 +47,96 @@ export function visibleTo(companies, model, r, db = null) {
   if (!companies) return true;
   if (model === 'res.company') return companies.has(r?.id);
   if (GROUP_WIDE.has(model)) return false;
+  if (CONFIG_MODELS.has(model)) return true;
   if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
   if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
   return companies.has(r.company_id);
+}
+
+export const NESTED_COMPANY_FIELDS = {
+  'account.journal': ['secure_chain_heads'],
+  'res.partner': ['followup_lines'],
+  'consolidation.chart': ['company_ids'],
+  'consolidation.period': ['rate_ids'],
+};
+
+/**
+ * Scopes nested per-company arrays within a record:
+ * - When reading (write=false): filters nested arrays to only entries belonging to allowed companies.
+ * - When writing (write=true): rejects writes that include entries for foreign companies, and preserves hidden entries from `prior`.
+ */
+export function scopeNestedCompanyArrays(model, rec, companies, { prior = null, submitted = null, write = false } = {}) {
+  const fields = NESTED_COMPANY_FIELDS[model];
+  if (!companies || !fields || !rec) return rec;
+
+  if (write) {
+    const checkSource = submitted ?? rec;
+    for (const field of fields) {
+      if (submitted && !(field in submitted)) continue;
+      const lines = checkSource[field];
+      if (Array.isArray(lines)) {
+        for (const line of lines) {
+          if (line && line.company_id != null && !companies.has(line.company_id)) {
+            throw new Error(`No access to this company's ${model} records`);
+          }
+        }
+      }
+    }
+
+    if (prior) {
+      for (const field of fields) {
+        if (Array.isArray(prior[field])) {
+          const hidden = prior[field].filter((line) => line?.company_id != null && !companies.has(line.company_id));
+          if (hidden.length) {
+            const userLines = Array.isArray(rec[field])
+              ? rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id))
+              : (prior[field] ?? []).filter((line) => line?.company_id != null && companies.has(line.company_id));
+            rec[field] = [...hidden, ...userLines];
+          }
+        }
+      }
+    }
+    return rec;
+  }
+
+  let modified = false;
+  const out = { ...rec };
+  for (const field of fields) {
+    if (Array.isArray(rec[field])) {
+      out[field] = rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id));
+      modified = true;
+    }
+  }
+  return modified ? out : rec;
+}
+
+/**
+ * Scopes an audit entry's changes dictionary: filters nested per-company arrays in old and new values.
+ */
+export function scopeAuditChanges(model, changes, companies) {
+  if (!companies || !NESTED_COMPANY_FIELDS[model] || !changes) return changes;
+  const oldVals = {};
+  const newVals = {};
+  for (const [k, v] of Object.entries(changes)) {
+    if (Array.isArray(v) && v.length === 2) {
+      oldVals[k] = v[0];
+      newVals[k] = v[1];
+    }
+  }
+  const scopedOld = scopeNestedCompanyArrays(model, oldVals, companies);
+  const scopedNew = scopeNestedCompanyArrays(model, newVals, companies);
+  const out = {};
+  for (const [k, v] of Object.entries(changes)) {
+    if (Array.isArray(v) && v.length === 2) {
+      out[k] = [
+        scopedOld[k] === undefined ? null : scopedOld[k],
+        scopedNew[k] === undefined ? null : scopedNew[k],
+      ];
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 /** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */
@@ -52,7 +145,10 @@ export function restrictRecords(db, companies) {
   const records = {};
   const hidden = new Set();
   for (const [model, list] of Object.entries(db.records)) {
-    records[model] = list.filter((r) => visibleTo(companies, model, r, db));
+    const filtered = list
+      .filter((r) => visibleTo(companies, model, r, db))
+      .map((r) => scopeNestedCompanyArrays(model, r, companies));
+    records[model] = filtered;
     if (records[model].length < list.length) list.filter((r) => !visibleTo(companies, model, r, db)).forEach((r) => hidden.add(`${model}:${r.id}`));
   }
   return { records, hidden };
@@ -96,6 +192,7 @@ export function withCompany(models) {
 }
 
 function companyGuard(db, before, r) {
+  if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);
@@ -106,6 +203,10 @@ function companyGuard(db, before, r) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  if (r.down_payment_account_id) {
+    const account = record(db, 'account.account', r.down_payment_account_id);
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
+  }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
   return null;
@@ -121,9 +222,11 @@ export function createCompany(db, vals) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
-    return create(next, 'res.company', { ...values, partner_id: partner.id });
+    const res = create(next, 'res.company', { ...values, partner_id: partner.id });
+    return { ...res, db: ensureReturnTypes(res.db) };
   }
-  return create(next, 'res.company', values);
+  const res = create(next, 'res.company', values);
+  return { ...res, db: ensureReturnTypes(res.db) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -133,17 +236,21 @@ export function createForCompany(db, model, vals) {
 
 /** Initialize the demo's main company once; call after seed to preserve existing IDs. */
 export function ensureMainCompany(db) {
-  if (record(db, 'res.company', 1)) return db;
+  if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const code = db.settings?.currency ?? 'USD';
   const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
   const base = currency ? { db, id: currency.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
-  return createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  return ensureReturnTypes(created);
 }
 
 /** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */
 export function renameCompany(db, companyId, name) {
-  const next = write(db, 'res.company', companyId, { name });
+  const company = read(db, 'res.company', companyId);
+  const partner = read(db, 'res.partner', company?.partner_id);
+  let next = write(db, 'res.company', companyId, { name });
+  if (partner?.name === company.name) next = write(next, 'res.partner', partner.id, { name });
   return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
 }
 
@@ -205,20 +312,37 @@ export const companyModels = {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
+      deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
+      deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
+      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual']] },
+      income_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Gain Account' },
+      expense_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Loss Account' },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
+      hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
       logo: { type: 'text', label: 'Logo' }, active: { type: 'boolean', label: 'Active' },
       intercompany_rule: { type: 'selection', label: 'Inter-Company Rule', options: [['none', 'None'], ['sale_purchase', 'Create Purchase from Sale']] },
+      tax_periodicity: { type: 'selection', label: 'Tax Periodicity', options: [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']] },
+      tax_start_date: { type: 'date', label: 'Tax Period Start' },
     },
-    defaults: () => ({ active: true, intercompany_rule: 'none' }),
+    defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly' }),
     guard: companyGuard,
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
     form: {
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'active'], ['email', 'phone', 'vat'], ['street', 'city', 'country']],
+      buttons: [{ label: 'Generate Company Deferrals', wizard: () => ({ title: 'Generate Company Deferrals', fields: [
+        { name: 'date', type: 'date', label: 'Period End Date', required: true, default: today() },
+      ] }), run: (db, r, values = {}) => {
+        const date = values.date;
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
+        return { db: postCompanyDeferrals(db, r.id, date) };
+      } }],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

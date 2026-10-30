@@ -1,9 +1,9 @@
 // Warehouse routes reuse transfer validation and boundary valuation.
-import { create, read, search, write } from '../orm.js';
+import { create, getActiveCompany, read, search, write } from '../orm.js';
 import { salesModels } from './sales.js';
 import { reservePicking, validatePicking } from './picking.js';
 import { canValidatePicking } from './qualityplus.js';
-import { locationStock } from './routes.js';
+import { locationStock, routeAction } from './routes.js';
 import { lineToStockQty } from './uom.js';
 import { pad } from './common.js';
 import { transferQuants } from './quant.js';
@@ -24,25 +24,30 @@ const warehouse = (db, id) => {
 export function ensureWarehouseLocations(db, warehouseId) {
   const wh = warehouse(db, warehouseId);
   let next = db;
-  let root = search(next, 'stock.location').find((l) => l.name === wh.code && l.usage === 'view');
+  const company = wh.company_id ?? 1;
+  let root = (next.records['stock.location'] ?? []).find((l) => l.name === wh.code && l.usage === 'view' && (l.company_id ?? 1) === company);
   if (!root) {
-    const res = create(next, 'stock.location', { name: wh.code, usage: 'view' });
+    const res = create(next, 'stock.location', { name: wh.code, usage: 'view', company_id: company });
     next = res.db;
     root = read(next, 'stock.location', res.id);
   }
   const vals = {};
   for (const [field, label] of locations) {
     const existing = wh[field] && read(next, 'stock.location', wh[field]);
-    if (existing) continue;
-    let loc = search(next, 'stock.location').find((l) => l.name === `${wh.code}/${label}` && l.parent_id === root.id && l.usage === 'internal');
+    if (existing) {
+      if (existing.usage !== 'internal' || (existing.company_id ?? 1) !== company) throw new Error('Warehouse location must be internal and belong to the same company');
+      continue;
+    }
+    if (wh[field]) throw new Error('Select an existing warehouse location in the same company');
+    let loc = (next.records['stock.location'] ?? []).find((l) => l.name === `${wh.code}/${label}` && l.parent_id === root.id && l.usage === 'internal' && (l.company_id ?? 1) === company);
     if (!loc) {
-      const res = create(next, 'stock.location', { name: `${wh.code}/${label}`, parent_id: root.id, usage: 'internal' });
+      const res = create(next, 'stock.location', { name: `${wh.code}/${label}`, parent_id: root.id, usage: 'internal', company_id: company });
       next = res.db;
       loc = read(next, 'stock.location', res.id);
     }
     vals[field] = loc.id;
   }
-  return ensureExternalLocations(Object.keys(vals).length ? write(next, 'stock.warehouse', wh.id, vals) : next);
+  return ensureExternalLocations(Object.keys(vals).length ? write(next, 'stock.warehouse', wh.id, vals) : next, company);
 }
 
 /** Ensure the main WH warehouse and its locations exist without changing legacy stock. */
@@ -52,8 +57,8 @@ export function ensureMainWarehouse(db) {
   return ensureWarehouseLocations(res.db, res.id);
 }
 
-function external(db, name) {
-  return search(db, 'stock.location').find((l) => l.name === name && l.usage === 'view')?.id;
+function external(db, name, company) {
+  return (db.records['stock.location'] ?? []).find((l) => l.name === name && l.usage === 'view' && (l.company_id ?? 1) === company)?.id;
 }
 
 function checkLines(db, lines) {
@@ -70,12 +75,13 @@ export function planTransfers(db, warehouseId, type, lines) {
   if (wh.active === false) throw new Error('This warehouse is archived');
   checkLines(db, lines);
   let path;
+  const company = wh.company_id ?? 1;
   if (type === 'incoming') {
-    path = [external(db, 'Vendors'), ...(wh.reception_steps === 'one_step' ? [] : [wh.wh_input_stock_loc_id]),
+    path = [external(db, 'Vendors', company), ...(wh.reception_steps === 'one_step' ? [] : [wh.wh_input_stock_loc_id]),
       ...(wh.reception_steps === 'three_steps' ? [wh.wh_qc_stock_loc_id] : []), wh.lot_stock_id];
   } else if (type === 'outgoing') {
     path = [wh.lot_stock_id, ...(wh.delivery_steps === 'pick_pack_ship' ? [wh.wh_pack_stock_loc_id] : []),
-      ...(wh.delivery_steps === 'ship_only' ? [] : [wh.wh_output_stock_loc_id]), external(db, 'Customers')];
+      ...(wh.delivery_steps === 'ship_only' ? [] : [wh.wh_output_stock_loc_id]), external(db, 'Customers', company)];
   } else throw new Error('Select a receipt or delivery route');
   if (path.some((id) => !id)) throw new Error('Initialize the warehouse and external locations first');
   return path.slice(1).map((location_dest_id, i) => ({
@@ -85,9 +91,9 @@ export function planTransfers(db, warehouseId, type, lines) {
   }));
 }
 
-function ensureExternalLocations(db) {
-  return ['Vendors', 'Customers'].reduce((next, name) => external(next, name) ? next
-    : create(next, 'stock.location', { name, usage: 'view' }).db, db);
+function ensureExternalLocations(db, company) {
+  return ['Vendors', 'Customers'].reduce((next, name) => external(next, name, company) ? next
+    : create(next, 'stock.location', { name, usage: 'view', company_id: company }).db, db);
 }
 
 function createChain(db, specs, vals, predecessor = null) {
@@ -99,7 +105,7 @@ function createChain(db, specs, vals, predecessor = null) {
       state: previous ? 'waiting' : 'ready', move_orig_picking_id: previous,
     });
     // A first-step delivery is ready only when its stock is free; otherwise it waits for availability.
-    next = !previous && spec.picking_type === 'outgoing' ? reservePicking(res.db, read(res.db, 'stock.picking', res.id)) : res.db;
+    next = !previous && ['outgoing', 'internal'].includes(spec.picking_type) ? reservePicking(res.db, read(res.db, 'stock.picking', res.id)) : res.db;
     previous = res.id;
   }
   return next;
@@ -116,10 +122,18 @@ export function createOrderTransfers(db, { type, partner_id, origin, lines, link
     return ix >= 0 ? { so_line: ix } : {};
   };
   const moves = (lines ?? []).filter((l) => read(db, 'product', l.product_id)?.type === 'goods')
-    .map((l) => ({ product_id: l.product_id, qty: lineToStockQty(db, l, read(db, 'product', l.product_id)), ...lineOf(l) }));
+    .map((l) => {
+      const product = read(db, 'product', l.product_id);
+      const route = type === 'outgoing' && order ? routeAction(db, product, l) : 'stock';
+      return { product_id: l.product_id, qty: lineToStockQty(db, l, product), ...(route !== 'stock' || (product.route && product.route !== 'stock') ? { procurement_route: route } : {}), ...lineOf(l) };
+    });
   if (!moves.length) return db;
-  const id = warehouse_id ?? order?.warehouse_id ?? (db.records['stock.warehouse'] ?? []).find((w) => w.code === 'WH' && w.active !== false)?.id;
-  const vals = { partner_id, origin, carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...link };
+  const company = order?.company_id ?? (warehouse_id ? warehouse(db, warehouse_id).company_id : null) ?? getActiveCompany() ?? 1;
+  const linkedSale = order?.sale_id && read(db, 'sale.order', order.sale_id);
+  const eligible = (db.records['stock.warehouse'] ?? []).filter((w) => (w.company_id ?? 1) === company && w.active !== false);
+  const id = warehouse_id ?? order?.warehouse_id ?? linkedSale?.warehouse_id ?? (eligible.find((w) => w.code === 'WH') || eligible[0])?.id;
+  if (id && (warehouse(db, id).company_id ?? 1) !== company) throw new Error('Select a warehouse in the order company');
+  const vals = { partner_id, origin, carrier_id, ...(scheduled_date ? { scheduled_date } : {}), ...(order?.company_id || company !== 1 ? { company_id: company } : {}), ...link };
   if (!id) {
     const res = create(db, 'stock.picking', { ...vals, picking_type: type, move_ids: moves, state: 'ready' });
     return type === 'outgoing' ? reservePicking(res.db, read(res.db, 'stock.picking', res.id)) : res.db;
@@ -167,7 +181,7 @@ export function validateWarehousePicking(db, picking) {
     const specs = suffix.map((p) => ({ warehouse_id: p.warehouse_id, location_id: p.location_id, location_dest_id: p.location_dest_id,
       picking_type: p.picking_type, move_ids: bo.move_ids.map((l) => ({ ...l })) }));
     next = createChain(next, specs, { partner_id: r.partner_id, origin: r.origin, sale_id: r.sale_id, purchase_id: r.purchase_id,
-      carrier_id: r.carrier_id, scheduled_date: r.scheduled_date }, bo.id);
+      carrier_id: r.carrier_id, scheduled_date: r.scheduled_date, company_id: r.company_id ?? 1 }, bo.id);
   }
   return next;
 }

@@ -32,12 +32,16 @@ const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) &&
 export const demoPaymentsAllowed = (env = process.env) => env.MIZAN_DEMO_PAYMENTS === '1' && env.NODE_ENV !== 'production';
 const enabledProviders = (db) => search(db, 'payment.provider').filter((p) => p.state === 'enabled' && (p.code !== 'demo' || demoPaymentsAllowed()));
 const selectablePricelists = (db) => search(db, 'product.pricelist').filter((p) => p.selectable);
+export const websiteCompany = (db) => read(db, 'res.company', 1) ?? search(db, 'res.company')[0];
 
 /** Public website content: only published pages and sellable products (no internal fields). */
-export const publicSite = (db, canAccess = () => false) => ({
-  company: db.settings?.company,
-  currency: db.settings?.currency ?? 'USD',
-  pages: search(db, 'website.page').filter((p) => {
+export const publicSite = (db, canAccess = () => false) => {
+  const company = websiteCompany(db);
+  const currency = company?.currency_id ? (read(db, 'res.currency', company.currency_id)?.name ?? db.settings?.currency ?? 'USD') : (db.settings?.currency ?? 'USD');
+  return {
+    company: company?.name ?? db.settings?.company,
+    currency,
+    pages: search(db, 'website.page').filter((p) => {
     const access = resolveUrl(db, p.slug);
     return access?.page || ((access?.needsPassword || access?.needsLogin) && canAccess(p));
   }).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
@@ -60,7 +64,8 @@ export const publicSite = (db, canAccess = () => false) => ({
     staff: (a.staff_ids ?? []).map((l) => read(db, 'hr.employee', l.employee_id)).filter(Boolean).map((e) => ({ id: e.id, name: e.name, avatar: safeImage(e.image) })),
     questions: (a.questions ?? []).filter((q) => q.label).map((q) => ({ label: q.label, required: !!q.required })),
   })),
-});
+  };
+};
 
 /** A real YYYY-MM-DD day (rejects 2099-02-31). */
 const isCalendarDate = (s) => {
@@ -314,7 +319,6 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) });
   const visible = (r) => r && visibleTo(companies, model, r, db);
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
-  const seen = companies ? { ...db, records: restrictRecords(db, companies).records } : db;
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {
@@ -322,6 +326,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
+      const seen = companies && terms.length ? { ...db, records: restrictRecords(db, companies).records } : db;
       const all = search(db, model).filter((r) => visible(r) && matches(seen, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }

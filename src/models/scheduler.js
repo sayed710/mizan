@@ -48,7 +48,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
       .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
-    ['inventory', (db) => replenish(db)],
+    ['inventory', (db, at) => replenish(db, at)],
     ['accounting', runFollowUps],
     ['accounting', (db) => autoReconcile(db)],
     ['automation', tolerant(processDue)],

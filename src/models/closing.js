@@ -4,6 +4,7 @@ import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { round } from '../money.js';
+import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
@@ -11,10 +12,10 @@ const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.te
 const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
 const side = (amount) => ({ debit: Math.max(0, round(amount)), credit: Math.max(0, round(-amount)) });
 
-function ensureAccount(db, code, name, type) {
-  const account = read(db, 'account.account', accountId(db, code));
+function ensureAccount(db, code, name, type, company = null) {
+  const account = read(db, 'account.account', accountId(db, code, company));
   if (account && account.account_type !== type) throw new Error(`${code} must be an ${type} account`);
-  return account ? db : create(db, 'account.account', { code, name, account_type: type }).db;
+  return account ? db : create(db, 'account.account', { code, name, account_type: type, ...(company ? { company_id: company } : {}) }).db;
 }
 
 const sameLines = (a, b) => a.length === b.length && a.every((l, i) => l.account_id === b[i].account_id && round(l.debit) === round(b[i].credit) && round(l.credit) === round(b[i].debit));
@@ -154,43 +155,70 @@ export function unrealizedExchange(db, date) {
   checkDate(date);
   return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice'].includes(m.move_type)
     && m.invoice_date <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
-    const payments = m.payments ?? [];
-    const untrackedPaid = Math.max(0, round((Number(m.amount_paid) || 0) - payments.reduce((s, p) => s + p.amount, 0)));
-    const paid = payments.filter((p) => p.date <= date);
-    const residual = round(m.amount_total - untrackedPaid - paid.reduce((s, p) => s + p.amount, 0));
+    const allocations = settlementCompanyAllocations(db, m);
+    const activePaid = round(allocations.filter(({ row }) => !row.reversed).reduce((s, { row }) => s + (Number(row.amount) || 0), 0));
+    if (round(Number(m.amount_paid) || 0) !== activePaid) throw new Error(`Invoice ${m.name || m.id} has payments not explained by settlement allocations`);
+    const paid = allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, date));
+    const paidForeign = round(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
+    const residual = round(m.amount_total - paidForeign);
     if (residual <= 0) return [];
-    const account = m.move_type === 'out_invoice' ? '121000' : '211000';
-    const sign = m.move_type === 'out_invoice' ? 1 : -1;
-    const original = (m.line_ids ?? []).filter((l) => l.account_id === accountId(db, account))
+    const accountType = m.move_type === 'out_invoice' ? 'asset_receivable' : 'liability_payable';
+    const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+    const ids = [...new Set(counterpart.map((l) => l.account_id))];
+    if (ids.length !== 1) throw new Error(`Invoice ${m.name || m.id} must have one ${accountType} account`);
+    const account_id = ids[0];
+    const account = read(db, 'account.account', account_id).code;
+    const sign = accountType === 'liability_payable' ? -1 : 1;
+    const original = counterpart
       .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
-    const booked = round(original - toCompany(db, m.currency_id, untrackedPaid, m.invoice_date, m.company_id)
-      - paid.reduce((s, p) => s + toCompany(db, m.currency_id, p.amount, m.invoice_date, m.company_id), 0));
+    const paidBooked = round(paid.reduce((s, a) => s + a.value, 0));
+    const booked = round(original - paidBooked);
     const value = toCompany(db, m.currency_id, residual, date, m.company_id);
-    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, residual, booked, value, difference: round(value - booked) }];
+    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, account_id, residual, booked, value, difference: round(value - booked) }];
   });
+}
+
+/** Foreign bank positions are reconstructed from posted journal items, grouped by account and currency. */
+function foreignBankBalances(db, date) {
+  const groups = new Map();
+  for (const move of search(db, 'account.move')) {
+    if (move.state !== 'posted' || move.invoice_date > date) continue;
+    const company = move.company_id ?? 1;
+    for (const line of move.line_ids ?? []) {
+      if (!line.currency_id || line.currency_id === companyCurrency(db, company)
+        || read(db, 'account.account', line.account_id)?.account_type !== 'asset_cash') continue;
+      const key = `${company}:${line.account_id}:${line.currency_id}`;
+      const row = groups.get(key) ?? { company_id: company, account_id: line.account_id, currency_id: line.currency_id, foreign: 0, booked: 0 };
+      row.foreign = round(row.foreign + (Number(line.amount_currency) || 0));
+      row.booked = round(row.booked + (Number(line.debit) || 0) - (Number(line.credit) || 0));
+      groups.set(key, row);
+    }
+  }
+  return [...groups.values()].map((row) => ({ ...row, difference: round(toCompany(db, row.currency_id, row.foreign, date, row.company_id) - row.booked) }));
 }
 
 /** Post one exchange adjustment and its next-day reversal, once per date. */
 export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100' } = {}) {
   checkDate(date);
-  const rows = unrealizedExchange(db, date).filter((r) => r.difference);
+  const rows = [...unrealizedExchange(db, date), ...foreignBankBalances(db, date)].filter((r) => r.difference);
   let next = db;
   // Each company adjusts its own books, so rows are grouped by company and posted with that company.
   for (const company of [...new Set(rows.map((r) => r.company_id))]) {
     const ref = `Foreign currency revaluation: ${date}`;
-    if (search(next, 'account.move').some((m) => (m.company_id ?? 1) === company && (m.revaluation_date === date || m.ref === ref) && m.state === 'posted')) continue;
-    next = ensureAccount(next, gainCode, 'Foreign Exchange Gain', 'income_other');
-    next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other');
+    if (search(next, 'account.move').some((m) => (m.company_id ?? 1) === company && m.revaluation_date === date && m.state === 'posted')) continue;
+    const settings = read(next, 'res.company', company);
+    if (!settings?.income_currency_exchange_account_id) next = ensureAccount(next, gainCode, 'Foreign Exchange Gain', 'income_other', company);
+    if (!settings?.expense_currency_exchange_account_id) next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other', company);
     let gain = 0;
     let loss = 0;
     const lines = rows.filter((r) => r.company_id === company).map((r) => {
-      const amount = round(r.difference * (r.account === '121000' ? 1 : -1));
+      const amount = round(r.difference * (read(next, 'account.account', r.account_id)?.account_type === 'liability_payable' ? -1 : 1));
       if (amount > 0) gain = round(gain + amount);
       else loss = round(loss - amount);
-      return { account: r.account, partner_id: r.partner_id, ...side(amount) };
+      return { account_id: r.account_id, partner_id: r.partner_id, ...side(amount) };
     });
-    if (gain) lines.push({ account: gainCode, credit: gain });
-    if (loss) lines.push({ account: lossCode, debit: loss });
+    if (gain) lines.push({ account: settings?.income_currency_exchange_account_id || gainCode, credit: gain });
+    if (loss) lines.push({ account: settings?.expense_currency_exchange_account_id || lossCode, debit: loss });
     const entry = postEntry(next, { journal: 'MISC', date, ref, lines, company });
     const reversal = postEntry(entry.db, {
       journal: 'MISC', date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,

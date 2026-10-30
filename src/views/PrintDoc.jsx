@@ -32,7 +32,7 @@ function PaymentQr({ db, company, move }) {
 
 // Document layouts per model: which fields form the header block and which one2many holds the lines.
 const LAYOUTS = {
-  'account.move': { title: (r) => t(models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'invoice_origin', 'payment_reference'], totals: ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] },
+  'account.move': { title: (r) => t(models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] },
   'sale.order': { title: (r) => t(r.state === 'sale' ? 'Sales Order' : 'Quotation'), lines: 'order_line', info: ['date_order', 'validity_date', 'user'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'purchase.order': { title: (r) => t(r.state === 'purchase' ? 'Purchase Order' : 'Request for Quotation'), lines: 'order_line', info: ['date_order', 'date_planned'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
@@ -48,7 +48,7 @@ function Checks({ db, batch }) {
         <button type="button" className="btn primary" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
-      {(batch.lines ?? []).map((l) => {
+      {(batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id && read(db, 'account.payment', l.payment_id)?.state === 'posted').map((l) => {
         const move = read(db, 'account.move', l.move_id);
         return (
           <article key={l.check_number ?? l.move_id} className="paper check">

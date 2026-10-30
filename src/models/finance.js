@@ -1,12 +1,15 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
+import { installments } from './terms.js';
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { today } from './common.js';
-import { accountId, isBalanced, journalItems } from './ledger.js';
+import { accountId, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
-import { companySum } from './money.js';
+import { TRANSITION } from './taxes.js';
+import { companySum, unratedCount } from './money.js';
 import { round } from '../money.js';
+import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 
-const accountByCode = (db, code) => (db.records['account.account'] ?? []).find((a) => a.code === code);
+export { applicationEffectiveDate };
 
 /** Open receivable (posted, unpaid invoices) of a partner. */
 export const receivableOf = (db, partnerId) => round(search(db, 'account.move')
@@ -22,10 +25,12 @@ export function checkCreditLimit(db, partnerId, amount) {
   if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
 }
 
-const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'active'];
+const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
+/** Hashed fields that can never change once an entry receives an inalterability hash. */
+const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
-const moveDate = (m) => m?.invoice_date ?? m?.date ?? today();
+export const moveDate = (m) => (m?.move_type === 'entry' && m?.date ? m.date : m?.invoice_date ?? m?.date ?? today());
 /** Archiving hides a record from every report, so `active` counts as changed only between kept and archived. */
 const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : r?.[k]);
 const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
@@ -55,8 +60,20 @@ export function lockDateFor(settings = {}, move = {}) {
   return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
 }
 
+const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
+/** Tax locks apply only to entries carrying tax information or touching a tax account. */
+function taxLockFor(db, move, settings = db.settings) {
+  if (!move || !settings?.tax_lock_date) return '';
+  const accounts = taxAccounts(db, move.company_id);
+  const ids = new Set([...accounts.sale, ...accounts.purchase,
+    accountId(db, TRANSITION.sale, move.company_id), accountId(db, TRANSITION.purchase, move.company_id)]);
+  const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
+    || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
+  return taxable ? settings.tax_lock_date : '';
+}
+
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
-const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && l.move_id === id);
+const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id));
 
 /**
  * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown
@@ -78,13 +95,17 @@ export function accountDeleteGuard(db, account, pending = db) {
 }
 
 /** What a posted entry keeps until it is reset to draft. */
-const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'active'];
+const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'invoice_date', 'invoice_date_due', 'date', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
-function postedMoveRule(before, after) {
+function postedMoveRule(db, before, after) {
   if (before?.state === 'posted' && after.state === 'posted' && changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
   if (before?.state === 'posted' && after.state !== 'posted') {
-    if (after.state !== 'draft') return 'Posted entries go back to draft before anything else';
+    // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.
+    const ret = before.tax_return_id && read(db, 'account.return', before.tax_return_id);
+    const closingReset = after.state === 'cancel' && ret?.state === 'new' && (ret.closing_move_ids ?? []).includes(before.id)
+      && !changedFields(before, after, [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => key !== 'state'));
+    if (after.state !== 'draft' && !closingReset) return 'Posted entries go back to draft before anything else';
     if (Number(before.amount_paid) > 0 || Number(after.amount_paid) > 0) return 'Paid entries cannot be reset to draft';
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
@@ -97,29 +118,46 @@ function postedMoveRule(before, after) {
   return null;
 }
 
-const settlementAccounts = (db) => [accountId(db, '121000'), accountId(db, '211000')];
 /** Whether invoice `inv` is settled by the credit (customer invoice, vendor refund) or the debit side of its partner's balance. */
 const settledByCredit = (inv) => !['in_invoice', 'out_refund'].includes(inv.move_type);
-/** In company currency; the lower of face value and the invoice-date rate, as payments from the payment form apply at face value. */
-const appliedValue = (db, inv, p) => Math.min(Number(p.amount) || 0, toCompany(db, inv.currency_id, p.amount, inv.invoice_date ?? p.date, inv.company_id));
+/** Derive settlement consumption from the document and booking dates, never from caller-supplied amounts. */
+export const appliedValue = (db, inv, p) => {
+  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
+  const source = read(db, 'account.move', p.move_id);
+  const date = source?.move_type !== 'entry' && source?.invoice_date ? source.invoice_date : payment && !payment.invoice_id ? p.date : (inv.invoice_date ?? p.date);
+  return toCompany(db, inv.currency_id, p.amount, date, inv.company_id);
+};
 
 /** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
 function settlementCapacity(db, entry, inv) {
   if (!entry || entry.state !== 'posted' || entry.id === inv.id || (entry.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+  const taxReturn = (db.records['account.return'] ?? []).find((r) => (r.closing_move_ids ?? []).includes(inv.id) && ['submitted', 'paid'].includes(r.state));
+  if (taxReturn) {
+    const payment = (db.records['account.payment'] ?? []).find((p) => p.state === 'posted' && p.is_tax_payment && p.return_id === taxReturn.id && p.move_id === entry.id);
+    const settlement = (inv.payments ?? []).find((p) => p.move_id === entry.id && !p.reversed);
+    const closingLine = Number.isInteger(settlement?.line_index) ? inv.line_ids?.[settlement.line_index] : null;
+    if (!payment || !closingLine || closingLine.account_id !== payment.destination_account_id || closingLine.partner_id !== payment.partner_id
+      || (taxReturn.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+    const signed = round((Number(closingLine.credit) || 0) - (Number(closingLine.debit) || 0));
+    const paid = round((entry.line_ids ?? []).filter((line) => line.account_id === closingLine.account_id && line.partner_id === payment.partner_id)
+      .reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0));
+    if (!signed || Math.sign(signed) !== Math.sign(paid) || Math.sign(signed) !== Math.sign(Number(taxReturn.total_amount_to_pay))) return 0;
+    return Math.min(Math.abs(signed), Math.abs(paid));
+  }
   // A credit note and its original invoice settle each other through their opposite receivable/payable lines.
   const creditPair = (note, original) => note.reversed_entry_id === original.id
     && note.move_type === (original.move_type === 'out_invoice' ? 'out_refund' : original.move_type === 'in_invoice' ? 'in_refund' : null)
     && note.partner_id === original.partner_id && (note.currency_id ?? null) === (original.currency_id ?? null);
   if (entry.move_type !== 'entry' && !creditPair(entry, inv) && !creditPair(inv, entry)) return 0;
-  const accounts = settlementAccounts(db);
-  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && accounts.includes(l.account_id))
-    .reduce((s, l) => s + (Number(settledByCredit(inv) ? l.credit : l.debit) || 0), 0));
+  const account = accountId(db, ['in_invoice', 'in_refund'].includes(inv.move_type) ? '211000' : '121000', inv.company_id);
+  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
+    .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
 
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
-    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id));
+    || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
 }
 
 /**
@@ -139,16 +177,28 @@ export function moveInvariant(db, after, before) {
     const current = now[i];
     if (JSON.stringify(current) === JSON.stringify(p)) return false;
     if (p.reversed || !current?.reversed) return true;
-    const { reversed: flag, reversal_move_id: reversalId, ...original } = current;
+    const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
     const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
     const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
-    return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || entry.reversed_entry_id !== source.id
+    return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || (revDate && revDate !== entry.invoice_date) || (p.date && p.date > entry.invoice_date) || entry.reversed_entry_id !== source.id
       || JSON.stringify((source.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
       !== JSON.stringify((entry.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]));
   })) return 'Registered payments cannot be changed without a posted reversing journal entry';
   const added = now.slice(was.length);
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  if (!added.every((p) => p && Number(p.amount) > 0 && settlementCapacity(db, entries.get(p.move_id), after) > 0)) return 'Payments must point at a posted journal entry';
+  if (!added.every((p) => {
+    if (!p || !(Number(p.amount) > 0)) return false;
+    if (settlementCapacity(db, entries.get(p.move_id), after) > 0) return true;
+    const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.invoice_id === after.id && x.state === 'posted');
+    return payment && entries.get(p.move_id)?.state === 'posted' && p.company_amount === 0
+      && settlementCompanyAmount(db, { ...read(db, 'account.move', after.id), payments: was }, Number(p.amount)) === 0;
+  })) return 'Payments must point at a posted journal entry';
+  if (added.some((p) => !p.date || !/^\d{4}-\d{2}-\d{2}$/.test(p.date) || !Number.isFinite(Date.parse(p.date)) || new Date(p.date).toISOString().slice(0, 10) !== p.date)) return 'A valid payment application date is required';
+  if (added.some((p) => {
+    const source = entries.get(p.move_id);
+    const reversal = p.move_id && [...entries.values()].find((m) => m.state === 'posted' && m.move_type === 'entry' && m.reversed_entry_id === p.move_id);
+    return (source?.state === 'posted' && p.date && p.date < source.invoice_date) || (reversal && p.date > reversal.invoice_date);
+  })) return 'Payment application date must be after payment and before reversal';
   if (Math.abs(round(paidBefore - reversed.reduce((sum, p) => sum + Number(p.amount), 0) + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
   // One entry may settle several invoices (a payment applied oldest first), but never more than it booked.
   for (const moveId of new Set(added.map((p) => p.move_id))) {
@@ -156,7 +206,51 @@ export function moveInvariant(db, after, before) {
     // ponytail: a cent of slack for foreign-currency rounding on partial payments.
     if (used > settlementCapacity(db, entries.get(moveId), after) + 0.01) return 'A payment cannot settle more than its journal entry booked';
   }
+  if (added.some((p) => p.payment_company_amount != null && Math.abs(Number(p.payment_company_amount) - toCompany(db, after.currency_id, p.amount, p.date, after.company_id)) > 0.01)) return 'Payment company amount does not match the booked conversion';
+  for (const [index, p] of added.entries()) {
+    const prior = { ...read(db, 'account.move', after.id), payments: now.slice(0, was.length + index) };
+    const isTaxClosing = after.move_type === 'entry' && isReturnEntry(db, after);
+    const booked = isTaxClosing ? Number(p.amount) : settlementCompanyAmount(db, prior, Number(p.amount));
+    if (p.company_amount != null && (!Number.isFinite(Number(p.company_amount)) || Number(p.company_amount) !== booked)) return 'Settlement company amount does not match the invoice booking';
+    const error = isTaxClosing ? null : settlementFxError(db, after, p, booked);
+    if (error) return error;
+  }
   return null;
+}
+
+/** Validate the exclusive FX entry for a settlement, including legacy rows read during reversal. */
+export function settlementFxError(db, invoice, p, allocated) {
+  const moves = db.records['account.move'] ?? [];
+  const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && ['posted', 'reversed'].includes(x.state));
+  const cash = appliedValue(db, invoice, p);
+  const index = (invoice.payments ?? []).findIndex((row) => row === p || (row.move_id === p.move_id && row.payment_fx_move_id === p.payment_fx_move_id));
+  const earlier = index < 0 ? invoice.payments ?? [] : invoice.payments.slice(0, index);
+  const prior = { ...invoice, ...read(db, 'account.move', invoice.id), payments: earlier.map((row) => {
+    const reversalDate = read(db, 'account.move', row.reversal_move_id)?.invoice_date ?? row.reversal_date;
+    return row.reversed && reversalDate && reversalDate > p.date ? { ...row, reversed: false } : row;
+  }) };
+  const booked = allocated ?? settlementCompanyAmount(db, prior, Number(p.amount));
+  const difference = payment && !payment.invoice_id ? round((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1)) : 0;
+  if (!difference) return p.payment_fx_move_id ? 'An exchange entry is not required for this settlement' : null;
+  const fx = read(db, 'account.move', p.payment_fx_move_id);
+  const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
+  if (uses > 1) return 'Exchange entry is already used by another settlement';
+  const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+  const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === invoice.partner_id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  const offset = accountId(db, difference > 0 ? '450100' : '690100', invoice.company_id);
+  const lines = fx?.line_ids ?? [];
+  const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
+  const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  if (fx?.state !== 'posted' || fx.move_type !== 'entry' || fx.fx_payment_move_id !== p.move_id || fx.fx_invoice_id !== invoice.id || (fx.company_id ?? 1) !== (invoice.company_id ?? 1) || fx.invoice_date !== p.date || lines.length !== 2 || other.length !== 1 || round(net) !== round(difference) || round(otherNet) !== round(-difference)) return 'A dedicated posted exchange entry must match the settlement';
+  return null;
+}
+
+/** Validate a synchronized newly-created FX entry against its staged settlement. */
+export function fxProvenanceError(db, entry) {
+  const invoice = read(db, 'account.move', entry.fx_invoice_id);
+  const row = (invoice?.payments ?? []).find((p) => p.payment_fx_move_id === entry.id && p.move_id === entry.fx_payment_move_id);
+  if (!row) return 'Exchange provenance requires its settlement';
+  return settlementFxError(db, invoice, row);
 }
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
@@ -164,38 +258,70 @@ export function paymentInvariant(db, after) {
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
-  const accounts = settlementAccounts(db);
-  if (after.partner_id && !(entry.line_ids ?? []).some((l) => l.partner_id === after.partner_id && accounts.includes(l.account_id))) return 'The journal entry does not belong to this payment';
+  if (after.is_tax_payment || after.return_id) {
+    const ret = (db.records['account.return'] ?? []).find((r) => r.id === after.return_id && r.state === 'paid');
+    const closings = (ret?.closing_move_ids ?? []).map((id) => (db.records['account.move'] ?? []).find((m) => m.id === id));
+    if (!ret || !closings.some((closing) => closing && settlementCapacity(db, entry, closing) >= round(Number(after.amount) || 0))) return 'The tax payment must settle its closing entry';
+  } else {
+  if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
+  if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
+  const inbound = after.payment_type === 'inbound';
+  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
+  const net = (id) => round((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : round(Number(after.amount));
+  const bank = accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  const counterpart = (inbound ? -1 : 1) * net(account);
+  const document = invoice && read(db, 'account.move', invoice.id);
+  const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
+  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > 0.01
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > 0.01)) return 'The journal entry must book this payment amount and direction';
+  }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
 }
 
 /** Whether a fiscal year names this entry as its closing or reopening entry. */
 const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some((y) => y.closing_move_id === id || y.opening_move_id === id);
+const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 
 /** A closed fiscal year locks its period whoever closed it. */
 export function closedYearLock(db) {
   return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
 }
 
-export function moveGuard(db, before, after) {
-  return lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(before, after);
+function securedMoveRule(before, after) {
+  if (!before?.inalterable_hash) return null;
+  if (after.state !== 'posted') return 'Secured entries cannot be reset to draft or cancelled';
+  if (changedFields(before, after, HASHED_FIELDS)) return 'Secured entries cannot be modified';
+  return null;
 }
 
+export function moveGuard(db, before, after, ctx) {
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after);
+}
 
-function lockRule(db, before, after) {
+function lockRule(db, before, after, ctx) {
   if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
   if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
-  const lock = [...[before, after].filter(Boolean).map((m) => lockDateFor(db.settings, m)), yearLock].sort().at(-1);
-  if (!lock) return null;
-  const touchesLocked = (before && moveDate(before) <= lock) || (after.state === 'posted' && moveDate(after) <= lock);
-  if (!touchesLocked) return null;
+  const proposed = ctx?.settings?.tax_lock_date;
+  const current = db.settings?.tax_lock_date;
+  const remaining = (db.records?.['account.return'] ?? []).filter((r) => ['submitted', 'paid'].includes(r.state)).map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+  const validDate = typeof proposed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(proposed) && !Number.isNaN(Date.parse(proposed)) && new Date(proposed).toISOString().slice(0, 10) === proposed;
+  const lowered = current && (proposed === null || validDate) && (proposed ?? '') < current;
+  const taxSettings = lowered ? { ...db.settings, tax_lock_date: [proposed, remaining].filter(Boolean).sort().at(-1) ?? null } : db.settings;
+  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before, taxSettings), yearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after), taxLockFor(db, after, taxSettings), yearLock].sort().at(-1);
+  const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
+  const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
+  if (!beforeLocked && !afterLocked) return null;
+  const lock = [beforeLocked && beforeLock, afterLocked && afterLock].filter(Boolean).sort().at(-1);
   const changed = !before || changedFields(before, after, LOCKED_FIELDS)
-    || (before && moveDate(before) <= lock && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, lock));
+    || (beforeLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, beforeLock));
   return changed ? `The period up to ${lock} is locked` : null;
 }
 
@@ -204,7 +330,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [lockDateFor(db.settings, before), closedYearLock(db)].sort().at(-1);
+  const lock = before && [companyLockDate(db, before), taxLockFor(db, before), closedYearLock(db)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -221,46 +347,68 @@ export function lockedSettlementInvariant(db, after, before) {
  * lock they cannot change, and nothing new can be booked into the locked period.
  */
 export const datedLockGuard = (fields, booked) => (db, before, after) => {
-  const lock = lockDateFor(db.settings, {});
-  if (!lock) return null;
-  const inLock = (r) => r && booked(r) && String(r.date ?? today()) <= lock;
-  if (!inLock(before) && !inLock(after)) return null;
+  const locks = [before, after].filter((r) => r && booked(r))
+    .map((r) => ({ record: r, lock: companyLockDate(db, r) }))
+    .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
+    .map(({ lock }) => lock);
+  if (!locks.length) return null;
+  const lock = locks.sort().at(-1);
   return !before || changedFields(before, after, fields) ? `The period up to ${lock} is locked` : null;
 };
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
 export const datedLockDelete = (booked) => (db, r) => {
-  const lock = lockDateFor(db.settings, {});
+  const lock = companyLockDate(db, r);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
 /** With the audit trail on, numbered entries are kept forever (they can be cancelled, not deleted). */
 export function moveDeleteGuard(db, move, staged = db) {
+  if (move.inalterable_hash || staged?.inalterable_hash) return 'Secured entries with an inalterability hash cannot be deleted';
   // `staged` is the database as the change set leaves it: a year that starts naming this entry in the same set counts.
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
-  if (bookedByBank(db, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [lockDateFor(db.settings, move), closedYearLock(db)].sort().at(-1);
+  if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
+  if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
+  const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
-  if (backsSettlement(db, move.id)) return 'This entry records a payment; reverse the payment instead';
+  if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
 }
 
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
-function taxAccounts(db) {
-  const of = (use, code) => new Set([accountByCode(db, code)?.id, ...search(db, 'account.tax').filter((x) => x.type_tax_use === use).map((x) => x.account_id)].filter(Boolean));
+export function taxAccounts(db, companyId) {
+  const of = (use, code) => new Set([
+    accountId(db, code, companyId),
+    ...search(db, 'account.tax')
+      .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
+      .map((x) => x.account_id),
+  ].filter(Boolean));
   return { sale: of('sale', '251000'), purchase: of('purchase', '131000') };
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
-  const accounts = taxAccounts(db);
+  const accounts = taxAccounts(db, period?.company_id ?? period?.company);
+  const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  const transitions = new Set([accountId(db, TRANSITION.sale), accountId(db, TRANSITION.purchase)]);
   return journalItems(db, period).flatMap((l) => {
-    const side = accounts.sale.has(l.account_id) ? 'sale' : accounts.purchase.has(l.account_id) ? 'purchase' : null;
+    if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
+    const move = l.tax_name && moves.get(l.move_id);
+    const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
+    const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
+    // Untagged manual items on a shared tax account use their debit/credit direction.
+    const manualSide = sale && purchase ? (l.balance < 0 ? 'sale' : 'purchase') : sale ? 'sale' : purchase ? 'purchase' : null;
+    const side = l.tax_side || (!transitions.has(l.account_id) && documentSide) || manualSide;
     if (!side) return [];
     const balance = (Number(l.debit) || 0) - (Number(l.credit) || 0);
-    return [{ ...l, side, tax: side === 'sale' ? -balance : balance }];
+    // Invoice tax bases retain the signed document base; a refund reverses that sign.
+    // Zero-value items already carry the refund sign, as do zero-rated base lines.
+    const invoiceBase = documentSide && balance && !l.tax_zero
+      ? (Number(l.tax_base) || 0) * (move.move_type.endsWith('_refund') ? -1 : 1)
+      : null;
+    return [{ ...l, side, tax: l.tax_zero ? 0 : side === 'sale' ? -balance : balance, invoiceBase }];
   });
 }
 
@@ -271,6 +419,99 @@ export function taxReport(db, period) {
   const output = sum('sale');
   const input = sum('purchase');
   return { output, input, payable: round(output - input) };
+}
+
+
+export function validateTaxReturnPeriod(db, ret) {
+  // 1. Check for draft moves in the period
+  const drafts = search(db, 'account.move').filter(
+    (m) => m.state === 'draft'
+      && moveDate(m) >= ret.date_from
+      && moveDate(m) <= ret.date_to
+      && (!ret.company_id || (m.company_id ?? 1) === ret.company_id)
+  );
+  if (drafts.length > 0) {
+    throw new Error('Draft entries exist in the period; post or cancel them before reviewing');
+  }
+
+  // 2. Check for unbalanced tax accounts
+  const accounts = taxAccounts(db, ret.company_id);
+  const taxAccountIds = new Set([
+    ...accounts.sale,
+    ...accounts.purchase,
+  ].filter(Boolean));
+
+  const items = journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })
+    .filter((l) => taxAccountIds.has(l.account_id) && !l.is_closing && !l.is_tax_closing && !l.is_tax_payment);
+
+  if (items.some((l) => !l.tax_name)) {
+    throw new Error('Unbalanced tax account: untagged entry exists on tax account');
+  }
+
+  return taxReport(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id });
+}
+
+
+/** Calculate the closing from posted tax accounts and the return's payment configuration. */
+function taxClosingSpec(db, ret) {
+  const type = read(db, 'account.return.type', ret.type_id);
+  if (!type || (type.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
+  const report = validateTaxReturnPeriod(db, ret);
+  const accounts = taxAccounts(db, ret.company_id);
+  const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
+  const balances = new Map();
+  for (const line of journalItems(db, { from: ret.date_from, to: ret.date_to, company_id: ret.company_id })) {
+    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    if (taxIds.has(line.account_id)) balances.set(line.account_id, (balances.get(line.account_id) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0));
+  }
+  const lines = [];
+  let netClosed = 0;
+  for (const [id, raw] of balances) {
+    const balance = round(raw);
+    if (!balance) continue;
+    const account = read(db, 'account.account', id)?.code;
+    lines.push(balance > 0 ? { account, credit: balance } : { account, debit: -balance });
+    netClosed = round(netClosed - balance);
+  }
+  if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
+  const payable = (type.tax_payable_account_id && read(db, 'account.account', type.tax_payable_account_id)?.code) || '251000';
+  const receivable = (type.tax_receivable_account_id && read(db, 'account.account', type.tax_receivable_account_id)?.code) || '131000';
+  const partner = type.payment_partner_id || ret.payment_partner_id;
+  if (report.payable > 0) lines.push({ account: payable, credit: report.payable, partner_id: partner });
+  else if (report.payable < 0) lines.push({ account: receivable, debit: -report.payable, partner_id: partner });
+  if (!lines.length) lines.push({ account: payable, debit: 0, credit: 0 }, { account: receivable, debit: 0, credit: 0 });
+  return { lines, payable: report.payable };
+}
+
+/** Validate a submitted closing against its linked return and the posted ledger. */
+export function taxClosingMatchesReturn(db, ret) {
+  const ids = ret.closing_move_ids ?? [];
+  if (ids.length !== 1) return false;
+  const move = read(db, 'account.move', ids[0]);
+  if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
+    || move.date !== ret.date_to || move.invoice_date !== ret.date_to || (move.company_id ?? 1) !== (ret.company_id ?? 1)) return false;
+  // The candidate link may not yet be written on a local transition.
+  const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === ret.id ? ret : r) } };
+  try {
+    const spec = taxClosingSpec(staged, ret);
+    const expected = spec.lines.map((line) => {
+      const net = round((line.debit ?? 0) - (line.credit ?? 0));
+      return [accountId(db, line.account, ret.company_id), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
+    });
+    const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
+    return round(Number(ret.total_amount_to_pay) || 0) === spec.payable && JSON.stringify(actual) === JSON.stringify(expected);
+  } catch {
+    return false;
+  }
+}
+
+/** Construct and post only the validated closing of a reviewed return. */
+export function postTaxReturnClosing(db, returnId) {
+  const ret = read(db, 'account.return', returnId);
+  if (!ret || ret.state !== 'reviewed') throw new Error('A reviewed tax return is required for closing');
+  const { lines, payable } = taxClosingSpec(db, ret);
+  const entry = postEntry(db, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company: ret.company_id, tax_return_id: ret.id });
+  return { ...entry, payable };
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
@@ -285,23 +526,77 @@ export function taxesByTax(db, period = {}) {
     const name = l.tax_name || 'Untagged';
     const key = `${l.side}|${name}`;
     const row = rows.get(key) ?? { side: l.side, name, base: 0, tax: 0 };
-    rows.set(key, { ...row, base: round(row.base + Math.sign(l.tax) * (Number(l.tax_base) || 0)), tax: round(row.tax + l.tax) });
+    const base = l.invoiceBase ?? (l.tax_base_signed ? (Number(l.tax_base) || 0) : (l.tax ? Math.sign(l.tax) : 1) * (Number(l.tax_base) || 0));
+    rows.set(key, { ...row, base: round(row.base + base), tax: round(row.tax + l.tax) });
   }
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }
 
+/** Add the open installments of posted invoices and refunds. */
+function ageDocumentInstallments(db, kind, at, moves, add) {
+  const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
+  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
+    const payments = m.payments ?? [];
+    const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+    const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType)
+      .reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
+    const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
+    const allocations = settlementCompanyAllocations(db, m);
+    let paid = (m.payment_date && m.payment_date <= at ? round(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
+    const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
+    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date).sort((a, b) => a.date.localeCompare(b.date)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
+    let assigned = 0;
+    const dues = docDues.map((d, i) => {
+      const amount = i === docDues.length - 1 ? round(booked - assigned) : round(booked * d.amount / (Number(m.amount_total) || 1));
+      assigned = round(assigned + amount);
+      return { ...d, amount };
+    });
+    for (const due of dues) {
+      const applied = Math.min(paid, due.amount);
+      paid -= applied;
+      const open = round(due.amount - applied);
+      if (open <= 0) continue;
+      add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * open);
+    }
+  }
+}
+
+/** Add each payment's unallocated portion until it is applied or reversed. */
+function ageUnappliedCredits(db, kind, at, moves, add) {
+  for (const payment of search(db, 'account.payment')) {
+    if (!payment.move_id || !['posted', 'reversed'].includes(payment.state) || payment.date > at) continue;
+    if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
+    const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
+    const reversal = moves.find((m) => m.state === 'posted' && m.reversed_entry_id === payment.move_id && m.move_type === 'entry');
+    if (reversal && reversal.invoice_date <= at) continue;
+    const entry = read(db, 'account.move', payment.move_id);
+    const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+    const bookedCredit = (entry?.line_ids ?? []).filter((l) => l.partner_id === payment.partner_id && read(db, 'account.account', l.account_id)?.account_type === accountType)
+      .reduce((sum, l) => sum + (kind === 'receivable' ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0);
+    const applied = moves.reduce((sum, m) => {
+      return sum + (m.payments ?? []).filter((p) => p.move_id === payment.move_id && applicationActiveAt(db, p, m, at)).reduce((n, p) => n + appliedValue(db, m, p), 0);
+    }, 0);
+    const remaining = round(Math.abs(bookedCredit) - applied);
+    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining);
+  }
+}
+
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today()) {
-  const type = kind === 'receivable' ? 'out_invoice' : 'in_invoice';
   const rows = new Map();
-  for (const m of search(db, 'account.move').filter((x) => x.state === 'posted' && x.move_type === type && x.amount_residual > 0)) {
-    const days = Math.floor((new Date(at) - new Date(m.invoice_date_due ?? m.invoice_date)) / 864e5);
+  const add = (partner, date, amount) => {
+    const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
     const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
-    const row = rows.get(m.partner_id) ?? { partner_id: m.partner_id, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
-    row[bucket] = round(row[bucket] + m.amount_residual);
-    row.total = round(row.total + m.amount_residual);
-    rows.set(m.partner_id, row);
-  }
+    const row = rows.get(partner) ?? { partner_id: partner, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+    row[bucket] = round(row[bucket] + amount);
+    row.total = round(row.total + amount);
+    rows.set(partner, row);
+  };
+  const moves = search(db, 'account.move');
+  ageDocumentInstallments(db, kind, at, moves, add);
+  ageUnappliedCredits(db, kind, at, moves, add);
   return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
@@ -311,6 +606,7 @@ export function agedBalance(db, kind = 'receivable', at = today()) {
  */
 export function journalCards(db, at = today()) {
   const moves = search(db, 'account.move');
+  const companyByMove = new Map(moves.map((m) => [m.id, m.company_id]));
   const items = journalItems(db);
   // Draft invoices get their journal on posting, so they count on the default INV/BILL journal meanwhile.
   const draftJournal = (m) => (m.move_type === 'entry' ? null : ['in_invoice', 'in_refund'].includes(m.move_type) ? 'BILL' : 'INV');
@@ -320,13 +616,14 @@ export function journalCards(db, at = today()) {
       const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
         journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
-        unpaidAmount: companySum(db, unpaid, 'amount_residual'), late: unpaid.filter((m) => m.invoice_date_due < at).length,
+        unpaidAmount: companySum(db, unpaid, 'amount_residual', at), unratedCount: unratedCount(db, unpaid, at), late: unpaid.filter((m) => m.invoice_date_due < at).length,
       };
     }
     if (['bank', 'cash'].includes(j.type)) {
-      const balance = round(items.filter((l) => l.account_id === j.default_account_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+      const balances = items.filter((l) => l.account_id === j.default_account_id).map((l) => ({ company_id: companyByMove.get(l.move_id), balance: (Number(l.debit) || 0) - (Number(l.credit) || 0) }));
+      const balance = companySum(db, balances, 'balance', at);
       const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check') : [];
-      return { journal: j, kind: j.type, balance, toReconcile: toCheck.length, toReconcileAmount: round(toCheck.reduce((s, l) => s + (Number(l.amount) || 0), 0)) };
+      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...toCheck], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, toCheck, 'amount', at) };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
   });
@@ -340,6 +637,49 @@ export function followUps(db, at = today()) {
   return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
+// A shared contact can have invoices in several companies; never combine their private notes.
+export const followUpCompanies = (f) => {
+  const groups = new Map();
+  for (const invoice of f.invoices) {
+    const cId = invoice.company_id ?? 1;
+    if (!groups.has(cId)) groups.set(cId, []);
+    groups.get(cId).push(invoice);
+  }
+  return [...groups.entries()].map(([company_id, invoices]) => ({
+    ...f, company_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
+  }));
+};
+const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, company_id: f.company_id ?? f.invoices[0].company_id ?? 1 });
+
+/**
+ * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
+ * invoice is logged on the contact once (the contact remembers the last level sent).
+ */
+export function partnerFollowUp(partner, companyId = 1) {
+  if (!partner) return null;
+  const line = (partner.followup_lines ?? []).find((l) => l.company_id === companyId);
+  return line ?? null;
+}
+
+export function updatePartnerFollowUp(partner, companyId, vals) {
+  const existing = [...(partner.followup_lines ?? [])];
+  const idx = existing.findIndex((l) => l.company_id === companyId);
+  const current = idx >= 0 ? existing[idx] : null;
+  const updated = {
+    company_id: companyId,
+    followup_level_delay: vals.followup_level_delay !== undefined ? vals.followup_level_delay : current?.followup_level_delay ?? null,
+    followup_date: vals.followup_date !== undefined ? vals.followup_date : current?.followup_date ?? null,
+    followup_level: vals.followup_level !== undefined ? vals.followup_level : current?.followup_level ?? null,
+  };
+  if (idx >= 0) existing[idx] = updated;
+  else existing.push(updated);
+
+  return {
+    ...partner,
+    followup_lines: existing,
+  };
+}
+
 /**
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
@@ -348,21 +688,55 @@ export function runFollowUps(db, at = today()) {
   const levels = search(db, 'account.followup.level').sort((a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0));
   if (!levels.length) return db;
   const overdue = followUps(db, at);
-  // Customers who caught up start again from the first level next time.
-  const late = new Set(overdue.map((f) => f.partner_id));
+  const overdueGroups = overdue.flatMap(followUpCompanies);
+  const activeLate = new Set(overdueGroups.map((f) => `${f.partner_id}:${f.invoices[0].company_id ?? 1}`));
+
   const partners = new Map((db.records['res.partner'] ?? []).map((p) => [p.id, p]));
-  const updates = new Map(search(db, 'res.partner').filter((p) => p.followup_level_delay != null && !late.has(p.id))
-    .map((p) => [p.id, { followup_level_delay: null }]));
-  // Notes and level changes are collected, then written in one batch so the job stays linear in the data.
+  const partnerUpdates = new Map();
+
+  for (const partner of partners.values()) {
+    const lines = partner.followup_lines ?? [];
+    for (const line of lines) {
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null;
+      if (hasProgress && !activeLate.has(`${partner.id}:${line.company_id}`)) {
+        const current = partnerUpdates.get(partner.id) ?? partner;
+        partnerUpdates.set(partner.id, updatePartnerFollowUp(current, line.company_id, { followup_level_delay: null, followup_level: null, followup_date: null }));
+      }
+    }
+  }
+
   const notes = [];
-  for (const f of overdue) {
+  for (const f of overdueGroups) {
+    const companyId = f.invoices[0].company_id ?? 1;
     const days = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
     const level = [...levels].reverse().find((l) => days >= (Number(l.delay) || 0));
     const partner = partners.get(f.partner_id);
-    if (!level || !partner || (Number(partner.followup_level_delay) || -1) >= Number(level.delay)) continue;
+    if (!level || !partner) continue;
+
+    const currentPartner = partnerUpdates.get(partner.id) ?? partner;
+    const progress = partnerFollowUp(currentPartner, companyId);
+    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
+
+    if (currentDelay >= Number(level.delay)) continue;
+
     const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim()]);
-    updates.set(partner.id, { followup_level_delay: Number(level.delay), followup_date: at });
+    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim(), reminderSource(f)]);
+
+    const updated = updatePartnerFollowUp(currentPartner, companyId, {
+      followup_level_delay: Number(level.delay),
+      followup_date: at,
+      followup_level: level.id,
+    });
+    partnerUpdates.set(partner.id, updated);
+  }
+
+  if (!notes.length && !partnerUpdates.size) return db;
+
+  const updates = new Map();
+  for (const [id, p] of partnerUpdates) {
+    updates.set(id, {
+      followup_lines: p.followup_lines,
+    });
   }
   return writeMany(postNotes(db, notes), 'res.partner', updates);
 }
@@ -372,26 +746,69 @@ const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.nam
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
 export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
 
-/** Record a reminder sent by hand: a note on the contact, the date, and the follow-up level it reached. */
-export function logManualFollowUp(db, partnerId, at = today()) {
-  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
+const manualFollowUpGroups = (scope, partnerId, at, reminder, companyId) => {
+  const f = reminder ?? followUps(scope, at).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
-  const late = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
-  const level = search(db, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0)).find((l) => late >= (Number(l.delay) || 0));
-  const noted = postNote(db, 'res.partner', partnerId, `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(db, f)}`);
-  return write(noted, 'res.partner', partnerId, { followup_date: at, ...(level ? { followup_level_delay: Number(level.delay) } : {}) });
+  const allGroups = followUpCompanies(f);
+  const targetCompany = companyId ?? reminder?.company_id ?? null;
+  const groups = targetCompany ? allGroups.filter((g) => g.company_id === targetCompany) : allGroups;
+  if (!groups.length) throw new Error('This customer has no overdue invoices');
+  return groups;
+};
+
+/** Record preparation without claiming that the email was sent. */
+export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
+  return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
+    `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
 }
+
+/** Record a reminder confirmed sent by hand. */
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
+  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
+  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
+
+  let nextDb = db;
+  let partner = read(db, 'res.partner', partnerId);
+
+  for (const part of groups) {
+    const cId = part.company_id;
+    const late = Math.floor((new Date(at) - new Date(part.oldest)) / 864e5);
+    const level = levels.find((l) => late >= (Number(l.delay) || 0));
+
+    const noteBody = `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}`;
+    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
+
+    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
+    if (level && (previous == null || Number(level.delay) > Number(previous))) {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_level_delay: Number(level.delay),
+        followup_date: at,
+        followup_level: level.id,
+      });
+    } else {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_date: at,
+      });
+    }
+  }
+
+  return write(nextDb, 'res.partner', partnerId, {
+    followup_lines: partner.followup_lines,
+  });
+}
+
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
-  for (const m of search(db, 'account.move').filter((x) => x.state === 'posted' && x.move_type !== 'entry' && (!period.from || x.invoice_date >= period.from) && (!period.to || x.invoice_date <= period.to))) {
-    const sign = m.move_type === 'in_invoice' ? -1 : 1;
-    for (const l of m.invoice_line_ids ?? []) {
-      if (!l.analytic_account_id) continue;
-      const amount = (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
-      totals.set(l.analytic_account_id, round((totals.get(l.analytic_account_id) ?? 0) + sign * amount));
-    }
+  for (const line of search(db, 'account.analytic.line')) {
+    if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) continue;
+    if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) continue;
+    if (period.account_id != null && line.account_id !== period.account_id) continue;
+    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) continue;
+    if (line.move_id && read(db, 'account.move', line.move_id)?.state !== 'posted') continue;
+    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
   }
   return totals;
 }

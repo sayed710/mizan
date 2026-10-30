@@ -162,3 +162,26 @@ test('packageContents merges duplicate products', () => {
     { product_id: 8, qty: 1 },
   ]);
 });
+import { models } from './models/index.js';
+import { ensureMainWarehouse, createOrderTransfers } from './models/warehouse.js';
+import { search } from './orm.js';
+
+test('batch validation routes internal transfers and releases successors', () => {
+  let db = ensureMainWarehouse(seed());
+  const wh = search(db, 'stock.warehouse').find((w) => w.code === 'WH');
+  db = write(db, 'stock.warehouse', wh.id, { delivery_steps: 'pick_pack_ship' });
+  db = createOrderTransfers(db, { type: 'incoming', warehouse_id: wh.id, origin: 'Batch receipt', lines: [{ product_id: 7, qty: 10 }] });
+  const validate = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate');
+  const receipt = search(db, 'stock.picking').find((p) => p.origin === 'Batch receipt');
+  db = validate.run(db, receipt).db;
+  db = createOrderTransfers(db, { type: 'outgoing', warehouse_id: wh.id, origin: 'Batch route', lines: [{ product_id: 7, qty: 6 }] });
+  const [pick, pack] = search(db, 'stock.picking').filter((p) => p.origin === 'Batch route');
+  let batchId;
+  ({ db, id: batchId } = create(db, 'stock.picking.batch', { picking_lines: [{ picking_id: pick.id }] }));
+  const buttons = models['stock.picking.batch'].form.buttons;
+  db = buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'stock.picking.batch', batchId)).db;
+  db = buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking.batch', batchId)).db;
+  assert.equal(read(db, 'stock.picking', pack.id).state, 'ready');
+  const quants = search(db, 'stock.quant').filter((q) => q.product_id === 7);
+  assert.equal(quants.find((q) => q.location_id === wh.wh_pack_stock_loc_id)?.quantity, 6);
+});

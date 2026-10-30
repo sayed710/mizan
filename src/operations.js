@@ -3,7 +3,7 @@
 import { read } from './orm.js';
 import { promptedAmount } from './models/common.js';
 import { payQuote } from './models/quoteplus.js';
-import { closeSession, payOrder, priceLines, refundOrder } from './models/pos.js';
+import { closeSession, payCart, payOrder } from './models/pos.js';
 import { payWithMethods, refundBill } from './models/posplus.js';
 
 const record = (db, model, id) => {
@@ -17,15 +17,37 @@ export const OPERATIONS = {
   'sale.prepay': { model: 'sale.order', run: (db, { id, text, amount = text }) => payQuote(db, record(db, 'sale.order', id).id, promptedAmount(amount) ?? Number.NaN) },
   'pos.pay': {
     model: 'pos.order',
-    run: (db, { cart = [], method, partner_id = null }) => {
-      if (!['cash', 'card'].includes(method)) throw new Error('Unknown payment method');
-      const lines = priceLines(db, cart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount) || 0, ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) })));
-      return payOrder(db, { lines, method, partner_id: Number(partner_id) || null });
+    run: (db, { cart = [], lines = null, method, partner_id = null, request_key = null, config_id = null, preset_id = null, payments = null }) => {
+      if (!payments && !['cash', 'card'].includes(method)) throw new Error('Unknown payment method');
+      return payCart(db, {
+        cart: lines ?? cart,
+        method,
+        payments,
+        partner_id: Number(partner_id) || null,
+        request_key,
+        config_id: config_id != null ? Number(config_id) : null,
+        preset_id: preset_id != null ? Number(preset_id) : null,
+      });
     },
   },
-  'pos.refund': { model: 'pos.order', run: (db, { id }) => { const out = refundOrder(db, record(db, 'pos.order', id)); return { ...out, go: `#/pos/orders/${out.id}` }; } },
+  'pos.refund': {
+    model: 'pos.order',
+    run: (db, { id, method, payments }) => {
+      const order = record(db, 'pos.order', id);
+      const out = payOrder(db, {
+        lines: order.lines,
+        method: method ?? (payments ? undefined : (order.payment_method_id ?? order.payment_method)),
+        payments: payments ?? (method ? undefined : (order.payment_ids?.length ? order.payment_ids : null)),
+        partner_id: order.partner_id,
+        refund_of: order.id,
+        config_id: order.config_id,
+        preset_id: order.preset_id,
+      });
+      return { ...out, go: `#/pos/orders/${out.id}` };
+    },
+  },
   'pos.close': { model: 'pos.session', run: (db, { id, counted }) => closeSession(db, record(db, 'pos.session', id), counted) },
-  'pos.bill.pay': { model: 'pos.order', run: (db, { id }) => payWithMethods(db, record(db, 'pos.order', id).id, record(db, 'pos.order', id).payment_ids) },
+  'pos.bill.pay': { model: 'pos.order', run: (db, { id, payments }) => payWithMethods(db, record(db, 'pos.order', id).id, payments ?? record(db, 'pos.order', id).payment_ids) },
   'pos.bill.refund': { model: 'pos.order', run: (db, { id }) => refundBill(db, record(db, 'pos.order', id)) },
 };
 

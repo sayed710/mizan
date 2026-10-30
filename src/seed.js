@@ -6,10 +6,13 @@ import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
-import { payMove, postMove } from './models/accounting.js';
+import { defaultCashFlowActivity } from './models/reports.js';
+import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
-import { SCHEMA_VERSION } from './migrations.js';
+import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
+import { ensureCalendars } from './models/calendar.js';
+import { migrateProductCategories } from './models/productconfig.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -88,7 +91,16 @@ export function seed() {
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
 
-  CHART.forEach(([code, name, account_type]) => add('account.account', { code, name, account_type, reconcile: ['asset_receivable', 'liability_payable'].includes(account_type) }));
+  const cashFlowTags = {
+    operating: add('account.account.tag', { name: 'Operating Activities' }),
+    investing: add('account.account.tag', { name: 'Investing Activities' }),
+    financing: add('account.account.tag', { name: 'Financing Activities' }),
+  };
+  CHART.forEach(([code, name, account_type]) => add('account.account', {
+    code, name, account_type,
+    reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
+    tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
+  }));
   JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
@@ -110,14 +122,36 @@ export function seed() {
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  leads.forEach(([name, partner_id, expected_revenue, stage_id, priority, tag_ids], i) => {
+  db = ensureMainCompany(db);
+
+  const crmStages = [
+    { name: 'New', sequence: 1, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Qualified', sequence: 2, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Proposition', sequence: 3, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
+    { name: 'Won', sequence: 4, is_won: true, fold: true, team_ids: [], rotting_threshold_days: 0 },
+  ];
+  crmStages.forEach((s) => add('crm.stage', s));
+
+  const lostReasons = [
+    { name: 'Too expensive', active: true },
+    { name: 'We lost to a competitor', active: true },
+    { name: 'Not the right timing', active: true },
+    { name: 'No answer', active: true },
+    { name: 'Other', active: true },
+  ];
+  lostReasons.forEach((r) => add('crm.lost.reason', r));
+
+  const crmStageMap = { new: 1, qualified: 2, proposition: 3, won: 4 };
+  leads.forEach(([name, partner_id, expected_revenue, stage, priority, tag_ids], i) => {
     const partner = partners[partner_id - 1];
+    const stage_id = typeof stage === 'number' ? stage : (crmStageMap[stage] ?? 1);
     add('crm.lead', {
       name, partner_id, expected_revenue, stage_id, priority, tag_ids,
       email: partner.email, phone: partner.phone,
-      probability: { new: 10, qualified: 30, proposition: 60, won: 100 }[stage_id],
+      probability: { 1: 10, 2: 30, 3: 60, 4: 100, new: 10, qualified: 30, proposition: 60, won: 100 }[stage_id] ?? 10,
       date_deadline: addDays(today(), i * 4 - 6),
       create_date: addDays(today(), -40 + i * 5),
+      date_last_stage_update: addDays(today(), -40 + i * 5),
     });
   });
   const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
@@ -141,7 +175,11 @@ export function seed() {
     { sequence: 3, code: 'GROSS', name: 'Gross', category: 'gross', amount_type: 'wage', base: '', value: 0, account: '' },
     { sequence: 4, code: 'NET', name: 'Net', category: 'net', amount_type: 'wage', base: '', value: 0, account: '' },
   ] });
-  [[2, 6000], [3, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
+  [[2, 6000], [4, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
+
+  const wh = add('stock.location', { name: 'WH', usage: 'view' });
+  ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));
+  db = ensureMainWarehouse(ensureMainCompany(db));
 
   // Sales: one quotation, one confirmed + invoiced + paid, one confirmed not invoiced.
   add('sale.order', { partner_id: 1, order_line: lines([[1, 40], [6, 8]]) });
@@ -187,10 +225,30 @@ export function seed() {
   add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
-  add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: ['Interior'], date: addDays(today(), 45) });
-  add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: ['Consulting'], date: addDays(today(), 60) });
-  tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) =>
-    add('project.task', { name, project_id, user_id, stage_id, planned_hours, priority, date_start: addDays(today(), d - Math.ceil(planned_hours / 4)), date_deadline: addDays(today(), d) }));
+  const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
+  const tagConsulting = add('project.tags', { name: 'Consulting', color: 2 });
+  add('project.tags', { name: 'Product', color: 3 });
+
+  const taskStages = [
+    { name: 'To Do', sequence: 1, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'In Progress', sequence: 2, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'Review', sequence: 3, fold: false, active: true, project_ids: [], rotting_threshold_days: 0 },
+    { name: 'Done', sequence: 4, fold: true, active: true, project_ids: [], rotting_threshold_days: 0 },
+  ];
+  taskStages.forEach((s) => add('project.task.type', s));
+
+  add('project.project', { name: 'HQ Office Fit-out', partner_id: 1, user_id: 4, tag_ids: [tagInterior], date: addDays(today(), 45) });
+  add('project.project', { name: 'Co-working Space Atlas', partner_id: 6, user_id: 4, tag_ids: [tagConsulting], date: addDays(today(), 60) });
+  const taskStageMap = { todo: 1, progress: 2, review: 3, done: 4 };
+  tasks.forEach(([name, project_id, user_id, stage_id, d, planned_hours, priority]) => {
+    const sId = typeof stage_id === 'number' ? stage_id : (taskStageMap[stage_id] ?? 1);
+    add('project.task', {
+      name, project_id, user_id, stage_id: sId, tag_ids: [], planned_hours, priority,
+      date_start: addDays(today(), d - Math.ceil(planned_hours / 4)),
+      date_deadline: addDays(today(), d),
+      date_last_stage_update: addDays(today(), d < 0 ? d : 0),
+    });
+  });
 
   tickets.forEach(([name, partner_id, user_id, ticket_type, stage_id, priority], i) =>
     add('helpdesk.ticket', { name, partner_id, user_id, ticket_type, stage_id, priority, create_date: addDays(today(), -i * 3) }));
@@ -235,7 +293,8 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  add('pos.order', { partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1 });
+  add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
   add('discuss.channel', { name: 'sales', description: 'Deals and quotations' });
@@ -356,8 +415,6 @@ export function seed() {
 
   add('stock.lot', { name: 'SDC-0001', product_id: read(db, 'product', 14) ? 14 : null, qty: 1 });
   add('phone.call', { name: 'Follow-up on HQ chairs', partner_id: 1, phone: '+20 2 2345 6789', direction: 'out', duration: 6 });
-  const wh = add('stock.location', { name: 'WH', usage: 'view' });
-  ['WH/Stock', 'WH/Stock/Shelf A', 'WH/Stock/Shelf B'].forEach((name) => add('stock.location', { name, parent_id: wh, usage: 'internal' }));
   set('product', 4, { route: 'mto_buy', vendor_id: 2 });
   set('product', 2, { route: 'mto_make' });
   add('iot.device', { name: 'Warehouse scale', device_type: 'scale', location: 'Warehouse A', unit: 'kg' });
@@ -383,6 +440,11 @@ export function seed() {
   set('res.partner', 3, { property_payment_term_id: t30 });
   add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
   add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+
+  // Standard Incoterms 2020
+  INCOTERMS_2020.forEach(([code, name]) => {
+    add('account.incoterm', { code, name, active: true });
+  });
 
   // eCommerce: payment providers, website categories, published carriers, a selectable pricelist and desk variants.
   add('payment.provider', { name: 'Wire Transfer', code: 'wire', state: 'enabled', pending_msg: 'Please transfer the amount to IBAN EG00 0000 0000 0000 0000 0000 0000, using your order number as the reference.', done_msg: 'Your order will ship once we receive the transfer.' });
@@ -426,5 +488,5 @@ export function seed() {
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
   const ready = postNote(ensureMainWarehouse(ensureMainCompany(ensureUoms(opened))), 'discuss.channel', general, 'Welcome to Mizan! Use this channel for team-wide news.');
-  return { ...migrateTimeOff(ensureQuants(ready)), schema_version: SCHEMA_VERSION };
+  return { ...ensureCalendars(migrateProductCategories(migratePosMethods(migrateTimeOff(ensureQuants(ready))))), schema_version: SCHEMA_VERSION };
 }

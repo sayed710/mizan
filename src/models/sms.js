@@ -40,7 +40,7 @@ export function queueSms(db, campaign, { now = today() } = {}) {
   if (!String(campaign.body ?? '').trim()) throw new Error('Write the SMS content first');
   const recipients = smsRecipients(db, campaign);
   if (!recipients.length) throw new Error('No recipient has a valid phone number');
-  const traced = recipients.reduce((acc, r) => create(acc, 'sms.trace', { campaign_id: campaign.id, ...r, state: 'outgoing', date: now }).db, db);
+  const traced = recipients.reduce((acc, r) => create(acc, 'sms.trace', { campaign_id: campaign.id, ...r, state: 'outgoing', delivery_pending: true, date: now }).db, db);
   return write(traced, 'sms.campaign', campaign.id, { stage_id: 'sent', sent_date: now, sent: recipients.length, delivered: 0, failed: 0 });
 }
 
@@ -92,6 +92,7 @@ export const smsModels = {
       buttons: [
         // The server sends the queued traces through the SMS gateway; offline, queueing records the campaign.
         { label: 'Send', primary: true, when: (r) => r.stage_id !== 'sent', server: '/api/integrations/sms-campaign', requires: 'sms', run: (db, r) => ({ db: queueSms(db, r) }) },
+        { label: 'Resume Unsent', when: (r, db) => r.stage_id === 'sent' && (db?.records?.['sms.trace'] ?? []).some((t) => t.campaign_id === r.id && t.state === 'outgoing'), server: '/api/integrations/sms-campaign', requires: 'sms' },
         { label: 'Schedule', when: (r) => r.stage_id === 'draft', vals: { stage_id: 'scheduled' } },
         { label: 'Cancel', when: (r) => r.stage_id === 'scheduled', vals: { stage_id: 'draft' } },
       ],
@@ -107,11 +108,13 @@ export const smsModels = {
     label: 'SMS Traces',
     fields: {
       campaign_id: { type: 'many2one', relation: 'sms.campaign', label: 'Campaign' },
+      attempted_at: { type: 'datetime', label: 'Attempted At', readonly: true },
+      delivery_pending: { type: 'boolean', label: 'Pending', readonly: true, hidden: true },
       phone: { type: 'char', label: 'Number' },
       name: { type: 'char', label: 'Recipient' },
       res_model: { type: 'char', label: 'Document Model', readonly: true },
       res_id: { type: 'integer', label: 'Document ID', readonly: true },
-      state: { type: 'selection', label: 'Status', options: [['outgoing', 'In Queue'], ['sent', 'Sent'], ['error', 'Error']] },
+      state: { type: 'selection', label: 'Status', options: [['outgoing', 'In Queue'], ['sent', 'Sent'], ['error', 'Error'], ['uncertain', 'Delivery Uncertain']] },
       error: { type: 'char', label: 'Error', readonly: true },
       date: { type: 'date', label: 'Date', readonly: true },
     },

@@ -52,7 +52,7 @@ function badShape(model, rec) {
   for (const [name, field] of Object.entries(models[model].fields)) {
     const v = rec[name];
     if (v === undefined || v === null || field.compute) continue;
-    const ok = field.type === 'one2many' || field.type === 'tags' ? Array.isArray(v)
+    const ok = ['one2many', 'many2many', 'tags'].includes(field.type) ? Array.isArray(v)
       : field.type === 'binary' ? plain(v)
       : typeof v !== 'object';
     if (!ok) return `${model}.${name}`;

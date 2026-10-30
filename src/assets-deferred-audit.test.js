@@ -1,0 +1,141 @@
+import './models/index.js';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { create, read, search, write } from './orm.js';
+import { models } from './registry.js';
+import { accountId, isBalanced } from './models/ledger.js';
+import { seed } from './seed.js';
+import { applyDiff, diffDb } from './sync.js';
+
+const button = (model, label, db, id) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+
+test('sale uses the posted invoice line account and reverses depreciation before reposting', () => {
+  let db = seed();
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Sale', qty: 1, price_unit: 50, tax: 0, account_id: accountId(db, '410000') }] });
+  db = button('account.move', 'Confirm', invoice.db, invoice.id);
+  const asset = create(db, 'account.asset', { name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
+  db = button('account.asset', 'Confirm', asset.db, asset.id);
+  db = button('account.asset', 'Post Depreciation', db, asset.id);
+  const original = read(db, 'account.asset', asset.id).depreciation_ids[0].move_id;
+  db = button('account.move', 'Reverse Entry', db, original);
+  assert.equal(read(db, 'account.asset', asset.id).depreciation_ids[0].posted, false);
+  db = button('account.asset', 'Post Depreciation', db, asset.id);
+  const current = read(db, 'account.asset', asset.id);
+  assert.notEqual(current.depreciation_ids[0].move_id, original);
+  db = models['account.asset'].actions.dispose(db, current, { date: '2027-01-01', saleValue: 50, invoiceId: invoice.id, invoiceLine: 0 });
+  const disposal = search(db, 'account.move').find((m) => m.ref === 'Machine disposal');
+  assert.ok(isBalanced(disposal.line_ids));
+  assert.equal(disposal.line_ids.find((l) => l.account_id === accountId(db, '410000')).debit, 50);
+  assert.equal(read(db, 'account.asset', asset.id).state, 'close');
+  assert.ok(read(db, 'account.asset', asset.id).cancelled_depreciation_ids.every((l) => l.cancelled && !l.posted));
+});
+
+test('invoice deferral prorates days, posts once, and reverses on reset', () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { deferred_generation_method: 'on_validation', deferred_revenue_account_id: accountId(db, '212000') });
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 59, tax: 0, account_id: accountId(db, '410000'), deferred_start_date: '2026-01-15', deferred_end_date: '2026-02-25' }] });
+  db = button('account.move', 'Confirm', invoice.db, invoice.id);
+  const posted = read(db, 'account.move', invoice.id);
+  assert.equal(posted.line_ids.find((l) => l.account_id === accountId(db, '212000')).credit, 59);
+  let schedule = search(db, 'account.deferral').find((d) => d.source_move_id === invoice.id);
+  assert.deepEqual(schedule.board.map((l) => l.amount), [23.88, 35.12]);
+  assert.ok(schedule.board.every((l) => l.posted && isBalanced(read(db, 'account.move', l.move_id).line_ids)));
+  const count = search(db, 'account.move').length;
+  db = button('account.deferral', 'Post Due Entries', db, schedule.id);
+  assert.equal(search(db, 'account.move').length, count);
+  db = button('account.move', 'Reset to Draft', db, invoice.id);
+  schedule = read(db, 'account.deferral', schedule.id);
+  assert.equal(schedule.state, 'cancel');
+  assert.ok(schedule.board.every((l) => read(db, 'account.move', l.reversal_move_id)?.reversed_entry_id === l.move_id));
+});
+
+test('manual company bill recognition respects hard lock without disturbing earlier periods', () => {
+  let db = seed();
+  const company = create(db, 'res.company', { name: 'Other company' });
+  db = company.db;
+  const deferred = create(db, 'account.account', { name: 'Prepaid', code: '132000', account_type: 'asset_current', company_id: company.id });
+  const expense = create(deferred.db, 'account.account', { name: 'Expense', code: '600000', account_type: 'expense', company_id: company.id });
+  const payable = create(expense.db, 'account.account', { name: 'Payable', code: '211000', account_type: 'liability_payable', company_id: company.id });
+  const billJournal = create(payable.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id });
+  const journal = create(billJournal.db, 'account.journal', { name: 'Misc', code: 'MISC', type: 'general', company_id: company.id });
+  db = write(journal.db, 'res.company', company.id, { deferred_expense_account_id: deferred.id, deferred_generation_method: 'manual' });
+  const bill = create(db, 'account.move', { company_id: company.id, move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Rent', qty: 1, price_unit: 90, tax: 0, account_id: expense.id, deferred_start_date: '2026-01-01', deferred_end_date: '2026-03-31' }] });
+  db = button('account.move', 'Confirm', bill.db, bill.id);
+  const source = read(db, 'account.move', bill.id);
+  assert.equal(source.company_id, company.id);
+  assert.equal(source.journal_id, billJournal.id);
+  assert.equal(source.line_ids.find((l) => l.account_id === deferred.id).debit, 90);
+  const schedule = search(db, 'account.deferral').find((d) => d.source_move_id === bill.id);
+  assert.equal(schedule.board.filter((l) => l.posted).length, 0);
+  const generate = models['res.company'].form.buttons.find((b) => b.label === 'Generate Company Deferrals');
+  assert.equal(generate.wizard(db, read(db, 'res.company', company.id)).fields[0].name, 'date');
+  assert.equal(models['account.deferral'].form.buttons.some((b) => b.label === 'Generate Company Deferrals'), false);
+  db = generate.run(db, read(db, 'res.company', company.id), { date: '2026-01-31' }).db;
+  db = generate.run(db, read(db, 'res.company', company.id), { date: '2026-01-31' }).db;
+  const first = read(db, 'account.deferral', schedule.id).board[0];
+  const entry = read(db, 'account.move', first.move_id);
+  assert.equal(entry.company_id, company.id);
+  assert.equal(entry.journal_id, journal.id);
+  assert.ok(isBalanced(entry.line_ids));
+  assert.equal(entry.line_ids.find((l) => l.account_id === expense.id).debit, 31);
+  db = write(db, 'res.company', company.id, { hard_lock_date: '2026-02-28' });
+  assert.throws(() => models['account.deferral'].actions.postDueEntries(db, read(db, 'account.deferral', schedule.id), '2026-03-31'), /lock/i);
+  assert.equal(read(db, 'account.deferral', schedule.id).board[0].move_id, first.move_id);
+  assert.equal(read(db, 'account.deferral', schedule.id).board[1].posted, false);
+});
+
+test('deferred invoice and recognition provenance survive server synchronization', () => {
+  let db = seed();
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 60, tax: 0, account_id: accountId(db, '410000'), deferred_start_date: '2026-01-01', deferred_end_date: '2026-02-28' }] });
+  db = applyDiff(db, diffDb(db, invoice.db), { isAdmin: true });
+  const posted = button('account.move', 'Confirm', db, invoice.id);
+  db = applyDiff(db, diffDb(db, posted), { isAdmin: true });
+  const saved = read(db, 'account.move', invoice.id);
+  assert.equal(saved.invoice_line_ids[0].deferred_end_date, '2026-02-28');
+  assert.equal(saved.line_ids.find((l) => l.invoice_sources?.length).invoice_sources[0].original_account_id, accountId(db, '410000'));
+  const schedule = search(db, 'account.deferral').find((d) => d.source_move_id === invoice.id);
+  assert.equal(schedule.recognition_account_id, accountId(db, '410000'));
+  assert.equal(schedule.board.reduce((sum, l) => sum + l.amount, 0), 60);
+});
+
+test('second company disposal uses its own sale and gain accounts', () => {
+  let db = seed();
+  const company = create(db, 'res.company', { name: 'Branch' }); db = company.db;
+  const saleAccount = create(db, 'account.account', { name: 'Sale proceeds', code: 'S2', account_type: 'income', company_id: company.id }); db = saleAccount.db;
+  const gainAccount = create(db, 'account.account', { name: 'Disposal gains', code: 'G2', account_type: 'income_other', company_id: company.id }); db = gainAccount.db;
+  const invoice = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Asset sale', qty: 1, price_unit: 150, tax: 0, account_id: saleAccount.id }] });
+  db = button('account.move', 'Confirm', invoice.db, invoice.id);
+  const asset = create(db, 'account.asset', { company_id: company.id, name: 'Branch machine', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', account_gain_id: gainAccount.id });
+  db = button('account.asset', 'Confirm', asset.db, asset.id);
+  db = models['account.asset'].actions.dispose(db, read(db, 'account.asset', asset.id), { date: '2026-01-02', saleValue: 150, invoiceId: invoice.id, invoiceLine: 0 });
+  const move = search(db, 'account.move').find((m) => m.ref === 'Branch machine disposal');
+  assert.equal(move.company_id, company.id);
+  assert.ok(isBalanced(move.line_ids));
+  assert.equal(move.line_ids.find((l) => l.account_id === saleAccount.id).debit, 150);
+  assert.equal(move.line_ids.find((l) => l.account_id === gainAccount.id).credit, 50);
+  assert.equal(read(db, 'account.asset', asset.id).cancelled_depreciation_ids.length, 3);
+});
+
+test('disposal wizard selects posted company invoice lines and rejects another company', () => {
+  let db = seed();
+  const company = create(db, 'res.company', { name: 'Other' }); db = company.db;
+  const sale = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Machine proceeds', qty: 1, price_unit: 150, tax: 0, account_id: accountId(db, '410000') }] });
+  db = button('account.move', 'Confirm', sale.db, sale.id);
+  const other = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other sale', qty: 1, price_unit: 150, tax: 0 }] });
+  db = button('account.move', 'Confirm', other.db, other.id);
+  const asset = create(db, 'account.asset', { name: 'Wizard asset', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
+  db = button('account.asset', 'Confirm', asset.db, asset.id);
+  const action = models['account.asset'].form.buttons.find((b) => b.label === 'Sell or Dispose');
+  const record = read(db, 'account.asset', asset.id);
+  const spec = action.wizard(db, record);
+  const invoiceField = spec.fields.find((f) => f.name === 'invoice_id');
+  assert.equal(invoiceField.domain(read(db, 'account.move', sale.id)), true);
+  assert.equal(invoiceField.domain(read(db, 'account.move', other.id)), false);
+  const lineField = spec.fields.find((f) => f.name === 'invoice_line');
+  assert.deepEqual(lineField.options(db, { invoice_id: sale.id }), [['0', 'Machine proceeds']]);
+  assert.throws(() => action.run(db, record, { date: '2026-01-02', sale_value: 150, invoice_id: other.id, invoice_line: '0' }), /company/i);
+  const sold = action.run(db, record, { date: '2026-01-02', sale_value: 150, invoice_id: sale.id, invoice_line: '0' }).db;
+  const closing = search(sold, 'account.move').find((m) => m.ref === 'Wizard asset disposal');
+  assert.ok(isBalanced(closing.line_ids));
+  assert.equal(closing.line_ids.find((l) => l.account_id === accountId(db, '410000')).debit, 150);
+});

@@ -209,9 +209,14 @@ export function Settings() {
           <div className="field-value">
             {/* One source of truth: the current company record, which the navbar, documents and QR codes all read. */}
             {company
-              ? <input id="company" disabled={readOnly} key={`${company.id}:${company.name}`} defaultValue={company.name}
+              ? <input id="company" disabled={readOnly} key={company.id} defaultValue={company.name}
                   onBlur={(e) => { const name = e.target.value.trim(); if (!name) e.target.value = company.name; else if (name !== company.name) commit(renameCompany(getDb(), company.id, name)); }} />
-              : <input id="company" disabled={readOnly} value={db.settings?.company ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company: e.target.value }))} />}
+              : <input id="company" disabled={readOnly} value={currentCompany(db).name} onChange={(e) => {
+                  const name = e.target.value;
+                  const curId = db.settings?.current_company_id ?? 1;
+                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, name } : c));
+                  commit(updateSettings(getDb(), { company: name, ...(db.settings?.companies?.length ? { companies } : {}) }));
+                }} />}
           </div>
         </div>
         <div className="field">
@@ -225,7 +230,12 @@ export function Settings() {
                 </>
               )
               : (
-                <select id="currency" disabled={readOnly} value={db.settings?.currency ?? 'USD'} onChange={(e) => commit(updateSettings(getDb(), { currency: e.target.value }))}>
+                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? 'USD'} onChange={(e) => {
+                  const currency = e.target.value;
+                  const curId = db.settings?.current_company_id ?? 1;
+                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
+                  commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
+                }}>
                   {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               )}
@@ -292,6 +302,13 @@ export function Settings() {
           <label htmlFor="company_iban">{t('Bank Account (IBAN)')}</label>
           <div className="field-value">
             <input id="company_iban" disabled={readOnly} value={db.settings?.company_iban ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_iban: e.target.value }))} />
+          </div>
+        </div>
+        <div className="field">
+          <label htmlFor="three_way_matching">{t('Three-Way Matching')}</label>
+          <div className="field-value">
+            <input id="three_way_matching" type="checkbox" checked={!!db.settings?.three_way_matching} disabled={readOnly}
+              onChange={(e) => commit(updateSettings(getDb(), { three_way_matching: e.target.checked }))} />
           </div>
         </div>
         <div className="field">

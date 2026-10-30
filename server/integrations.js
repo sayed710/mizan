@@ -274,6 +274,7 @@ export async function sendSms(env, to, body) {
 }
 
 const MAX_SMS = 500;
+const activeSms = new Set();
 
 /**
  * Queue the campaign's traces and commit them first (a second send then sees it sent; concurrent edits survive),
@@ -283,21 +284,31 @@ const MAX_SMS = 500;
 export async function sendSmsCampaign(env, store, { id }) {
   const c = read(store.get(), 'sms.campaign', Number(id));
   if (!c) throw new Error('Campaign not found');
-  const queued = queueSms(store.get(), c);
-  store.commit(queued);
-  const traces = search(queued, 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
-  let sent = 0;
-  for (const trace of traces) {
-    try {
+  if (activeSms.has(c.id)) throw new Error('SMS delivery is already in progress');
+  activeSms.add(c.id);
+  try {
+    if (c.stage_id !== 'sent') store.commit(queueSms(store.get(), c));
+    const traces = search(store.get(), 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
+    let sent = 0, uncertain = 0;
+    for (const trace of traces) {
+      // A persisted attempt without a result may already have reached the provider: never send it twice.
+      if (trace.attempted_at || trace.delivery_pending !== true) {
+        store.commit(write(store.get(), 'sms.trace', trace.id, { state: 'uncertain', error: 'Delivery status unknown after interruption; verify with the provider before resending' }));
+        uncertain++;
+        continue;
+      }
       store.check?.();
-      await sendSms(env, trace.phone, c.body);
-      store.commit(markSms(store.get(), trace.id, true));
-      sent += 1;
-    } catch (e) {
-      store.commit(markSms(store.get(), trace.id, false, e.message));
+      store.commit(write(store.get(), 'sms.trace', trace.id, { attempted_at: new Date().toISOString(), delivery_pending: false }));
+      try {
+        await sendSms(env, trace.phone, c.body);
+        store.commit(markSms(store.get(), trace.id, true));
+        sent += 1;
+      } catch (e) {
+        store.commit(markSms(store.get(), trace.id, false, e.message));
+      }
     }
-  }
-  return { message: `${sent} SMS sent, ${traces.length - sent} failed` };
+    return { message: `${sent} SMS sent, ${traces.length - sent - uncertain} failed, ${uncertain} uncertain` };
+  } finally { activeSms.delete(c.id); }
 }
 
 // ---- Shipping rate APIs ----

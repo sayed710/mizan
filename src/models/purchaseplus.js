@@ -18,7 +18,7 @@ const agreement = (db, id) => {
 /** Return a new order with matching vendor prices, preserving unmatched lines. */
 export function applyVendorPrices(db, order) {
   return { ...order, order_line: (order.order_line ?? []).map((l) => {
-    const price = vendorPrice(db, l.product_id, { partnerId: order.partner_id, qty: l.qty, date: order.date_order });
+    const price = vendorPrice(db, l.product_id, { partnerId: order.partner_id, qty: l.qty, date: order.date_order || today(), currencyId: order.currency_id, companyId: order.company_id, uomId: l.uom_id });
     return price ? { ...l, price_unit: price.price } : { ...l };
   }) };
 }
@@ -56,11 +56,11 @@ export function newQuotationFromRequisition(db, requisitionId, { partnerId } = {
   if (!read(db, 'res.partner', vendor)) throw new Error('Select a valid vendor');
   const lines = remainingQty(db, r.id).map((l) => {
     const qty = r.type === 'blanket' ? l.remaining : Number(l.product_qty);
-    const price = vendorPrice(db, l.product_id, { partnerId: vendor, qty, date: today() });
+    const price = vendorPrice(db, l.product_id, { partnerId: vendor, qty, date: today(), currencyId: r.currency_id, companyId: r.company_id });
     return { product_id: l.product_id, qty, price_unit: r.type === 'blanket' ? Number(l.price_unit) : price?.price ?? read(db, 'product', l.product_id)?.cost ?? 0, tax: read(db, 'product', l.product_id)?.purchase_tax ?? 14 };
   }).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('No quantity remains to order');
-  const out = create(db, 'purchase.order', { partner_id: vendor, requisition_id: r.id, origin: r.name, order_line: lines });
+  const out = create(db, 'purchase.order', { partner_id: vendor, requisition_id: r.id, origin: r.name, order_line: lines, ...(r.currency_id ? { currency_id: r.currency_id } : {}), ...(r.company_id ? { company_id: r.company_id } : {}) });
   return { db: syncAgreement(out.db, r.id), id: out.id };
 }
 
@@ -121,8 +121,9 @@ export function closeRequisition(db, id, { force = false } = {}) {
 
 /** Close ongoing agreements strictly past their end date. */
 export function blanketExpiryCheck(db, date = today()) {
-  return search(db, 'purchase.requisition').filter((r) => r.state === 'ongoing' && r.date_end && r.date_end < date)
-    .reduce((next, r) => closeRequisition(next, r.id, { force: true }), db);
+  return search(db, 'purchase.requisition').filter((r) => r.type === 'blanket' && r.state === 'ongoing' && r.date_end && r.date_end < date)
+    .reduce((next, r) => closeRequisition(orders(next, r.id).filter(draft)
+      .reduce((acc, p) => write(acc, 'purchase.order', p.id, { state: 'cancel' }), next), r.id), db);
 }
 
 const purchase = salesModels['purchase.order'];
@@ -136,14 +137,16 @@ export const purchasePlusModels = {
       min_qty: { type: 'float', label: 'Minimum Quantity' },
       price: { type: 'monetary', label: 'Price', required: true },
       currency: { type: 'char', label: 'Currency' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      uom_id: { type: 'many2one', relation: 'uom.uom', label: 'Unit of Measure' },
       delay: { type: 'integer', label: 'Lead Days' },
       date_start: { type: 'date', label: 'Start Date' },
       date_end: { type: 'date', label: 'End Date' },
       sequence: { type: 'integer', label: 'Sequence' },
     },
-    defaults: () => ({ min_qty: 0, price: 0, currency: 'USD', delay: 0, sequence: 10 }),
-    list: ['partner_id', 'product_id', 'min_qty', 'price', 'currency', 'delay', 'date_start', 'date_end', 'sequence'],
-    form: { title: 'product_id', groups: [['partner_id', 'product_id'], ['min_qty', 'price', 'currency', 'delay'], ['date_start', 'date_end', 'sequence']] },
+    defaults: () => ({ min_qty: 0, price: 0, delay: 0, sequence: 10 }),
+    list: ['partner_id', 'product_id', 'min_qty', 'price', 'currency_id', 'delay', 'date_start', 'date_end', 'sequence'],
+    form: { title: 'product_id', groups: [['partner_id', 'product_id'], ['min_qty', 'uom_id', 'price', 'currency_id', 'delay'], ['date_start', 'date_end', 'sequence']] },
   },
   'purchase.requisition': {
     label: 'Purchase Agreements',
@@ -151,6 +154,7 @@ export const purchasePlusModels = {
       name: { type: 'char', label: 'Reference', required: true },
       type: { type: 'selection', label: 'Agreement Type', options: [['blanket', 'Blanket Order'], ['tender', 'Call for Tenders']] },
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       date_start: { type: 'date', label: 'Start Date' },
       date_end: { type: 'date', label: 'End Date' },
       line_ids: { type: 'one2many', label: 'Products', fields: {
@@ -167,7 +171,7 @@ export const purchasePlusModels = {
     kanban: { title: 'name', lines: ['type', 'vendor_id', 'date_end'], badge: 'state' },
     form: {
       title: 'name', statusbar: 'state', lockedWhen: (r) => r.state !== 'draft',
-      groups: [['type', 'vendor_id'], ['date_start', 'date_end']],
+      groups: [['type', 'vendor_id', 'currency_id'], ['date_start', 'date_end']],
       tabs: [{ label: 'Products', fields: ['line_ids'] }, { label: 'Quotations', fields: ['purchase_ids'] }],
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmRequisition(db, r.id) }) },
