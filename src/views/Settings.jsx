@@ -305,6 +305,13 @@ export function Settings() {
           </div>
         </div>
         <div className="field">
+          <label htmlFor="three_way_matching">{t('Three-Way Matching')}</label>
+          <div className="field-value">
+            <input id="three_way_matching" type="checkbox" checked={!!db.settings?.three_way_matching} disabled={readOnly}
+              onChange={(e) => commit(updateSettings(getDb(), { three_way_matching: e.target.checked }))} />
+          </div>
+        </div>
+        <div className="field">
           <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
           <div className="field-value">
             <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={readOnly || !!db.settings?.audit_trail}

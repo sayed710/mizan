@@ -5,58 +5,14 @@ import { round } from '../money.js';
 
 const baseRental = extraModels['sale.rental'];
 
-const periods = { hour: 1, day: 24, week: 168, month: 720 };
-const timestamp = (value) => {
-  const time = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
-  if (!Number.isFinite(time)) throw new Error('Enter a valid pickup and return date');
-  return time;
-};
-const windowOf = (from, to) => {
-  const start = timestamp(from), end = timestamp(to);
-  if (end < start) throw new Error('The return date must be after the pickup date');
-  return [start, end];
-};
+export { bestPrice, rentalHours } from './rentalpricing.js';
+import { periods, timestamp, windowOf } from './rentalpricing.js';
+
 const rentalOf = (db, id) => {
   const rental = read(db, 'sale.rental', id);
   if (!rental) throw new Error('Rental not found');
   return rental;
 };
-
-/** Elapsed hours rounded up to a whole hour, with a one-hour minimum. */
-export function rentalHours(pickup, end) {
-  const [from, to] = windowOf(pickup, end);
-  return Math.max(1, Math.ceil((to - from) / 36e5));
-}
-
-/** Compare largest-first combinations and rounded-up periods; prices are per unit. */
-export function bestPrice(db, productId, hours) {
-  if (!Number.isFinite(hours) || hours < 0) throw new Error('Enter a valid rental duration');
-  const wanted = Math.max(1, hours);
-  const rules = search(db, 'rental.pricing').filter((r) => r.product_id === productId)
-    .map((r) => ({ ...r, hours: periods[r.period] * r.duration })).sort((a, b) => b.hours - a.hours || a.price - b.price);
-  if (!rules.length) {
-    const rental = search(db, 'sale.rental').find((r) => r.product_id === productId);
-    if (!rental) throw new Error('Set rental pricing or a rental daily price for this product');
-    const qty = Math.ceil(wanted / 24), price = round(qty * Number(rental.price_per_day));
-    return { price, breakdown: [{ period: 'day', duration: 1, qty, price }] };
-  }
-  const quote = (index, remaining) => {
-    if (remaining <= 0) return { price: 0, breakdown: [] };
-    if (index === rules.length) return { price: Infinity, breakdown: [] };
-    const rule = rules[index];
-    const line = (qty) => ({ period: rule.period, duration: rule.duration, qty, price: round(qty * rule.price) });
-    const rounded = line(Math.ceil(remaining / rule.hours));
-    let best = { price: rounded.price, breakdown: [rounded] };
-    const qty = Math.floor(remaining / rule.hours);
-    const tail = quote(index + 1, remaining - qty * rule.hours);
-    const head = line(qty);
-    const combined = { price: round(head.price + tail.price), breakdown: [...(qty ? [head] : []), ...tail.breakdown] };
-    if (combined.price < best.price) best = combined;
-    const smaller = qty ? quote(index + 1, remaining) : tail;
-    return smaller.price < best.price ? smaller : best;
-  };
-  return quote(0, wanted);
-}
 
 /** Available fleet units, accounting for picked units already removed from on-hand stock. */
 export function availability(db, productId, from, to) {

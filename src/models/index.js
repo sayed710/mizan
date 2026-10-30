@@ -105,7 +105,7 @@ for (const [name, model] of Object.entries(models)) {
     const run = b.run;
     b.run = Object.assign((db, rec, ...rest) => {
       const current = (rec?.id && read(db, name, rec.id)) || rec;
-      if (!b.when(current, db)) throw new Error(`${b.label} is not available for this record in its current state`);
+      if (!b.when(current, db)) throw new Error(b.unavailable || `${b.label} is not available for this record in its current state`);
       return run(db, current, ...rest);
     }, { checked: true });
   }
@@ -165,7 +165,7 @@ const allApps = [
         { key: 'orders', label: 'Orders', model: 'sale.order', domain: (r) => r.state === 'sale' },
         customers,
       ] },
-      { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' },
+      { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' && r.invoice_status === 'to_invoice' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }, { key: 'quote-templates', label: 'Quotation Templates', model: 'sale.order.template' }, { key: 'loyalty', label: 'Discount & Loyalty', model: 'loyalty.program' }, { key: 'cards', label: 'Coupons & Cards', model: 'loyalty.card' }] },
       { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
       { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }] },

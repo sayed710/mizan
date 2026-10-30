@@ -200,6 +200,10 @@ function companyGuard(db, before, r) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  if (r.down_payment_account_id) {
+    const account = record(db, 'account.account', r.down_payment_account_id);
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
+  }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
   return null;
@@ -302,6 +306,7 @@ export const companyModels = {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
@@ -317,7 +322,7 @@ export const companyModels = {
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
     form: {
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'active'], ['email', 'phone', 'vat'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'active'], ['email', 'phone', 'vat'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

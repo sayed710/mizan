@@ -12,6 +12,7 @@ import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
 import { journalId } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
+import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -412,6 +413,7 @@ export const MIGRATIONS = [
   { version: 11, name: 'Invoicing: seed standard Incoterms 2020', up: migrateIncoterms },
   { version: 12, name: 'Follow-ups: store follow-up progress per partner and company', up: migrateFollowUps },
   { version: 13, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
+  { version: 14, name: 'Rental: flag legacy billing counters for review', up: migrateLegacyRentalBilling },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
