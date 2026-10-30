@@ -38,7 +38,7 @@ export function postPayment(db, p) {
     const take = round(Math.min(acc.left, m.amount_residual));
     if (!(take > 0)) return acc;
     const released = releaseCashBasis(acc.db, m, take / m.amount_total, date, { final: take >= m.amount_residual });
-    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: take }] });
+    const next = write(released.db, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: take, cash_basis_move_id: released.id }] });
     return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - take) };
   }, { db: booked, left: amount });
   return write(applied, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: left });
@@ -75,9 +75,30 @@ export function reversePayment(db, p, date = today()) {
   }
   const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => sources.has(x.move_id) && !x.reversed));
   const reopened = settled.reduce((acc, m) => {
-    const amount = round((m.payments ?? []).filter((x) => sources.has(x.move_id) && !x.reversed).reduce((sum, x) => sum + Number(x.amount), 0));
+    const active = (m.payments ?? []).filter((x) => sources.has(x.move_id) && !x.reversed);
+    const amount = round(active.reduce((sum, x) => sum + Number(x.amount), 0));
     const payments = m.payments.map((x) => sources.has(x.move_id) && !x.reversed ? { ...x, reversed: true, reversal_move_id: reversals.get(x.move_id) } : x);
-    const released = releaseCashBasis(acc, m, -amount / m.amount_total, date);
+    let released = acc;
+    for (const allocation of active) {
+      if (Object.hasOwn(allocation, 'cash_basis_move_id')) {
+        if (!allocation.cash_basis_move_id) continue;
+        const original = read(released, 'account.move', allocation.cash_basis_move_id);
+        if (!original) throw new Error('Cash-basis release for payment not found');
+        const lines = original.line_ids.map((l) => ({
+          ...l, account: read(released, 'account.account', l.account_id)?.code,
+          debit: l.credit, credit: l.debit,
+          // Old bases are unsigned and the report derives their sign from the tax line.
+          tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
+        }));
+        const reversal = postEntry(released, { journal: 'MISC', date, ref: `Cash basis taxes ${m.name}`, lines });
+        released = write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+      }
+    }
+    const legacy = active.filter((x) => !Object.hasOwn(x, 'cash_basis_move_id') && !x.discount);
+    const legacyAmount = round(legacy.reduce((sum, x) => sum + Number(x.amount), 0));
+    if (legacy.length && m.amount_total) {
+      released = releaseCashBasis(released, m, -legacyAmount / m.amount_total, date).db;
+    }
     const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) - amount), payments, payment_date: payments.filter((x) => !x.reversed).at(-1)?.date ?? null });
     return postNote(next, 'account.move', m.id, `Payment ${p.name} reversed: ${amount}`);
   }, booked);

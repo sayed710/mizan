@@ -39,7 +39,7 @@ function locate(list, id) {
     const at = seen.get(id);
     // The position is checked against the array, so even an in-place change can only cost a scan, never a wrong record.
     if (at !== undefined && list[at]?.id === id) return list[at];
-    return seen.size === list.length && at === undefined ? undefined : list.find((x) => x.id === id);
+    return list.find((x) => x.id === id);
   }
   if (seen) positions.set(list, new Map(list.map((x, i) => [x.id, i])));
   else positions.set(list, true);

@@ -66,7 +66,15 @@ export function paymentGuard(db, before, after) {
   const payments = after.payments ?? [];
   if (!Array.isArray(payments) || payments.some((p) => !p || !(Number(p.amount) > 0))) return 'Invalid payments';
   const paid = Number(after.amount_paid) || 0;
-  if (round2(payments.filter((p) => !p.reversed).reduce((s, p) => s + Number(p.amount), 0)) !== round2(paid)) return 'The paid amount must equal the recorded payments';
+  // Compare deltas against the previous state so legacy/drifted rows (where
+  // amount_paid and payments[] already disagree) can still be paid or discounted.
+  // For new records there is no previous state, so the baseline is 0 and the full invariant applies.
+  const prevPayments = Array.isArray(before?.payments) ? before.payments : [];
+  const prevPaid = Number(before?.amount_paid) || 0;
+  const activeSum = (list) => list.filter((p) => !p?.reversed).reduce((s, p) => s + (Number(p?.amount) || 0), 0);
+  const paymentsSum = activeSum(payments);
+  const prevPaymentsSum = activeSum(prevPayments);
+  if (round2(paymentsSum - prevPaymentsSum) !== round2(paid - prevPaid)) return 'The change in paid amount must equal the change in recorded payments';
   if (isInvoice(after) && paid > 0 && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
   // A recorded payment keeps pointing at its posted settlement entry (so that entry stays protected); new ones must name one.
   const old = before?.payments ?? [];
@@ -147,7 +155,7 @@ function offsetCreditNote(db, noteId) {
   if (!(value > 0)) return db;
   const date = note.invoice_date ?? today();
   const settle = (next, r, other) => write(next, 'account.move', r.id, {
-    amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id }],
+    amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id, cash_basis_move_id: null }],
   });
   let next = settle(settle(db, invoice, note), note, invoice);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
@@ -223,8 +231,9 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
-  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open }];
-  const next = write(releaseCashBasis(withPayment, r, value / total(r), date, { final }), 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
+  const release = releaseCashBasis(withPayment, r, value / total(r), date, { final });
+  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, cash_basis_move_id: release.id }];
+  const next = write(release.db, 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
 }
@@ -246,7 +255,12 @@ const releasedTaxes = (db, r) => {
       const code = read(db, 'account.account', l.account_id)?.code;
       const key = `${code}:${l.tax_name ?? ''}`;
       const previous = released.get(key) ?? { amount: 0, base: 0 };
-      released.set(key, { amount: previous.amount + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), base: previous.base + (Number(l.tax_base) || 0) });
+      const zeroTax = !(Number(l.debit) || Number(l.credit));
+      // Signed bases (and older zero-amount bases) include the refund direction.
+      // Legacy nonzero reversals retain the original unsigned base, so undo it here.
+      const base = (Number(l.tax_base) || 0) * ((l.tax_base_signed || zeroTax) && isRefund(r) ? -1 : 1)
+        * (!l.tax_base_signed && !zeroTax && m.reversed_entry_id ? -1 : 1);
+      released.set(key, { amount: previous.amount + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), base: previous.base + base });
     }
   }
   return released;
@@ -268,21 +282,23 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     // Older releases were not tagged; allocate their account total across its taxes.
     const tagged = final ? released.get(`${g.account}:${g.tax_name}`) : null;
     const legacy = final ? released.get(`${g.account}:`) : null;
-    const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * g.amount / accountTotal;
-    const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * g.amount / accountTotal;
+    const legacyShare = accountTotal ? g.amount / accountTotal : 0;
+    const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
+    const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * legacyShare;
     return { ...g, amount: round2(final ? g.amount - prior : g.amount * Math.abs(share)), base: round2(final ? g.base - priorBase : g.base * share) };
   })
-    .filter((g) => g.amount > 0);
-  if (!due.length) return db;
+    .filter((g) => g.amount || g.base);
+  if (!due.length) return { db, id: null };
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
   const lines = due.flatMap(({ account, amount, base, tax_name }) => {
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: base, tax_side: sale ? 'sale' : 'purchase' };
+    // The base is signed independently of the tax amount, including reversals and refunds.
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
   });
-  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines }).db;
+  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines });
 }
 
 /** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill, while some of it is left to credit. */
@@ -336,7 +352,7 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
   const paymentMove = after.payments.at(-1).move_id;
-  const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, discount: true }];
+  const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, cash_basis_move_id: null, discount: true }];
   return postNote(write(booked, 'account.move', id, { amount_paid: round2((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
@@ -369,6 +385,7 @@ const lineItem = {
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
     tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
+    tax_base_signed: { type: 'boolean', label: 'Tax Base', hidden: true },
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
   },
@@ -450,7 +467,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,

@@ -58,7 +58,7 @@ export function taxGroups(lines, accountOf, rate = 1) {
 
 /** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
 export const cashBasisTaxes = (lines, rate = 1) =>
-  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis), (l) => l.tax_account_id, rate).filter((g) => g.amount);
+  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis && lineTaxOf(l) !== 0), (l) => l.tax_account_id, rate).filter((g) => g.amount || g.base);
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
