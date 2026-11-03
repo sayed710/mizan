@@ -152,3 +152,21 @@ test('clicking a submenu button keeps the mobile panel open, while anchor clicks
     await React.act(async () => root.unmount());
   }
 });
+
+test('Accounting menu follows the Odoo top-level, Closing and Review group order', async () => {
+  const { menusFor } = await import('./models/index.js');
+  const menus = menusFor('accounting');
+  assert.deepEqual(menus.map((menu) => menu.label), ['Dashboard', 'Customers', 'Vendors', 'Accounting', 'Review', 'Reporting', 'Configuration']);
+  const accounting = menus.find((menu) => menu.label === 'Accounting');
+  assert.deepEqual(accounting.children.map((menu) => menu.label), ['Transactions', 'Assets & Liabilities', 'Closing']);
+  assert.deepEqual(accounting.children.find((menu) => menu.label === 'Closing').children.map((menu) => menu.label), ['Reconcile', 'Tax Returns', 'Lock Dates…', 'Secure Entries']);
+  const review = menus.find((menu) => menu.label === 'Review');
+  assert.deepEqual(review.children.map((menu) => menu.label), ['Control', 'Audit', 'Inventory', 'Regularization Entries', 'Sales']);
+  const allLabels = (items) => items.flatMap((item) => [item.label, ...allLabels(item.children ?? [])]);
+  for (const label of ['Journal Items', 'Unrealized Currencies', 'Customer Statement']) assert.ok(!allLabels(menus).includes(label), label);
+  const regularization = review.children.find((menu) => menu.label === 'Regularization Entries').children;
+  assert.equal(regularization.find((menu) => menu.key === 'deferred-revenues').domain({ kind: 'revenue' }), true);
+  assert.equal(regularization.find((menu) => menu.key === 'deferred-revenues').domain({ kind: 'expense' }), false);
+  assert.equal(regularization.find((menu) => menu.key === 'deferred-expenses').domain({ kind: 'expense' }), true);
+  assert.equal(regularization.find((menu) => menu.key === 'deferred-expenses').domain({ kind: 'revenue' }), false);
+});
