@@ -1,7 +1,7 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, read, search, unlink, write } from '../orm.js';
 import { today } from './common.js';
-import { analyticActuals, financeModels } from './finance.js';
+import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { invoiceLines, invoiceLineAccount } from './ledger.js';
 import { round } from '../money.js';
@@ -11,6 +11,23 @@ const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];
 const inPeriod = (r, from, to) => (!from || r.date >= from) && (!to || r.date <= to);
 const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
+const allocatedShares = (db, distribution, base) => {
+  const entries = Object.entries(normalizeDistribution(distribution, db)).filter(([, n]) => n > 0);
+  const amounts = entries.map(([, percent]) => round(base * percent / 100));
+  const plans = new Map();
+  entries.forEach(([id, percent], index) => {
+    const plan = planOf(read(db, 'account.analytic.account', Number(id)));
+    const group = plans.get(plan) ?? [];
+    group.push({ index, percent });
+    plans.set(plan, group);
+  });
+  for (const group of plans.values()) {
+    const largest = group.reduce((a, b) => b.percent > a.percent ? b : a);
+    const expected = round(base * group.reduce((sum, item) => sum + item.percent, 0) / 100);
+    amounts[largest.index] = round(amounts[largest.index] + expected - group.reduce((sum, item) => sum + amounts[item.index], 0));
+  }
+  return entries.map(([id], index) => [id, amounts[index]]);
+};
 export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 
@@ -97,12 +114,15 @@ export function checkMandatoryPlans(db, move) {
 
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
 export function analyticLinesForMove(db, move) {
-  if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => Object.entries(normalizeDistribution(distributionOfLine(line), db)).filter(([, n]) => n > 0).map(([id, percent]) => ({
+  if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
+    const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
+    return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
     name: line.name || move.name || '/', date: move.invoice_date || today(), account_id: Number(id),
-    amount: round(((Number(line.credit) || 0) - (Number(line.debit) || 0)) * percent / 100),
+    amount,
     general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
     partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
-  })));
+    }));
+  });
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
   checkMandatoryPlans(db, move);
   const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
@@ -117,13 +137,7 @@ export function analyticLinesForMove(db, move) {
     const allocation = allocations.get(index);
     const account = move.line_ids?.length ? allocation?.account : invoiceLineAccount(db, move, line);
     const lineAmount = allocation?.amount ?? 0;
-    const totals = new Map();
-    return Object.entries(normalizeDistribution(distributionOfLine(line, db, move), db)).filter(([, n]) => n > 0).map(([id, percent]) => {
-      const plan = planOf(read(db, 'account.analytic.account', Number(id)));
-      const previous = totals.get(plan) ?? { percent: 0, amount: 0 };
-      const cumulative = round(lineAmount * (previous.percent + percent) / 100);
-      const amount = round(cumulative - previous.amount);
-      totals.set(plan, { percent: previous.percent + percent, amount: cumulative });
+    return allocatedShares(db, distributionOfLine(line, db, move), lineAmount).map(([id, amount]) => {
       return {
         name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
@@ -166,18 +180,25 @@ const day = (date) => {
 };
 
 /** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
-export function budgetReport(db, budgetId, atDate = today()) {
+export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
   const start = day(budget.date_from);
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
-  const fraction = Math.min(1, Math.max(0, (day(atDate) - start + 1) / (end - start + 1)));
   return (budget.lines ?? []).map((line) => {
     const planned = Number(line.planned) || 0;
-    const practical = analyticActuals(db, { from: budget.date_from, to: budget.date_to, company_id: budget.company_id, account_id: line.analytic_account_id, general_account: line.general_account }).get(line.analytic_account_id) ?? 0;
+    const lineStart = line.date_from ? day(line.date_from) : start;
+    const lineEnd = line.date_to ? day(line.date_to) : end;
+    if (lineEnd < lineStart) throw new Error('Budget end date must be on or after its start date');
+    const fraction = Math.min(1, Math.max(0, (day(atDate) - lineStart + 1) / (lineEnd - lineStart + 1)));
+    const from = [budget.date_from, line.date_from, period.from].filter(Boolean).sort().at(-1);
+    const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
+    const companyId = budget.company_id ?? 1;
+    const analytic_lines = analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account });
+    const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
     const theoretical = round(planned * fraction);
-    return { ...line, planned, practical, theoretical, achievement: theoretical ? round(practical / theoretical * 100) : 0 };
+    return { ...line, planned, practical, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines };
   });
 }
 
@@ -242,7 +263,7 @@ export const analyticPlusModels = {
     ...budgetModel,
     fields: {
       ...budgetModel.fields,
-      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, general_account: { type: 'char', label: 'General Account Prefix' } } },
+      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
       state: { ...budgetModel.fields.state, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['validated', 'Validated'], ['done', 'Done'], ['cancel', 'Cancelled']] },
     },
     form: {

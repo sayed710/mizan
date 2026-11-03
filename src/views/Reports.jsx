@@ -2,7 +2,8 @@ import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
 import { companyViewDb, scopeAuditRows } from '../companyView.js';
@@ -288,23 +289,27 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   );
 }
 
-function Budget({ db }) {
+function Budget({ db, period }) {
   return (
     <tbody>
-      {search(db, 'account.budget').filter((b) => b.state !== 'draft').flatMap((b) => {
+      {search(db, 'account.budget').filter((b) => b.state !== 'draft' && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
         return [
-          <tr key={b.id} className="rep-section"><td colSpan={4}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
-          ...(b.lines ?? []).map((l, i) => {
-            const a = analyticActuals(db, { from: b.date_from, to: b.date_to, company_id: b.company_id, general_account: l.general_account }).get(l.analytic_account_id) ?? 0;
-            return (
-              <tr key={`${b.id}-${i}`} className="rep-detail">
+          <tr key={b.id} className="rep-section"><td colSpan={5}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
+          ...(b.lines?.length ? budgetReport(db, b.id, today(), { period }) : []).map((l, i) => (
+            <Fragment key={`${b.id}-${i}`}>
+              <tr className="rep-detail">
                 <td>{read(db, 'account.analytic.account', l.analytic_account_id)?.name ?? '—'}</td>
                 <td className="num">{money(l.planned)}</td>
-                <td className="num">{money(a)}</td>
-                <td className="num">{l.planned ? `${Math.round((a / l.planned) * 100)}%` : ''}</td>
+                <td className="num">{money(l.practical)}</td>
+                <td className="num">{money(l.variance)}</td>
+                <td className="num">{l.planned ? `${l.achievement}%` : ''}</td>
               </tr>
-            );
-          }),
+              {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
+                <td><a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a>{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
+                <td /><td className="num">{money(item.amount)}</td><td /><td />
+              </tr>)}
+            </Fragment>
+          )),
         ];
       })}
     </tbody>
@@ -313,9 +318,16 @@ function Budget({ db }) {
 
 function Analytic({ db, period }) {
   const actual = analyticActuals(db, period);
+  const lines = analyticActualLines(db, period);
   return (
     <tbody>
-      {search(db, 'account.analytic.account').map((a) => <Total key={a.id} label={a.name} value={actual.get(a.id) ?? 0} />)}
+      {search(db, 'account.analytic.account').map((a) => <Fragment key={a.id}>
+        <Total label={a.name} value={actual.get(a.id) ?? 0} />
+        {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
+          <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
+          <td className="num">{money(line.amount)}</td>
+        </tr>)}
+      </Fragment>)}
     </tbody>
   );
 }
@@ -466,7 +478,7 @@ const REPORTS = {
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
-  budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Achievement'] },
+  budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', Body: Pnl, cols: ['Balance'] },
   balance: { title: 'Balance Sheet', Body: Balance, cols: ['Balance'] },

@@ -6,7 +6,7 @@ import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
-import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, postAnalytic, removeAnalytic } from './analyticplus.js';
+import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { cashRound, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
@@ -154,7 +154,16 @@ export function postMove(db, id) {
   if (!isInvoice(r)) {
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids)) throw new Error('Journal entry is not balanced: total debit must equal total credit');
-    return write(db, 'account.move', id, { state: 'posted', name });
+    const line_ids = (r.line_ids ?? []).map((line) => {
+      const type = read(db, 'account.account', line.account_id)?.account_type;
+      const eligible = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(type);
+      const distribution = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : eligible ? findAnalyticDistribution(db, {
+        partner_id: line.partner_id ?? r.partner_id, product_id: line.product_id, account_id: line.account_id, company_id: r.company_id ?? 1,
+      }) : null);
+      if (distribution == null || (!Object.hasOwn(line, 'analytic_distribution') && !Object.keys(distribution).length)) return line;
+      return { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
+    });
+    return postAnalytic(write(db, 'account.move', id, { state: 'posted', name, line_ids }), id);
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
@@ -774,6 +783,7 @@ Object.assign(accountingModels, {
         ],
       },
       color: { type: 'integer', label: 'Color' },
+      cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
       active: { type: 'boolean', label: 'Active' },
       country: { type: 'char', label: 'Country' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
@@ -784,7 +794,7 @@ Object.assign(accountingModels, {
       title: 'name',
       groups: [
         ['name', 'applicability', 'color'],
-        ['country', 'balance_negate', 'active'],
+        ['country', 'balance_negate', 'cash_flow_activity', 'active'],
       ],
     },
   },
