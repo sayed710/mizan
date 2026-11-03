@@ -10,11 +10,16 @@ import { currentCompany } from '../models/company.js';
 import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
 import { auditSummary } from '../audit.js';
 import { valuationReport } from '../models/valuation.js';
-import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
+import { CashFlow, CustomerStatement, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
+import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
+import { SalesReview } from './SalesReview.jsx';
+import { JournalItems } from './JournalItems.jsx';
+import { LoansAnalysis } from './LoansAnalysis.jsx';
+import { Checks } from './Checks.jsx';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
@@ -456,6 +461,7 @@ function InalterabilityCheck({ db, companyId }) {
 const REPORTS = {
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
   partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
@@ -477,7 +483,12 @@ const REPORTS = {
 
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf }) {
-  return reportPage(leaf, ReportPage);
+  const component = leaf.report === 'journalItems' ? JournalItems
+    : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
+    : leaf.report === 'checks' ? Checks
+    : leaf.report === 'loansAnalysis' ? LoansAnalysis
+      : ['invoicesToBeIssued', 'invoicedNotDelivered'].includes(leaf.report) ? SalesReview : ReportPage;
+  return reportPage(leaf, component);
 }
 
 function ReportPage({ leaf }) {
@@ -507,7 +518,7 @@ function ReportPage({ leaf }) {
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
-            {leaf.report === 'journalAudit' && <option value="custom">{t('Custom Period')}</option>}
+            {['journalAudit', 'customerStatement'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}

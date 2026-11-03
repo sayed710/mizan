@@ -189,6 +189,7 @@ const allApps = [
         { key: 'bills', label: 'Bills', model: 'account.move', domain: (r) => r.move_type === 'in_invoice', defaults: { move_type: 'in_invoice' } },
         { key: 'refunds', label: 'Refunds', model: 'account.move', domain: (r) => r.move_type === 'in_refund', defaults: { move_type: 'in_refund' } },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' } },
+        { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
         { key: 'products', label: 'Products', model: 'product' },
         vendors,
       ] },
@@ -215,6 +216,7 @@ const allApps = [
       ] },
       { label: 'Review', children: [
                 { label: 'Control', children: [
+          { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
@@ -226,12 +228,14 @@ const allApps = [
           { key: 'inventory-valuation', label: 'Inventory Valuation', type: 'report', report: 'valuation' },
         ] },
                 { label: 'Regularization Entries', children: [
+          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
           { key: 'deferred-revenues', label: 'Deferred Revenues', model: 'account.deferral', domain: (r) => r.kind === 'revenue', defaults: { kind: 'revenue' } },
           { key: 'deferred-expenses', label: 'Deferred Expenses', model: 'account.deferral', domain: (r) => r.kind === 'expense', defaults: { kind: 'expense' } },
           { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
         ] },
                 { label: 'Sales', children: [
-
+          { key: 'invoices-to-be-issued', label: 'Invoices To Be Issued', type: 'report', report: 'invoicesToBeIssued' },
+          { key: 'invoiced-not-delivered', label: 'Invoiced Not Delivered', type: 'report', report: 'invoicedNotDelivered' },
         ] },
       ] },
       { label: 'Reporting', children: [
@@ -247,6 +251,7 @@ const allApps = [
         ] },
                 { label: 'Partner Reports', children: [
           { key: 'partner-ledger', label: 'Partner Ledger', type: 'report', report: 'partnerReceivable' },
+          { key: 'customer-statement', label: 'Customer Statement', type: 'report', report: 'customerStatement' },
           { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
           { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
           { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
@@ -257,6 +262,7 @@ const allApps = [
         ] },
                 { label: 'Management', children: [
           { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
+          { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
           { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
           { key: 'executive-summary', label: 'Executive Summary', type: 'report', report: 'executive' },
           { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
@@ -272,6 +278,7 @@ const allApps = [
                 { label: 'Accounting', children: [
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax' },
+          { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
           { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },

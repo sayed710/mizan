@@ -72,6 +72,14 @@ export const lineUntaxed = (l) => gross(l) - (l.tax_include ? lineTaxOf(l) : 0);
 const TAX_TYPES = [['sale', 'Sales'], ['purchase', 'Purchases'], ['none', 'None']];
 
 export const taxModels = {
+  'account.tax.group': {
+    label: 'Tax Groups',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+    },
+    list: ['name'],
+    form: { title: 'name', groups: [[], []], chatter: true },
+  },
   'account.tax': {
     label: 'Taxes',
     guard: (db, before, after) => (after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes') ? 'Select only tax tags' : null,
@@ -85,6 +93,7 @@ export const taxModels = {
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       account_id: { type: 'many2one', relation: 'account.account', label: 'Tax Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
+      tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'taxes' },
       active: { type: 'boolean', label: 'Active' },
     },
@@ -95,7 +104,7 @@ export const taxModels = {
     list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'tax_exigibility', 'tag_ids'],
     form: {
       title: 'name',
-      groups: [['amount_type', 'amount', 'description', 'type_tax_use', 'tag_ids'], ['account_id', 'tax_group', 'price_include', 'tax_exigibility', 'active']],
+      groups: [['amount_type', 'amount', 'description', 'type_tax_use', 'tag_ids'], ['account_id', 'tax_group_id', 'tax_group', 'price_include', 'tax_exigibility', 'active']],
       chatter: true,
     },
   },

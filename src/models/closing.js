@@ -5,6 +5,7 @@ import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLo
 import { companyCurrency, toCompany } from './currency.js';
 import { round } from '../money.js';
 import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
+import { companyViewDb } from '../companyView.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
@@ -179,7 +180,8 @@ export function unrealizedExchange(db, date) {
 }
 
 /** Foreign bank positions are reconstructed from posted journal items, grouped by account and currency. */
-function foreignBankBalances(db, date) {
+export function foreignBankBalances(db, date) {
+  checkDate(date);
   const groups = new Map();
   for (const move of search(db, 'account.move')) {
     if (move.state !== 'posted' || move.invoice_date > date) continue;
@@ -197,10 +199,16 @@ function foreignBankBalances(db, date) {
   return [...groups.values()].map((row) => ({ ...row, difference: round(toCompany(db, row.currency_id, row.foreign, date, row.company_id) - row.booked) }));
 }
 
+/** Open foreign positions visible to the selected companies. */
+export function foreignBalanceReport(db, date) {
+  const scoped = companyViewDb(db);
+  return [...unrealizedExchange(scoped, date), ...foreignBankBalances(scoped, date)];
+}
+
 /** Post one exchange adjustment and its next-day reversal, once per date. */
-export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100' } = {}) {
+export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100', companyScoped = false } = {}) {
   checkDate(date);
-  const rows = [...unrealizedExchange(db, date), ...foreignBankBalances(db, date)].filter((r) => r.difference);
+  const rows = (companyScoped ? foreignBalanceReport(db, date) : [...unrealizedExchange(db, date), ...foreignBankBalances(db, date)]).filter((r) => r.difference);
   let next = db;
   // Each company adjusts its own books, so rows are grouped by company and posted with that company.
   for (const company of [...new Set(rows.map((r) => r.company_id))]) {
