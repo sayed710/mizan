@@ -1,0 +1,48 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { register } from 'node:module';
+import { create, read, search, updateSettings } from './orm.js';
+import { seed } from './seed.js';
+import { menusFor } from './models/index.js';
+import { postMove } from './models/accounting.js';
+import { createCompany } from './models/company.js';
+import { foreignBalanceReport, revalueForeignBalances } from './models/closing.js';
+import { accountId, journalId } from './models/ledger.js';
+
+register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
+
+test('Unrealized Currencies menu renders dated invoice and bank positions and revalues only selected companies', async () => {
+  const currency = create(seed(), 'res.currency', { name: 'TESTFX', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }] });
+  const invoice = create(currency.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }] });
+  let db = postMove(invoice.db, invoice.id);
+  const bank = create(db, 'account.move', { name: 'BANK-FX-TEST', move_type: 'entry', state: 'posted', journal_id: journalId(db, 'MISC'), invoice_date: '2026-01-01', line_ids: [{ account_id: accountId(db, '101401'), debit: 50, credit: 0, currency_id: currency.id, amount_currency: 100 }, { account_id: accountId(db, '301000'), debit: 0, credit: 50 }] });
+  const second = createCompany(bank.db, { name: 'Other company' });
+  db = second.db;
+  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: second.id }).db;
+  db = create(db, 'account.journal', { code: 'MISC', name: 'Other journal', type: 'general', company_id: second.id }).db;
+  const other = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: second.id, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
+  db = updateSettings(postMove(other.db, other.id), { current_company_id: 1, allowed_company_ids: [1] });
+  const leaf = menusFor('accounting').find((m) => m.label === 'Review').children.find((m) => m.label === 'Regularization Entries').children[0];
+  assert.equal(leaf.report, 'unrealizedCurrencies');
+  const rows = foreignBalanceReport(db, '2026-02-28');
+  assert.equal(rows.find((r) => r.invoice_id === invoice.id).difference, 50);
+  assert.equal(rows.find((r) => r.account_id === accountId(db, '101401')).difference, 50);
+  assert.ok(!rows.some((r) => r.company_id === second.id));
+  assert.equal(foreignBalanceReport(db, '2025-12-31').length, 0);
+  const result = revalueForeignBalances(db, '2026-02-28', { companyScoped: true });
+  const entries = search(result, 'account.move').filter((m) => m.revaluation_date === '2026-02-28');
+  assert.deepEqual(entries.map((m) => m.company_id), [1]);
+  assert.equal(read(result, 'account.move', entries[0].reversal_move_id).invoice_date, '2026-03-01');
+  assert.equal(revalueForeignBalances(result, '2026-02-28', { companyScoped: true }), result);
+  assert.ok(read(result, 'account.move', other.id));
+  const { initStore, commit } = await import('./store.js');
+  await initStore();
+  await commit(db);
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Reports } = await import('./views/Reports.jsx');
+  const html = renderToStaticMarkup(React.createElement(Reports, { leaf }));
+  assert.match(html, /Unrealized Currencies/);
+  assert.match(html, /Revalue Foreign Currency/);
+  assert.doesNotMatch(html, /Other company/);
+});

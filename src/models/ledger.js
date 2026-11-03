@@ -271,6 +271,8 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         move_id: m.id,
         move_name: m.name,
         date: m.invoice_date ?? m.date,
+        company_id: m.company_id ?? 1,
+        journal_id: m.journal_id,
         is_closing: !!m.is_closing,
         is_tax_closing: isTaxClosing,
         is_tax_payment: isTaxSettlement,
