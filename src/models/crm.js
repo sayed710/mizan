@@ -38,7 +38,8 @@ export function stageColumnsFor(db, model, context = {}) {
 
 export function isWonLead(db, r) {
   if (!r) return false;
-  if (r.stage_id === 'won' || r.stage_id === 4) return true;
+  if (typeof r.stage_id === 'number') return !!(db?.records?.['crm.stage'] ?? []).find((s) => s.id === r.stage_id)?.is_won;
+  if (r.stage_id === 'won') return true;
   if (db?.records?.['crm.stage']) {
     const s = (db.records['crm.stage'] ?? []).find((x) => x.id === r.stage_id || x.name?.toLowerCase() === String(r.stage_id).toLowerCase());
     if (s?.is_won) return true;
@@ -200,6 +201,7 @@ export const crmModels = {
         label: 'Rotting',
         compute: (r, db) => isRotting(db, 'crm.lead', r),
       },
+      is_won_stage: { type: 'boolean', label: 'Is Won Stage', hidden: true, compute: (r, db) => isWonLead(db, r) },
       user: { type: 'char', label: 'Salesperson' },
       date_deadline: { type: 'date', label: 'Expected Closing' },
       create_date: { type: 'date', label: 'Created on', readonly: true },
@@ -223,8 +225,8 @@ export const crmModels = {
         const stage = typeof r.stage_id === 'number'
           ? (db.records['crm.stage'] ?? []).find((s) => s.id === r.stage_id)
           : (db.records['crm.stage'] ?? []).find((s) => s.name?.toLowerCase() === String(r.stage_id).toLowerCase());
-        const won = stage?.is_won || r.stage_id === 'won' || r.stage_id === 4;
-        const legacyProbs = { new: 10, qualified: 30, proposition: 60, won: 100, 1: 10, 2: 30, 3: 60, 4: 100 };
+        const won = stage?.is_won || r.stage_id === 'won';
+        const legacyProbs = { new: 10, qualified: 30, proposition: 60, won: 100, 1: 10, 2: 30, 3: 60 };
         return {
           date_last_stage_update: today(),
           probability: won ? 100 : (legacyProbs[r.stage_id] ?? r.probability),
@@ -238,8 +240,8 @@ export const crmModels = {
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],
       [
-        { id: 'won', label: 'Won', fn: (r) => r.stage_id === 'won' || r.stage_id === 4 || r.probability === 100 },
-        { id: 'ongoing', label: 'Ongoing', fn: (r) => r.active !== false && r.stage_id !== 'won' && r.stage_id !== 4 && r.probability !== 100 },
+        { id: 'won', label: 'Won', fn: (r) => r.is_won_stage },
+        { id: 'ongoing', label: 'Ongoing', fn: (r) => r.active !== false && !r.is_won_stage },
         { id: 'overdue', label: 'Overdue', fn: (r) => r.active !== false && r.date_deadline && r.date_deadline < today() },
         { id: 'rotting', label: 'Rotting', fn: (r) => !!r.is_rotting },
       ],
@@ -276,8 +278,8 @@ export const crmModels = {
           run: (db, r) => {
             const stages = db.records['crm.stage'] ?? [];
             const wonStage = stages.find((s) => s.is_won && (!s.team_ids?.length || (r.team_id && s.team_ids.includes(r.team_id))))
-              ?? stages.find((s) => s.is_won)
-              ?? { id: 4 };
+              ?? stages.find((s) => s.is_won);
+            if (!wonStage) throw new Error('Configure a won stage first');
             return { db: write(db, 'crm.lead', r.id, { stage_id: wonStage.id, probability: 100, date_last_stage_update: today() }) };
           },
         },

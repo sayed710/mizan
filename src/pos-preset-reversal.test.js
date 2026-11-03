@@ -47,6 +47,31 @@ test('return with a missing valuation layer link fails safely', () => {
   assert.deepEqual(db, before);
 });
 
+test('periodic return without stored valuation provenance can be cancelled', () => {
+  for (const valuation of ['periodic', 'manual_periodic']) {
+    let db = seed();
+    const category = create(db, 'product.category', { name: 'Periodic category', property_valuation: valuation });
+    const product = create(category.db, 'product', { name: 'Periodic return', type: 'goods', categ_id: category.id, cost: 20, sale_ok: true });
+    const config = search(product.db, 'pos.config')[0];
+    const preset = create(product.db, 'pos.preset', { name: 'Return', is_return: true, identification: 'none' });
+    db = write(preset.db, 'pos.config', config.id, { available_preset_ids: [preset.id], default_preset_id: preset.id });
+    db = startSession(db, 50, config.id).db;
+    const session = search(db, 'pos.session').find((s) => s.state === 'opened');
+    const returned = payOrder(db, { lines: [{ product_id: product.id, qty: -2, price_unit: 50, tax: 0 }], method: 'cash' });
+    const committed = applyDiff(db, diffDb(db, returned.db), { author: 'test', isAdmin: false, allowed: null });
+    db = write(committed, 'pos.order', returned.id, { return_layers: [] });
+    const qty = (state) => (state.records['stock.quant'] ?? []).filter((q) => q.product_id === product.id).reduce((sum, q) => sum + q.quantity, 0);
+    const layers = (state) => (state.records['stock.valuation.layer'] ?? []).filter((l) => l.product_id === product.id);
+    assert.equal(qty(db), 2);
+    assert.equal(layers(db).length, 0);
+    const reversed = refundOrder(db, read(db, 'pos.order', returned.id));
+    assert.equal(qty(reversed.db), 0);
+    assert.equal(layers(reversed.db).length, 0);
+    assert.equal(read(reversed.db, 'pos.order', returned.id).state, 'refunded');
+    assert.deepEqual(sessionTotals(reversed.db, session), { orders: 2, cash: 0, card: 0, expected: 50 });
+  }
+});
+
 test('sale and return reversals survive edited archived presets, including missing snapshots', () => {
   for (const isReturn of [false, true]) for (const legacy of [false, true]) {
     let db = seed();

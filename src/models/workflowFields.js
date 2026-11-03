@@ -68,7 +68,7 @@ const LINE_FIELDS = {
     employee_feedback: { type: hidden('selection', 'Answer Type', { options: [['text', 'Text'], ['rating', 'Rating']] }) },
     manager_feedback: { type: hidden('selection', 'Answer Type', { options: [['text', 'Text'], ['rating', 'Rating']] }) },
   },
-  'purchase.order': { order_line: { purchase_method: hidden('selection', 'Bill Control', { options: PURCHASE_METHOD }) } },
+  'purchase.order': { order_line: { purchase_method: hidden('selection', 'Bill Control', { options: PURCHASE_METHOD }), orderpoint_id: m2o('stock.warehouse.orderpoint', 'Reordering Rule') } },
   'repair.order': { operations: { tax: hidden('float', 'Tax %') } },
   'sale.order': { order_line: { name: hidden('char', 'Description', { readonly: false }), expense_id: m2o('hr.expense', 'Expense') } },
   'stock.picking': { move_ids: { lot_id: m2o('stock.lot', 'Lot/Serial Number') } },

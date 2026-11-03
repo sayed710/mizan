@@ -4,7 +4,7 @@ import { today } from './common.js';
 import { round } from '../money.js';
 import { moreModels } from './more.js';
 import { currentActor, employeeFor, approvalError } from './authority.js';
-import { calendarFor, getAttendances, isPublicHoliday, isWorkingDay, workingHoursForDay } from './calendar.js';
+import { calendarFor, getAttendances, isWorkingDay, workingHoursForDay } from './calendar.js';
 
 const LEAVE_TYPES = [['paid', 'Paid Time Off'], ['sick', 'Sick Time Off'], ['unpaid', 'Unpaid'], ['comp', 'Compensatory Days']];
 export const REQUIRES_ALLOCATION = new Set(['paid', 'comp']);
@@ -21,15 +21,6 @@ const company = (a, b) => (a.company_id ?? 1) === (b.company_id ?? 1);
 
 /** Working schedule resolves through resource.calendar, subtracting holidays and weekends. */
 export function leaveSchedule(db, employeeId, date) {
-  const employee = (db.records['hr.employee'] ?? []).find((e) => e.id === employeeId);
-  const c = (db.records['hr.contract'] ?? []).find(
-    (r) => r.employee_id === employeeId && (!employee || company(r, employee)) && r.state === 'running' && (!r.date_start || r.date_start <= date) && (!r.date_end || r.date_end >= date),
-  );
-  if (!employee?.resource_calendar_id && !c) {
-    const cal = calendarFor(db, employeeId, date);
-    const holiday = isPublicHoliday(cal, date, db);
-    return { working: !holiday, hours: 8, from: 9 };
-  }
   const cal = calendarFor(db, employeeId, date);
   const working = isWorkingDay(cal, date, db);
   const hours = workingHoursForDay(cal, date, db);

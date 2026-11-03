@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, pad, today } from './common.js';
 import { vendorPrice } from './routes.js';
-import { ensureMainWarehouse } from './warehouse.js';
+import { ensureMainWarehouse, mainWarehouse } from './warehouse.js';
 
 export function childLocationIds(db, rootLocationId) {
   const ids = new Set([rootLocationId]);
@@ -166,15 +166,15 @@ export function orderOrderpoints(db, ids) {
 
       if (existingRfq) {
         const lines = [...(existingRfq.order_line ?? [])];
-        const lineIdx = lines.findIndex((l) => l.product_id === op.product_id);
+        const lineIdx = lines.findIndex((l) => l.orderpoint_id === op.id && l.product_id === op.product_id);
         if (lineIdx >= 0) {
           const line = lines[lineIdx];
-          const newQty = Math.max(Number(line.qty) || 0, qty);
+          const newQty = qty;
           const newPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty: newQty, currencyId: existingRfq.currency_id, companyId: existingRfq.company_id, uomId: line.uom_id, date: existingRfq.date_order || today() })?.price ?? line.price_unit;
           lines[lineIdx] = { ...line, qty: newQty, price_unit: newPrice };
         } else {
           const existingPrice = vendorPrice(next, op.product_id, { partnerId: vendor, qty, currencyId: existingRfq.currency_id, companyId: existingRfq.company_id, date: existingRfq.date_order || today() })?.price ?? priceUnit;
-          lines.push({ product_id: op.product_id, qty, price_unit: existingPrice, tax });
+          lines.push({ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: existingPrice, tax });
         }
         const vals = {
           order_line: lines,
@@ -184,7 +184,7 @@ export function orderOrderpoints(db, ids) {
       } else {
         next = create(next, 'purchase.order', {
           partner_id: vendor,
-          order_line: [{ product_id: op.product_id, qty, price_unit: priceUnit, tax }],
+          order_line: [{ product_id: op.product_id, orderpoint_id: op.id, qty, price_unit: priceUnit, tax }],
           origin: 'Replenishment',
           company_id: op.company_id ?? 1,
         }).db;
@@ -225,8 +225,9 @@ export function syncProductOrderpoint(db, prod) {
   const max = Number(prod.reorder_max) || 0;
   if (min <= 0 && max <= 0) return db;
 
-  let next = ensureMainWarehouse(db);
-  const wh = search(next, 'stock.warehouse').find((w) => w.code === 'WH') ?? search(next, 'stock.warehouse')[0];
+  const company = prod.company_id ?? 1;
+  let next = ensureMainWarehouse(db, company);
+  const wh = mainWarehouse(next, company);
   if (!wh?.lot_stock_id) return next;
 
   // Find any existing quant for this product in this company
