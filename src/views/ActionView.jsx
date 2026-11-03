@@ -102,7 +102,7 @@ export function ActionView({ leaf, base, params }) {
   const importCsv = async (file) => {
     try {
       const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text) : importRows(getDb(), model, defaults, fromCsv(text));
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importRows(getDb(), model, defaults, fromCsv(text));
       // Report the import only once the server has accepted it (a refusal shows its own message).
       if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {

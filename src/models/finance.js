@@ -78,7 +78,7 @@ function taxLockFor(db, move, settings = db.settings) {
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
-const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id));
+const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === id || l.writeoff_move_id === id || (l.allocations ?? []).some((a) => a.payment_move_id === id || a.writeoff_move_id === id) || (l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id)));
 
 /**
  * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown
@@ -275,7 +275,7 @@ export function paymentInvariant(db, after) {
   const net = (id) => round((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
   const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : round(Number(after.amount));
-  const bank = accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };

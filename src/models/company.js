@@ -316,6 +316,8 @@ export const companyModels = {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
+      outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },

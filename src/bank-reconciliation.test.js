@@ -72,11 +72,20 @@ test('bank actions and reconciliation models never match another company invoice
   assert.throws(() => applyRule(account.db, writeoff, read(account.db, LINE, onlyForeign.id)), /belongs to another company/);
 });
 
-test('a line larger than what is due is refused instead of reconciled for less', () => {
+test('an oversized line pays the invoice and keeps the remainder open with one bank item', () => {
   const db0 = seed();
   const inv = openInvoice(db0);
-  const { db, id } = addLine(db0, { amount: inv.amount_residual + 500, move_id: inv.id });
-  assert.throws(() => run(db, id, 'Match'), /only has .* left to pay/);
+  const amount = inv.amount_residual + 500;
+  const { db, id } = addLine(db0, { amount, move_id: inv.id });
+  const done = run(db, id, 'Match');
+  const line = read(done, LINE, id);
+  assert.equal(read(done, 'account.move', inv.id).amount_residual, 0);
+  assert.equal(line.state, 'to_check');
+  assert.equal(line.open_amount, 500);
+  const bank = search(done, 'account.account').find((a) => a.code === '101401').id;
+  const newItems = journalItems(done).filter((l) => !read(db, 'account.move', l.move_id) && l.account_id === bank);
+  assert.equal(newItems.length, 1);
+  assert.equal(newItems[0].debit, amount);
 });
 
 test('money received cannot settle a vendor bill, and money paid out cannot settle an invoice', () => {

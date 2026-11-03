@@ -1,6 +1,6 @@
 import { create, postNote, read, search, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -271,7 +271,7 @@ function draftAssetsFromBill(db, bill) {
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, directBank = false, liquidityAccountId = null } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -283,10 +283,12 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   }
   // Matching an existing bank statement records money already sent, rather than authorizing a new payout.
   const statement = statementLineId ? read(db, 'account.bank.statement.line', statementLineId) : null;
-  if (statementLineId && (!statement || statement.state !== 'to_check' || statement.amount >= 0 || isInbound(r)
-    || round2(Math.abs(Number(statement.amount))) !== round2(Number(amount)) || (statement.date ?? today()) !== date)) {
+  if (statementLineId && (!statement || statement.state !== 'to_check' || (statement.amount > 0) !== isInbound(r)
+    || (statement.date ?? today()) !== date || (statement.company_id ?? 1) !== (r.company_id ?? 1)
+    || toCompany(db, r.currency_id, amount, date, r.company_id) > round2(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
     throw new Error('Invalid bank statement settlement');
   }
+  if (liquidityAccountId && (!statement?.bank_move_id || directBank)) throw new Error('A bank suspense settlement requires a posted statement entry');
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
     recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id, companyId: r.company_id ?? 1 });
@@ -297,6 +299,9 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const sale = isInbound(r);
   const counterpartCode = isPurchase(r) ? '211000' : '121000';
   const via = paymentJournal(db, payJournal);
+  const journal = read(db, 'account.journal', payJournal ?? journalId(db, via.code, r.company_id));
+  const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
+  const liquidity = liquidityAccountId ?? outstanding ?? via.account;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   const bank = toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
@@ -308,12 +313,12 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const extra = excess > 0 ? Math.round((toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) * 100) / 100 : 0;
   const credit = extra ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit' } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit' }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
-    journal: via.code, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
+    journal: via.code, journal_id: journal?.id, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
     lines: sale
-      ? [{ account: via.account, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
-      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: via.account, credit: bank + extra, partner_id: r.partner_id }, ...fx],
+      ? [{ account: liquidity, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
+      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: journal?.id ?? journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -324,6 +329,29 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const next = write(release.db, 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
+}
+
+/** Settle a document with an explicitly chosen company-currency write-off. */
+export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal } = {}) {
+  const invoice = read(db, 'account.move', invoiceId);
+  if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice)) throw new Error('Write-off exceeds the remaining invoice');
+  if (!Number.isFinite(Number(companyAmount)) || !(companyAmount > 0) || toCompany(db, invoice.currency_id, amount, date, invoice.company_id) !== round2(companyAmount)) throw new Error('Invalid write-off amount in company currency');
+  const account = read(db, 'account.account', writeoffAccount);
+  if (!account || (account.company_id && account.company_id !== (invoice.company_id ?? 1))) throw new Error('Write-off account belongs to another company or does not exist');
+  if (!String(label ?? '').trim()) throw new Error('Set a write-off label');
+  const incoming = isInbound(invoice);
+  const counterpart = isPurchase(invoice) ? '211000' : '121000';
+  const open = settlementCompanyAmount(db, invoice, amount);
+  const diff = round2(incoming ? companyAmount - open : open - companyAmount);
+  const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
+  const partner_id = invoice.partner_id;
+  const booked = postEntry(db, { journal: 'BNK1', journal_id: journal, company: invoice.company_id ?? 1, date, ref: label,
+    lines: incoming
+      ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
+      : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
+  const release = releaseCashBasis(booked.db, invoice, amount / total(invoice), date, { final: amount >= residual(invoice) });
+  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id }];
+  return { db: write(release.db, 'account.move', invoiceId, { amount_paid: round2((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
 /** Tax already released for an invoice, per tax account code. */
@@ -528,6 +556,8 @@ export const accountingModels = {
       code: { type: 'char', label: 'Short Code', required: true },
       type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
+      outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
+      outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
       secure_chain_heads: { type: 'one2many', label: 'Secure Chain Heads', hidden: true, fields: {
         company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
@@ -542,7 +572,7 @@ export const accountingModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['default_account_id', 'restrict_mode_hash_table']],
+      groups: [['code', 'type'], ['default_account_id', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table']],
     },
   },
 

@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
-import { paymentJournal, postEntry } from './ledger.js';
+import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, settlementFxError } from './finance.js';
 import { round } from '../money.js';
@@ -41,6 +41,9 @@ export function postPayment(db, p) {
           && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id))
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
+  const journal = read(db, 'account.journal', currentPayment.journal_id ?? journalId(db, via.code, currentPayment.company_id ?? 1));
+  const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
+  const liquidity = outstanding ?? via.account;
   let taxClosing = null;
   if (currentPayment.return_id || currentPayment.is_tax_payment) {
     const ret = read(db, 'account.return', currentPayment.return_id);
@@ -62,16 +65,16 @@ export function postPayment(db, p) {
     || (currentPayment.partner_type === 'supplier' ? '211000' : '121000');
   const amount = round(Number(currentPayment.amount));
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: via.code, date, ref: currentPayment.memo || name,
+    journal: via.code, journal_id: journal?.id, date, ref: currentPayment.memo || name,
     lines: inbound
-      ? [{ account: via.account, debit: amount, partner_id: currentPayment.partner_id }, { account: counterpart, credit: amount, partner_id: currentPayment.partner_id }]
-      : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, { account: via.account, credit: amount, partner_id: currentPayment.partner_id }],
+      ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, { account: counterpart, credit: amount, partner_id: currentPayment.partner_id }]
+      : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, { account: liquidity, credit: amount, partner_id: currentPayment.partner_id }],
     company: currentPayment.company_id ?? 1,
     is_tax_payment: Boolean(currentPayment.is_tax_payment || currentPayment.return_id),
     tax_return_id: currentPayment.return_id ?? null,
   });
   // Register the source before allocations so all callers can derive its currency semantics.
-  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: amount });
+  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, outstanding_account_id: outstanding, unapplied: amount });
   // Apply a company-currency payment against the recorded company balance of each document.
   const { db: applied, left } = open.reduce((acc, m) => {
     if (!(acc.left > 0)) return acc;
@@ -101,6 +104,43 @@ export function postPayment(db, p) {
   return write(settled, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: taxClosing ? 0 : left });
 }
 
+/** Post a linked mirror of an existing entry. */
+export function reverseEntry(db, source, date) {
+  if (!source || source.state !== 'posted' || date < (source.invoice_date ?? '')) throw new Error('A posted entry and valid reversal date are required');
+  if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) throw new Error('This entry has already been reversed');
+  const code = read(db, 'account.journal', source.journal_id)?.code ?? 'BNK1';
+  return create(db, 'account.move', {
+    move_type: 'entry', state: 'posted', journal_id: source.journal_id, invoice_date: date, ref: `Reversal of ${source.name}`, reversed_entry_id: source.id, partner_id: source.partner_id ?? null,
+    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`), company_id: source.company_id ?? 1,
+    line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
+  });
+}
+
+/** Reverse the exact cash-basis entry released by a settlement. */
+function reverseCashBasis(db, allocation, invoice, date) {
+  if (!allocation.cash_basis_move_id) return db;
+  const original = read(db, 'account.move', allocation.cash_basis_move_id);
+  if (!original) throw new Error('Cash-basis release for payment not found');
+  const lines = original.line_ids.map((l) => ({
+    ...l, account: read(db, 'account.account', l.account_id)?.code, debit: l.credit, credit: l.debit,
+    tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
+  }));
+  const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
+  const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company });
+  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+}
+
+/** Reverse a write-off settlement without changing unrelated invoice applications. */
+export function reverseWriteoff(db, invoiceId, moveId, date) {
+  const invoice = read(db, 'account.move', invoiceId);
+  const row = (invoice?.payments ?? []).find((p) => p.move_id === moveId && !p.reversed);
+  if (!row) throw new Error('The linked write-off settlement is missing');
+  const reversed = reverseEntry(db, read(db, 'account.move', moveId), date);
+  const released = reverseCashBasis(reversed.db, row, invoice, date);
+  const payments = invoice.payments.map((p) => p === row ? { ...p, reversed: true, reversal_move_id: reversed.id, reversal_date: date } : p);
+  return write(released, 'account.move', invoiceId, { amount_paid: round((Number(invoice.amount_paid) || 0) - Number(row.amount)), payments, payment_date: payments.filter((p) => !p.reversed).at(-1)?.date ?? null });
+}
+
 /**
  * Reverse a posted payment (FLOW-017): a mirror entry is posted on `date`, and what the payment settled becomes due
  * again, cash-basis taxes included. Payments made by a bank reconciliation stay, since the bank line still matches them.
@@ -109,11 +149,11 @@ export function reversePayment(db, p, date = today()) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
   const entry = read(db, 'account.move', p.move_id);
-  const fromBank = p.invoice_id && search(db, 'account.bank.statement.line')
-    .some((l) => l.state === 'reconciled' && (l.payment_move_id ? l.payment_move_id === p.move_id
-      // Legacy rows cannot disambiguate two identical payments: retain their conservative refusal until relinked.
-      : l.move_id === p.invoice_id && l.date === p.date && round(Math.abs(l.amount)) === round(p.amount)));
-  if (fromBank) throw new Error('This payment comes from a reconciled bank transaction and cannot be reversed here');
+  const fromBank = search(db, 'account.bank.statement.line')
+    .some((l) => (l.allocations ?? []).some((a) => a.payment_move_id === p.move_id) || (l.state === 'reconciled' && (l.payment_move_id === p.move_id || l.payment_id === p.id)));
+  const missingBankLink = p.invoice_id && search(db, 'account.bank.statement.line').some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && !l.payment_move_id);
+  if (missingBankLink) throw new Error('Cannot reverse payment: the reconciled bank transaction is missing its payment link; repair it first');
+  if (fromBank) throw new Error('This payment is linked to a reconciled bank transaction; unreconcile the transaction before reversing it');
   // A posted legacy line without payment identity could represent any payment of its linked invoice.
   // Do not guess from amount or reference; require the missing link to be repaired first.
   const missingBatchLink = (db.records['account.batch.payment'] ?? []).some((batch) => batch.state === 'posted'
@@ -137,12 +177,7 @@ export function reversePayment(db, p, date = today()) {
   const reversals = new Map();
   for (const id of sources) {
     const source = read(booked, 'account.move', id);
-    const code = read(booked, 'account.journal', source.journal_id)?.code ?? 'BNK1';
-    const made = create(booked, 'account.move', {
-      move_type: 'entry', state: 'posted', journal_id: source.journal_id, invoice_date: date, ref: `Reversal of ${source.name}`, reversed_entry_id: source.id, partner_id: source.partner_id ?? null,
-      name: nextName(booked, 'account.move', `${code}/${date.slice(0, 4)}/`), company_id: source.company_id ?? 1,
-      line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
-    });
+    const made = reverseEntry(booked, source, date);
     booked = made.db;
     reversals.set(id, made.id);
   }
@@ -154,18 +189,7 @@ export function reversePayment(db, p, date = today()) {
     let released = acc;
     for (const allocation of active) {
       if (Object.hasOwn(allocation, 'cash_basis_move_id')) {
-        if (!allocation.cash_basis_move_id) continue;
-        const original = read(released, 'account.move', allocation.cash_basis_move_id);
-        if (!original) throw new Error('Cash-basis release for payment not found');
-        const lines = original.line_ids.map((l) => ({
-          ...l, account: read(released, 'account.account', l.account_id)?.code,
-          debit: l.credit, credit: l.debit,
-          // Old bases are unsigned and the report derives their sign from the tax line.
-          tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
-        }));
-        const company = read(released, 'res.company', m.company_id ?? 1) ? (m.company_id ?? 1) : null;
-        const reversal = postEntry(released, { journal: 'MISC', date, ref: `Cash basis taxes ${m.name}`, lines, company });
-        released = write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+        released = reverseCashBasis(released, allocation, m, date);
       }
     }
     const legacy = active.filter((x) => !Object.hasOwn(x, 'cash_basis_move_id') && !x.discount);
@@ -212,6 +236,7 @@ export const payModels = {
       return_id: { type: 'many2one', relation: 'account.return', label: 'Tax Return', readonly: true },
       invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
+      outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: STATES },

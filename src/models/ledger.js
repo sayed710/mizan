@@ -15,7 +15,7 @@ export const ACCOUNT_TYPES = [
 
 /** Default chart of accounts (codes follow a common 6-digit layout). */
 export const CHART = [
-  ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['121000', 'Account Receivable', 'asset_receivable'],
+  ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['101402', 'Outstanding Receipts', 'asset_current'], ['101403', 'Outstanding Payments', 'asset_current'], ['101404', 'Bank Suspense', 'asset_current'], ['121000', 'Account Receivable', 'asset_receivable'],
   ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['110200', 'Stock Interim (Received)', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
   ['211000', 'Account Payable', 'liability_payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
   ['212000', 'Deferred Revenue', 'liability_current'], ['132000', 'Prepaid Expenses', 'asset_current'], ['230000', 'Salaries Payable', 'liability_current'], ['230100', 'Employee Expenses Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
@@ -233,6 +233,24 @@ export function paymentJournal(db, journalId) {
   const j = read(db, 'account.journal', journalId);
   const account = j && ['bank', 'cash'].includes(j.type) ? read(db, 'account.account', j.default_account_id)?.code : null;
   return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
+}
+
+/** Ensure the bank suspense account exists for older databases and company-specific charts. */
+export function ensureBankSuspense(db, company) {
+  const id = accountId(db, '101404', company);
+  const account = read(db, 'account.account', id);
+  if (account && (!account.company_id || account.company_id === company)) return { db, id };
+  return create(db, 'account.account', { code: '101404', name: 'Bank Suspense', account_type: 'asset_current', company_id: company });
+}
+
+/** Resolve an optional journal outstanding account, falling back to the company setting. */
+export function outstandingAccount(db, journal, company, inbound) {
+  const field = inbound ? 'outstanding_receipts_account_id' : 'outstanding_payments_account_id';
+  const id = journal?.[field] || read(db, 'res.company', company)?.[field];
+  if (!id) return null;
+  const account = read(db, 'account.account', id);
+  if (!account || (account.company_id && account.company_id !== company)) throw new Error('Outstanding account must belong to the payment company');
+  return id;
 }
 
 /** Posted journal items with their move date, optionally limited to [from, to] and company. */
