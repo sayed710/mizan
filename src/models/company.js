@@ -60,6 +60,8 @@ export const NESTED_COMPANY_FIELDS = {
   'consolidation.period': ['rate_ids'],
 };
 
+const nestedCompany = (model, field, line) => line?.company_id ?? (line && model === 'res.partner' && field === 'followup_lines' ? 1 : null);
+
 /**
  * Scopes nested per-company arrays within a record:
  * - When reading (write=false): filters nested arrays to only entries belonging to allowed companies.
@@ -76,7 +78,8 @@ export function scopeNestedCompanyArrays(model, rec, companies, { prior = null, 
       const lines = checkSource[field];
       if (Array.isArray(lines)) {
         for (const line of lines) {
-          if (line && line.company_id != null && !companies.has(line.company_id)) {
+          const company = nestedCompany(model, field, line);
+          if (company != null && !companies.has(company)) {
             throw new Error(`No access to this company's ${model} records`);
           }
         }
@@ -86,11 +89,11 @@ export function scopeNestedCompanyArrays(model, rec, companies, { prior = null, 
     if (prior) {
       for (const field of fields) {
         if (Array.isArray(prior[field])) {
-          const hidden = prior[field].filter((line) => line?.company_id != null && !companies.has(line.company_id));
+          const hidden = prior[field].filter((line) => nestedCompany(model, field, line) != null && !companies.has(nestedCompany(model, field, line)));
           if (hidden.length) {
             const userLines = Array.isArray(rec[field])
-              ? rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id))
-              : (prior[field] ?? []).filter((line) => line?.company_id != null && companies.has(line.company_id));
+              ? rec[field].filter((line) => companies.has(nestedCompany(model, field, line)))
+              : (prior[field] ?? []).filter((line) => companies.has(nestedCompany(model, field, line)));
             rec[field] = [...hidden, ...userLines];
           }
         }
@@ -103,7 +106,7 @@ export function scopeNestedCompanyArrays(model, rec, companies, { prior = null, 
   const out = { ...rec };
   for (const field of fields) {
     if (Array.isArray(rec[field])) {
-      out[field] = rec[field].filter((line) => line?.company_id != null && companies.has(line.company_id));
+      out[field] = rec[field].filter((line) => companies.has(nestedCompany(model, field, line)));
       modified = true;
     }
   }
@@ -155,7 +158,8 @@ export function restrictRecords(db, companies) {
 }
 
 /** Keep shared records and records belonging to an allowed company. */
-export function companyFilter(db, records) {
+export function companyFilter(db, records, model = null) {
+  if (CONFIG_MODELS.has(model)) return records;
   const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }

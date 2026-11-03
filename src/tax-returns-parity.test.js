@@ -6,7 +6,7 @@ import { today, addDays } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { postBatch } from './models/payments.js';
-import { accountId, postEntry } from './models/ledger.js';
+import { accountId, journalId, postEntry } from './models/ledger.js';
 import { migrate } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import {
@@ -175,6 +175,83 @@ test('sync round trips preserve manual locks and reset returns in lock order', (
   assert.equal(db.settings.lock_date, '2024-12-31');
 });
 
+test('tax return locks and resets are isolated by company through synced actions', () => {
+  let db = seed();
+  const company = createCompany(db, { name: 'Second company' });
+  db = company.db;
+  const buttons = models['account.return'].form.buttons;
+  const run = (label, id) => {
+    const next = buttons.find((button) => button.label === label).run(db, read(db, 'account.return', id)).db;
+    db = applyDiff(db, diffDb(db, next), { isAdmin: true });
+  };
+  const makeReturn = (companyId, end) => {
+    const type = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === companyId);
+    const made = create(db, 'account.return', { name: `Return ${companyId}`, type_id: type.id, company_id: companyId, date_from: '2025-01-01', date_to: end });
+    db = made.db;
+    run('Review', made.id);
+    run('Submit', made.id);
+    return made.id;
+  };
+  const first = makeReturn(1, '2025-02-28');
+  const taxable = (companyId, date) => postEntry(db, { journal: 'MISC', company: companyId, date, lines: [
+    { account: '101401', debit: 10 }, { account: '251000', credit: 10, tax_name: 'VAT' },
+  ] });
+  assert.doesNotThrow(() => taxable(company.id, '2025-01-15'));
+  const second = makeReturn(company.id, '2025-01-31');
+  const legacy = { ...db, schema_version: 15, settings: { ...db.settings, tax_lock_dates: undefined } };
+  const migrated = migrate(legacy);
+  assert.throws(() => postEntry(migrated, { journal: 'MISC', company: company.id, date: '2025-01-15', lines: [
+    { account: '101401', debit: 10 }, { account: '251000', credit: 10, tax_name: 'VAT' },
+  ] }), /locked/i);
+  assert.throws(() => taxable(company.id, '2025-01-15'), /locked/i);
+  assert.doesNotThrow(() => taxable(company.id, '2025-02-15'));
+  run('Reset to Draft', second);
+  assert.doesNotThrow(() => taxable(company.id, '2025-01-15'));
+  assert.throws(() => taxable(1, '2025-02-15'), /locked/i);
+  run('Reset to Draft', first);
+  assert.doesNotThrow(() => taxable(1, '2025-02-15'));
+});
+
+test('invoice confirmation only uses journals and accounts available to its company', () => {
+  let db = seed();
+  const company = createCompany(db, { name: 'Company without journals' });
+  db = company.db;
+  for (const code of ['INV', 'BILL']) {
+    const journal = search(db, 'account.journal').find((record) => record.code === code);
+    db = write(db, 'account.journal', journal.id, { company_id: 1 });
+    assert.equal(journalId(db, code), journal.id);
+  }
+  const confirm = models['account.move'].form.buttons.find((button) => button.label === 'Confirm');
+  const makeInvoice = (source, type, account) => create(source, 'account.move', {
+    company_id: company.id, move_type: type, partner_id: 1, invoice_date: '2025-06-01',
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0, ...(account ? { account_id: account } : {}) }],
+  });
+  for (const type of ['out_invoice', 'in_invoice']) {
+    const draft = makeInvoice(db, type);
+    assert.throws(() => confirm.run(draft.db, read(draft.db, 'account.move', draft.id)), type === 'out_invoice' ? /no customer invoice journal for this company/i : /no vendor bill journal for this company/i);
+    assert.equal(read(draft.db, 'account.move', draft.id).state, 'draft');
+  }
+  assert.equal(journalId(db, 'INV', company.id), null);
+  const foreignAccount = create(db, 'account.account', { code: 'FOREIGN', name: 'Other company account', company_id: 1 });
+  db = foreignAccount.db;
+  assert.equal(accountId(db, 'FOREIGN', company.id), null);
+  assert.equal(accountId(db, 'FOREIGN'), foreignAccount.id);
+  for (const [code, type] of [['INV', 'sale'], ['BILL', 'purchase']]) {
+    const journal = create(db, 'account.journal', { name: `Company ${code}`, code, type, company_id: company.id });
+    db = journal.db;
+    assert.equal(journalId(db, code, company.id), journal.id);
+  }
+  const wrongAccount = makeInvoice(db, 'out_invoice', foreignAccount.id);
+  assert.throws(() => confirm.run(wrongAccount.db, read(wrongAccount.db, 'account.move', wrongAccount.id)), /account.*company/i);
+  for (const type of ['out_invoice', 'in_invoice']) {
+    const draft = makeInvoice(db, type);
+    const posted = confirm.run(draft.db, read(draft.db, 'account.move', draft.id)).db;
+    assert.equal(read(posted, 'account.move', draft.id).journal_id, journalId(posted, type === 'out_invoice' ? 'INV' : 'BILL', company.id));
+  }
+  const shared = create(db, 'account.journal', { name: 'Shared journal', code: 'SHARED', type: 'general' });
+  assert.equal(journalId(shared.db, 'SHARED', company.id), shared.id);
+});
+
 test('journal posting resolves duplicate account codes in the entry company', () => {
   let db = seed();
   db = create(db, 'res.company', { name: 'Other company' }).db;
@@ -204,7 +281,8 @@ test('journal entries sync with exact, shared and other-company account fallback
   account('987002', 'Other shared code', otherCompany.id);
   const shared = account('987002', 'Shared fallback', null);
   const otherFallback = account('987003', 'Other fallback', otherCompany.id);
-  assert.equal(accountId(db, '987003', company.id), otherFallback);
+  assert.equal(accountId(db, '987003', company.id), null);
+  assert.equal(accountId(db, '987003'), otherFallback);
   assert.throws(() => postEntry(db, { journal: 'MISC', company: company.id, lines: [{ account: '987003', debit: 10 }, { account: '101401', credit: 10 }] }), /another company/i);
   const fallback = account('987003', 'Shared fallback', null);
   const makeEntry = (companyId) => {
@@ -1008,6 +1086,51 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
   }
 });
 
+test('outbound payment actions reject another company’s recipient bank and allow own or shared banks', () => {
+  const initial = seed();
+  const company = createCompany(initial, { name: 'Other paying company' });
+  const vendor = create(company.db, 'res.partner', { name: 'Company-aware vendor' });
+  const foreign = create(vendor.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-TWO', company_id: company.id });
+  const own = create(foreign.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-ONE', company_id: 1 });
+  const shared = create(own.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SHARED' });
+  const confirmPayment = models['account.payment'].form.buttons.find((button) => button.label === 'Confirm');
+  const confirmBill = models['account.move'].form.buttons.find((button) => button.label === 'Confirm');
+  const validateBatch = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Validate');
+  const makePayment = (source, bankId, companyId = 1, invoiceId = null) => create(source, 'account.payment', {
+    partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100,
+    company_id: companyId, partner_bank_id: bankId, invoice_id: invoiceId,
+  });
+  const confirm = (payment) => confirmPayment.run(payment.db, read(payment.db, 'account.payment', payment.id)).db;
+  const wrong = makePayment(shared.db, foreign.id);
+  assert.throws(() => confirm(wrong), /bank account.*company/i);
+  assert.equal(read(wrong.db, 'account.payment', wrong.id).state, 'draft');
+  assert.throws(() => confirm(makePayment(shared.db, own.id, company.id)), /bank account.*company/i);
+  for (const bankId of [own.id, shared.id, null]) {
+    const payment = makePayment(shared.db, bankId);
+    assert.equal(read(confirm(payment), 'account.payment', payment.id).state, 'posted');
+  }
+  const otherCompanyPayment = makePayment(shared.db, foreign.id, company.id);
+  assert.equal(read(confirm(otherCompanyPayment), 'account.payment', otherCompanyPayment.id).state, 'posted');
+  const bill = create(shared.db, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, company_id: 1,
+    partner_bank_id: foreign.id, invoice_date: today(), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const posted = confirmBill.run(bill.db, read(bill.db, 'account.move', bill.id)).db;
+  const register = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment');
+  const oldPrompt = globalThis.prompt;
+  try {
+    globalThis.prompt = () => '100';
+    assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id)), /bank account.*company/i);
+  } finally {
+    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
+  }
+  assert.throws(() => confirm(makePayment(posted, null, 1, bill.id)), /bank account.*company/i);
+  const noBank = write(posted, 'account.move', bill.id, { partner_bank_id: null });
+  assert.throws(() => confirm(makePayment(noBank, foreign.id, 1, bill.id)), /bank account.*company/i);
+  const batch = create(posted, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 1,
+    lines: [{ move_id: bill.id, amount: 100 }] });
+  assert.throws(() => validateBatch.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)), /bank account.*company/i);
+  assert.equal(read(batch.db, 'account.move', bill.id).amount_paid, 0);
+});
+
 test('batch payment form action posts each bill settlement to the selected bank', () => {
   let db = seed();
   const vendor = create(db, 'res.partner', { name: 'Batch settlement vendor' });
@@ -1063,7 +1186,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 15);
+  assert.equal(migrated.schema_version, 17);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');

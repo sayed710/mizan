@@ -14,6 +14,7 @@ import { today } from './models/common.js';
 import { journalId } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
+import { returnTaxLock } from './models/finance.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -383,7 +384,7 @@ export function migrateFollowUps(db) {
   const partners = db.records['res.partner'].map((p) => {
     const { followup_level_delay, followup_date, followup_level, ...rest } = p;
     const company = p.company_id || 1;
-    const lines = [...(p.followup_lines ?? [])];
+    const lines = (p.followup_lines ?? []).map((line) => line && line.company_id == null ? { ...line, company_id: 1 } : line);
     const hasLegacy = followup_level_delay != null || followup_date != null || followup_level != null;
     if (hasLegacy && !lines.some((l) => l.company_id === company)) {
       lines.push({
@@ -421,6 +422,7 @@ export function migratePartnerBankAccounts(db) {
       banks.push({
         id: maxId,
         partner_id: p.id,
+        company_id: p.company_id || 1,
         account_number: bank_account,
         sanitized_account_number: sanitized,
         allow_out_payment: true,
@@ -464,6 +466,13 @@ export const MIGRATIONS = [
   { version: 13, name: 'POS: repair payment method resolution within configuration', up: repairPosMethods },
   { version: 14, name: 'Rental: flag legacy billing counters for review', up: migrateLegacyRentalBilling },
   { version: 15, name: 'Partners: migrate free-text bank accounts to res.partner.bank', up: migratePartnerBankAccounts },
+  { version: 16, name: 'Tax returns: initialize company-specific locks', up: (db) => {
+    const ids = new Set((db.records['account.return'] ?? []).map((r) => r.company_id ?? 1).filter((id) => id !== 1));
+    const locks = { ...db.settings?.tax_lock_dates };
+    for (const id of ids) if (!(id in locks)) locks[id] = returnTaxLock(db, id) || null;
+    return { ...db, settings: { ...db.settings, tax_lock_dates: locks } };
+  } },
+  { version: 17, name: 'Follow-ups: assign legacy untagged progress to company 1', up: migrateFollowUps },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

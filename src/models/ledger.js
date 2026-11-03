@@ -42,7 +42,7 @@ const idByCode = (db, model, code, company) => {
     const match = records.find((record) => record.code === code && record.company_id === company);
     if (match) return match.id;
   }
-  return records.find((record) => record.code === code && (!company || !record.company_id || record.company_id === company))?.id ?? records.find((record) => record.code === code)?.id ?? null;
+  return records.find((record) => record.code === code && (!company || !record.company_id))?.id ?? null;
 };
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);

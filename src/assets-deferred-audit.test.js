@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
 import { accountId, isBalanced } from './models/ledger.js';
+import { analyticBalance } from './models/analyticplus.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -30,6 +31,35 @@ test('sale uses the posted invoice line account and reverses depreciation before
   assert.ok(read(db, 'account.asset', asset.id).cancelled_depreciation_ids.every((l) => l.cancelled && !l.posted));
 });
 
+test('reversing and reposting depreciation offsets analytic actuals through synced actions', () => {
+  let db = seed();
+  const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'DEP-A' });
+  const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'DEP-B' });
+  const distribution = { [first.id]: 60, [second.id]: 40 };
+  const asset = create(second.db, 'account.asset', { name: 'Allocated asset', original_value: 100,
+    acquisition_date: '2020-01-01', method: 'linear', method_number: 1, method_period: '12', analytic_distribution: distribution });
+  db = button('account.asset', 'Confirm', asset.db, asset.id);
+  db = button('account.asset', 'Post Depreciation', db, asset.id);
+  const original = read(db, 'account.asset', asset.id).depreciation_ids[0].move_id;
+  const actual = (account) => analyticBalance(db, account).balance;
+  assert.equal(actual(first.id), -60);
+  assert.equal(actual(second.id), -40);
+  const reversed = button('account.move', 'Reverse Entry', db, original);
+  db = applyDiff(db, diffDb(db, reversed), { isAdmin: true });
+  const reversal = search(db, 'account.move').find((move) => move.reversed_entry_id === original);
+  assert.ok(reversal && isBalanced(reversal.line_ids));
+  assert.deepEqual(reversal.line_ids.find((line) => line.analytic_distribution)?.analytic_distribution, distribution);
+  assert.equal(actual(first.id), 0);
+  assert.equal(actual(second.id), 0);
+  const board = read(db, 'account.asset', asset.id).depreciation_ids[0];
+  assert.equal(board.posted, false);
+  assert.equal(board.move_id, null);
+  db = button('account.asset', 'Post Depreciation', db, asset.id);
+  assert.notEqual(read(db, 'account.asset', asset.id).depreciation_ids[0].move_id, original);
+  assert.equal(actual(first.id), -60);
+  assert.equal(actual(second.id), -40);
+});
+
 test('invoice deferral prorates days, posts once, and reverses on reset', () => {
   let db = seed();
   db = write(db, 'res.company', 1, { deferred_generation_method: 'on_validation', deferred_revenue_account_id: accountId(db, '212000') });
@@ -47,6 +77,53 @@ test('invoice deferral prorates days, posts once, and reverses on reset', () => 
   schedule = read(db, 'account.deferral', schedule.id);
   assert.equal(schedule.state, 'cancel');
   assert.ok(schedule.board.every((l) => read(db, 'account.move', l.reversal_move_id)?.reversed_entry_id === l.move_id));
+});
+
+test('resetting deferred invoices and bills offsets recognition analytic actuals', () => {
+  for (const [moveType, recognition, deferred, sign] of [
+    ['out_invoice', '410000', '212000', 1],
+    ['in_invoice', '600000', '132000', -1],
+  ]) {
+    let db = seed();
+    const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'PROJECT-A' });
+    const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'PROJECT-B' });
+    db = write(second.db, 'res.company', 1, {
+      deferred_generation_method: 'on_validation',
+      [moveType === 'out_invoice' ? 'deferred_revenue_account_id' : 'deferred_expense_account_id']: accountId(second.db, deferred),
+    });
+    const distribution = { [first.id]: 60, [second.id]: 40 };
+    const invoice = create(db, 'account.move', { move_type: moveType, partner_id: 2, invoice_date: '2020-01-01', invoice_line_ids: [{
+      name: 'Deferred service', qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, recognition),
+      deferred_start_date: '2020-01-01', deferred_end_date: '2020-02-29', analytic_distribution: distribution,
+    }] });
+    db = button('account.move', 'Confirm', invoice.db, invoice.id);
+    const schedule = search(db, 'account.deferral').find((d) => d.source_move_id === invoice.id);
+    const originalIds = schedule.board.map((line) => line.move_id);
+    const linesFor = (state, ids) => (state.records['account.analytic.line'] ?? []).filter((line) => ids.includes(line.move_id));
+    const originals = linesFor(db, originalIds);
+    assert.equal(originals.length, 4);
+    for (const [account, expected] of [[first.id, 60 * sign], [second.id, 40 * sign]]) {
+      assert.equal(Math.round(originals.filter((line) => line.account_id === account).reduce((sum, line) => sum + line.amount, 0) * 100) / 100, expected);
+    }
+    const reset = button('account.move', 'Reset to Draft', db, invoice.id);
+    db = applyDiff(db, diffDb(db, reset), { isAdmin: true });
+    const cancelled = read(db, 'account.deferral', schedule.id);
+    assert.equal(cancelled.state, 'cancel');
+    assert.equal(linesFor(db, [invoice.id]).length, 0);
+    for (const row of cancelled.board) {
+      const reversal = read(db, 'account.move', row.reversal_move_id);
+      assert.equal(reversal.reversed_entry_id, row.move_id);
+      assert.ok(isBalanced(reversal.line_ids));
+      const before = linesFor(db, [row.move_id]);
+      const after = linesFor(db, [row.reversal_move_id]);
+      assert.equal(after.length, before.length);
+      for (const line of before) {
+        const offset = after.find((entry) => entry.account_id === line.account_id);
+        assert.equal(offset?.amount, -line.amount);
+        assert.equal(offset?.general_account, line.general_account);
+      }
+    }
+  }
 });
 
 test('manual company bill recognition respects hard lock without disturbing earlier periods', () => {

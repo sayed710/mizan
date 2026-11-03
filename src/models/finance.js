@@ -61,15 +61,20 @@ export function lockDateFor(settings = {}, move = {}) {
 }
 
 const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
+const companyTaxLock = (settings, companyId) => companyId === 1 ? settings?.tax_lock_date : settings?.tax_lock_dates?.[companyId];
+export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
+  .filter((r) => (r.company_id ?? 1) === companyId && r.id !== excludeId && ['submitted', 'paid'].includes(r.state))
+  .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
 function taxLockFor(db, move, settings = db.settings) {
-  if (!move || !settings?.tax_lock_date) return '';
+  const lock = companyTaxLock(settings, move?.company_id ?? 1);
+  if (!move || !lock) return '';
   const accounts = taxAccounts(db, move.company_id);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
     accountId(db, TRANSITION.sale, move.company_id), accountId(db, TRANSITION.purchase, move.company_id)]);
   const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
     || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
-  return taxable ? settings.tax_lock_date : '';
+  return taxable ? lock : '';
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
@@ -308,12 +313,15 @@ function lockRule(db, before, after, ctx) {
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
-  const proposed = ctx?.settings?.tax_lock_date;
-  const current = db.settings?.tax_lock_date;
-  const remaining = (db.records?.['account.return'] ?? []).filter((r) => ['submitted', 'paid'].includes(r.state)).map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+  const companyId = before?.company_id ?? after.company_id ?? 1;
+  const proposed = companyTaxLock(ctx?.settings, companyId);
+  const current = companyTaxLock(db.settings, companyId);
+  const remaining = returnTaxLock(db, companyId);
   const validDate = typeof proposed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(proposed) && !Number.isNaN(Date.parse(proposed)) && new Date(proposed).toISOString().slice(0, 10) === proposed;
   const lowered = current && (proposed === null || validDate) && (proposed ?? '') < current;
-  const taxSettings = lowered ? { ...db.settings, tax_lock_date: [proposed, remaining].filter(Boolean).sort().at(-1) ?? null } : db.settings;
+  const adjusted = [proposed, remaining].filter(Boolean).sort().at(-1) ?? null;
+  const taxSettings = !lowered ? db.settings : companyId === 1 ? { ...db.settings, tax_lock_date: adjusted }
+    : { ...db.settings, tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: adjusted } };
   const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before, taxSettings), yearLock].sort().at(-1) : '';
   const afterLock = [companyLockDate(db, after), taxLockFor(db, after, taxSettings), yearLock].sort().at(-1);
   const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;

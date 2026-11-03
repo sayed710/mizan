@@ -32,7 +32,7 @@ export function postBatch(db, batch) {
       throw new Error(`${move.name}: the amount must be positive and at most the amount due (${round(move.amount_residual)})`);
     }
     if (batch.batch_type === 'outbound' && move.partner_id) {
-      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id);
+      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: move.company_id ?? 1 });
     }
   }
   if (batch.batch_type === 'outbound' && !(Number(batch.check_number_start) > 0)) throw new Error('Set the first check number to print');

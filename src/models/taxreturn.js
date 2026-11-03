@@ -3,11 +3,15 @@ import { create, read, updateSettings, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId } from './ledger.js';
 import { postPayment } from './pay.js';
-import { moveDate, postTaxReturnClosing, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
+import { moveDate, postTaxReturnClosing, returnTaxLock, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
 
 /** The tax lock follows the latest submitted or paid return. */
-const syncTaxLockDate = (db, excludeId = null) => updateSettings(db, { tax_lock_date: (db.records?.['account.return'] ?? [])
-  .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state)).map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? null });
+const syncTaxLockDate = (db, companyId, excludeId = null) => {
+  const date = returnTaxLock(db, companyId, excludeId) || null;
+  return updateSettings(db, companyId === 1 ? { tax_lock_date: date } : {
+    tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: date },
+  });
+};
 
 /** Ensure a VAT return type exists for each company, matching its periodicity setting. */
 export function ensureReturnTypes(db) {
@@ -231,7 +235,7 @@ export function submitReturn(db, returnId) {
     is_completed: false,
   });
 
-  return syncTaxLockDate(nextDb);
+  return syncTaxLockDate(nextDb, currentRet.company_id ?? 1);
 }
 
 /** Pay a submitted tax return: registers outbound payment or inbound refund to payment_partner_id. */
@@ -306,7 +310,7 @@ export function payReturn(db, returnId) {
     state: 'paid',
     is_completed: true,
     ...(paymentId ? { payment_id: paymentId } : {}),
-  }));
+  }), ret.company_id ?? 1);
 }
 
 /** Reset to draft: cancels closing move and unlocks period, forbidden after pay. */
@@ -317,7 +321,7 @@ export function resetReturnToDraft(db, returnId) {
     throw new Error('Paid returns cannot be reset to draft');
   }
 
-  let nextDb = syncTaxLockDate(db, ret.id);
+  let nextDb = syncTaxLockDate(db, ret.company_id ?? 1, ret.id);
 
   // Cancel closing moves after removing this return's tax lock.
   for (const moveId of ret.closing_move_ids ?? []) {
@@ -337,7 +341,7 @@ export function resetReturnToDraft(db, returnId) {
     is_completed: false,
   });
 
-  return syncTaxLockDate(nextDb);
+  return syncTaxLockDate(nextDb, ret.company_id ?? 1);
 }
 
 function returnGuard(db, before, after) {

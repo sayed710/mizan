@@ -71,7 +71,7 @@ export function syncPartnerBankAccounts(db, partnerId, bankLines) {
 }
 
 /** Resolve and validate recipient bank account for outbound payments. */
-export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, { invoiceBankId = null } = {}) {
+export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, { invoiceBankId = null, companyId = 1 } = {}) {
   const allBanks = db?.records?.['res.partner.bank'] ?? [];
   if (requestedBankId && invoiceBankId && requestedBankId !== invoiceBankId) {
     throw new Error('Payment and invoice bank accounts must match');
@@ -85,6 +85,9 @@ export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, 
     }
     if (chosen.partner_id !== partnerId) {
       throw new Error('The bank account does not belong to the partner');
+    }
+    if (chosen.company_id && chosen.company_id !== companyId) {
+      throw new Error('The bank account belongs to another company');
     }
     if (!chosen.allow_out_payment) {
       throw new Error('The bank account does not allow outbound payments');

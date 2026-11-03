@@ -168,8 +168,13 @@ export function postMove(db, id) {
     return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
   });
   const updatedR = { ...r, invoice_line_ids: resolvedLines };
-  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id);
+  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
+  if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
   const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
+  if (line_ids.some((line) => {
+    const account = read(db, 'account.account', line.account_id);
+    return account?.company_id && account.company_id !== (r.company_id ?? 1);
+  })) throw new Error('Journal account belongs to another company');
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
   if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
@@ -182,8 +187,8 @@ export function reverseDepreciation(db, move) {
   const asset = (db.records['account.asset'] ?? []).find((a) => (a.depreciation_ids ?? []).some((line) => line.posted && line.move_id === move.id));
   if (!asset || move.state !== 'posted' || asset.disposal_date) throw new Error('Select an active posted depreciation entry');
   if ((db.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === move.id)) throw new Error('This depreciation has already been reversed');
-  const reversed = postEntry(db, { journal: move.journal_id, company: move.company_id ?? 1, date: today(), ref: `Reversal of ${move.name}`, lines: move.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id })) });
-  const linked = write(reversed.db, 'account.move', reversed.id, { reversed_entry_id: move.id });
+  const reversed = postEntry(db, { journal: move.journal_id, company: move.company_id ?? 1, date: today(), ref: `Reversal of ${move.name}`, lines: move.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+  const linked = postAnalytic(write(reversed.db, 'account.move', reversed.id, { reversed_entry_id: move.id }), reversed.id);
   return write(linked, 'account.asset', asset.id, { state: 'open', depreciation_ids: asset.depreciation_ids.map((l) => l.move_id === move.id ? { ...l, posted: false, move_id: null } : l) });
 }
 
@@ -284,7 +289,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   }
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
-    recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id });
+    recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id, companyId: r.company_id ?? 1 });
     if (recipientBankId && !r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
   }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.

@@ -511,6 +511,10 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         : db.settings.companies,
       lock_date: lockValue(s.lock_date, db.settings.lock_date),
       tax_lock_date: lockValue(s.tax_lock_date, db.settings.tax_lock_date),
+      tax_lock_dates: s.tax_lock_dates && typeof s.tax_lock_dates === 'object' && !Array.isArray(s.tax_lock_dates)
+        ? { ...db.settings.tax_lock_dates, ...Object.fromEntries(Object.entries(s.tax_lock_dates).filter(([id]) => /^[1-9]\d*$/.test(id))
+          .map(([id, value]) => [id, lockValue(value, db.settings.tax_lock_dates?.[id])])) }
+        : db.settings.tax_lock_dates,
       sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.

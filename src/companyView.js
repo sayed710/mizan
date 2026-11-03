@@ -2,7 +2,7 @@ import { read, search } from './orm.js';
 import { companyFilter, currentCompany, restrictRecords, scopeAuditChanges, visibleTo } from './models/company.js';
 
 /** Search UI records in the allowed companies, keeping shared records. */
-export const viewRecords = (db, model, options) => companyFilter(db, search(db, model, options));
+export const viewRecords = (db, model, options) => companyFilter(db, search(db, model, options), model);
 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>

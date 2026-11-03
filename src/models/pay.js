@@ -23,7 +23,7 @@ export function postPayment(db, p) {
   if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) throw new Error('The amount must be a finite positive number');
   let currentPayment = p;
   if (!p.invoice_id && p.payment_type === 'outbound' && p.partner_type === 'supplier') {
-    const resolvedBankId = resolveAndValidateRecipientBank(db, p.partner_id, p.partner_bank_id);
+    const resolvedBankId = resolveAndValidateRecipientBank(db, p.partner_id, p.partner_bank_id, { companyId: p.company_id ?? 1 });
     if (resolvedBankId && resolvedBankId !== p.partner_bank_id) {
       currentPayment = { ...p, partner_bank_id: resolvedBankId };
       db = write(db, 'account.payment', p.id, { partner_bank_id: resolvedBankId });
