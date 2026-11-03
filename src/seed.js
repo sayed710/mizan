@@ -92,9 +92,9 @@ export function seed() {
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
 
   const cashFlowTags = {
-    operating: add('account.account.tag', { name: 'Operating Activities' }),
-    investing: add('account.account.tag', { name: 'Investing Activities' }),
-    financing: add('account.account.tag', { name: 'Financing Activities' }),
+    operating: add('account.account.tag', { name: 'Operating Activities', cash_flow_activity: 'operating' }),
+    investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
+    financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
   };
   CHART.forEach(([code, name, account_type]) => add('account.account', {
     code, name, account_type,

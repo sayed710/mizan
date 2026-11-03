@@ -102,7 +102,7 @@ test('cash flow splits every cash movement into operating, investing and financi
   assert.equal(week.net, week.operating + week.investing + week.financing);
 });
 
-test('cash flow follows account activity tags and falls back when tags are removed', () => {
+test('cash flow follows account activity tags and leaves untagged accounts unclassified', () => {
   let db = seed();
   const asset = accountId(db, '151000');
   const financing = search(db, 'account.account.tag').find((tag) => tag.name === 'Financing Activities');
@@ -113,7 +113,8 @@ test('cash flow follows account activity tags and falls back when tags are remov
   db = write(db, 'account.account', asset, { tag_ids: [financing.id] });
   assert.deepEqual(sections(), [0, 0, -100]);
   db = write(db, 'account.account', asset, { tag_ids: [] });
-  assert.deepEqual(sections(), [0, -100, 0]);
+  assert.deepEqual(sections(), [0, 0, 0]);
+  assert.equal(cashFlow(db, period).unclassified, -100);
 });
 
 test('executive summary reports margins, liquidity and days sales outstanding', () => {

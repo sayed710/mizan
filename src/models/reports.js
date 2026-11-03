@@ -76,23 +76,13 @@ export function defaultCashFlowActivity(code, account_type, name = '') {
 
 /** Determine the cash flow activity (operating, investing, financing) for an account. */
 export function accountCashFlowActivity(db, account) {
-  if (!account) return 'operating';
-  const checkTag = (val) => {
-    if (!val) return null;
-    const s = String(val).toLowerCase();
-    if (s.includes('investing')) return 'investing';
-    if (s.includes('financing')) return 'financing';
-    if (s.includes('operating')) return 'operating';
-    return null;
-  };
+  if (!account) return 'unclassified';
   if (Array.isArray(account.tag_ids)) {
-    for (const t of account.tag_ids) {
-      const rec = typeof t === 'object' ? t : read(db, 'account.account.tag', t);
-      const match = checkTag(rec?.name ?? t);
-      if (match) return match;
-    }
+    const tags = account.tag_ids.map((tag) => typeof tag === 'object' ? tag : read(db, 'account.account.tag', tag));
+    const explicit = tags.find((tag) => ['operating', 'investing', 'financing'].includes(tag?.cash_flow_activity));
+    if (explicit) return explicit.cash_flow_activity;
   }
-  return defaultCashFlowActivity(account.code, account.account_type, account.name);
+  return 'unclassified';
 }
 
 /**
@@ -106,7 +96,7 @@ export function cashFlow(db, { from, to } = {}) {
   const all = journalItems(db);
   const opening = sum(itemsBefore(db, from));
   const closing = sum(all.filter((l) => !to || l.date <= to));
-  const totals = { operating: 0, investing: 0, financing: 0 };
+  const totals = { operating: 0, investing: 0, financing: 0, unclassified: 0 };
   const attributed = new Map();
   const byMove = new Map();
   for (const l of journalItems(db, { from, to })) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
@@ -186,7 +176,7 @@ export function cashFlow(db, { from, to } = {}) {
     add(counterpart.account, -amount);
     for (const x of source) add(x.account, amount * netOf(x.line) / denominator);
   }
-  const ORDER = ['operating', 'investing', 'financing'];
+  const ORDER = ['operating', 'investing', 'financing', 'unclassified'];
   const lines = [...attributed]
     .map(([id, amount]) => {
       const account = read(db, 'account.account', id);
@@ -195,7 +185,7 @@ export function cashFlow(db, { from, to } = {}) {
     .sort((a, b) => ORDER.indexOf(a.section) - ORDER.indexOf(b.section) || a.account.code.localeCompare(b.account.code));
   return {
     opening, closing, net: round(closing - opening),
-    operating: round(totals.operating), investing: round(totals.investing), financing: round(totals.financing),
+    operating: round(totals.operating), investing: round(totals.investing), financing: round(totals.financing), unclassified: round(totals.unclassified),
     lines,
   };
 }

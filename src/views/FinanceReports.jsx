@@ -61,6 +61,7 @@ export function CashFlow({ db, period }) {
       {section('operating', 'Operating Activities')}
       {section('investing', 'Investing Activities')}
       {section('financing', 'Financing Activities')}
+      {section('unclassified', 'Unclassified')}
       <tr className="rep-total"><td>{t('Net Change in Cash')}</td>{num(r.net)}</tr>
       <tr className="rep-total strong"><td>{t('Cash at the end of the period')}</td>{num(r.closing)}</tr>
     </tbody>

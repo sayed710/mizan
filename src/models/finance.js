@@ -807,15 +807,22 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
 }
 
 
+/** Analytic entries included in an actuals calculation. */
+export function analyticActualLines(db, period = {}) {
+  return search(db, 'account.analytic.line').filter((line) => {
+    if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) return false;
+    if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) return false;
+    if (period.account_id != null && line.account_id !== period.account_id) return false;
+    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) return false;
+    const move = line.move_id && read(db, 'account.move', line.move_id);
+    return !line.move_id || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
+  });
+}
+
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
-  for (const line of search(db, 'account.analytic.line')) {
-    if (!line.account_id || (period.from && line.date < period.from) || (period.to && line.date > period.to)) continue;
-    if (period.company_id != null && (line.company_id ?? 1) !== period.company_id) continue;
-    if (period.account_id != null && line.account_id !== period.account_id) continue;
-    if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) continue;
-    if (line.move_id && read(db, 'account.move', line.move_id)?.state !== 'posted') continue;
+  for (const line of analyticActualLines(db, period)) {
     totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
   }
   return totals;
