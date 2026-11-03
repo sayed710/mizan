@@ -31,6 +31,7 @@ const MAINTAINED = {
   'documents.document': ['locked_by'], // Lock / Unlock
   'mailing.mailing': ['ab_testing_winner_selection'], // the A/B winner is chosen after sending
   'account.move': ['ref'], // the reference stays editable on posted entries
+  'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
 };
 
 export function withLocks(models) {
