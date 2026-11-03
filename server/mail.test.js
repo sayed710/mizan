@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import net from 'node:net';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { create, read, search, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
 import { sendDocument, sendMailing } from './mail.js';
@@ -63,3 +70,88 @@ test('a mailing that does not exist or was already sent is refused', async () =>
   const out = await sendMailing({}, { get: () => sent, commit: () => {} }, { id }, 'https://erp.example');
   assert.deepEqual([out.status, out.body.error], [400, 'Already sent']);
 });
+
+test('a document with a custom nonstandard currency name formats safely and sends email', async () => {
+  const { server, seen, cfg } = await fakeSmtp();
+  try {
+    const base = seed();
+    const customCurr = create(base, 'res.currency', { name: 'CUSTOM-COIN' });
+    const partner = create(customCurr.db, 'res.partner', { name: 'Custom Coin Partner', email: 'custom@example.com' });
+    const order = create(partner.db, 'sale.order', { partner_id: partner.id, currency_id: customCurr.id, order_line: [{ product_id: 1, qty: 2, price_unit: 50, tax: 0 }] });
+    const out = await sendDocument(cfg, order.db, admin, { model: 'sale.order', id: order.id });
+    assert.equal(out.status, 200);
+    assert.ok(seen.includes('RCPT TO:<custom@example.com>'));
+    assert.ok(seen.some((l) => l.includes('CUSTOM-COIN')));
+  } finally {
+    server.close();
+  }
+});
+
+test('a request with a forged Host header does not persist mail_base_url for future mailings', async () => {
+  const { server, cfg } = await fakeSmtp();
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-mail-'));
+  const dbPath = join(dir, 'test.sqlite');
+  const password = 'test-admin-password';
+  const child = spawn(process.execPath, ['server/index.js'], {
+    env: {
+      ...process.env,
+      PORT: '0',
+      MIZAN_DB: dbPath,
+      MIZAN_ADMIN_PASSWORD: password,
+      MIZAN_SMTP_HOST: cfg.host,
+      MIZAN_SMTP_PORT: String(cfg.port),
+      MIZAN_SMTP_FROM: cfg.from,
+      MIZAN_PUBLIC_URL: '',
+      MIZAN_SECURE_COOKIE: '0',
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  try {
+    const origin = await new Promise((resolve, reject) => {
+      let out = '';
+      child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
+      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out}`)));
+    });
+    const loginRes = await fetch(`${origin}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
+      body: JSON.stringify({ login: 'admin', password }),
+    });
+    const cookie = loginRes.headers.get('set-cookie')?.split(';')[0];
+    assert.equal(loginRes.status, 200);
+
+    const port = Number(new URL(origin).port);
+    const bodyStr = JSON.stringify({ id: 99999 });
+    await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1',
+        port,
+        path: '/api/mail/mailing',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(bodyStr),
+          'X-Requested-With': 'mizan',
+          Cookie: cookie,
+          Host: 'evil.attacker.com',
+        },
+      }, (res) => {
+        res.resume();
+        res.on('end', resolve);
+      });
+      req.on('error', reject);
+      req.end(bodyStr);
+    });
+
+    const sql = new DatabaseSync(dbPath, { readOnly: true });
+    const saved = sql.prepare("SELECT value FROM kv WHERE key = 'mail_base_url'").get()?.value;
+    sql.close();
+    assert.equal(saved, undefined, 'mail_base_url should not be persisted from request Host header');
+  } finally {
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    server.close();
+  }
+});
+
+

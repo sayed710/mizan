@@ -1,4 +1,4 @@
-import { read, search } from './orm.js';
+import { SHARED_MODELS, read, search } from './orm.js';
 import { companyFilter, currentCompany, restrictRecords, scopeAuditChanges, visibleTo } from './models/company.js';
 
 /** Search UI records in the allowed companies, keeping shared records. */
@@ -31,6 +31,6 @@ export const scopeAuditRows = (db, rows) => {
   return rows.filter((row) => {
     if (Number.isInteger(row.company_id) && row.company_id > 0) return allowed.has(row.company_id);
     const record = (db.records[row.model] ?? []).find((r) => r.id === row.res_id);
-    return record ? visibleTo(allowed, row.model, record, db) : false;
+    return record ? visibleTo(allowed, row.model, record, db) : (SHARED_MODELS.has(row.model) && !(row.model === 'res.partner' && (db.records['res.company'] ?? []).some((c) => c.partner_id === row.res_id && !allowed.has(c.id))));
   }).map((row) => (row.changes && typeof row.changes === 'object' ? { ...row, changes: scopeAuditChanges(row.model, row.changes, allowed) } : row));
 };

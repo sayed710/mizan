@@ -9,9 +9,10 @@ import { openBlobs } from './blobs.js';
 import { safeImage } from './api.js';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { diffDb } from '../src/sync.js';
 import { createCompany } from '../src/models/company.js';
 import { claimWriter } from './storage.js';
@@ -162,3 +163,88 @@ test('blob downloads require access to the referencing model and company', async
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('public image requests cache allowed images per revision without rebuilding the public site on every request', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-image-cache-'));
+  const preloadPath = join(dir, 'preload-spy.mjs');
+  const modelsUrl = pathToFileURL(join(process.cwd(), 'src/models/index.js')).href;
+  writeFileSync(preloadPath, `
+    import { models } from '${modelsUrl}';
+    let rebuilds = 0;
+    const origJob = models['hr.job'];
+    Object.defineProperty(models, 'hr.job', {
+      get() { rebuilds++; return origJob; },
+      configurable: true,
+    });
+    process.on('message', (m) => {
+      if (m === 'get-rebuilds') process.send({ type: 'rebuilds', count: rebuilds });
+    });
+  `);
+
+  const child = spawn(process.execPath, ['--import', pathToFileURL(preloadPath).href, 'server/index.js'], {
+    cwd: new URL('..', import.meta.url),
+    env: { ...process.env, PORT: '0', MIZAN_DB: join(dir, 'test.sqlite'), MIZAN_ADMIN_PASSWORD: 'test-admin-password', MIZAN_SECURE_COOKIE: '0', MIZAN_SMTP_HOST: '', MIZAN_ALLOW_RESET: '' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+
+  try {
+    const origin = await new Promise((resolve, reject) => {
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (b) => { out += b; const m = /Mizan listening on (http:\/\/localhost:\d+)/.exec(out); if (m) resolve(m[1]); });
+      child.stderr.on('data', (b) => { err += b; });
+      child.on('exit', (code) => reject(new Error(`server exited ${code}: ${out} ${err}`)));
+    });
+
+    const getRebuilds = () => new Promise((resolve) => {
+      const handler = (msg) => {
+        if (msg?.type === 'rebuilds') {
+          child.removeListener('message', handler);
+          resolve(msg.count);
+        }
+      };
+      child.on('message', handler);
+      child.send('get-rebuilds');
+    });
+
+    const loginRes = await fetch(`${origin}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
+      body: JSON.stringify({ login: 'admin', password: 'test-admin-password' }),
+    });
+    const cookie = loginRes.headers.get('set-cookie')?.split(';')[0];
+    const client = (path, opts = {}) => fetch(origin + path, {
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'mizan',
+        Cookie: cookie,
+        ...opts.headers,
+      },
+    });
+
+    const dbRes = await (await client('/api/db')).json();
+    const catalog = create(dbRes, 'product', { name: 'Cached Image Product', list_price: 20, image: { name: 'p.png', type: 'image/png', data: PNG } });
+    const diffRes = await client('/api/diff', { method: 'POST', body: JSON.stringify(diffDb(dbRes, catalog.db)) });
+    assert.equal(diffRes.status, 200);
+    const saved = await diffRes.json();
+    const publicImage = saved.records.product.find((p) => p.name === 'Cached Image Product').image;
+
+    // Reset baseline count after setup/diff
+    const initialRebuilds = await getRebuilds();
+
+    // 5 consecutive public image requests
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(`${origin}/api/public/image/${publicImage.blob}`);
+      assert.equal(res.status, 200);
+    }
+
+    const afterRequests = await getRebuilds();
+    const rebuildDelta = afterRequests - initialRebuilds;
+    assert.equal(rebuildDelta, 1, 'first image request builds cache; subsequent requests for same revision reuse cache');
+  } finally {
+    if (child.exitCode === null) { const exited = once(child, 'exit'); child.send('shutdown'); await exited; }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
