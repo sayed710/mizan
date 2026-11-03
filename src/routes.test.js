@@ -949,3 +949,12 @@ test('create landed costs, clear the flag, validate a draft with another line; t
   assert.equal(landedLayer.value, 80);
 });
 
+
+test('Accounting menu routes resolve relocated and added entries', async () => {
+  const { apps, findLeaf } = await import('./models/index.js');
+  const app = apps.find((item) => item.id === 'accounting');
+  for (const [key, model] of [['tax-returns', 'account.return'], ['analytic-items', 'account.analytic.line'], ['fiscal-years', 'account.fiscal.year'], ['analytic-plans', 'account.analytic.plan'], ['analytic-distribution-models', 'account.analytic.distribution.model'], ['budgets', 'account.budget'], ['deferred-revenues', 'account.deferral'], ['deferred-expenses', 'account.deferral']]) {
+    assert.equal(findLeaf(app, key).model, model, key);
+    assert.equal(findLeaf(app, key).key, key);
+  }
+});

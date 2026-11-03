@@ -346,3 +346,12 @@ test('follow-up report with several companies selected shows separate sections w
     await React.act(async () => root.unmount());
   }
 });
+
+test('Accounting review and reporting routes retain their report destinations', async () => {
+  const { apps, findLeaf } = await import('./models/index.js');
+  const app = apps.find((item) => item.id === 'accounting');
+  for (const [key, report] of [['audit-trail', 'audit'], ['journal-audit', 'journalAudit'], ['inalterability-check', 'inalterability'], ['inventory-valuation', 'valuation'], ['cash-flow', 'cashflow'], ['general-ledger', 'ledger']]) {
+    assert.equal(findLeaf(app, key).report, report, key);
+    assert.equal(findLeaf(app, key).key, key);
+  }
+});

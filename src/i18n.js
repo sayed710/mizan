@@ -23,6 +23,23 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Invoice Reminders': '\u062a\u0630\u0643\u064a\u0631\u0627\u062a \u0627\u0644\u0641\u0648\u0627\u062a\u064a\u0631',
+  'Online Payments': '\u0627\u0644\u0645\u062f\u0641\u0648\u0639\u0627\u062a \u0639\u0628\u0631 \u0627\u0644\u0625\u0646\u062a\u0631\u0646\u062a',
+  'Assets & Liabilities': 'الأصول والخصوم',
+  'Lock Dates…': 'تواريخ الإقفال',
+  'Regularization Entries': 'قيود التسوية',
+  'Unrealized Currencies': 'فروق العملات غير المحققة',
+  'Deferred Revenues': 'الإيرادات المؤجلة',
+  'Deferred Expenses': 'المصروفات المؤجلة',
+  'Statement Reports': 'تقارير القوائم',
+  'Ledgers': 'دفاتر الأستاذ',
+  'Partner Reports': 'تقارير الشركاء',
+  'Customer Statement': 'كشف حساب العميل',
+  'Taxes & Fiscal': 'الضرائب والشؤون المالية',
+  'Management': 'الإدارة',
+  'Analytic Accounting': 'المحاسبة التحليلية',
+  'Rounding Methods': 'طرق التقريب',
+  'Financial Budgets': 'الميزانيات المالية',
   'Model Expense Account (Fallback)': 'حساب مصروف النموذج (البديل)',
   'Depreciation Expense Account (Override)': 'حساب مصروف الإهلاك (الأولوية)',
   'Deferred Start Date': 'تاريخ بدء التأجيل',
