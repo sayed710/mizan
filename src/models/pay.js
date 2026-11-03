@@ -217,8 +217,8 @@ const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'
 export const payModels = {
   'account.payment': {
     label: 'Payments',
-    guard: datedLockGuard(['name', 'amount', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted'),
-    protectDelete: datedLockDelete((p) => p.state === 'posted'),
+    guard: (db, before, after, ctx) => (before?.check_number != null && (before.check_number !== after.check_number || before.journal_id !== after.journal_id) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
+    protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
     invariant: paymentInvariant,
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
@@ -228,6 +228,7 @@ export const payModels = {
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       amount: { type: 'monetary', label: 'Amount' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      check_number: { type: 'integer', label: 'Check Number', readonly: true },
       date: { type: 'date', label: 'Date' },
       memo: { type: 'char', label: 'Memo' },
       destination_account_id: { type: 'many2one', relation: 'account.account', label: 'Destination Account' },

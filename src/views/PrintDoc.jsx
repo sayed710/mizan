@@ -50,9 +50,10 @@ function Checks({ db, batch }) {
       </div>
       {(batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id && read(db, 'account.payment', l.payment_id)?.state === 'posted').map((l) => {
         const move = read(db, 'account.move', l.move_id);
+        const number = read(db, 'account.payment', l.payment_id)?.check_number ?? l.check_number;
         return (
-          <article key={l.check_number ?? l.move_id} className="paper check">
-            <header className="paper-head"><b className="paper-company">{currentCompany(db).name}</b><span>{t('Check')} #{l.check_number}</span></header>
+          <article key={number ?? l.move_id} className="paper check">
+            <header className="paper-head"><b className="paper-company">{currentCompany(db).name}</b><span>{t('Check')} #{number}</span></header>
             <p>{t('Date')}: {formatDate(batch.date)}</p>
             <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', move?.partner_id)?.name ?? '—'}</b> <span className="num">{money(l.amount)}</span></p>
             <p className="check-words">{amountInWords(l.amount)}</p>

@@ -1,7 +1,7 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
-import { today } from './common.js';
+import { addDays, today } from './common.js';
 import { accountId, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
@@ -260,6 +260,7 @@ export function fxProvenanceError(db, entry) {
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
 export function paymentInvariant(db, after) {
+  if (after.check_number != null && (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound' || (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && p.check_number === after.check_number))) return 'Check number must be unique within its journal';
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
@@ -540,34 +541,41 @@ export function taxesByTax(db, period = {}) {
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
 }
 
-/** Add the open installments of posted invoices and refunds. */
-function ageDocumentInstallments(db, kind, at, moves, add) {
-  const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
-  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
-    const payments = m.payments ?? [];
-    const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
-    const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType)
-      .reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-    const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
-    const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-    const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
-    const allocations = settlementCompanyAllocations(db, m);
-    let paid = (m.payment_date && m.payment_date <= at ? round(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
+/** Open installments in company currency, using the schedule recorded when the document was posted. */
+function openInstallments(db, m, kind, at) {
+  const payments = m.payments ?? [];
+  const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const items = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+  const counterpart = items.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
+  const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+  const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
+  const allocations = settlementCompanyAllocations(db, m);
+  let paid = (m.payment_date && m.payment_date <= at ? round(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
+  let dues = items.map((l) => ({ date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date, amount: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)) }));
+  if (!items.length) {
     const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
-    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date).sort((a, b) => a.date.localeCompare(b.date)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
+    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
     let assigned = 0;
-    const dues = docDues.map((d, i) => {
+    dues = docDues.map((d, i) => {
       const amount = i === docDues.length - 1 ? round(booked - assigned) : round(booked * d.amount / (Number(m.amount_total) || 1));
       assigned = round(assigned + amount);
       return { ...d, amount };
     });
-    for (const due of dues) {
-      const applied = Math.min(paid, due.amount);
-      paid -= applied;
-      const open = round(due.amount - applied);
-      if (open <= 0) continue;
-      add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * open);
-    }
+  }
+  dues.sort((a, b) => a.date.localeCompare(b.date));
+  return dues.map((due) => {
+    const applied = Math.min(paid, due.amount);
+    paid -= applied;
+    return { date: due.date, amount: round(due.amount - applied) };
+  }).filter((due) => due.amount > 0);
+}
+
+/** Add the open installments of posted invoices and refunds. */
+function ageDocumentInstallments(db, kind, at, moves, add) {
+  const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
+  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
+    for (const due of openInstallments(db, m, kind, at)) add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * due.amount);
   }
 }
 
@@ -639,7 +647,14 @@ export function journalCards(db, at = today()) {
 
 /** Partners with overdue invoices, for payment reminders. */
 export function followUps(db, at = today()) {
-  const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.amount_residual > 0 && m.invoice_date_due < at);
+  const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
+    if (!m.invoice_date || !(m.line_ids ?? []).length) return m.amount_residual > 0 && m.invoice_date_due < at ? [m] : [];
+    const dues = openInstallments(db, m, 'receivable', at).filter((due) => due.date < at);
+    if (!dues.length) return [];
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const amount = round(dues.reduce((sum, due) => sum + due.amount, 0) * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1));
+    return [{ ...m, invoice_date_due: dues[0].date, amount_residual: amount }];
+  });
   const by = new Map();
   for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push(m);
   return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
@@ -678,6 +693,9 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_level_delay: vals.followup_level_delay !== undefined ? vals.followup_level_delay : current?.followup_level_delay ?? null,
     followup_date: vals.followup_date !== undefined ? vals.followup_date : current?.followup_date ?? null,
     followup_level: vals.followup_level !== undefined ? vals.followup_level : current?.followup_level ?? null,
+    followup_last_level: vals.followup_last_level !== undefined ? vals.followup_last_level : current?.followup_last_level ?? null,
+    followup_channel: vals.followup_channel !== undefined ? vals.followup_channel : current?.followup_channel ?? null,
+    followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
   };
   if (idx >= 0) existing[idx] = updated;
   else existing.push(updated);
@@ -686,6 +704,12 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     ...partner,
     followup_lines: existing,
   };
+}
+
+function reminderDetails(levels, level, date, channel) {
+  const delay = Number(level?.delay) || 0;
+  const next = levels.filter((candidate) => Number(candidate.delay) > delay).sort((a, b) => Number(a.delay) - Number(b.delay))[0];
+  return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? addDays(date, Number(next.delay) - delay) : null };
 }
 
 /**
@@ -708,7 +732,7 @@ export function runFollowUps(db, at = today()) {
       const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null;
       if (hasProgress && !activeLate.has(`${partner.id}:${line.company_id}`)) {
         const current = partnerUpdates.get(partner.id) ?? partner;
-        partnerUpdates.set(partner.id, updatePartnerFollowUp(current, line.company_id, { followup_level_delay: null, followup_level: null, followup_date: null }));
+        partnerUpdates.set(partner.id, updatePartnerFollowUp(current, line.company_id, { followup_level_delay: null, followup_level: null, followup_date: null, followup_last_level: null, followup_channel: null, followup_next_action_date: null }));
       }
     }
   }
@@ -734,6 +758,7 @@ export function runFollowUps(db, at = today()) {
       followup_level_delay: Number(level.delay),
       followup_date: at,
       followup_level: level.id,
+      ...reminderDetails(levels, level, at, 'internal'),
     });
     partnerUpdates.set(partner.id, updated);
   }
@@ -754,10 +779,11 @@ const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.nam
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
 export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
 
-const manualFollowUpGroups = (scope, partnerId, at, reminder, companyId) => {
-  const f = reminder ?? followUps(scope, at).find((x) => x.partner_id === partnerId);
+const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
+  const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
+  const f = followUps(db, at).find((x) => x.partner_id === partnerId);
   if (!f) throw new Error('This customer has no overdue invoices');
-  const allGroups = followUpCompanies(f);
+  const allGroups = followUpCompanies({ ...f, invoices: f.invoices.filter((invoice) => allowed.has(invoice.id)) });
   const targetCompany = companyId ?? reminder?.company_id ?? null;
   const groups = targetCompany ? allGroups.filter((g) => g.company_id === targetCompany) : allGroups;
   if (!groups.length) throw new Error('This customer has no overdue invoices');
@@ -766,14 +792,15 @@ const manualFollowUpGroups = (scope, partnerId, at, reminder, companyId) => {
 
 /** Record preparation without claiming that the email was sent. */
 export function openManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
-  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
   return groups.reduce((next, part) => postNote(next, 'res.partner', partnerId,
     `Payment reminder opened in mail app:\n${followUpText(scope, part)}`, reminderSource(part)), db);
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null } = {}) {
-  const groups = manualFollowUpGroups(scope, partnerId, at, reminder, companyId);
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email' } = {}) {
+  if (!['email', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
+  const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
   const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
 
   let nextDb = db;
@@ -784,7 +811,7 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     const late = Math.floor((new Date(at) - new Date(part.oldest)) / 864e5);
     const level = levels.find((l) => late >= (Number(l.delay) || 0));
 
-    const noteBody = `Payment reminder sent by email${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}`;
+    const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}`;
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
 
     const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
@@ -793,10 +820,12 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
         followup_level_delay: Number(level.delay),
         followup_date: at,
         followup_level: level.id,
+        ...reminderDetails(levels, level, at, channel),
       });
     } else {
       partner = updatePartnerFollowUp(partner, cId, {
         followup_date: at,
+        ...reminderDetails(levels, level, at, channel),
       });
     }
   }
