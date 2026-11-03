@@ -32,7 +32,7 @@ import { dueAbWinners, dueMailings, selectWinner, sendWinner } from '../src/mode
 import { handleWebhook, MAX_WEBHOOK_BODY, readRaw, verifyWebhook, WEBHOOK_WRITE } from './whatsapp.js';
 import { aiDraft, digitizeBill, ingestIot, integrationStatus, issueIotToken, quoteShipping, sendSmsCampaign, sendWhatsApp, syncMarketplace } from './integrations.js';
 import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/websiteplus.js';
-import { read, search } from '../src/orm.js';
+import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
@@ -195,7 +195,9 @@ const commitDb = (raw, { full = false, actor = 'system', action = 'replace', aud
       const source = e.action === 'delete' ? db : next;
       const model = e.model === 'mail.message' ? e.changes.thread?.[0] : e.model;
       const record = source.records?.[model]?.find((r) => r.id === e.res_id);
-      logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes), e.company_id ?? (record ? (model === 'res.company' ? record.id : record.company_id || 1) : null));
+      const recCompany = record ? (model === 'res.company' ? record.id : record.company_id) : null;
+      const companyId = e.company_id ?? (recCompany || (record && !SHARED_MODELS.has(model) ? 1 : null));
+      logChange.run(at, actor, e.model, e.res_id, e.action, JSON.stringify(e.changes), companyId);
     }
   });
   epoch = nextEpoch;
@@ -332,6 +334,22 @@ const pageUnlocked = (req, p) => {
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
 const siteOf = (req) => ({ ...publicSite(db, pageAccess(req)), ...publicBlogSite(db), livechat: livechatInfo(db) });
 
+let cachedImageRevision = -1;
+let cachedPublicImages = new Set();
+const publicImagesOf = () => {
+  if (cachedImageRevision === revision) return cachedPublicImages;
+  const site = { ...publicSite(db), ...publicBlogSite(db) };
+  const images = [
+    ...site.products.map((p) => p.image),
+    ...site.categories.map((c) => c.image),
+    ...site.appointments.flatMap((a) => [a.image, ...a.staff.map((e) => e.avatar)]),
+    ...(site.posts ?? []).map((p) => p.cover),
+  ].filter(Boolean);
+  cachedPublicImages = new Set(images);
+  cachedImageRevision = revision;
+  return cachedPublicImages;
+};
+
 const readOnlyFor = (u) => (u.isAdmin || !u.apps?.length ? null : readOnlyForApps(u.apps));
 /** Models a session/API user may change (null = everything). */
 const allowedFor = (u) => (u.isAdmin || !u.apps?.length ? null : writableModelsForApps(u.apps));
@@ -341,10 +359,8 @@ const menuModelsFor = (u) => (u.isAdmin || !u.apps?.length ? null : menuModelsFo
 const readableFor = (u) => (u.isAdmin || !u.apps?.length ? null : modelsForApps(u.apps));
 /** Company ids a user may work in (null = all). */
 const companiesFor = (u) => (u.companies ? new Set(u.companies) : null);
-// Null audit ownership was not established by the migration and must not be inferred at read time.
 sql.function('audit_visible', (companyId, model, id, changes, grants) => {
   if (grants === null) return 1;
-  if (companyId == null) return 0;
   const row = { company_id: companyId, model: model === 'mail.message' ? JSON.parse(changes).thread?.[0] : model, res_id: id };
   return scopeAuditRows({ ...db, settings: { ...db.settings, allowed_company_ids: JSON.parse(grants) } }, [row]).length;
 });
@@ -502,15 +518,12 @@ async function serveStatic(req, res, status = 200, routeHash) {
 // ---- routes ----
 /** Public base URL for links in emails: MIZAN_PUBLIC_URL, else this request's host. */
 // A configured address is cut to origin + path, so a query or fragment in it cannot break the links built on it.
-const configuredBase = () => { try { const u = new URL(process.env.MIZAN_PUBLIC_URL); return `${u.origin}${u.pathname.replace(/\/$/, '')}`; } catch { return ''; } };
+const configuredBase = () => { try { const u = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(u.protocol) ? `${u.origin}${u.pathname.replace(/\/$/, '')}` : ''; } catch { return ''; } };
 const baseUrlOf = (req) => configuredBase() || `${SECURE ? 'https' : 'http'}://${req.headers.host ?? `localhost:${PORT}`}`;
 // No Host allow-list exists: crawler URLs are relative unless the operator configured MIZAN_PUBLIC_URL.
 const websiteOrigin = () => {
   try { const url = new URL(process.env.MIZAN_PUBLIC_URL); return ['http:', 'https:'].includes(url.protocol) ? url.origin : ''; } catch { return ''; }
 };
-const savedMailBase = sql.prepare("SELECT value FROM kv WHERE key = 'mail_base_url'").get()?.value;
-let lastBaseUrl = configuredBase() || savedMailBase || `http://localhost:${PORT}`;
-let mailBaseKnown = !!(configuredBase() || savedMailBase);
 
 async function api(req, res, path) {
   const ip = clientIp(req);
@@ -553,10 +566,7 @@ async function api(req, res, path) {
   // Only declared images exposed by the visitor's current public payload may be downloaded.
   const imagePath = /^\/api\/public\/image\/([0-9a-f]{32})$/.exec(path);
   if (imagePath && req.method === 'GET') {
-    const site = siteOf(req);
-    const images = [...site.products.map((p) => p.image), ...site.categories.map((c) => c.image),
-      ...site.appointments.flatMap((a) => [a.image, ...a.staff.map((e) => e.avatar)]), ...(site.posts ?? []).map((p) => p.cover)];
-    if (!images.includes(`/api/public/image/${imagePath[1]}`)) return send(res, 404, { error: 'Not found' });
+    if (!publicImagesOf().has(path)) return send(res, 404, { error: 'Not found' });
     return sendBlob(res, blobs.get(imagePath[1]), true);
   }
   // Blog posts and forum threads: GET counts the visit; visitor posts wait for validation, votes count once per client.
@@ -750,17 +760,11 @@ async function api(req, res, path) {
     const allowed = allowedFor(user);
     if (allowed && !allowed.has(model)) return send(res, 403, { error: `No access to ${model}` });
     try {
-      lastBaseUrl = baseUrlOf(req);
-      mailBaseKnown = true;
-      try {
-        writeSql("INSERT INTO kv (key, value) VALUES ('mail_base_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", lastBaseUrl);
-      } catch (e) {
-        log('warn', 'failed to persist mail_base_url', { error: e.message });
-      }
+      const baseUrl = baseUrlOf(req);
       const snapshot = scopeFor(user);
       const at = epoch;
       const out = path.endsWith('mailing')
-        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, lastBaseUrl)
+        ? await sendMailing(SMTP, storeFor(writeOptions(user, allowed), user.login, () => scopeFor(user)), body, baseUrl)
         : await sendDocument(SMTP, snapshot, user, body);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded' });
       if (!out.db) return send(res, out.status, out.body);
@@ -1094,16 +1098,17 @@ scheduleSnapshots(DB_PATH);
 
 // Scheduled mailings and A/B test winners go out by email (only when SMTP is configured).
 const MAIL_JOB_INTERVAL_MS = 10 * 60 * 1000;
-// Links in scheduled emails need the public address; without MIZAN_PUBLIC_URL they wait for a manual send to learn it.
+// Links in scheduled emails need the configured public address; without MIZAN_PUBLIC_URL they wait for configuration.
 const runMailJobs = async () => {
-  if (!SMTP || (!process.env.MIZAN_PUBLIC_URL && !mailBaseKnown)) return;
+  const mailBase = configuredBase();
+  if (!SMTP || !mailBase) return;
   const at = new Date().toISOString().slice(0, 10);
   const jobs = [
-    (store) => resumeQueued(SMTP, store, lastBaseUrl),
-    ...dueMailings(db, at).map((m) => (store) => deliverMailing(SMTP, store, m.id, lastBaseUrl)),
+    (store) => resumeQueued(SMTP, store, mailBase),
+    ...dueMailings(db, at).map((m) => (store) => deliverMailing(SMTP, store, m.id, mailBase)),
     ...dueAbWinners(db, at).map((key) => (store) => {
       const winner = selectWinner(store.get(), key);
-      return winner ? deliver(SMTP, store, (x, opts) => sendWinner(x, winner.id, opts), lastBaseUrl) : null;
+      return winner ? deliver(SMTP, store, (x, opts) => sendWinner(x, winner.id, opts), mailBase) : null;
     }),
   ];
   for (const job of jobs) {

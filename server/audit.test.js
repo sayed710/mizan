@@ -649,3 +649,42 @@ test('audit log scopes nested per-company arrays in old and new values for compa
     await stop();
   }
 });
+
+test('audit history of shared records is visible across companies and contact partners of other companies stay private', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
+    const snapshot = (await admin('GET', '/api/db')).body;
+    const branch = createCompany(snapshot, { name: 'Branch 2', currency_id: snapshot.records['res.company'][0].currency_id });
+    const prod = create(branch.db, 'product', { name: 'Shared Tool 108c', list_price: 25 });
+    const branchComp = prod.db.records['res.company'].find((c) => c.name === 'Branch 2');
+    const branchPartnerId = branchComp.partner_id;
+
+    const diff = diffDb(snapshot, prod.db);
+    assert.equal((await admin('POST', '/api/diff', diff)).status, 200);
+
+    // Create restricted admin for company 2
+    assert.equal((await admin('POST', '/api/users', { login: 'admin-branch2', password: 'pw-branch2', isAdmin: true, companies: String(branchComp.id) })).status, 201);
+    const branchAdmin = client(url);
+    await branchAdmin('POST', '/api/login', { login: 'admin-branch2', password: 'pw-branch2' });
+
+    // Create restricted admin for company 1
+    assert.equal((await admin('POST', '/api/users', { login: 'admin-branch1', password: 'pw-branch1', isAdmin: true, companies: '1' })).status, 201);
+    const comp1Admin = client(url);
+    await comp1Admin('POST', '/api/login', { login: 'admin-branch1', password: 'pw-branch1' });
+
+    // 1. User limited to company 2 must see audit history for shared product
+    const prodAudit = await branchAdmin('GET', `/api/audit?model=product&id=${prod.id}`);
+    assert.equal(prodAudit.status, 200);
+    assert.ok(prodAudit.body.length >= 1, 'company 2 admin should see audit history for shared product');
+
+    // 2. User limited to company 1 must NOT see audit history for branch 2 contact partner
+    const partnerAudit = await comp1Admin('GET', `/api/audit?model=res.partner&id=${branchPartnerId}`);
+    assert.equal(partnerAudit.status, 200);
+    assert.equal(partnerAudit.body.length, 0, 'company 1 admin should not see audit history for branch 2 contact partner');
+  } finally {
+    await stop();
+  }
+});
+

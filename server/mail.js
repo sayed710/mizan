@@ -11,7 +11,16 @@ const docCurrency = (db, rec) => (rec.currency_id && read(db, 'res.currency', re
   ?? (read(db, 'res.company', rec.company_id ?? 1)?.currency_id && read(db, 'res.currency', read(db, 'res.company', rec.company_id ?? 1).currency_id)?.name)
   ?? db.settings?.currency ?? 'USD';
 
-const money = (db, rec, n) => (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: docCurrency(db, rec) });
+const money = (db, rec, n) => {
+  const curr = docCurrency(db, rec);
+  const num = Number(n) || 0;
+  if (typeof curr === 'string' && /^[A-Za-z]{3}$/.test(curr)) {
+    try {
+      return num.toLocaleString('en-US', { style: 'currency', currency: curr.toUpperCase() });
+    } catch { /* fallback */ }
+  }
+  return `${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${curr ?? ''}`.trim();
+};
 
 /** Plain-text rendering of a document: header, lines, totals. */
 function documentText(db, model, rec) {
