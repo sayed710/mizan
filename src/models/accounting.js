@@ -266,7 +266,7 @@ function draftAssetsFromBill(db, bill) {
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
-export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId } = {}) {
+export function payMove(db, id, amount, date = today(), { paymentId, journalId: payJournal, statementLineId, checkNumber } = {}) {
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
@@ -308,7 +308,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       ? [{ account: via.account, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: via.account, credit: bank + extra, partner_id: r.partner_id }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, journal_id: journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -406,7 +406,19 @@ export function correctCreditNote(db, note) {
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
 export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, total(r), r.invoice_date, date) : 0;
+  const base = term?.discount_tax_computation === 'excluded' ? amounts(r.invoice_line_ids).untaxed : total(r);
+  return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, base, r.invoice_date, date) : 0;
+}
+
+/** Reverse the discounted share of invoice-basis taxes using their posted accounts and bases. */
+function discountTaxLines(invoice, term, discount) {
+  if (term?.discount_tax_computation !== 'included') return [];
+  const share = discount / (total(invoice) || 1);
+  return (invoice.line_ids ?? []).filter((line) => line.tax_name && line.tax_side).map((line) => ({
+    account_id: line.account_id, partner_id: invoice.partner_id, name: line.tax_name,
+    debit: round2((Number(line.credit) || 0) * share), credit: round2((Number(line.debit) || 0) * share),
+    tax_name: line.tax_name, tax_base: round2((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true, tax_side: line.tax_side,
+  }));
 }
 
 /** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
@@ -418,17 +430,22 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap - 0.005) return paid;
   const sale = isInbound(r);
-  const value = toCompany(db, r.currency_id, discount, r.invoice_date ?? date, r.company_id);
+  const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
+  const company = read(db, 'res.company', r.company_id ?? 1);
+  const discountAccount = sale ? company?.expense_early_payment_discount_account_id ?? '690200' : company?.income_early_payment_discount_account_id ?? '450200';
+  const counterpart = isPurchase(r) ? '211000' : '121000';
+  const taxes = discountTaxLines(r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
+  const taxValue = round2(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const { db: booked, id: discountMove } = postEntry(paid, {
-    journal: 'MISC', date, ref: `Early payment discount ${r.name}`,
+    journal: 'MISC', date, ref: `Early payment discount ${r.name}`, company: company?.id ?? null,
     lines: sale
-      ? [{ account: '690200', debit: value, partner_id: r.partner_id }, { account: '121000', credit: value, partner_id: r.partner_id }]
-      : [{ account: '211000', debit: value, partner_id: r.partner_id }, { account: '450200', credit: value, partner_id: r.partner_id }],
+      ? [{ account: discountAccount, debit: value - taxValue, partner_id: r.partner_id }, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
+      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...taxes, { account: discountAccount, credit: value - taxValue, partner_id: r.partner_id }],
   });
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
   const paymentMove = after.payments.at(-1).move_id;
-  const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, cash_basis_move_id: null, discount: true }];
+  const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, company_amount: value, cash_basis_move_id: null, discount: true }];
   return postNote(write(booked, 'account.move', id, { amount_paid: round2((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
@@ -523,6 +540,7 @@ export const accountingModels = {
       code: { type: 'char', label: 'Short Code', required: true },
       type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
+      check_next_number: { type: 'integer', label: 'Next Check Number' },
       restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
       secure_chain_heads: { type: 'one2many', label: 'Secure Chain Heads', hidden: true, fields: {
         company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
@@ -537,7 +555,7 @@ export const accountingModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['default_account_id', 'restrict_mode_hash_table']],
+      groups: [['code', 'type'], ['default_account_id', 'restrict_mode_hash_table', 'check_next_number']],
     },
   },
 

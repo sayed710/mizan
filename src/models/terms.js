@@ -64,6 +64,7 @@ export const termModels = {
       early_discount: { type: 'boolean', label: 'Early Discount' },
       discount_percent: { type: 'float', label: 'Discount %' },
       discount_days: { type: 'integer', label: 'Discount Days' },
+      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax']] },
       line_ids: {
         type: 'one2many',
         label: 'Due Terms',
@@ -95,7 +96,7 @@ export const termModels = {
     list: ['name', 'early_discount'],
     form: {
       title: 'name',
-      groups: [['name'], ['early_discount', 'discount_percent', 'discount_days'], ['preview']],
+      groups: [['name'], ['early_discount', 'discount_percent', 'discount_days', 'discount_tax_computation'], ['preview']],
       tabs: [{ label: 'Due Terms', fields: ['line_ids'] }, { label: 'Note', fields: ['note'] }],
       chatter: true,
     },
