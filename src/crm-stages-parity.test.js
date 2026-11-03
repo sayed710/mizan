@@ -2,7 +2,7 @@ import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { models, menusFor } from './models/index.js';
-import { create, read, search, write } from './orm.js';
+import { applyFilters, create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { addDays, today } from './models/common.js';
@@ -237,6 +237,33 @@ test('moving lead to an is_won stage marks it won; Won button navigates to won s
   const fromBtn = read(runRes.db, 'crm.lead', leadId);
   assert.equal(fromBtn.stage_id, wonStage.id);
   assert.equal(fromBtn.probability, 100);
+});
+
+test('custom numeric stages determine won state, filters and stage-change probability', () => {
+  let db = seed();
+  db = write(db, 'crm.stage', 4, { name: 'Negotiating', is_won: false });
+  const won = create(db, 'crm.stage', { name: 'Contract signed', is_won: true });
+  const lead = create(won.db, 'crm.lead', { name: 'Custom pipeline lead', stage_id: 1, probability: 30, type: 'opportunity' });
+  db = write(lead.db, 'crm.lead', lead.id, { stage_id: 4 });
+  const ordinary = read(db, 'crm.lead', lead.id);
+  const spec = models['crm.lead'];
+  const wonFilter = spec.filters.flat().find((filter) => filter.id === 'won');
+  const ongoingFilter = spec.filters.flat().find((filter) => filter.id === 'ongoing');
+  assert.equal(ordinary.probability, 30);
+  assert.equal(spec.form.ribbon(ordinary, db), null);
+  assert.equal(wonFilter.fn(ordinary), false);
+  assert.equal(ongoingFilter.fn(ordinary), true);
+  const certain = write(db, 'crm.lead', lead.id, { probability: 100 });
+  const leads = search(certain, 'crm.lead');
+  assert.ok(!applyFilters('crm.lead', leads, ['won']).some((r) => r.id === lead.id));
+  assert.ok(applyFilters('crm.lead', leads, ['ongoing']).some((r) => r.id === lead.id));
+  const marked = spec.form.buttons.find((button) => button.label === 'Won').run(db, ordinary).db;
+  const result = read(marked, 'crm.lead', lead.id);
+  assert.equal(result.stage_id, won.id);
+  assert.equal(result.probability, 100);
+  assert.equal(spec.form.ribbon(result, marked), 'Won');
+  assert.equal(wonFilter.fn(result), true);
+  assert.equal(ongoingFilter.fn(result), false);
 });
 
 test('Lost action on crm.lead opens wizard with reason and closing note, then archives lead', () => {

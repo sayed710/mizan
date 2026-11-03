@@ -216,3 +216,19 @@ test('restaurant settlement retains exact same-type tender IDs and net change fo
   assert.doesNotThrow(() => payOrder(paid.db, { lines: settlement.lines, refund_of: settlement.id, method: other.id }));
 });
 
+test('restaurant checkout uses selected payment method ID instead of stale or missing legacy method', () => {
+  for (const legacy of [undefined, 'cash']) {
+    const { db, id, configId } = setup();
+    const bank = search(db, 'pos.payment.method').find((m) => m.type === 'bank');
+    const cash = search(db, 'pos.payment.method').find((m) => m.type === 'cash');
+    const configured = write(db, 'pos.config', configId, { payment_method_ids: [bank.id, cash.id] });
+    const payment = { payment_method_id: bank.id, amount: 110, ...(legacy ? { method: legacy } : {}) };
+    const paid = payWithMethods(configured, id, [payment]);
+    const settlement = read(paid.db, 'pos.order', paid.id);
+    assert.deepEqual(settlement.payment_ids, [{ payment_method_id: bank.id, method: 'bank', amount: 110 }]);
+    assert.equal(read(paid.db, 'pos.order', id).payment_ids[0].method, 'bank');
+    assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 1, cash: 0, card: 110, expected: 100 });
+    assert.throws(() => payWithMethods(configured, id, [{ ...payment, amount: 120 }]), /Only cash/);
+    assert.throws(() => payWithMethods(configured, id, [{ ...payment, payment_method_id: 999999 }]), /not enabled/);
+  }
+});

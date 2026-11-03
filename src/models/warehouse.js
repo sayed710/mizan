@@ -50,10 +50,19 @@ export function ensureWarehouseLocations(db, warehouseId) {
   return ensureExternalLocations(Object.keys(vals).length ? write(next, 'stock.warehouse', wh.id, vals) : next, company);
 }
 
-/** Ensure the main WH warehouse and its locations exist without changing legacy stock. */
-export function ensureMainWarehouse(db) {
-  const wh = warehouses(db).find((w) => w.code === 'WH');
-  const res = wh ? { db, id: wh.id } : create(db, 'stock.warehouse', { name: 'Main Warehouse', code: 'WH' });
+export function mainWarehouse(db, company = 1) {
+  const eligible = warehouses(db).filter((w) => (w.company_id ?? 1) === company && w.active !== false);
+  return eligible.find((w) => w.code === 'WH') ?? eligible[0];
+}
+
+/** Ensure the main warehouse and its locations exist without changing legacy stock. */
+export function ensureMainWarehouse(db, company = 1) {
+  const all = warehouses(db);
+  const wh = mainWarehouse(db, company);
+  let code = 'WH';
+  let suffix = 2;
+  while (!wh && all.some((w) => w.code?.toUpperCase() === code)) code = `WH${suffix++}`;
+  const res = wh ? { db, id: wh.id } : create(db, 'stock.warehouse', { name: 'Main Warehouse', code, company_id: company });
   return ensureWarehouseLocations(res.db, res.id);
 }
 

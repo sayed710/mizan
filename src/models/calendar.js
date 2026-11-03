@@ -62,7 +62,7 @@ export function isPublicHoliday(calendar, date, db) {
     const end = (l.date_to || '').slice(0, 10);
     if (!start || !end || d < start || d > end) return false;
     if (l.company_id && l.company_id !== calCompany) return false;
-    if (l.calendar_id && calendar?.id && l.calendar_id !== calendar.id) return false;
+    if (l.calendar_id && l.calendar_id !== calendar?.id) return false;
     return true;
   });
 }

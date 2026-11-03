@@ -164,12 +164,13 @@ export function payWithMethods(db, orderId, payments) {
   const enabledMethods = posPaymentMethods(db, resolvedConfigId);
   const resolved = [];
   for (const payment of payments) {
-    const method = payment.method === 'card' ? 'bank' : payment.method;
-    if (!['cash', 'bank'].includes(method) || !Number.isFinite(payment.amount) || payment.amount <= 0) throw new Error('Select a valid payment method and positive amount');
+    const legacyMethod = payment.method === 'card' ? 'bank' : payment.method;
+    if (!Number.isFinite(payment.amount) || payment.amount <= 0 || (payment.payment_method_id == null && !['cash', 'bank'].includes(legacyMethod))) throw new Error('Select a valid payment method and positive amount');
     const match = payment.payment_method_id != null
-      ? enabledMethods.find((m) => String(m.id) === String(payment.payment_method_id) && m.type === method)
-      : enabledMethods.find((m) => m.type === method || m.name?.toLowerCase() === payment.method?.toLowerCase());
-    if (!match) throw new Error('Payment method is not enabled');
+      ? enabledMethods.find((m) => String(m.id) === String(payment.payment_method_id))
+      : enabledMethods.find((m) => m.type === legacyMethod || m.name?.toLowerCase() === payment.method?.toLowerCase());
+    if (!match || !['cash', 'bank'].includes(match.type)) throw new Error('Payment method is not enabled');
+    const method = match.type;
     byMethod[method] = round(byMethod[method] + payment.amount);
     resolved.push({ payment_method_id: match.id, method, amount: round(payment.amount) });
   }
@@ -225,7 +226,7 @@ export function payWithMethods(db, orderId, payments) {
   next = write(next, 'pos.order', orderId, {
     state: 'paid',
     session_id: null,
-    payment_ids: payments.map((p) => ({ ...p })),
+    payment_ids: resolved,
     change,
     loyalty_points_earned: round(points),
     ...(order.config_id ? {} : { config_id: resolvedConfigId }),

@@ -8,6 +8,7 @@ import { orderpointModels, getOnHand, getForecast, computeQtyToOrder, orderOrder
 import { replenish } from './models/routes.js';
 import { runScheduledJobs } from './models/scheduler.js';
 import { migrate } from './migrations.js';
+import { applyDiff, diffDb } from './sync.js';
 
 // Register orderpoint models in case not yet registered
 Object.assign(models, orderpointModels);
@@ -177,6 +178,29 @@ test('Buy route creates a draft RFQ or extends/merges into an existing draft RFQ
   assert.equal(line2.price_unit, 20); // fall back to p2.cost
 });
 
+test('replenishment keeps separate durable requirements for rules sharing a product and vendor', () => {
+  const { db: base, wh, stockLocId } = setupBase();
+  const vendor = search(base, 'res.partner').find((p) => p.is_company);
+  const product = create(base, 'product', { name: 'Shared reorder product', type: 'goods', cost: 10, vendor_id: vendor.id });
+  const location = create(product.db, 'stock.location', { name: 'Second stock', usage: 'internal', company_id: 1 });
+  const warehouse = create(location.db, 'stock.warehouse', { name: 'Second warehouse', code: 'SEC', company_id: 1, lot_stock_id: location.id });
+  const first = create(warehouse.db, 'stock.warehouse.orderpoint', { product_id: product.id, warehouse_id: wh.id, location_id: stockLocId, product_min_qty: 1, product_max_qty: 10, route_id: 'buy' });
+  const second = create(first.db, 'stock.warehouse.orderpoint', { product_id: product.id, warehouse_id: warehouse.id, location_id: location.id, product_min_qty: 1, product_max_qty: 20, route_id: 'buy' });
+  const order = orderpointModels['stock.warehouse.orderpoint'].listActions.find((action) => action.label === 'Order').run;
+  let db = order(second.db, [first.id, second.id]);
+  const rfq = search(db, 'purchase.order').find((po) => po.origin === 'Replenishment' && po.partner_id === vendor.id);
+  const lines = (state) => read(state, 'purchase.order', rfq.id).order_line.filter((line) => line.product_id === product.id);
+  assert.equal(lines(db).reduce((sum, line) => sum + line.qty, 0), 30);
+  assert.deepEqual(lines(db).map((line) => line.orderpoint_id), [first.id, second.id]);
+  db = applyDiff(second.db, diffDb(second.db, db), { author: 'test', isAdmin: false, allowed: null });
+  assert.deepEqual(lines(db).map((line) => line.orderpoint_id), [first.id, second.id]);
+  db = order(db, [first.id, second.id]);
+  assert.equal(lines(db).reduce((sum, line) => sum + line.qty, 0), 30);
+  db = write(db, 'stock.warehouse.orderpoint', first.id, { product_max_qty: 15 });
+  db = order(db, [first.id]);
+  assert.deepEqual(lines(db).map((line) => [line.orderpoint_id, line.qty]), [[first.id, 15], [second.id, 20]]);
+});
+
 test('Manufacture route creates a draft manufacturing order from BoM', () => {
   const { db: base, wh, stockLocId } = setupBase();
   const raw = create(base, 'product', { name: 'Wood Planks', type: 'goods', cost: 5, qty_available: 50 });
@@ -284,6 +308,41 @@ test('migration converts legacy product reorder_min/reorder_max into orderpoints
   const rfq = search(afterReplenish, 'purchase.order').find((po) => po.origin === 'Replenishment' && po.partner_id === 2);
   assert.ok(rfq);
   assert.ok(rfq.order_line.some((l) => l.product_id === p.id && l.qty === 30));
+});
+
+test('migration keeps legacy reorder stock in each product company warehouse', () => {
+  let db = seed();
+  const wh1 = search(db, 'stock.warehouse').find((w) => (w.company_id ?? 1) === 1);
+  const location = create(db, 'stock.location', { name: 'Company 2 stock', usage: 'internal', company_id: 2 });
+  const warehouse = create(location.db, 'stock.warehouse', { name: 'Company 2 warehouse', code: 'C2', company_id: 2, lot_stock_id: location.id });
+  const p1 = create(warehouse.db, 'product', { name: 'Legacy company 1', type: 'goods', company_id: 1, qty_available: 3, reorder_min: 5, reorder_max: 10 });
+  const p2 = create(p1.db, 'product', { name: 'Legacy company 2', type: 'goods', company_id: 2, qty_available: 4, reorder_min: 6, reorder_max: 12 });
+  db = migrate({ ...p2.db, schema_version: 4 });
+  for (const [product, company, wh, loc, qty] of [[p1.id, 1, wh1.id, wh1.lot_stock_id, 3], [p2.id, 2, warehouse.id, location.id, 4]]) {
+    const rule = db.records['stock.warehouse.orderpoint'].find((r) => r.product_id === product);
+    const quant = db.records['stock.quant'].find((q) => q.product_id === product);
+    assert.equal(rule.company_id, company);
+    assert.equal(rule.warehouse_id, wh);
+    assert.equal(rule.location_id, loc);
+    assert.equal(quant.company_id, company);
+    assert.equal(quant.location_id, loc);
+    assert.equal(quant.quantity, qty);
+    assert.equal(read(db, 'product', product).reorder_min, undefined);
+  }
+});
+
+test('migration creates a warehouse in the legacy product company when missing', () => {
+  const p = create(seed(), 'product', { name: 'Legacy company 2', type: 'goods', company_id: 2, qty_available: 2, reorder_min: 3, reorder_max: 5 });
+  const db = migrate({ ...p.db, schema_version: 4 });
+  const rule = db.records['stock.warehouse.orderpoint'].find((r) => r.product_id === p.id);
+  const warehouse = read(db, 'stock.warehouse', rule.warehouse_id);
+  const location = read(db, 'stock.location', rule.location_id);
+  const quant = db.records['stock.quant'].find((q) => q.product_id === p.id);
+  assert.equal(warehouse.company_id, 2);
+  assert.equal(location.company_id, 2);
+  assert.equal(warehouse.lot_stock_id, location.id);
+  assert.equal(quant.location_id, location.id);
+  assert.equal(quant.company_id, 2);
 });
 
 test('company isolation ensures orderpoints and replenishment respect company boundaries', () => {

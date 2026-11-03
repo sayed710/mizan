@@ -517,7 +517,7 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     const periodic = isPeriodicValuation(stocked, p);
     if (original && qty < 0 && original.return_layers?.find((c) => c.index === index)?.layer_id) {
       stocked = reverseReceipt(stocked, original.return_layers.find((c) => c.index === index).layer_id, { reference: name, company_id: session.company_id });
-    } else if (original && qty < 0 && (!periodic || !original.return_layers?.some((c) => c.index === index))) {
+    } else if (original && qty < 0 && !periodic) {
       throw new Error('Original return valuation provenance was not found; historical orders require manual refund');
     } else if (!refund_of && !periodic && qty > 0) {
       const out = deliver(stocked, p.id, qty, { reference: name, company_id: session.company_id });
