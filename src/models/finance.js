@@ -8,6 +8,7 @@ import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
 import { round } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
+import { exchangeAccount } from './exchange-account.js';
 
 export { applicationEffectiveDate };
 
@@ -242,7 +243,8 @@ export function settlementFxError(db, invoice, p, allocated) {
   if (uses > 1) return 'Exchange entry is already used by another settlement';
   const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === invoice.partner_id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-  const offset = accountId(db, difference > 0 ? '450100' : '690100', invoice.company_id);
+  const configured = exchangeAccount(db, invoice.company_id, difference);
+  const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
   const lines = fx?.line_ids ?? [];
   const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
   const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);

@@ -6,8 +6,33 @@ import { seed } from './seed.js';
 import { createCompany } from './models/company.js';
 import { today } from './models/common.js';
 import { migrate } from './migrations.js';
+import { applyDiff, diffDb } from './sync.js';
+import { reversePayment } from './models/pay.js';
 
 const press = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+
+test('standalone payment allocations use company-configured exchange accounts and can be synchronized and reversed', () => {
+  for (const [paymentRate, field, side] of [[1, 'income_currency_exchange_account_id', 'credit'], [4, 'expense_currency_exchange_account_id', 'debit']]) {
+    const branch = createCompany(seed(), { name: 'FX branch' });
+    for (const company of [1, branch.id]) {
+      const account = create(branch.db, 'account.account', { name: 'Configured exchange', code: `FX${company}`, account_type: side === 'credit' ? 'income_other' : 'expense_other', company_id: company });
+      const configured = write(account.db, 'res.company', company, { [field]: account.id });
+      const currency = create(configured, 'res.currency', { name: 'Exchange test', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: paymentRate }] });
+      const invoice = create(currency.db, 'account.move', { move_type: 'out_invoice', company_id: company, partner_id: 1, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+      const posted = press(invoice.db, 'account.move', invoice.id, 'Confirm');
+      const draft = create(posted, 'account.payment', { company_id: company, partner_id: 1, partner_type: 'customer', payment_type: 'inbound', amount: 20, date: '2026-02-01' });
+      const paid = press(draft.db, 'account.payment', draft.id, 'Confirm');
+      const allocation = read(paid, 'account.move', invoice.id).payments[0];
+      const fx = read(paid, 'account.move', allocation.payment_fx_move_id);
+      assert.ok(fx.line_ids.some((line) => line.account_id === account.id && line[side] > 0));
+      assert.equal(fx.company_id, company);
+      assert.doesNotThrow(() => applyDiff(draft.db, diffDb(draft.db, paid), { isAdmin: true }));
+      const reversed = reversePayment(paid, read(paid, 'account.payment', draft.id), '2026-02-02');
+      assert.equal(read(reversed, 'account.move', invoice.id).amount_residual, 100);
+      assert.ok(reversed.records['account.move'].some((move) => move.reversed_entry_id === fx.id));
+    }
+  }
+});
 
 test('bank match uses each company exchange account for payment and write-off', () => {
   const branch = createCompany(seed(), { name: 'FX branch' });

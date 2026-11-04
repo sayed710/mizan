@@ -14,19 +14,14 @@ import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGu
 import { t } from '../i18n.js';
 import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
+import { exchangeAccount } from './exchange-account.js';
 
 const exchangeLines = (db, companyId, difference) => {
   if (!difference) return [];
-  const company = read(db, 'res.company', companyId ?? 1);
-  const field = difference > 0 ? 'income_currency_exchange_account_id' : 'expense_currency_exchange_account_id';
-  const configured = company?.[field];
-  if (configured) {
-    const account = read(db, 'account.account', configured);
-    if (!account || (account.company_id && account.company_id !== (companyId ?? 1))) throw new Error('Exchange account must belong to the document company');
-  }
+  const account = exchangeAccount(db, companyId, difference);
   return difference > 0
-    ? [{ account: configured || '450100', credit: difference }]
-    : [{ account: configured || '690100', debit: -difference }];
+    ? [{ account, credit: difference }]
+    : [{ account, debit: -difference }];
 };
 
 const isInvoice = (r) => r.move_type !== 'entry';

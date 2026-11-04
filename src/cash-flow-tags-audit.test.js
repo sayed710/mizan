@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { cashFlow } from './models/reports.js';
 import { companyViewDb } from './companyView.js';
+import { migrate } from './migrations.js';
 
 test('cash flow classifies loan movements by stored tag activity and reconciles cash per company', () => {
   let db = seed();
@@ -46,4 +47,43 @@ test('cash flow does not classify an account using tag or account names', () => 
   db = postMove(move.db, move.id);
   const report = cashFlow(db, { from: '2040-02-01', to: '2040-02-01' });
   assert.deepEqual([report.operating, report.financing, report.unclassified, report.net], [0, 0, 100, 100]);
+});
+
+test('migration preserves legacy cash-flow categories by account type without changing existing tags', () => {
+  let db = seed();
+  const other = create(db, 'account.account.tag', { name: 'Other classification' });
+  const explicit = create(other.db, 'account.account.tag', { name: 'Custom category', cash_flow_activity: 'financing' });
+  const definitions = [
+    ['771001', 'asset_fixed', [], 100],
+    ['771002', 'equity', [], -200],
+    ['771003', 'liability_non_current', [other.id], -300],
+    ['771004', 'expense', [], 40],
+    ['771005', 'asset_fixed', [explicit.id], 50],
+  ];
+  db = explicit.db;
+  for (const [code, account_type, tag_ids, amount] of definitions) {
+    const account = create(db, 'account.account', { code, name: 'Legacy account', account_type, tag_ids });
+    const cash = search(account.db, 'account.account').find((item) => item.code === '101401');
+    const move = create(account.db, 'account.move', { move_type: 'entry', invoice_date: '2040-03-01', line_ids: [
+      { account_id: account.id, debit: amount > 0 ? amount : 0, credit: amount < 0 ? -amount : 0 },
+      { account_id: cash.id, debit: amount < 0 ? -amount : 0, credit: amount > 0 ? amount : 0 },
+    ] });
+    db = postMove(move.db, move.id);
+  }
+  const old = { ...db, schema_version: 18 };
+  const migrated = migrate(old);
+  const period = { from: '2040-03-01', to: '2040-03-01' };
+  const report = cashFlow(migrated, period);
+  assert.deepEqual([report.operating, report.investing, report.financing, report.unclassified], [-40, -100, 450, 0]);
+  const loan = search(migrated, 'account.account').find((account) => account.code === '771003');
+  assert.ok(loan.tag_ids.includes(other.id));
+  const overridden = search(migrated, 'account.account').find((account) => account.code === '771005');
+  assert.deepEqual(overridden.tag_ids, [explicit.id]);
+  assert.equal(migrate(migrated), migrated);
+  const fresh = create(migrated, 'account.account', { code: '771006', name: 'New fixed asset', account_type: 'asset_fixed' });
+  const cash = search(fresh.db, 'account.account').find((item) => item.code === '101401');
+  const move = create(fresh.db, 'account.move', { move_type: 'entry', invoice_date: '2040-03-02', line_ids: [
+    { account_id: fresh.id, debit: 25, credit: 0 }, { account_id: cash.id, debit: 0, credit: 25 },
+  ] });
+  assert.equal(cashFlow(postMove(move.db, move.id), { from: '2040-03-02', to: '2040-03-02' }).unclassified, -25);
 });
