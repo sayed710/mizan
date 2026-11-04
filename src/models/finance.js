@@ -1,7 +1,7 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
 import { models } from '../registry.js';
-import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
+import { postNote, read, search, write } from '../orm.js';
 import { addDays, today, total } from './common.js';
 import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
@@ -536,16 +536,16 @@ export function validateTaxReturnPeriod(db, ret) {
 }
 
 
-function resolveCompanyTaxAccount(db, configuredId, fallbackCode, companyId, isMember) {
-  if (configuredId) {
-    const acc = read(db, 'account.account', configuredId);
-    if (!acc || (acc.company_id && acc.company_id !== companyId)) return null;
-    const resolvedId = accountId(db, acc.code, companyId) ?? acc.id;
-    return read(db, 'account.account', resolvedId) ?? acc;
+function resolveCompanyTaxAccount(db, type, field, label, companyId) {
+  const configuredId = type?.[field];
+  if (!configuredId) {
+    throw new Error(`Missing ${label.toLowerCase()} configuration: Tax return type "${type?.name ?? ''}" needs ${label} configured (${field})`);
   }
-  if (isMember) return null;
-  const fallbackId = accountId(db, fallbackCode, companyId);
-  return fallbackId ? read(db, 'account.account', fallbackId) : null;
+  const account = read(db, 'account.account', configuredId);
+  if (!account || (account.company_id && account.company_id !== companyId)) {
+    throw new Error(`Tax return type "${type.name}" has an invalid ${label} for company ${companyId} (${field})`);
+  }
+  return account;
 }
 
 /** Validate explicit return-type mappings configured on a tax unit. */
@@ -601,26 +601,25 @@ export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   for (const [id, raw] of balances) {
     const balance = round(raw);
     if (!balance) continue;
-    const account = read(db, 'account.account', id)?.code;
-    lines.push(balance > 0 ? { account, credit: balance } : { account, debit: -balance });
+    lines.push(balance > 0 ? { account_id: id, credit: balance } : { account_id: id, debit: -balance });
     netClosed = round(netClosed - balance);
   }
   if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
-  const payableAccount = resolveCompanyTaxAccount(db, type?.tax_payable_account_id, '251000', companyId, isMember);
-  const receivableAccount = resolveCompanyTaxAccount(db, type?.tax_receivable_account_id, '131000', companyId, isMember);
-  const partner = type?.payment_partner_id || mainType.payment_partner_id || ret.payment_partner_id;
+  const payableAccount = resolveCompanyTaxAccount(db, type, 'tax_payable_account_id', 'Tax Payable Account', companyId);
+  const receivableAccount = resolveCompanyTaxAccount(db, type, 'tax_receivable_account_id', 'Tax Receivable Account', companyId);
+  const partner = read(db, 'res.partner', type?.payment_partner_id);
+  if (!partner) {
+    throw new Error(`Tax return type "${type?.name ?? ''}" needs a Payment Partner configured (payment_partner_id)`);
+  }
   if (report.payable > 0) {
-    if (!payableAccount) throw new Error(`Missing tax payable account configuration for company ${companyId}`);
-    lines.push({ account: payableAccount.code, credit: report.payable, partner_id: partner });
+    lines.push({ account_id: payableAccount.id, credit: report.payable, partner_id: partner.id });
   } else if (report.payable < 0) {
-    if (!receivableAccount) throw new Error(`Missing tax receivable account configuration for company ${companyId}`);
-    lines.push({ account: receivableAccount.code, debit: -report.payable, partner_id: partner });
+    lines.push({ account_id: receivableAccount.id, debit: -report.payable, partner_id: partner.id });
   }
   if (!lines.length) {
-    if (!payableAccount || !receivableAccount) throw new Error(`Missing tax account configuration for company ${companyId}`);
-    lines.push({ account: payableAccount.code, debit: 0, credit: 0 }, { account: receivableAccount.code, debit: 0, credit: 0 });
+    lines.push({ account_id: payableAccount.id, debit: 0, credit: 0 }, { account_id: receivableAccount.id, debit: 0, credit: 0 });
   }
-  return { lines, payable: report.payable, payableAccount, receivableAccount, partner };
+  return { lines, payable: report.payable, payableAccount, receivableAccount, partner: partner.id };
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */
@@ -640,7 +639,7 @@ export function taxClosingMatchesReturn(db, ret) {
       payable = round(payable + spec.payable);
       const expected = spec.lines.map((line) => {
         const net = round((line.debit ?? 0) - (line.credit ?? 0));
-        return [accountId(db, line.account, companyId), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
+        return [line.account_id, line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
       });
       const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
       if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
@@ -886,6 +885,7 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_level: vals.followup_level !== undefined ? vals.followup_level : current?.followup_level ?? null,
     followup_last_level: vals.followup_last_level !== undefined ? vals.followup_last_level : current?.followup_last_level ?? null,
     followup_channel: vals.followup_channel !== undefined ? vals.followup_channel : current?.followup_channel ?? null,
+    followup_delivery_state: vals.followup_delivery_state !== undefined ? vals.followup_delivery_state : current?.followup_delivery_state ?? null,
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
     followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
     no_followup: vals.no_followup !== undefined ? vals.no_followup : current?.no_followup ?? false,
@@ -917,20 +917,25 @@ export function runFollowUps(db, at = today()) {
   const activeLate = new Set( followUps(db, at, { ignoreNextActionDate: true }).flatMap(followUpCompanies).map((f) => `${f.partner_id}:${f.invoices[0].company_id ?? 1}`));
 
   const partners = new Map((db.records['res.partner'] ?? []).map((p) => [p.id, p]));
-  const partnerUpdates = new Map();
+  let nextDb = db;
 
   for (const partner of partners.values()) {
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
-      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null;
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_delivery_state != null;
       if (hasProgress && !activeLate.has(`${partner.id}:${line.company_id}`)) {
-        const current = partnerUpdates.get(partner.id) ?? partner;
-        partnerUpdates.set(partner.id, updatePartnerFollowUp(current, line.company_id, { followup_level_delay: null, followup_level: null, followup_date: null, followup_last_level: null, followup_channel: null, followup_next_action_date: null }));
+        const current = read(nextDb, 'res.partner', partner.id) ?? partner;
+        nextDb = write(nextDb, 'res.partner', partner.id, {
+          followup_lines: updatePartnerFollowUp(current, line.company_id, {
+            followup_level_delay: null, followup_level: null, followup_date: null,
+            followup_last_level: null, followup_channel: null, followup_delivery_state: null,
+            followup_next_action_date: null,
+          }).followup_lines,
+        });
       }
     }
   }
 
-  const notes = [];
   for (const f of overdueGroups) {
     const companyId = f.invoices[0].company_id ?? 1;
     const days = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
@@ -938,33 +943,39 @@ export function runFollowUps(db, at = today()) {
     const partner = partners.get(f.partner_id);
     if (!level || !partner) continue;
 
-    const currentPartner = partnerUpdates.get(partner.id) ?? partner;
+    const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
     const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
 
     if (currentDelay >= Number(level.delay)) continue;
+    if (progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) continue;
 
-    const list = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)}`).join('; ');
-    notes.push(['res.partner', partner.id, `${level.name}: ${round(f.total)} overdue — ${list}. ${level.message ?? ''}`.trim(), reminderSource(f)]);
+    const channel = level.channel;
+    if (channel === 'email' && partner.email?.trim()) {
+      nextDb = logManualFollowUp(nextDb, partner.id, at, { scope: nextDb, reminder: f, companyId, channel, nextLevelBaseDate: f.oldest });
+      continue;
+    }
 
-    const updated = updatePartnerFollowUp(currentPartner, companyId, {
-      followup_level_delay: Number(level.delay),
+    const deliveryState = channel ? 'not_sent' : 'not_configured';
+    const reason = !channel
+      ? 'No delivery action is configured for this follow-up level.'
+      : channel === 'email'
+        ? 'The customer has no email address.'
+        : `Automatic ${channel} delivery is unavailable; this reminder needs manual delivery.`;
+    const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+    nextDb = postNote(nextDb, 'res.partner', partner.id,
+      `${level.name}: ${round(f.total)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+    const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
+    const updated = updatePartnerFollowUp(current, companyId, {
       followup_date: at,
-      followup_level: level.id,
-      ...reminderDetails(levels, level, at, 'internal', f.oldest),
+      followup_channel: channel ?? null,
+      followup_delivery_state: deliveryState,
+      followup_next_action_date: null,
     });
-    partnerUpdates.set(partner.id, updated);
+    nextDb = write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
   }
 
-  if (!notes.length && !partnerUpdates.size) return db;
-
-  const updates = new Map();
-  for (const [id, p] of partnerUpdates) {
-    updates.set(id, {
-      followup_lines: p.followup_lines,
-    });
-  }
-  return writeMany(postNotes(db, notes), 'res.partner', updates);
+  return nextDb;
 }
 
 const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.name ?? db.settings?.currency ?? '';
@@ -991,8 +1002,11 @@ export function openManualFollowUp(db, partnerId, at = today(), { scope = db, re
 }
 
 /** Record a reminder confirmed sent by hand. */
-export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email' } = {}) {
+export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null } = {}) {
   if (!['email', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
+  if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
+    throw new Error('A customer email address is required to send an email reminder');
+  }
   const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
   const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
 
@@ -1004,7 +1018,9 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     const late = Math.floor((new Date(at) - new Date(part.oldest)) / 864e5);
     const level = levels.find((l) => late >= (Number(l.delay) || 0));
 
-    const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}`;
+    const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+    const detail = `${level?.name ?? 'Payment reminder'}: ${round(part.total)} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
+    const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
 
     const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
@@ -1013,12 +1029,14 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
         followup_level_delay: Number(level.delay),
         followup_date: at,
         followup_level: level.id,
-        ...reminderDetails(levels, level, at, channel),
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       });
     } else {
       partner = updatePartnerFollowUp(partner, cId, {
         followup_date: at,
-        ...reminderDetails(levels, level, at, channel),
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       });
     }
   }
@@ -1073,12 +1091,13 @@ export const financeModels = {
     fields: {
       name: { type: 'char', label: 'Level', required: true },
       delay: { type: 'integer', label: 'Days Overdue' },
+      channel: { type: 'selection', label: 'Automatic Delivery', options: [['email', 'Email'], ['phone', 'Phone'], ['letter', 'Letter']] },
       message: { type: 'text', label: 'Message' },
     },
     defaults: () => ({ delay: 15 }),
     kanban: { title: 'name', lines: ['delay'] },
-    list: ['delay', 'name'],
-    form: { title: 'name', groups: [['delay'], []], tabs: [{ label: 'Message', fields: ['message'] }] },
+    list: ['delay', 'name', 'channel'],
+    form: { title: 'name', groups: [['delay', 'channel'], []], tabs: [{ label: 'Message', fields: ['message'] }] },
   },
 
   'account.analytic.account': {

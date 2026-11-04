@@ -10,6 +10,62 @@ import { nextCheckNumber } from './pay.js';
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
 
+/** Normalize posted batch checks and individual check payment history for the register. */
+export function checkRegisterRows(db, batches = db.records['account.batch.payment'] ?? [], payments = db.records['account.payment'] ?? []) {
+  const postedBatches = batches.filter((batch) => batch.state === 'posted' && batch.batch_type === 'outbound');
+  const batchedPaymentIds = new Set(postedBatches.flatMap((batch) => (batch.lines ?? []).map((line) => line.payment_id).filter(Boolean)));
+  const batchRows = postedBatches.flatMap((batch) => (batch.lines ?? []).flatMap((line, index) => {
+    if (line.check_number == null) return [];
+    const payment = read(db, 'account.payment', line.payment_id);
+    const current = {
+      key: `batch-${batch.id}-${index}`,
+      checkNumber: line.check_number,
+      date: batch.date,
+      paymentId: line.payment_id,
+      invoiceId: line.move_id,
+      batchId: batch.id,
+      amount: line.amount,
+      state: line.cancelled ? 'Cancelled' : payment?.state === 'posted' ? 'Posted' : payment?.state === 'cancel' ? 'Cancelled' : 'Unknown',
+    };
+    const voided = (payment?.voided_check_numbers ?? []).map((item, voidIndex) => ({
+      key: `batch-${batch.id}-${index}-voided-${voidIndex}`,
+      checkNumber: item.check_number,
+      date: item.date ?? batch.date,
+      paymentId: line.payment_id,
+      invoiceId: line.move_id,
+      batchId: batch.id,
+      amount: line.amount,
+      state: 'Voided',
+    }));
+    return [current, ...voided];
+  }));
+  const individualRows = payments
+    .filter((payment) => payment.state === 'posted' && payment.payment_type === 'outbound' && payment.check_number != null && !batchedPaymentIds.has(payment.id))
+    .flatMap((payment) => {
+      const voided = payment.voided_check_numbers ?? [];
+      const rows = voided.map((item, index) => ({
+        key: `payment-${payment.id}-voided-${index}`,
+        checkNumber: item.check_number,
+        date: item.date ?? payment.date,
+        paymentId: payment.id,
+        amount: payment.amount,
+        state: 'Voided',
+      }));
+      if (!voided.some((item) => item.check_number === payment.check_number)) {
+        rows.push({
+          key: `payment-${payment.id}-issued`,
+          checkNumber: payment.check_number,
+          date: payment.date,
+          paymentId: payment.id,
+          amount: payment.amount,
+          state: 'Issued',
+        });
+      }
+      return rows;
+    });
+  return [...batchRows, ...individualRows];
+}
+
 /** Replace the batch lines with every posted, still-open invoice of the matching type, at its residual. */
 export function fillOpenInvoices(db, batch) {
   const company = (batch.journal_id ? read(db, 'account.journal', batch.journal_id)?.company_id : null) ?? batch.company_id ?? 1;

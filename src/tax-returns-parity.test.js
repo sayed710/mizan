@@ -23,6 +23,11 @@ import { models } from './models/index.js';
 import { createCompany, ensureMainCompany } from './models/company.js';
 
 const taxNamed = (db, name, use = 'sale') => search(db, 'account.tax').find((t) => t.name === name && t.type_tax_use === use);
+const configureReturnType = (db, typeId, companyId, partnerId) => write(db, 'account.return.type', typeId, {
+  tax_payable_account_id: accountId(db, '251000', companyId),
+  tax_receivable_account_id: accountId(db, '131000', companyId),
+  payment_partner_id: partnerId,
+});
 const invoiceLine = (db, taxName, use, vals = {}) => ({
   product_id: 1, qty: 1, price_unit: 100, discount: 0,
   ...taxSnapshot(taxNamed(db, taxName, use)),
@@ -179,6 +184,10 @@ test('tax return locks and resets are isolated by company through synced actions
   let db = seed();
   const company = createCompany(db, { name: 'Second company' });
   db = company.db;
+  const authority = create(db, 'res.partner', { name: 'Second company tax authority' });
+  db = authority.db;
+  const memberType = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === company.id && t.name === 'VAT Return');
+  db = configureReturnType(db, memberType.id, company.id, authority.id);
   const buttons = models['account.return'].form.buttons;
   const run = (label, id) => {
     const next = buttons.find((button) => button.label === label).run(db, read(db, 'account.return', id)).db;
@@ -612,9 +621,11 @@ test('company isolation: tax report, journal items, and closing entries isolate 
   assert.equal(ret1Record.total_amount_to_pay, 100);
 
   // Company 2's tax items are untouched
-  const co2Type = search(submittedDb, 'account.return.type').find((t) => t.company_id === co2.id);
+  const authority = create(submittedDb, 'res.partner', { name: 'Company Two tax authority' });
+  const co2Type = search(authority.db, 'account.return.type').find((t) => t.company_id === co2.id);
   assert.ok(co2Type, 'Return type for Company 2 exists');
-  const co2ReturnRes = create(submittedDb, 'account.return', {
+  const configuredCo2 = configureReturnType(authority.db, co2Type.id, co2.id, authority.id);
+  const co2ReturnRes = create(configuredCo2, 'account.return', {
     name: 'Co2 VAT Return',
     type_id: co2Type.id,
     date_from: from,
@@ -822,6 +833,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
 
 test('states workflow transitions and immutability of submitted/paid returns', () => {
   let db = seed();
+  const vatType = search(db, 'account.return.type').find((type) => type.name === 'VAT Return' && (type.company_id ?? 1) === 1);
 
   // Workflow: generic_state_review_submit
   const typeReview = create(db, 'account.return.type', {
@@ -841,7 +853,8 @@ test('states workflow transitions and immutability of submitted/paid returns', (
     category: 'account_return',
     states_workflow: 'generic_state_tax_report',
   });
-  const rReport = create(typeReport.db, 'account.return', {
+  const configuredReportType = configureReturnType(typeReport.db, typeReport.id, 1, vatType.payment_partner_id);
+  const rReport = create(configuredReportType, 'account.return', {
     name: 'R Report', type_id: typeReport.id, date_from: '2026-06-01', date_to: '2026-06-30', state: 'new',
   });
   const subReport = submitReturn(rReport.db, rReport.id);
@@ -852,9 +865,9 @@ test('states workflow transitions and immutability of submitted/paid returns', (
     name: 'Type Only Pay',
     category: 'account_return',
     states_workflow: 'generic_state_only_pay',
-    payment_partner_id: 1,
   });
-  const rPay = create(typePay.db, 'account.return', {
+  const configuredPayType = configureReturnType(typePay.db, typePay.id, 1, vatType.payment_partner_id);
+  const rPay = create(configuredPayType, 'account.return', {
     name: 'R Pay', type_id: typePay.id, date_from: '2026-07-01', date_to: '2026-07-31', state: 'new', total_amount_to_pay: 50,
   });
   const paidOnly = payReturn(rPay.db, rPay.id);

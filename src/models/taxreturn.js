@@ -2,7 +2,6 @@
 import { create, getActiveCompany, read, search, updateSettings, write } from '../orm.js';
 import { round } from '../money.js';
 import { addDays, today } from './common.js';
-import { accountId } from './ledger.js';
 import { postPayment } from './pay.js';
 import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
@@ -110,11 +109,6 @@ export function ensureReturnTypes(db) {
         deadline_days_delay: 20,
         auto_generate: true,
         company_id: company.id,
-        tax_payable_account_id: accountId(next, '251000', company.id),
-        tax_receivable_account_id: accountId(next, '131000', company.id),
-        rounding_profit_account_id: accountId(next, '450000', company.id),
-        rounding_loss_account_id: accountId(next, '690000', company.id),
-        payment_partner_id: company.partner_id ?? 1,
       });
       next = made.db;
     }
@@ -342,11 +336,10 @@ export function payReturn(db, returnId) {
 
   let nextDb = db;
   const paymentIds = [];
+  const specs = returnCompanies(db, ret).map((companyId) => ({ companyId, spec: taxClosingSpec(db, ret, companyId) }));
 
-  for (const companyId of returnCompanies(db, ret)) {
-    const spec = taxClosingSpec(nextDb, ret, companyId);
+  for (const { companyId, spec } of specs) {
     if (!spec.payable) continue;
-    if (!spec.partner) throw new Error('Set a payment partner on the return type');
     const inbound = spec.payable < 0;
     const targetAccount = inbound ? spec.receivableAccount : spec.payableAccount;
     const created = create(nextDb, 'account.payment', {
