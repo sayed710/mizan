@@ -69,7 +69,7 @@ const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', '
 const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'journal_id', 'company_id', 'inalterable_hash', 'secure_sequence_number', 'inalterable_hash_version', 'move_type', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'is_closing', 'currency_id', 'fiscal_position_id'];
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
-export const moveDate = (m) => (m?.move_type === 'entry' && m?.date ? m.date : m?.invoice_date ?? m?.date ?? today());
+export const moveDate = (m) => m?.date ?? m?.invoice_date ?? today();
 /** Archiving hides a record from every report, so `active` counts as changed only between kept and archived; `blocked` (dispute flag) may toggle on posted lines. */
 const stripBlocked = (lines) => (lines ?? []).map((l) => Object.fromEntries(Object.entries(l ?? {}).filter(([k]) => k !== 'blocked')));
 const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : k === 'line_ids' ? stripBlocked(r?.line_ids) : r?.[k]);

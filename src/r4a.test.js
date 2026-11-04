@@ -234,7 +234,7 @@ test('portal displays amounts at the precision of very small currency increments
 });
 
 test('currency rounding changes are blocked only while the currency is in use', () => {
-  const currency = create(seed(), 'res.currency', { name: 'TST', rounding: 0.01 });
+  const currency = create(seed(), 'res.currency', { name: 'TST', rounding: 0.01, rate_ids: [{ date: '2000-01-01', rate: 1 }] });
   const draft = create(currency.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, currency_id: currency.id, invoice_line_ids: [{ qty: 1, price_unit: 10.25, tax: 0 }] });
   let db = write(draft.db, 'res.currency', currency.id, { rounding: 0.001 });
   assert.equal(read(db, 'res.currency', currency.id).rounding, 0.001);

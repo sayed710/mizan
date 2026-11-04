@@ -4,11 +4,12 @@ import { today } from './common.js';
 import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../money.js';
 
 
-/** Units of `currencyId` per 1 base-currency unit on `date`: the latest rate on or before it (1 without rates). */
+/** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
 function baseRate(db, currencyId, date) {
   const c = currencyId ? read(db, 'res.currency', currencyId) : null;
+  if (!c) throw new Error('Select an existing currency before converting an amount');
   const rates = (c?.rate_ids ?? []).filter((r) => Number(r.rate) > 0 && r.date).sort((a, b) => a.date.localeCompare(b.date));
-  if (!rates.length) return 1;
+  if (!rates.length) throw new Error(`No ${c.name} exchange rate is configured`);
   const rate = [...rates].reverse().find((r) => r.date <= date);
   if (!rate) throw new Error(`No ${c.name} rate on or before ${date}`);
   return Number(rate.rate);
@@ -23,8 +24,14 @@ export const companyCurrency = (db, companyId) => (companyId ? read(db, 'res.com
  */
 export function rateAt(db, currencyId, date = today(), companyId = null) {
   const own = companyCurrency(db, companyId);
-  if (!currencyId || currencyId === own) return 1;
-  return baseRate(db, currencyId, date) / (own ? baseRate(db, own, date) : 1);
+  if (!currencyId) return 1;
+  const currency = read(db, 'res.currency', currencyId);
+  if (!currency) throw new Error('Select an existing currency before converting an amount');
+  const baseCurrency = (db.records['res.currency'] ?? []).find((item) => item.name === db.settings?.currency)?.id;
+  if (currencyId === own || (companyId == null && currencyId === baseCurrency)) return 1;
+  const currencyRate = currencyId === baseCurrency ? 1 : baseRate(db, currencyId, date);
+  const companyRate = own && own !== baseCurrency ? baseRate(db, own, date) : 1;
+  return currencyRate / companyRate;
 }
 
 /** Amount in `currencyId` expressed in the company's currency at `date`. */

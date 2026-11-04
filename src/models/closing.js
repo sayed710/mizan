@@ -39,7 +39,7 @@ function yearGuard(db, before, after) {
   if (!validDate(after.date_from) || !validDate(after.date_to) || after.date_from > after.date_to) return 'Enter a valid fiscal year date range';
   if (before?.state === 'closed' && (before.date_from !== after.date_from || before.date_to !== after.date_to)) return 'Reopen the fiscal year before changing its dates';
   // Closing and reopening entries leave the P&L, so a year names them only as it closes or reopens, on its end date.
-  const entryOff = (id) => { const m = id && read(db, 'account.move', id); return m && (m.invoice_date ?? m.date) !== after.date_to; };
+  const entryOff = (id) => { const m = id && read(db, 'account.move', id); return m && (m.date ?? m.invoice_date) !== after.date_to; };
   const closes = after.state === 'closed' && before?.state !== 'closed';
   if ((before?.closing_move_id ?? null) !== (after.closing_move_id ?? null) && !(closes && after.closing_move_id)) return 'The closing entry is set by closing the fiscal year';
   if (closes && !after.closing_move_id) return 'Close the fiscal year with its closing entry';
@@ -66,7 +66,7 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
   const year = getYear(db, yearId);
   if (year.state === 'closed') throw new Error('This fiscal year is already closed');
   if (date && date !== year.date_to) throw new Error('Close the fiscal year on its end date');
-  if (search(db, 'account.move').some((m) => (m.company_id ?? 1) === year.company_id && m.state === 'draft' && (m.invoice_date ?? m.date) >= year.date_from && (m.invoice_date ?? m.date) <= year.date_to)) {
+  if (search(db, 'account.move').some((m) => (m.company_id ?? 1) === year.company_id && m.state === 'draft' && (m.date ?? m.invoice_date) >= year.date_from && (m.date ?? m.invoice_date) <= year.date_to)) {
     throw new Error('Post or cancel draft moves inside this fiscal year before closing');
   }
   const next = ensureAccount(db, retainedEarningsCode, 'Retained Earnings', 'equity', year.company_id);
@@ -141,7 +141,7 @@ const ownCurrency = (db, m) => read(db, 'res.currency', companyCurrency(db, m.co
 export function unrealizedExchange(db, date) {
   checkDate(date);
   return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type)
-    && m.invoice_date <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
+    && (m.date ?? m.invoice_date) <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
     const docRound = (n) => roundCurrency(n, documentCurrency(db, m));
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
     const allocations = settlementCompanyAllocations(db, m);
@@ -168,59 +168,145 @@ export function unrealizedExchange(db, date) {
   });
 }
 
-/** Foreign bank positions are reconstructed from posted journal items, grouped by account and currency. */
-export function foreignBankBalances(db, date) {
-  checkDate(date);
+const revaluableTypes = new Set(['asset_receivable', 'asset_cash', 'asset_current', 'liability_payable', 'liability_current']);
+const journalLineKey = (moveId, index) => `${moveId}:${index}`;
+
+/** Invoice and settlement receivable/payable lines are represented by their document residual above. */
+function documentSettlementLines(db, date) {
+  const excluded = new Set();
+  for (const move of search(db, 'account.move')) {
+    if (move.state !== 'posted' || !['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)
+      || (move.date ?? move.invoice_date ?? '') > date) continue;
+    const counterpartType = ['in_invoice', 'in_refund'].includes(move.move_type) ? 'liability_payable' : 'asset_receivable';
+    (move.line_ids ?? []).forEach((line, index) => {
+      if (read(db, 'account.account', line.account_id)?.account_type === counterpartType) excluded.add(journalLineKey(move.id, index));
+    });
+    for (const { row } of settlementCompanyAllocations(db, move)) {
+      if (!applicationActiveAt(db, row, move, date)) continue;
+      const settlement = read(db, 'account.move', row.move_id);
+      (settlement?.line_ids ?? []).forEach((line, index) => {
+        const type = read(db, 'account.account', line.account_id)?.account_type;
+        if (type === 'asset_receivable' || type === 'liability_payable') excluded.add(journalLineKey(settlement.id, index));
+      });
+    }
+  }
+  return excluded;
+}
+
+/** Open foreign-currency balance-sheet journal items grouped by company, account, currency and partner. */
+function foreignJournalPositions(db, date, { accountTypes = revaluableTypes, excludedLines = new Set() } = {}) {
   const groups = new Map();
   for (const move of search(db, 'account.move')) {
-    if (move.state !== 'posted' || (move.invoice_date ?? move.date ?? '') > date) continue;
+    if (move.state !== 'posted' || (move.date ?? move.invoice_date ?? '') > date) continue;
     const company = move.company_id ?? 1;
-    for (const line of move.line_ids ?? []) {
-      if (!line.currency_id || line.currency_id === companyCurrency(db, company)
-        || read(db, 'account.account', line.account_id)?.account_type !== 'asset_cash') continue;
-      const key = `${company}:${line.account_id}:${line.currency_id}`;
-      const row = groups.get(key) ?? { company_id: company, account_id: line.account_id, currency_id: line.currency_id, foreign: 0, booked: 0 };
+    (move.line_ids ?? []).forEach((line, index) => {
+      if (excludedLines.has(journalLineKey(move.id, index)) || !line.currency_id || line.currency_id === companyCurrency(db, company)) return;
+      const account = read(db, 'account.account', line.account_id);
+      if (!account || !accountTypes.has(account.account_type)) return;
+      const key = `${company}:${line.account_id}:${line.currency_id}:${line.partner_id ?? ''}`;
+      const row = groups.get(key) ?? { company_id: company, account_id: line.account_id, account: account.code, partner_id: line.partner_id ?? null, currency_id: line.currency_id, foreign: 0, booked: 0, signedBalance: true };
       row.foreign = roundCurrency(row.foreign + (Number(line.amount_currency) || 0), read(db, 'res.currency', line.currency_id));
       row.booked = roundCurrency(row.booked + (Number(line.debit) || 0) - (Number(line.credit) || 0), companyCurrencyRecord(db, company));
       groups.set(key, row);
-    }
+    });
   }
-  return [...groups.values()].map((row) => ({ ...row, difference: roundCurrency(toCompany(db, row.currency_id, row.foreign, date, row.company_id) - row.booked, companyCurrencyRecord(db, row.company_id)) }));
+  return [...groups.values()].filter((row) => row.foreign).map((row) => {
+    const own = companyCurrencyRecord(db, row.company_id);
+    const value = roundCurrency(toCompany(db, row.currency_id, row.foreign, date, row.company_id), own);
+    return { ...row, residual: row.foreign, value, difference: roundCurrency(value - row.booked, own) };
+  });
 }
 
-/** Open foreign positions visible to the selected companies. */
-export function foreignBalanceReport(db, date) {
-  const scoped = companyViewDb(db);
-  return [...unrealizedExchange(scoped, date), ...foreignBankBalances(scoped, date)];
+/** Foreign bank positions are reconstructed from posted journal items, grouped by account and currency. */
+export function foreignBankBalances(db, date) {
+  checkDate(date);
+  return foreignJournalPositions(db, date, { accountTypes: new Set(['asset_cash']) });
+}
+
+/** Open foreign positions visible to the selected companies, including manual balance-sheet entries. */
+export function foreignBalanceReport(db, date, { companyId = null, companyScoped = true } = {}) {
+  checkDate(date);
+  const scoped = companyId ? db : companyScoped ? companyViewDb(db) : db;
+  const source = companyId
+    ? { ...db, records: { ...db.records, 'account.move': search(db, 'account.move').filter((move) => (move.company_id ?? 1) === companyId) } }
+    : scoped;
+  const invoices = unrealizedExchange(source, date);
+  const settled = documentSettlementLines(source, date);
+  const manual = foreignJournalPositions(source, date, { excludedLines: settled });
+  return [...invoices, ...manual];
+}
+
+function sameRevaluation(entry, expected, db, company) {
+  const totals = (items) => {
+    const map = new Map();
+    for (const line of items) {
+      const account = line.account_id ?? accountId(db, line.account, company) ?? accountId(db, line.account);
+      if (!account) return null;
+      const key = `${account}:${line.partner_id ?? ''}`;
+      map.set(key, round((map.get(key) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0)));
+    }
+    return [...map].filter(([, amount]) => amount).sort(([a], [b]) => a.localeCompare(b));
+  };
+  const wanted = totals(expected);
+  const actual = totals(entry.line_ids ?? []);
+  return wanted && actual && JSON.stringify(wanted) === JSON.stringify(actual);
+}
+
+function configuredExchangeAccount(db, accountId, type, company, label) {
+  if (!accountId) return null;
+  const account = read(db, 'account.account', accountId);
+  if (!account || (account.company_id && account.company_id !== company) || account.account_type !== type) {
+    throw new Error(`${label} must be a ${type} account belonging to this company`);
+  }
+  return account.id;
 }
 
 /** Post one exchange adjustment and its next-day reversal, once per date. */
-export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100', companyScoped = false } = {}) {
+export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100', companyScoped = false, companyId = null } = {}) {
   checkDate(date);
-  const rows = (companyScoped ? foreignBalanceReport(db, date) : [...unrealizedExchange(db, date), ...foreignBankBalances(db, date)]).filter((r) => r.difference);
-  let next = db;
-  // Each company adjusts its own books, so rows are grouped by company and posted with that company.
+  const rows = foreignBalanceReport(db, date, { companyId, companyScoped }).filter((r) => r.difference);
+  const plans = [];
+  // Validate every company and any existing adjustment before constructing entries.
   for (const company of [...new Set(rows.map((r) => r.company_id))]) {
-    const ref = `Foreign currency revaluation: ${date}`;
-    if (search(next, 'account.move').some((m) => (m.company_id ?? 1) === company && m.revaluation_date === date && m.state === 'posted')) continue;
-    const settings = read(next, 'res.company', company);
-    if (!settings?.income_currency_exchange_account_id) next = ensureAccount(next, gainCode, 'Foreign Exchange Gain', 'income_other', company);
-    if (!settings?.expense_currency_exchange_account_id) next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other', company);
+    const settings = read(db, 'res.company', company);
+    if (!settings) throw new Error('A revaluation company no longer exists');
+    const gainAccount = configuredExchangeAccount(db, settings.income_currency_exchange_account_id, 'income_other', company, 'Foreign exchange gain account');
+    const lossAccount = configuredExchangeAccount(db, settings.expense_currency_exchange_account_id, 'expense_other', company, 'Foreign exchange loss account');
     let gain = 0;
     let loss = 0;
-    const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(next, company));
+    const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
     const lines = rows.filter((r) => r.company_id === company).map((r) => {
-      const amount = companyRound(r.difference * (read(next, 'account.account', r.account_id)?.account_type === 'liability_payable' ? -1 : 1));
+      const account = read(db, 'account.account', r.account_id);
+      if (!account || (account.company_id && account.company_id !== company)) throw new Error('A foreign balance account does not belong to its company');
+      const amount = companyRound(r.signedBalance ? r.difference : r.difference * (account.account_type === 'liability_payable' ? -1 : 1));
       if (amount > 0) gain = companyRound(gain + amount);
       else loss = companyRound(loss - amount);
       return { account_id: r.account_id, partner_id: r.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
-    });
-    if (gain) lines.push({ account: settings?.income_currency_exchange_account_id || gainCode, credit: gain });
-    if (loss) lines.push({ account: settings?.expense_currency_exchange_account_id || lossCode, debit: loss });
-    const entry = postEntry(next, { journal: 'MISC', date, ref, lines, company });
+    }).filter((line) => line.debit || line.credit);
+    const expected = [...lines];
+    if (gain) expected.push({ ...(gainAccount ? { account_id: gainAccount } : { account: gainCode }), credit: gain });
+    if (loss) expected.push({ ...(lossAccount ? { account_id: lossAccount } : { account: lossCode }), debit: loss });
+    const prior = search(db, 'account.move').find((m) => (m.company_id ?? 1) === company && m.revaluation_date === date && m.state === 'posted');
+    if (prior) {
+      if (!sameRevaluation(prior, expected, db, company)) {
+        throw new Error(`Company ${settings.name || company} already has a foreign currency revaluation dated ${date}; reverse it before regenerating the updated position`);
+      }
+      continue;
+    }
+    plans.push({ company, settings, gainAccount, lossAccount, gain, loss, lines, expected });
+  }
+
+  let next = db;
+  for (const plan of plans) {
+    if (!plan.gainAccount && plan.gain) next = ensureAccount(next, gainCode, 'Foreign Exchange Gain', 'income_other', plan.company);
+    if (!plan.lossAccount && plan.loss) next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other', plan.company);
+  }
+  for (const plan of plans) {
+    const { company, expected } = plan;
+    const entry = postEntry(next, { journal: 'MISC', date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company });
     const reversal = postEntry(entry.db, {
       journal: 'MISC', date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
-      lines: lines.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
+      lines: expected.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
     });
     next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
@@ -258,7 +344,7 @@ export const closingModels = {
             const year = getYear(db, r.id);
             checkDate(date);
             if (year.state !== 'open' || date < year.date_from || date > year.date_to) throw new Error('Select a revaluation date inside this open fiscal year');
-            return { db: revalueForeignBalances(db, date) };
+            return { db: revalueForeignBalances(db, date, { companyId: year.company_id }) };
           },
         },
       ],
