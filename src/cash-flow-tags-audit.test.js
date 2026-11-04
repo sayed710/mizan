@@ -49,14 +49,14 @@ test('cash flow does not classify an account using tag or account names', () => 
   assert.deepEqual([report.operating, report.financing, report.unclassified, report.net], [0, 0, 100, 100]);
 });
 
-test('migration classifies legacy accounts using code and name defaults', () => {
+test('migration classifies legacy accounts by account type only, ignoring codes and names', () => {
   let db = seed();
   const cases = [
-    ['159901', 'Equipment', 'expense', 'investing', 11],
-    ['309901', 'Capital', 'expense', 'financing', 22],
-    ['260000', 'Debt', 'expense', 'financing', 33],
-    ['779901', 'Business Loan', 'liability_current', 'financing', 44],
-    ['159902', 'Loan equipment', 'liability_current', 'investing', 55],
+    ['159901', 'Equipment', 'expense', 'operating', 11],
+    ['309901', 'Capital', 'equity', 'financing', 22],
+    ['260000', 'Debt', 'liability_non_current', 'financing', 33],
+    ['779901', 'Business Loan', 'liability_current', 'operating', 44],
+    ['159902', 'Loan equipment', 'asset_fixed', 'investing', 55],
   ];
   const ids = [];
   for (const [code, name, account_type, , amount] of cases) {
@@ -72,7 +72,7 @@ test('migration classifies legacy accounts using code and name defaults', () => 
   const accounts = search(migrated, 'account.account');
   assert.deepEqual(ids.map((id) => accountCashFlowActivity(migrated, accounts.find((account) => account.id === id))), cases.map((entry) => entry[3]));
   const report = cashFlow(migrated, { from: '2040-03-05', to: '2040-03-05' });
-  assert.deepEqual([report.operating, report.investing, report.financing, report.unclassified], [0, 66, 99, 0]);
+  assert.deepEqual([report.operating, report.investing, report.financing, report.unclassified], [55, 55, 55, 0]);
 });
 
 test('migration preserves legacy cash-flow categories by account type without changing existing tags', () => {

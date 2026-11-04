@@ -463,7 +463,7 @@ function migrateCashFlowActivities(db) {
   for (const account of db.records['account.account'] ?? []) {
     const tags = account.tag_ids ?? [];
     if (tags.some((tag) => activities.includes((typeof tag === 'object' ? tag : (next.records['account.account.tag'] ?? []).find((item) => item.id === tag))?.cash_flow_activity))) continue;
-    const activity = defaultCashFlowActivity(account.code, account.account_type, account.name);
+    const activity = defaultCashFlowActivity(account.account_type);
     const id = tagFor(activity);
     next = write(next, 'account.account', account.id, { tag_ids: [...tags, id] });
   }
