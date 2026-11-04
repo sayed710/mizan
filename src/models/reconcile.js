@@ -8,6 +8,22 @@ import { lineTaxOf, taxSnapshot } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
+/** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
+export function sameCommercialPartner(db, leftId, rightId) {
+  const commercialId = (id) => {
+    let partner = read(db, 'res.partner', id);
+    const seen = new Set();
+    while (partner?.parent_id) {
+      if (seen.has(partner.id)) return null;
+      seen.add(partner.id);
+      partner = read(db, 'res.partner', partner.parent_id);
+    }
+    return partner?.id ?? null;
+  };
+  const left = commercialId(leftId);
+  return left != null && left === commercialId(rightId);
+}
+
 function labelMatches(rule, label) {
   const text = String(label ?? '');
   const param = String(rule.match_label_param ?? '');
@@ -98,8 +114,12 @@ export function applyRule(db, rule, line) {
     return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
   }
   if (rule.rule_type === 'invoice_matching') {
-    // Only an exact amount match, and from the line's partner when it has one: never pay someone else's invoice.
-    const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && toCompany(db, m.currency_id, m.amount_residual, line.date, m.company_id) === roundCurrency(line.open_amount ?? statementCompanyAmount(db, line), companyCurrencyRecord(db, line.company_id)));
+    const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date, m.company_id) === roundCurrency(line.open_amount ?? statementCompanyAmount(db, line), companyCurrencyRecord(db, line.company_id)));
+    if (!line.partner_id) {
+      if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice');
+      return db;
+    }
+    const match = exact.find((m) => sameCommercialPartner(db, m.partner_id, line.partner_id));
     return match ? reconcileWith(db, line, match.id) : db;
   }
   return writeOff(db, rule, line);

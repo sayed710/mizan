@@ -5,7 +5,7 @@ import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { accountId, ensureBankSuspense, journalId, paymentJournal, postEntry } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
-import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
+import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
@@ -42,8 +42,9 @@ export function matchError(line, move) {
 export function candidates(db, line) {
   const incoming = line.amount > 0;
   return search(db, 'account.move')
-    .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === (line.company_id ?? 1) && m.amount_residual > 0 && (incoming ? inboundTypes : outboundTypes).includes(m.move_type))
-    .sort((a, b) => Number(b.partner_id === line.partner_id) - Number(a.partner_id === line.partner_id)
+    .filter((m) => m.state === 'posted' && (m.company_id ?? 1) === (line.company_id ?? 1) && m.amount_residual > 0 && (incoming ? inboundTypes : outboundTypes).includes(m.move_type)
+      && (!line.partner_id || sameCommercialPartner(db, m.partner_id, line.partner_id)))
+    .sort((a, b) => Number(sameCommercialPartner(db, b.partner_id, line.partner_id)) - Number(sameCommercialPartner(db, a.partner_id, line.partner_id))
       || Math.abs(a.amount_residual - Math.abs(line.amount)) - Math.abs(b.amount_residual - Math.abs(line.amount)));
 }
 
@@ -203,12 +204,31 @@ function matchPayment(db, line) {
   const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via));
   const amount = statementCompanyAmount(db, line);
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
-  if (!(journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id) && paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
-
   const incoming = line.amount > 0;
   const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
   const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, read(db, 'res.currency', journal.currency_id))) : [];
-  if (foreign && roundCurrency(fxAmounts.reduce((a, b) => a + b, 0), read(db, 'res.currency', journal.currency_id)) !== roundCurrency(Math.abs(line.amount), read(db, 'res.currency', journal.currency_id))) throw new Error('The selected payments must total the bank transaction currency amount');
+  const foreignDifference = foreign
+    ? roundCurrency(fxAmounts.reduce((a, b) => a + b, 0) - Math.abs(line.amount), read(db, 'res.currency', journal.currency_id))
+    : 0;
+  const difference = round(paymentsTotal - amount);
+  const needsWriteoff = foreign ? foreignDifference !== 0 : difference !== 0;
+  let writeoffAccount = null;
+  if (needsWriteoff) {
+    if (!line.writeoff_account_id) throw new Error('The selected payments must total the bank transaction amount');
+    writeoffAccount = read(db, 'account.account', line.writeoff_account_id);
+    if (!writeoffAccount || (writeoffAccount.company_id && writeoffAccount.company_id !== company)) {
+      throw new Error('Select a write-off account belonging to the payment company for the bank difference');
+    }
+    if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label for the bank difference');
+    if (line.writeoff_amount != null) {
+      const configuredAmount = Number(line.writeoff_amount);
+      if (!Number.isFinite(configuredAmount) || configuredAmount < 0 || round(configuredAmount) !== configuredAmount || round(configuredAmount) !== Math.abs(difference)) {
+        throw new Error('Write-off amount must equal the payment difference in company currency');
+      }
+    }
+    const forbidden = new Set([accountId(db, via.account, company), accountId(db, '101404', company), ...outstandingItems.map((item) => item.account)]);
+    if (forbidden.has(writeoffAccount.id)) throw new Error('Write-off account must differ from the bank, suspense and outstanding accounts');
+  }
   const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
   const bankLine = incoming ? { account: via.account, debit: amount, ...fx(Math.abs(line.amount)) } : { account: via.account, credit: amount, ...fx(-Math.abs(line.amount)) };
   const paymentLines = outstandingItems.map((item, i) => (incoming
@@ -216,8 +236,14 @@ function matchPayment(db, line) {
     : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }));
 
   const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
-  const difference = round((incoming ? 1 : -1) * (amount - paymentsTotal));
-  if (difference) lines.push({ account: exchangeAccount(db, company, difference), ...(difference > 0 ? { credit: difference } : { debit: -difference }) });
+  if (needsWriteoff) {
+    const companyNet = incoming ? difference : -difference;
+    const currencyNet = incoming ? foreignDifference : -foreignDifference;
+    lines.push({ account_id: writeoffAccount.id, partner_id: line.partner_id ?? null, name: line.writeoff_label, debit: Math.max(0, companyNet), credit: Math.max(0, -companyNet), ...fx(currencyNet) });
+  } else if (difference) {
+    const exchangeDifference = (incoming ? 1 : -1) * (amount - paymentsTotal);
+    lines.push({ account: exchangeAccount(db, company, exchangeDifference), ...(exchangeDifference > 0 ? { credit: exchangeDifference } : { debit: -exchangeDifference }) });
+  }
   const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
 
   return {
@@ -237,8 +263,13 @@ function matchPayment(db, line) {
 
 function autoReconcile(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
-  const match = candidates(db, line).find((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
-  if (!match) throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');
+  const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
+  if (!line.partner_id) {
+    if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice candidate');
+    throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');
+  }
+  const match = exact.find((m) => sameCommercialPartner(db, m.partner_id, line.partner_id));
+  if (!match) throw new Error('No open invoice or bill with this exact amount belongs to the statement partner. Pick one in "Match with" or book it to an account.');
   return { db: reconcileWith(db, line, match.id) };
 }
 

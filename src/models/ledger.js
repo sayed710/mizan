@@ -371,10 +371,13 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
   const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
   return search(db, 'account.move')
-    .filter((m) => m.state === 'posted'
-      && (!from || (m.invoice_date ?? m.date) >= from)
-      && (!to || (m.invoice_date ?? m.date) <= to)
-      && (!targetCompany || (m.company_id ?? 1) === targetCompany))
+    .filter((m) => {
+      const date = m.date ?? m.invoice_date;
+      return m.state === 'posted'
+      && (!from || date >= from)
+      && (!to || date <= to)
+      && (!targetCompany || (m.company_id ?? 1) === targetCompany)
+    })
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
@@ -382,7 +385,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         ...l,
         move_id: m.id,
         move_name: m.name,
-        date: m.invoice_date ?? m.date,
+        date: m.date ?? m.invoice_date,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,
         is_closing: !!m.is_closing,

@@ -37,8 +37,8 @@ export function computeAuditChecks(db, ret) {
   // 1. Draft entries check
   const drafts = search(db, 'account.move').filter(
     (m) => m.state === 'draft'
-      && (!from || (m.invoice_date ?? m.date) >= from)
-      && (!to || (m.invoice_date ?? m.date) <= to)
+      && (!from || moveDate(m) >= from)
+      && (!to || moveDate(m) <= to)
       && (!companyId || (m.company_id ?? 1) === companyId),
   );
   checks.push({
@@ -50,8 +50,8 @@ export function computeAuditChecks(db, ret) {
   // 2. Balanced journal entries check
   const postedMoves = search(db, 'account.move').filter(
     (m) => m.state === 'posted'
-      && (!from || (m.invoice_date ?? m.date) >= from)
-      && (!to || (m.invoice_date ?? m.date) <= to)
+      && (!from || moveDate(m) >= from)
+      && (!to || moveDate(m) <= to)
       && (!companyId || (m.company_id ?? 1) === companyId),
   );
   const unbalanced = postedMoves.filter((m) => {
