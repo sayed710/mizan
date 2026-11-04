@@ -103,7 +103,11 @@ export function seed() {
     reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
     tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
   }));
-  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  let demoBankJournal;
+  JOURNALS.forEach(([code, name, type, account]) => {
+    const id = add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null });
+    if (code === 'BNK1') demoBankJournal = id;
+  });
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -235,9 +239,9 @@ export function seed() {
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
   const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
-  add('account.bank.statement.line', { date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
-  add('account.bank.statement.line', { date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
-  add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
