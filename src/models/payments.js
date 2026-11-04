@@ -97,8 +97,8 @@ export function postBatch(db, batch) {
   }
   const company = read(db, 'account.move', lines[0].move_id)?.company_id ?? 1;
   if (batch.batch_type === 'inbound' && lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch invoices must belong to the same company');
-  const journal = batch.batch_type === 'outbound' ? read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company)) : null;
-  if (batch.batch_type === 'outbound' && (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company))) throw new Error('Checks require a bank journal and invoices in the same company');
+  const journal = read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company));
+  if (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch payments require a bank journal and invoices in the same company');
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
   if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
   const start = journal ? nextCheckNumber(db, journal.id, requested) : requested;
@@ -106,7 +106,7 @@ export function postBatch(db, batch) {
 
   let next = db;
   const linked = lines.map((line, index) => {
-    next = payMove(next, line.move_id, Number(line.amount), batch.date, journal ? { journalId: journal.id, checkNumber: start + index } : {});
+    next = payMove(next, line.move_id, Number(line.amount), batch.date, { journalId: journal.id, ...(batch.batch_type === 'outbound' ? { checkNumber: start + index } : {}) });
     const entryId = read(next, 'account.move', line.move_id).payments.at(-1).move_id;
     return { ...line, payment_id: search(next, 'account.payment').find((p) => p.move_id === entryId).id, cancelled: false };
   });
