@@ -1,0 +1,11 @@
+const { models, apps } = await import(process.argv[2] + '/src/models/index.js');
+const keyCount = {};
+for (const [k, m] of Object.entries(models)) for (const key of Object.keys(m)) keyCount[key] = (keyCount[key] ?? 0) + 1;
+console.log(Object.keys(models).length, 'models;', apps.length, 'apps');
+console.log(JSON.stringify(keyCount));
+const fkeys = {};
+for (const m of Object.values(models)) for (const f of Object.values(m.fields)) for (const key of Object.keys(f)) fkeys[key] = (fkeys[key] ?? 0) + 1;
+console.log(JSON.stringify(fkeys));
+const formKeys = {};
+for (const m of Object.values(models)) if (m.form) for (const key of Object.keys(m.form)) formKeys[key] = (formKeys[key] ?? 0) + 1;
+console.log(JSON.stringify(formKeys));

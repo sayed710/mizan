@@ -1,0 +1,4625 @@
+{
+ "res.partner": {
+  "model": "res.partner",
+  "file": "crm.js+ecommerce.js",
+  "fields": 16,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "contacts",
+   "crm",
+   "sales",
+   "accounting",
+   "purchase"
+  ],
+  "rels": [
+   "product.pricelist",
+   "account.payment.term",
+   "account.fiscal.position"
+  ]
+ },
+ "crm.lead": {
+  "model": "crm.lead",
+  "file": "crm.js",
+  "fields": 28,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 5,
+  "runBtns": 3,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "crm"
+  ],
+  "rels": [
+   "res.partner",
+   "crm.team",
+   "marketing.campaign",
+   "res.company"
+  ]
+ },
+ "stock.picking": {
+  "model": "stock.picking",
+  "file": "sales.js+warehouse.js",
+  "fields": 22,
+  "subfields": 5,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 5,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "res.partner",
+   "sale.order",
+   "purchase.order",
+   "delivery.carrier",
+   "stock.location",
+   "stock.warehouse",
+   "res.company",
+   "product"
+  ]
+ },
+ "product": {
+  "model": "product",
+  "file": "billcontrol.js+ecommerce.js+sales.js+valuation.js",
+  "fields": 43,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales",
+   "website",
+   "purchase",
+   "inventory",
+   "manufacturing"
+  ],
+  "rels": [
+   "account.tax",
+   "account.account",
+   "res.partner",
+   "uom.uom",
+   "res.company",
+   "product.public.category"
+  ]
+ },
+ "sale.order": {
+  "model": "sale.order",
+  "file": "ecommerce.js+quoteplus.js+sales.js",
+  "fields": 37,
+  "subfields": 30,
+  "computes": 6,
+  "onchange": 3,
+  "buttons": 13,
+  "runBtns": 11,
+  "valsBtns": 2,
+  "serverBtns": 2,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "crm",
+   "sales",
+   "website"
+  ],
+  "rels": [
+   "res.partner",
+   "product.pricelist",
+   "account.payment.term",
+   "account.fiscal.position",
+   "delivery.carrier",
+   "marketplace.connector",
+   "crm.lead",
+   "sale.order.template",
+   "purchase.order",
+   "res.company",
+   "product",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account"
+  ]
+ },
+ "purchase.order": {
+  "model": "purchase.order",
+  "file": "billcontrol.js+purchaseplus.js+sales.js",
+  "fields": 17,
+  "subfields": 15,
+  "computes": 4,
+  "onchange": 2,
+  "buttons": 6,
+  "runBtns": 4,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "purchase"
+  ],
+  "rels": [
+   "res.partner",
+   "account.payment.term",
+   "purchase.requisition",
+   "sale.order",
+   "res.company",
+   "product",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account"
+  ]
+ },
+ "account.account": {
+  "model": "account.account",
+  "file": "accounting.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": []
+ },
+ "account.journal": {
+  "model": "account.journal",
+  "file": "accounting.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.account",
+   "res.company"
+  ]
+ },
+ "account.move": {
+  "model": "account.move",
+  "file": "accounting.js",
+  "fields": 28,
+  "subfields": 23,
+  "computes": 5,
+  "onchange": 2,
+  "buttons": 8,
+  "runBtns": 7,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": true,
+  "onUnlink": true,
+  "lockedWhen": true,
+  "audited": true,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.journal",
+   "res.partner",
+   "res.currency",
+   "account.payment.term",
+   "account.fiscal.position",
+   "sale.subscription",
+   "sale.order",
+   "purchase.order",
+   "res.company",
+   "product",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account",
+   "account.account"
+  ]
+ },
+ "hr.department": {
+  "model": "hr.department",
+  "file": "work.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "employees"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "hr.employee": {
+  "model": "hr.employee",
+  "file": "work.js",
+  "fields": 38,
+  "subfields": 8,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "employees"
+  ],
+  "rels": [
+   "hr.department",
+   "res.company"
+  ]
+ },
+ "project.project": {
+  "model": "project.project",
+  "file": "work.js",
+  "fields": 8,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "project"
+  ],
+  "rels": [
+   "res.partner",
+   "hr.employee",
+   "res.company"
+  ]
+ },
+ "project.task": {
+  "model": "project.task",
+  "file": "work.js",
+  "fields": 16,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "project"
+  ],
+  "rels": [
+   "project.project",
+   "hr.employee",
+   "res.partner",
+   "project.milestone",
+   "project.recurrence"
+  ]
+ },
+ "helpdesk.ticket": {
+  "model": "helpdesk.ticket",
+  "file": "work.js",
+  "fields": 20,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 4,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "helpdesk"
+  ],
+  "rels": [
+   "res.partner",
+   "hr.employee",
+   "helpdesk.team",
+   "fsm.task",
+   "res.company"
+  ]
+ },
+ "calendar.event": {
+  "model": "calendar.event",
+  "file": "work.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "calendar"
+  ],
+  "rels": [
+   "res.partner"
+  ]
+ },
+ "mrp.bom": {
+  "model": "mrp.bom",
+  "file": "more.js",
+  "fields": 5,
+  "subfields": 6,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "manufacturing",
+   "plm"
+  ],
+  "rels": [
+   "product",
+   "uom.uom",
+   "mrp.workcenter"
+  ]
+ },
+ "mrp.workcenter": {
+  "model": "mrp.workcenter",
+  "file": "more.js+workorder.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "manufacturing"
+  ],
+  "rels": []
+ },
+ "mrp.production": {
+  "model": "mrp.production",
+  "file": "more.js+workorder.js",
+  "fields": 17,
+  "subfields": 8,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 4,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "manufacturing"
+  ],
+  "rels": [
+   "product",
+   "mrp.bom",
+   "hr.employee",
+   "mrp.workcenter"
+  ]
+ },
+ "hr.expense": {
+  "model": "hr.expense",
+  "file": "expenseplus.js+more.js",
+  "fields": 20,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 7,
+  "runBtns": 3,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "expenses"
+  ],
+  "rels": [
+   "hr.employee",
+   "product",
+   "account.move",
+   "hr.expense.sheet",
+   "sale.order",
+   "account.analytic.account"
+  ]
+ },
+ "hr.leave": {
+  "model": "hr.leave",
+  "file": "more.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 0,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "timeoff"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "hr.job": {
+  "model": "hr.job",
+  "file": "more.js+recruitplus.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "recruitment"
+  ],
+  "rels": [
+   "hr.department"
+  ]
+ },
+ "hr.applicant": {
+  "model": "hr.applicant",
+  "file": "more.js+recruitplus.js",
+  "fields": 27,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 5,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "recruitment"
+  ],
+  "rels": [
+   "hr.job",
+   "hr.employee"
+  ]
+ },
+ "account.analytic.line": {
+  "model": "account.analytic.line",
+  "file": "analyticplus.js+more.js+timesheetplus.js",
+  "fields": 21,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 4,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting",
+   "timesheets"
+  ],
+  "rels": [
+   "hr.employee",
+   "project.project",
+   "project.task",
+   "account.analytic.account",
+   "account.move",
+   "res.partner",
+   "product",
+   "sale.order"
+  ]
+ },
+ "event.event": {
+  "model": "event.event",
+  "file": "more.js",
+  "fields": 10,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "event.registration": {
+  "model": "event.registration",
+  "file": "eventsplus.js+more.js",
+  "fields": 13,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 1,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "event.event",
+   "res.partner",
+   "account.move",
+   "event.question"
+  ]
+ },
+ "sale.subscription": {
+  "model": "sale.subscription",
+  "file": "more.js+subscriptionplus.js",
+  "fields": 25,
+  "subfields": 15,
+  "computes": 2,
+  "onchange": 2,
+  "buttons": 8,
+  "runBtns": 4,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "subscriptions"
+  ],
+  "rels": [
+   "res.partner",
+   "product",
+   "sale.subscription.plan",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account",
+   "account.move"
+  ]
+ },
+ "todo.task": {
+  "model": "todo.task",
+  "file": "more.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "todo"
+  ],
+  "rels": []
+ },
+ "pos.order": {
+  "model": "pos.order",
+  "file": "more.js+posplus.js",
+  "fields": 24,
+  "subfields": 22,
+  "computes": 3,
+  "onchange": 1,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "pos"
+  ],
+  "rels": [
+   "res.partner",
+   "pos.session",
+   "pos.config",
+   "product",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account",
+   "loyalty.program"
+  ]
+ },
+ "mail.activity": {
+  "model": "mail.activity",
+  "file": "mail.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "discuss"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "discuss.channel": {
+  "model": "discuss.channel",
+  "file": "mail.js",
+  "fields": 2,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [],
+  "rels": []
+ },
+ "hr.payslip.input.type": {
+  "model": "hr.payslip.input.type",
+  "file": "payroll.js",
+  "fields": 2,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "payroll"
+  ],
+  "rels": []
+ },
+ "hr.payroll.structure": {
+  "model": "hr.payroll.structure",
+  "file": "payroll.js",
+  "fields": 2,
+  "subfields": 9,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "payroll"
+  ],
+  "rels": []
+ },
+ "hr.contract": {
+  "model": "hr.contract",
+  "file": "payroll.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "payroll"
+  ],
+  "rels": [
+   "hr.employee",
+   "hr.payroll.structure"
+  ]
+ },
+ "hr.payslip": {
+  "model": "hr.payslip",
+  "file": "payroll.js",
+  "fields": 14,
+  "subfields": 10,
+  "computes": 3,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 4,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "payroll"
+  ],
+  "rels": [
+   "hr.employee",
+   "hr.payslip.run",
+   "hr.payroll.structure"
+  ]
+ },
+ "hr.payslip.run": {
+  "model": "hr.payslip.run",
+  "file": "payroll.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "payroll"
+  ],
+  "rels": []
+ },
+ "website.page": {
+  "model": "website.page",
+  "file": "extra.js+websiteplus.js",
+  "fields": 17,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 4,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "sign.request": {
+  "model": "sign.request",
+  "file": "extra.js+signplus.js",
+  "fields": 20,
+  "subfields": 14,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 5,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "sign"
+  ],
+  "rels": [
+   "res.partner",
+   "sign.template"
+  ]
+ },
+ "documents.document": {
+  "model": "documents.document",
+  "file": "documentsplus.js+extra.js+signplus.js",
+  "fields": 16,
+  "subfields": 1,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": true,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "documents"
+  ],
+  "rels": [
+   "hr.employee",
+   "res.partner",
+   "documents.folder",
+   "documents.tag"
+  ]
+ },
+ "planning.slot": {
+  "model": "planning.slot",
+  "file": "extra.js+planningplus.js",
+  "fields": 25,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "planning"
+  ],
+  "rels": [
+   "hr.employee",
+   "planning.template",
+   "project.project",
+   "hr.department"
+  ]
+ },
+ "planning.template": {
+  "model": "planning.template",
+  "file": "extra.js+planningplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "planning"
+  ],
+  "rels": []
+ },
+ "sale.rental": {
+  "model": "sale.rental",
+  "file": "extra.js",
+  "fields": 15,
+  "subfields": 0,
+  "computes": 2,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 5,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "rental"
+  ],
+  "rels": [
+   "res.partner",
+   "product"
+  ]
+ },
+ "mailing.list": {
+  "model": "mailing.list",
+  "file": "mailing.js",
+  "fields": 1,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "marketing"
+  ],
+  "rels": []
+ },
+ "mailing.contact": {
+  "model": "mailing.contact",
+  "file": "mailing.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "marketing"
+  ],
+  "rels": [
+   "mailing.list"
+  ]
+ },
+ "mailing.mailing": {
+  "model": "mailing.mailing",
+  "file": "mailing.js",
+  "fields": 31,
+  "subfields": 0,
+  "computes": 5,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 2,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "marketing"
+  ],
+  "rels": [
+   "hr.employee",
+   "mailing.list"
+  ]
+ },
+ "mailing.trace": {
+  "model": "mailing.trace",
+  "file": "mailing.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "marketing"
+  ],
+  "rels": [
+   "mailing.mailing"
+  ]
+ },
+ "mail.blacklist": {
+  "model": "mail.blacklist",
+  "file": "mailing.js",
+  "fields": 3,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "marketing"
+  ],
+  "rels": []
+ },
+ "maintenance.equipment": {
+  "model": "maintenance.equipment",
+  "file": "apps2.js+maintplus.js",
+  "fields": 16,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "maintenance"
+  ],
+  "rels": [
+   "hr.employee",
+   "res.partner"
+  ]
+ },
+ "maintenance.request": {
+  "model": "maintenance.request",
+  "file": "apps2.js+maintplus.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "maintenance"
+  ],
+  "rels": [
+   "maintenance.equipment",
+   "hr.employee"
+  ]
+ },
+ "quality.check": {
+  "model": "quality.check",
+  "file": "apps2.js+qualityplus.js",
+  "fields": 15,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 3,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "quality"
+  ],
+  "rels": [
+   "quality.point",
+   "stock.picking",
+   "mrp.production",
+   "product",
+   "hr.employee"
+  ]
+ },
+ "quality.alert": {
+  "model": "quality.alert",
+  "file": "apps2.js+qualityplus.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "quality"
+  ],
+  "rels": [
+   "quality.check",
+   "product",
+   "stock.picking",
+   "hr.employee"
+  ]
+ },
+ "fleet.vehicle": {
+  "model": "fleet.vehicle",
+  "file": "apps2.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "fleet"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "fleet.odometer": {
+  "model": "fleet.odometer",
+  "file": "apps2.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "fleet"
+  ],
+  "rels": [
+   "fleet.vehicle",
+   "hr.employee"
+  ]
+ },
+ "fleet.contract": {
+  "model": "fleet.contract",
+  "file": "apps2.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "fleet"
+  ],
+  "rels": [
+   "fleet.vehicle",
+   "res.partner"
+  ]
+ },
+ "fleet.service": {
+  "model": "fleet.service",
+  "file": "apps2.js+fleetplus.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "fleet"
+  ],
+  "rels": [
+   "fleet.vehicle",
+   "res.partner"
+  ]
+ },
+ "hr.attendance": {
+  "model": "hr.attendance",
+  "file": "apps2.js+attendanceplus.js",
+  "fields": 15,
+  "subfields": 0,
+  "computes": 3,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "attendances"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "hr.appraisal": {
+  "model": "hr.appraisal",
+  "file": "appraisalplus.js+apps2.js",
+  "fields": 18,
+  "subfields": 7,
+  "computes": 3,
+  "onchange": 1,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "appraisals"
+  ],
+  "rels": [
+   "hr.employee",
+   "hr.appraisal.template",
+   "hr.appraisal.goal"
+  ]
+ },
+ "survey.survey": {
+  "model": "survey.survey",
+  "file": "apps2.js+surveys.js",
+  "fields": 12,
+  "subfields": 9,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 2,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "surveys"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "survey.answer": {
+  "model": "survey.answer",
+  "file": "apps2.js+surveys.js",
+  "fields": 11,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "surveys"
+  ],
+  "rels": [
+   "survey.survey"
+  ]
+ },
+ "lunch.product": {
+  "model": "lunch.product",
+  "file": "apps2.js+lunch.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "lunch"
+  ],
+  "rels": [
+   "lunch.supplier"
+  ]
+ },
+ "lunch.order": {
+  "model": "lunch.order",
+  "file": "apps2.js+lunch.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "lunch"
+  ],
+  "rels": [
+   "lunch.product",
+   "hr.employee",
+   "lunch.supplier"
+  ]
+ },
+ "approval.request": {
+  "model": "approval.request",
+  "file": "approvalsplus.js+apps2.js",
+  "fields": 14,
+  "subfields": 7,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 5,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "approvals"
+  ],
+  "rels": [
+   "approval.category",
+   "hr.employee",
+   "res.partner",
+   "product"
+  ]
+ },
+ "repair.order": {
+  "model": "repair.order",
+  "file": "apps2.js+repairplus.js",
+  "fields": 26,
+  "subfields": 20,
+  "computes": 3,
+  "onchange": 2,
+  "buttons": 7,
+  "runBtns": 6,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "repairs"
+  ],
+  "rels": [
+   "product",
+   "res.partner",
+   "hr.employee",
+   "stock.lot",
+   "sale.order",
+   "stock.picking",
+   "account.move",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account"
+  ]
+ },
+ "fsm.task": {
+  "model": "fsm.task",
+  "file": "apps2.js+fsm.js",
+  "fields": 21,
+  "subfields": 20,
+  "computes": 2,
+  "onchange": 1,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "fieldservice"
+  ],
+  "rels": [
+   "res.partner",
+   "hr.employee",
+   "account.move",
+   "helpdesk.ticket",
+   "product",
+   "uom.uom",
+   "account.tax",
+   "account.analytic.account"
+  ]
+ },
+ "frontdesk.visitor": {
+  "model": "frontdesk.visitor",
+  "file": "apps2.js+frontdeskplus.js",
+  "fields": 18,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "frontdesk"
+  ],
+  "rels": [
+   "hr.employee",
+   "frontdesk.station"
+  ]
+ },
+ "slide.channel": {
+  "model": "slide.channel",
+  "file": "apps2.js+elearning.js",
+  "fields": 15,
+  "subfields": 11,
+  "computes": 2,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": true,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "elearning"
+  ],
+  "rels": [
+   "hr.employee",
+   "product"
+  ]
+ },
+ "mrp.eco": {
+  "model": "mrp.eco",
+  "file": "apps3.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "plm"
+  ],
+  "rels": [
+   "mrp.bom",
+   "hr.employee"
+  ]
+ },
+ "room.room": {
+  "model": "room.room",
+  "file": "apps3.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "rooms"
+  ],
+  "rels": []
+ },
+ "room.booking": {
+  "model": "room.booking",
+  "file": "apps3.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "rooms"
+  ],
+  "rels": [
+   "room.room",
+   "hr.employee"
+  ]
+ },
+ "hr.referral": {
+  "model": "hr.referral",
+  "file": "apps3.js+skillsplus.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 3,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "referral"
+  ],
+  "rels": [
+   "hr.job",
+   "hr.employee",
+   "hr.applicant"
+  ]
+ },
+ "hr.skill": {
+  "model": "hr.skill",
+  "file": "apps3.js+skillsplus.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "skills"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "esg.emission": {
+  "model": "esg.emission",
+  "file": "apps3.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "esg"
+  ],
+  "rels": []
+ },
+ "account.bank.statement.line": {
+  "model": "account.bank.statement.line",
+  "file": "bank.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "product.pricelist": {
+  "model": "product.pricelist",
+  "file": "ecommerce.js+pricelist.js",
+  "fields": 3,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "equity.transaction": {
+  "model": "equity.transaction",
+  "file": "apps4.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "equity"
+  ],
+  "rels": [
+   "res.partner"
+  ]
+ },
+ "data.recycle": {
+  "model": "data.recycle",
+  "file": "apps4.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "recycle"
+  ],
+  "rels": []
+ },
+ "marketplace.connector": {
+  "model": "marketplace.connector",
+  "file": "logistics.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales"
+  ],
+  "rels": []
+ },
+ "delivery.carrier": {
+  "model": "delivery.carrier",
+  "file": "ecommerce.js+logistics.js",
+  "fields": 8,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": []
+ },
+ "stock.lot": {
+  "model": "stock.lot",
+  "file": "logistics.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "phone.call": {
+  "model": "phone.call",
+  "file": "logistics.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "phone"
+  ],
+  "rels": [
+   "res.partner"
+  ]
+ },
+ "iot.device": {
+  "model": "iot.device",
+  "file": "logistics.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "iot"
+  ],
+  "rels": []
+ },
+ "stock.location": {
+  "model": "stock.location",
+  "file": "routes.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": []
+ },
+ "stock.landed.cost": {
+  "model": "stock.landed.cost",
+  "file": "routes.js",
+  "fields": 6,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "stock.picking"
+  ]
+ },
+ "account.followup.level": {
+  "model": "account.followup.level",
+  "file": "finance.js",
+  "fields": 3,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": []
+ },
+ "account.analytic.account": {
+  "model": "account.analytic.account",
+  "file": "analyticplus.js+finance.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.analytic.plan",
+   "res.partner",
+   "res.currency"
+  ]
+ },
+ "account.budget": {
+  "model": "account.budget",
+  "file": "analyticplus.js+finance.js",
+  "fields": 5,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.analytic.account"
+  ]
+ },
+ "res.currency": {
+  "model": "res.currency",
+  "file": "currency.js",
+  "fields": 4,
+  "subfields": 2,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": []
+ },
+ "stock.picking.batch": {
+  "model": "stock.picking.batch",
+  "file": "batch.js",
+  "fields": 5,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "stock.picking"
+  ]
+ },
+ "stock.quant.package": {
+  "model": "stock.quant.package",
+  "file": "batch.js",
+  "fields": 5,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "stock.picking",
+   "product"
+  ]
+ },
+ "account.payment.term": {
+  "model": "account.payment.term",
+  "file": "terms.js",
+  "fields": 7,
+  "subfields": 4,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": []
+ },
+ "account.deferral": {
+  "model": "account.deferral",
+  "file": "deferred.js",
+  "fields": 8,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 2,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "account.batch.payment": {
+  "model": "account.batch.payment",
+  "file": "payments.js",
+  "fields": 7,
+  "subfields": 3,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 3,
+  "runBtns": 3,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.move"
+  ]
+ },
+ "helpdesk.team": {
+  "model": "helpdesk.team",
+  "file": "helpdesk.js",
+  "fields": 10,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "helpdesk"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "helpdesk.sla": {
+  "model": "helpdesk.sla",
+  "file": "helpdesk.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "helpdesk"
+  ],
+  "rels": [
+   "helpdesk.team"
+  ]
+ },
+ "hr.leave.allocation": {
+  "model": "hr.leave.allocation",
+  "file": "timeoff.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "timeoff"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "pos.session": {
+  "model": "pos.session",
+  "file": "pos.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "pos"
+  ],
+  "rels": []
+ },
+ "account.asset": {
+  "model": "account.asset",
+  "file": "assets.js",
+  "fields": 18,
+  "subfields": 6,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 7,
+  "runBtns": 4,
+  "valsBtns": 3,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "account.reconcile.model": {
+  "model": "account.reconcile.model",
+  "file": "reconcile.js",
+  "fields": 14,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner"
+  ]
+ },
+ "account.tax": {
+  "model": "account.tax",
+  "file": "taxes.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.account"
+  ]
+ },
+ "account.fiscal.position": {
+  "model": "account.fiscal.position",
+  "file": "taxes.js",
+  "fields": 6,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.tax",
+   "account.account"
+  ]
+ },
+ "account.payment": {
+  "model": "account.payment",
+  "file": "pay.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 2,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner",
+   "account.journal",
+   "account.move",
+   "res.company"
+  ]
+ },
+ "slide.channel.partner": {
+  "model": "slide.channel.partner",
+  "file": "elearning.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": true,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "elearning"
+  ],
+  "rels": [
+   "slide.channel",
+   "res.partner"
+  ]
+ },
+ "sms.campaign": {
+  "model": "sms.campaign",
+  "file": "sms.js",
+  "fields": 14,
+  "subfields": 0,
+  "computes": 3,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "sms"
+  ],
+  "rels": [
+   "mailing.list"
+  ]
+ },
+ "sms.trace": {
+  "model": "sms.trace",
+  "file": "sms.js",
+  "fields": 8,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sms"
+  ],
+  "rels": [
+   "sms.campaign"
+  ]
+ },
+ "phone.blacklist": {
+  "model": "phone.blacklist",
+  "file": "sms.js",
+  "fields": 3,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sms"
+  ],
+  "rels": []
+ },
+ "marketing.campaign": {
+  "model": "marketing.campaign",
+  "file": "automation.js",
+  "fields": 5,
+  "subfields": 5,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 3,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "automation"
+  ],
+  "rels": [
+   "mailing.list"
+  ]
+ },
+ "marketing.participant": {
+  "model": "marketing.participant",
+  "file": "automation.js",
+  "fields": 7,
+  "subfields": 5,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "automation"
+  ],
+  "rels": [
+   "marketing.campaign"
+  ]
+ },
+ "social.account": {
+  "model": "social.account",
+  "file": "social.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "social"
+  ],
+  "rels": []
+ },
+ "social.post": {
+  "model": "social.post",
+  "file": "social.js",
+  "fields": 14,
+  "subfields": 9,
+  "computes": 5,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 2,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "social"
+  ],
+  "rels": [
+   "social.account"
+  ]
+ },
+ "spreadsheet.document": {
+  "model": "spreadsheet.document",
+  "file": "spreadsheet.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "spreadsheet"
+  ],
+  "rels": []
+ },
+ "account.loan": {
+  "model": "account.loan",
+  "file": "loans.js",
+  "fields": 12,
+  "subfields": 7,
+  "computes": 2,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 4,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "stock.scrap": {
+  "model": "stock.scrap",
+  "file": "mrp.js",
+  "fields": 12,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "inventory",
+   "manufacturing"
+  ],
+  "rels": [
+   "product",
+   "stock.picking",
+   "mrp.production",
+   "account.move"
+  ]
+ },
+ "mrp.unbuild": {
+  "model": "mrp.unbuild",
+  "file": "mrp.js",
+  "fields": 8,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "manufacturing"
+  ],
+  "rels": [
+   "product",
+   "mrp.bom",
+   "mrp.production"
+  ]
+ },
+ "crm.team": {
+  "model": "crm.team",
+  "file": "crmteams.js",
+  "fields": 9,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "crm"
+  ],
+  "rels": []
+ },
+ "project.milestone": {
+  "model": "project.milestone",
+  "file": "projectplus.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 1,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "project"
+  ],
+  "rels": [
+   "project.project"
+  ]
+ },
+ "project.update": {
+  "model": "project.update",
+  "file": "projectplus.js",
+  "fields": 8,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "project"
+  ],
+  "rels": [
+   "project.project"
+  ]
+ },
+ "project.recurrence": {
+  "model": "project.recurrence",
+  "file": "projectplus.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "project"
+  ],
+  "rels": [
+   "project.project",
+   "hr.employee"
+  ]
+ },
+ "fleet.fuel.log": {
+  "model": "fleet.fuel.log",
+  "file": "fleetplus.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "fleet"
+  ],
+  "rels": [
+   "fleet.vehicle",
+   "hr.employee"
+  ]
+ },
+ "quality.point": {
+  "model": "quality.point",
+  "file": "qualityplus.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "quality"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "event.track": {
+  "model": "event.track",
+  "file": "eventsplus.js",
+  "fields": 10,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "event.event"
+  ]
+ },
+ "event.sponsor": {
+  "model": "event.sponsor",
+  "file": "eventsplus.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "event.event",
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "event.booth": {
+  "model": "event.booth",
+  "file": "eventsplus.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "event.event",
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "event.question": {
+  "model": "event.question",
+  "file": "eventsplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "events"
+  ],
+  "rels": [
+   "event.event"
+  ]
+ },
+ "rental.pricing": {
+  "model": "rental.pricing",
+  "file": "rentalplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "rental"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "rental.deposit": {
+  "model": "rental.deposit",
+  "file": "rentalplus.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "rental"
+  ],
+  "rels": [
+   "sale.rental",
+   "account.move"
+  ]
+ },
+ "loyalty.program": {
+  "model": "loyalty.program",
+  "file": "loyalty.js",
+  "fields": 15,
+  "subfields": 14,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "loyalty.card": {
+  "model": "loyalty.card",
+  "file": "loyalty.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales"
+  ],
+  "rels": [
+   "loyalty.program",
+   "res.partner"
+  ]
+ },
+ "approval.category": {
+  "model": "approval.category",
+  "file": "approvalsplus.js",
+  "fields": 10,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "approvals"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "pos.config": {
+  "model": "pos.config",
+  "file": "posplus.js",
+  "fields": 6,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "pos"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "restaurant.floor": {
+  "model": "restaurant.floor",
+  "file": "posplus.js",
+  "fields": 3,
+  "subfields": 3,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "pos"
+  ],
+  "rels": [
+   "pos.config"
+  ]
+ },
+ "sign.template": {
+  "model": "sign.template",
+  "file": "signplus.js",
+  "fields": 5,
+  "subfields": 5,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sign"
+  ],
+  "rels": [
+   "documents.tag"
+  ]
+ },
+ "documents.tag": {
+  "model": "documents.tag",
+  "file": "signplus.js",
+  "fields": 2,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "documents"
+  ],
+  "rels": []
+ },
+ "documents.folder": {
+  "model": "documents.folder",
+  "file": "documentsplus.js+signplus.js",
+  "fields": 5,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "documents"
+  ],
+  "rels": [
+   "hr.employee",
+   "res.company"
+  ]
+ },
+ "documents.share": {
+  "model": "documents.share",
+  "file": "signplus.js",
+  "fields": 6,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "documents"
+  ],
+  "rels": [
+   "documents.folder",
+   "documents.document"
+  ]
+ },
+ "documents.workflow.rule": {
+  "model": "documents.workflow.rule",
+  "file": "documentsplus.js",
+  "fields": 12,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "documents"
+  ],
+  "rels": [
+   "documents.folder",
+   "hr.employee",
+   "documents.tag"
+  ]
+ },
+ "account.analytic.plan": {
+  "model": "account.analytic.plan",
+  "file": "analyticplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": []
+ },
+ "hr.appraisal.template": {
+  "model": "hr.appraisal.template",
+  "file": "appraisalplus.js",
+  "fields": 4,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "appraisals"
+  ],
+  "rels": []
+ },
+ "hr.appraisal.goal": {
+  "model": "hr.appraisal.goal",
+  "file": "appraisalplus.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "appraisals"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "mrp.workorder": {
+  "model": "mrp.workorder",
+  "file": "workorder.js",
+  "fields": 13,
+  "subfields": 5,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 4,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "manufacturing"
+  ],
+  "rels": [
+   "mrp.production",
+   "mrp.workcenter",
+   "hr.employee"
+  ]
+ },
+ "hr.expense.sheet": {
+  "model": "hr.expense.sheet",
+  "file": "expenseplus.js",
+  "fields": 13,
+  "subfields": 3,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 6,
+  "runBtns": 6,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "expenses"
+  ],
+  "rels": [
+   "hr.employee",
+   "hr.expense",
+   "account.move",
+   "res.partner"
+  ]
+ },
+ "product.supplierinfo": {
+  "model": "product.supplierinfo",
+  "file": "purchaseplus.js",
+  "fields": 9,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "purchase"
+  ],
+  "rels": [
+   "res.partner",
+   "product"
+  ]
+ },
+ "purchase.requisition": {
+  "model": "purchase.requisition",
+  "file": "purchaseplus.js",
+  "fields": 8,
+  "subfields": 5,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 5,
+  "runBtns": 4,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "purchase"
+  ],
+  "rels": [
+   "res.partner",
+   "product",
+   "purchase.order"
+  ]
+ },
+ "sale.subscription.plan": {
+  "model": "sale.subscription.plan",
+  "file": "subscriptionplus.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "subscriptions"
+  ],
+  "rels": []
+ },
+ "stock.valuation.layer": {
+  "model": "stock.valuation.layer",
+  "file": "valuation.js",
+  "fields": 14,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "product",
+   "stock.picking",
+   "account.move"
+  ]
+ },
+ "stock.inventory.count": {
+  "model": "stock.inventory.count",
+  "file": "valuation.js",
+  "fields": 4,
+  "subfields": 4,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "hr.attendance.overtime.rule": {
+  "model": "hr.attendance.overtime.rule",
+  "file": "attendanceplus.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "attendances"
+  ],
+  "rels": []
+ },
+ "hr.skill.type": {
+  "model": "hr.skill.type",
+  "file": "skillsplus.js",
+  "fields": 3,
+  "subfields": 4,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "skills"
+  ],
+  "rels": []
+ },
+ "hr.employee.skill": {
+  "model": "hr.employee.skill",
+  "file": "skillsplus.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "skills"
+  ],
+  "rels": [
+   "hr.employee",
+   "hr.skill.type"
+  ]
+ },
+ "hr.resume.line": {
+  "model": "hr.resume.line",
+  "file": "skillsplus.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "skills"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "hr.referral.reward": {
+  "model": "hr.referral.reward",
+  "file": "skillsplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "referral"
+  ],
+  "rels": []
+ },
+ "account.fiscal.year": {
+  "model": "account.fiscal.year",
+  "file": "closing.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "account.move"
+  ]
+ },
+ "website.menu": {
+  "model": "website.menu",
+  "file": "websiteplus.js",
+  "fields": 7,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": [
+   "website.page"
+  ]
+ },
+ "website.redirect": {
+  "model": "website.redirect",
+  "file": "websiteplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "website.snippet": {
+  "model": "website.snippet",
+  "file": "websiteplus.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "frontdesk.station": {
+  "model": "frontdesk.station",
+  "file": "frontdeskplus.js",
+  "fields": 10,
+  "subfields": 1,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "frontdesk"
+  ],
+  "rels": []
+ },
+ "uom.category": {
+  "model": "uom.category",
+  "file": "uom.js",
+  "fields": 1,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": []
+ },
+ "uom.uom": {
+  "model": "uom.uom",
+  "file": "uom.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "uom.category"
+  ]
+ },
+ "product.packaging": {
+  "model": "product.packaging",
+  "file": "uom.js",
+  "fields": 6,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "knowledge.article": {
+  "model": "knowledge.article",
+  "file": "knowledge.js",
+  "fields": 16,
+  "subfields": 6,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "knowledge"
+  ],
+  "rels": [
+   "res.partner"
+  ]
+ },
+ "lunch.supplier": {
+  "model": "lunch.supplier",
+  "file": "lunch.js",
+  "fields": 14,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "lunch"
+  ],
+  "rels": []
+ },
+ "lunch.cashmove": {
+  "model": "lunch.cashmove",
+  "file": "lunch.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "lunch"
+  ],
+  "rels": [
+   "hr.employee",
+   "lunch.order"
+  ]
+ },
+ "lunch.alert": {
+  "model": "lunch.alert",
+  "file": "lunch.js",
+  "fields": 12,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "lunch"
+  ],
+  "rels": []
+ },
+ "livechat.channel": {
+  "model": "livechat.channel",
+  "file": "livechat.js",
+  "fields": 9,
+  "subfields": 5,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "livechat"
+  ],
+  "rels": [
+   "hr.employee",
+   "livechat.chatbot"
+  ]
+ },
+ "livechat.session": {
+  "model": "livechat.session",
+  "file": "livechat.js",
+  "fields": 19,
+  "subfields": 3,
+  "computes": 2,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "livechat"
+  ],
+  "rels": [
+   "livechat.channel",
+   "hr.employee",
+   "livechat.chatbot"
+  ]
+ },
+ "livechat.canned": {
+  "model": "livechat.canned",
+  "file": "livechat.js",
+  "fields": 3,
+  "subfields": 0,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "livechat"
+  ],
+  "rels": []
+ },
+ "livechat.chatbot": {
+  "model": "livechat.chatbot",
+  "file": "livechat.js",
+  "fields": 3,
+  "subfields": 3,
+  "computes": 1,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "livechat"
+  ],
+  "rels": []
+ },
+ "product.public.category": {
+  "model": "product.public.category",
+  "file": "ecommerce.js",
+  "fields": 4,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "payment.provider": {
+  "model": "payment.provider",
+  "file": "ecommerce.js",
+  "fields": 5,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 0,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "sale.order.template": {
+  "model": "sale.order.template",
+  "file": "quoteplus.js",
+  "fields": 10,
+  "subfields": 8,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "sales"
+  ],
+  "rels": [
+   "product"
+  ]
+ },
+ "blog.blog": {
+  "model": "blog.blog",
+  "file": "blog.js",
+  "fields": 2,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "blog.post": {
+  "model": "blog.post",
+  "file": "blog.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 2,
+  "runBtns": 1,
+  "valsBtns": 1,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": [
+   "blog.blog",
+   "hr.employee"
+  ]
+ },
+ "forum.forum": {
+  "model": "forum.forum",
+  "file": "blog.js",
+  "fields": 3,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "website"
+  ],
+  "rels": []
+ },
+ "forum.post": {
+  "model": "forum.post",
+  "file": "blog.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "website"
+  ],
+  "rels": [
+   "forum.forum",
+   "res.partner"
+  ]
+ },
+ "appointment.type": {
+  "model": "appointment.type",
+  "file": "appointments.js",
+  "fields": 17,
+  "subfields": 6,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "appointments"
+  ],
+  "rels": [
+   "hr.employee"
+  ]
+ },
+ "appointment.booking": {
+  "model": "appointment.booking",
+  "file": "appointments.js",
+  "fields": 14,
+  "subfields": 2,
+  "computes": 2,
+  "onchange": 0,
+  "buttons": 3,
+  "runBtns": 1,
+  "valsBtns": 2,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "appointments"
+  ],
+  "rels": [
+   "appointment.type",
+   "hr.employee",
+   "res.partner",
+   "account.move"
+  ]
+ },
+ "whatsapp.template": {
+  "model": "whatsapp.template",
+  "file": "whatsapp.js",
+  "fields": 9,
+  "subfields": 2,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 4,
+  "runBtns": 0,
+  "valsBtns": 4,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "whatsapp"
+  ],
+  "rels": []
+ },
+ "whatsapp.message": {
+  "model": "whatsapp.message",
+  "file": "whatsapp.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 1,
+  "ruleButtons": false,
+  "guard": false,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "whatsapp"
+  ],
+  "rels": [
+   "res.partner",
+   "whatsapp.template"
+  ]
+ },
+ "res.company": {
+  "model": "res.company",
+  "file": "company.js",
+  "fields": 13,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 1,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "settings"
+  ],
+  "rels": [
+   "res.partner",
+   "res.currency"
+  ]
+ },
+ "stock.warehouse": {
+  "model": "stock.warehouse",
+  "file": "warehouse.js",
+  "fields": 11,
+  "subfields": 0,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 1,
+  "runBtns": 1,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "inventory"
+  ],
+  "rels": [
+   "res.partner",
+   "stock.location"
+  ]
+ },
+ "consolidation.chart": {
+  "model": "consolidation.chart",
+  "file": "consolidation.js",
+  "fields": 4,
+  "subfields": 7,
+  "computes": 0,
+  "onchange": 0,
+  "buttons": 0,
+  "runBtns": 0,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": false,
+  "onUnlink": false,
+  "lockedWhen": false,
+  "audited": false,
+  "statusbar": false,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "res.currency",
+   "res.company"
+  ]
+ },
+ "consolidation.period": {
+  "model": "consolidation.period",
+  "file": "consolidation.js",
+  "fields": 9,
+  "subfields": 13,
+  "computes": 1,
+  "onchange": 1,
+  "buttons": 2,
+  "runBtns": 2,
+  "valsBtns": 0,
+  "serverBtns": 0,
+  "ruleButtons": false,
+  "guard": true,
+  "protectDelete": true,
+  "onUnlink": false,
+  "lockedWhen": true,
+  "audited": false,
+  "statusbar": true,
+  "apps": [
+   "accounting"
+  ],
+  "rels": [
+   "consolidation.chart",
+   "res.company"
+  ]
+ }
+}

@@ -1,0 +1,12 @@
+import { seed } from '../src/seed.js';
+import { search, write } from '../src/orm.js';
+import { applyDiff, diffDb } from '../src/sync.js';
+import { models } from '../src/models/index.js';
+const base0 = seed();
+const base = { ...base0, settings: { ...base0.settings, audit_trail: true } };
+const inv = search(base, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted');
+const s1 = applyDiff(base, diffDb(base, write(base, 'account.move', inv.id, { ref: 'X' })), { isAdmin: false });
+const m = s1.messages.find((x) => x.model === 'account.move' && x.res_id === inv.id);
+console.log('msg', m.id, m.model, 'audited fn?', typeof models['account.move'].audited, models['account.move'].audited?.(s1), 'settings.audit_trail', s1.settings.audit_trail);
+const s3 = applyDiff(s1, { upserts: {}, deletes: {}, messages: [], removedMessages: [m.id], seq: s1.seq, settings: null }, { isAdmin: false });
+console.log('kept?', s3.messages.some((x) => x.id === m.id));

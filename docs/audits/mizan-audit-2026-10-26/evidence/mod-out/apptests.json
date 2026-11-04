@@ -1,0 +1,506 @@
+[
+ {
+  "id": "spreadsheet",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "discuss",
+  "tests": 2,
+  "neg": 0,
+  "server": 0,
+  "files": 2,
+  "top": "csv.test.js(1) documentsplus.test.js(1)"
+ },
+ {
+  "id": "calendar",
+  "tests": 2,
+  "neg": 1,
+  "server": 0,
+  "files": 2,
+  "top": "appointments.test.js(1) recruitplus.test.js(1)"
+ },
+ {
+  "id": "appointments",
+  "tests": 13,
+  "neg": 9,
+  "server": 0,
+  "files": 5,
+  "top": "appointments.test.js(7) server/appointments.test.js(2) server/public-forms.test.js(2) events.test.js(1)"
+ },
+ {
+  "id": "todo",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "knowledge",
+  "tests": 8,
+  "neg": 3,
+  "server": 0,
+  "files": 1,
+  "top": "knowledge.test.js(8)"
+ },
+ {
+  "id": "contacts",
+  "tests": 37,
+  "neg": 16,
+  "server": 4,
+  "files": 21,
+  "top": "whatsapp.test.js(5) company.test.js(3) appointments.test.js(2) eventsplus.test.js(2)"
+ },
+ {
+  "id": "crm",
+  "tests": 77,
+  "neg": 24,
+  "server": 10,
+  "files": 28,
+  "top": "orm.test.js(11) server/portal.test.js(8) company.test.js(7) quoteplus.test.js(7)"
+ },
+ {
+  "id": "sales",
+  "tests": 65,
+  "neg": 27,
+  "server": 2,
+  "files": 24,
+  "top": "server/portal.test.js(8) quoteplus.test.js(7) company.test.js(6) loyalty.test.js(6)"
+ },
+ {
+  "id": "dashboards",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "subscriptions",
+  "tests": 11,
+  "neg": 3,
+  "server": 0,
+  "files": 3,
+  "top": "subscriptionplus.test.js(9) more.test.js(1) subscription.test.js(1)"
+ },
+ {
+  "id": "rental",
+  "tests": 10,
+  "neg": 3,
+  "server": 0,
+  "files": 5,
+  "top": "rentalplus.test.js(4) rental.test.js(2) review-fixes2.test.js(2) extra.test.js(1)"
+ },
+ {
+  "id": "pos",
+  "tests": 16,
+  "neg": 9,
+  "server": 0,
+  "files": 5,
+  "top": "posplus.test.js(10) valuation-wiring.test.js(3) apps3.test.js(1) pos.test.js(1)"
+ },
+ {
+  "id": "kitchen",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "accounting",
+  "tests": 154,
+  "neg": 59,
+  "server": 3,
+  "files": 58,
+  "top": "closing.test.js(10) analyticplus.test.js(8) loans.test.js(7) billcontrol.test.js(6)"
+ },
+ {
+  "id": "documents",
+  "tests": 14,
+  "neg": 11,
+  "server": 0,
+  "files": 3,
+  "top": "documentsplus.test.js(7) signplus.test.js(6) events.test.js(1)"
+ },
+ {
+  "id": "project",
+  "tests": 8,
+  "neg": 4,
+  "server": 0,
+  "files": 3,
+  "top": "projectplus.test.js(6) company.test.js(1) onchange.test.js(1)"
+ },
+ {
+  "id": "timesheets",
+  "tests": 10,
+  "neg": 5,
+  "server": 0,
+  "files": 3,
+  "top": "timesheetplus.test.js(5) analyticplus.test.js(4) analytic-wiring.test.js(1)"
+ },
+ {
+  "id": "planning",
+  "tests": 8,
+  "neg": 3,
+  "server": 0,
+  "files": 2,
+  "top": "planningplus.test.js(7) events.test.js(1)"
+ },
+ {
+  "id": "helpdesk",
+  "tests": 14,
+  "neg": 6,
+  "server": 1,
+  "files": 6,
+  "top": "helpdesk.test.js(8) review-fixes3.test.js(2) company.test.js(1) fsm.test.js(1)"
+ },
+ {
+  "id": "website",
+  "tests": 73,
+  "neg": 32,
+  "server": 2,
+  "files": 27,
+  "top": "websiteplus.test.js(9) server/portal.test.js(8) quoteplus.test.js(7) company.test.js(6)"
+ },
+ {
+  "id": "marketing",
+  "tests": 15,
+  "neg": 5,
+  "server": 1,
+  "files": 5,
+  "top": "mailing.test.js(7) server/mailtrack.test.js(3) extra.test.js(2) sms.test.js(2)"
+ },
+ {
+  "id": "events",
+  "tests": 9,
+  "neg": 5,
+  "server": 1,
+  "files": 4,
+  "top": "eventsplus.test.js(6) events.test.js(1) review-fixes2.test.js(1) server/public-forms.test.js(1)"
+ },
+ {
+  "id": "purchase",
+  "tests": 29,
+  "neg": 11,
+  "server": 2,
+  "files": 9,
+  "top": "billcontrol.test.js(7) purchaseplus.test.js(7) company.test.js(3) routes.test.js(3)"
+ },
+ {
+  "id": "inventory",
+  "tests": 59,
+  "neg": 28,
+  "server": 0,
+  "files": 21,
+  "top": "valuation-wiring.test.js(7) warehouse.test.js(7) batch.test.js(6) picking.test.js(6)"
+ },
+ {
+  "id": "manufacturing",
+  "tests": 21,
+  "neg": 12,
+  "server": 0,
+  "files": 7,
+  "top": "workorder.test.js(8) valuation-wiring.test.js(4) mrp.test.js(3) more.test.js(2)"
+ },
+ {
+  "id": "shopfloor",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "barcode",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "quality",
+  "tests": 9,
+  "neg": 1,
+  "server": 0,
+  "files": 3,
+  "top": "qualityplus.test.js(7) apps2.test.js(1) picking.test.js(1)"
+ },
+ {
+  "id": "maintenance",
+  "tests": 9,
+  "neg": 3,
+  "server": 4,
+  "files": 2,
+  "top": "maintplus.test.js(8) subscription.test.js(1)"
+ },
+ {
+  "id": "repairs",
+  "tests": 7,
+  "neg": 3,
+  "server": 0,
+  "files": 2,
+  "top": "repairplus.test.js(6) apps2.test.js(1)"
+ },
+ {
+  "id": "fieldservice",
+  "tests": 7,
+  "neg": 4,
+  "server": 0,
+  "files": 3,
+  "top": "fsm.test.js(5) helpdesk.test.js(1) review-fixes3.test.js(1)"
+ },
+ {
+  "id": "sign",
+  "tests": 8,
+  "neg": 3,
+  "server": 0,
+  "files": 4,
+  "top": "signplus.test.js(5) documentsplus.test.js(1) events.test.js(1) extra.test.js(1)"
+ },
+ {
+  "id": "employees",
+  "tests": 25,
+  "neg": 13,
+  "server": 1,
+  "files": 16,
+  "top": "planningplus.test.js(4) expenseplus.test.js(3) timesheetplus.test.js(3) appraisalplus.test.js(2)"
+ },
+ {
+  "id": "attendances",
+  "tests": 13,
+  "neg": 7,
+  "server": 0,
+  "files": 3,
+  "top": "attendanceplus.test.js(10) payroll.test.js(2) review-fixes3.test.js(1)"
+ },
+ {
+  "id": "recruitment",
+  "tests": 9,
+  "neg": 6,
+  "server": 0,
+  "files": 4,
+  "top": "recruitplus.test.js(4) skillsplus.test.js(3) recruitment.test.js(1) review-fixes3.test.js(1)"
+ },
+ {
+  "id": "timeoff",
+  "tests": 12,
+  "neg": 2,
+  "server": 3,
+  "files": 8,
+  "top": "approvalsplus.test.js(2) attendanceplus.test.js(2) payroll.test.js(2) timeoff.test.js(2)"
+ },
+ {
+  "id": "appraisals",
+  "tests": 9,
+  "neg": 9,
+  "server": 0,
+  "files": 1,
+  "top": "appraisalplus.test.js(9)"
+ },
+ {
+  "id": "payroll",
+  "tests": 6,
+  "neg": 1,
+  "server": 1,
+  "files": 2,
+  "top": "payroll.test.js(5) security.test.js(1)"
+ },
+ {
+  "id": "expenses",
+  "tests": 15,
+  "neg": 8,
+  "server": 0,
+  "files": 3,
+  "top": "expenseplus.test.js(11) expense.test.js(3) documentsplus.test.js(1)"
+ },
+ {
+  "id": "fleet",
+  "tests": 7,
+  "neg": 4,
+  "server": 0,
+  "files": 3,
+  "top": "fleetplus.test.js(5) review-fixes3.test.js(1) subscription.test.js(1)"
+ },
+ {
+  "id": "lunch",
+  "tests": 8,
+  "neg": 3,
+  "server": 0,
+  "files": 1,
+  "top": "lunch.test.js(8)"
+ },
+ {
+  "id": "approvals",
+  "tests": 6,
+  "neg": 4,
+  "server": 4,
+  "files": 2,
+  "top": "approvalsplus.test.js(5) review-fixes4.test.js(1)"
+ },
+ {
+  "id": "frontdesk",
+  "tests": 7,
+  "neg": 5,
+  "server": 0,
+  "files": 1,
+  "top": "frontdeskplus.test.js(7)"
+ },
+ {
+  "id": "surveys",
+  "tests": 2,
+  "neg": 1,
+  "server": 0,
+  "files": 1,
+  "top": "surveys.test.js(2)"
+ },
+ {
+  "id": "elearning",
+  "tests": 9,
+  "neg": 7,
+  "server": 0,
+  "files": 1,
+  "top": "elearning.test.js(9)"
+ },
+ {
+  "id": "livechat",
+  "tests": 8,
+  "neg": 6,
+  "server": 0,
+  "files": 2,
+  "top": "livechat.test.js(6) server/livechat.test.js(2)"
+ },
+ {
+  "id": "whatsapp",
+  "tests": 7,
+  "neg": 4,
+  "server": 2,
+  "files": 2,
+  "top": "whatsapp.test.js(5) server/whatsapp.test.js(2)"
+ },
+ {
+  "id": "sms",
+  "tests": 4,
+  "neg": 1,
+  "server": 0,
+  "files": 2,
+  "top": "sms.test.js(3) apps3.test.js(1)"
+ },
+ {
+  "id": "social",
+  "tests": 3,
+  "neg": 2,
+  "server": 0,
+  "files": 1,
+  "top": "social.test.js(3)"
+ },
+ {
+  "id": "automation",
+  "tests": 3,
+  "neg": 0,
+  "server": 0,
+  "files": 1,
+  "top": "automation.test.js(3)"
+ },
+ {
+  "id": "plm",
+  "tests": 7,
+  "neg": 2,
+  "server": 0,
+  "files": 5,
+  "top": "valuation-wiring.test.js(3) review-fixes2.test.js(1) routes.test.js(1) uom-flows.test.js(1)"
+ },
+ {
+  "id": "rooms",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "referral",
+  "tests": 5,
+  "neg": 4,
+  "server": 0,
+  "files": 1,
+  "top": "skillsplus.test.js(5)"
+ },
+ {
+  "id": "skills",
+  "tests": 3,
+  "neg": 2,
+  "server": 0,
+  "files": 1,
+  "top": "skillsplus.test.js(3)"
+ },
+ {
+  "id": "esg",
+  "tests": 1,
+  "neg": 0,
+  "server": 0,
+  "files": 1,
+  "top": "apps3.test.js(1)"
+ },
+ {
+  "id": "equity",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "recycle",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "phone",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "iot",
+  "tests": 1,
+  "neg": 1,
+  "server": 0,
+  "files": 1,
+  "top": "server/integrations.test.js(1)"
+ },
+ {
+  "id": "studio",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "apps",
+  "tests": 0,
+  "neg": 0,
+  "server": 0,
+  "files": 0,
+  "top": ""
+ },
+ {
+  "id": "settings",
+  "tests": 8,
+  "neg": 3,
+  "server": 0,
+  "files": 2,
+  "top": "company.test.js(7) consolidation.test.js(1)"
+ }
+]

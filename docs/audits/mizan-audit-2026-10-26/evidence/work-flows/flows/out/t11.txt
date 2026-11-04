@@ -1,0 +1,4 @@
+Credit Note click 1 visible true
+Credit Note click 2 visible true
+invoice total 450 after 2 posted credit notes: invoice payment_state not_paid residual 450 | partner receivable 450 -> -450
+Register Payment still offered: true -> partner receivable after paying -900
