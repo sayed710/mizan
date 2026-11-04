@@ -1,4 +1,5 @@
 import './models/index.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
@@ -10,7 +11,6 @@ import { unrealizedExchange } from './models/closing.js';
 import { cashFlow } from './models/reports.js';
 import { confirmLoan, earlyRepayment } from './models/loans.js';
 import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js';
-import { createCompany } from './models/company.js';
 
 // ---------------------------------------------------------------------------
 // 1. Cash rounding sign
@@ -205,7 +205,7 @@ test('cash flow statement classifies loan proceeds and repayment as financing, a
 test('assets post with company and validate journal and accounts across two companies', () => {
   let db = seed();
   // Create second company
-  const co2 = createCompany(db, { name: 'Subsidiary Corp' });
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Subsidiary Corp', currency_id: db.settings.base_currency_id });
   db = co2.db;
   const co2Id = co2.id;
 

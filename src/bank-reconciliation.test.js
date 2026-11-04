@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -6,7 +7,6 @@ import { journalItems, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { applyRule } from './models/reconcile.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -17,7 +17,7 @@ const openBill = (db) => search(db, 'account.move').find((m) => m.move_type === 
 
 test('bank reconciliation enforces company for entries, payment entries, journals and accounts locally and on sync', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
   const makeEntry = (db, company) => postEntry(db, { journal: 'BNK1', company, lines: [{ account: '101401', debit: 10 }, { account: '450000', credit: 10 }] });
   const own = makeEntry(branch.db, 1);
   const foreign = makeEntry(own.db, branch.id);
@@ -48,7 +48,7 @@ test('bank reconciliation enforces company for entries, payment entries, journal
 
 test('bank actions and reconciliation models never match another company invoice or book a foreign account', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
   const makeInvoice = (db, company) => {
     const draft = create(db, 'account.move', { company_id: company, move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-10-01', invoice_line_ids: [{ qty: 1, price_unit: 234.56, tax: 0 }] });
     return { db: postMove(draft.db, draft.id), id: draft.id };

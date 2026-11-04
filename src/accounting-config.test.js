@@ -10,13 +10,14 @@ const userOf = (apps) => ({ author: 'User', isAdmin: false, allowed: modelsForAp
 test('users outside Accounting can read but not change accounts, taxes, journals and fiscal settings (ACC-009)', () => {
   const db = seed();
   const sales = userOf(['sales']);
-  const receivable = search(db, 'account.account').find((a) => a.code === '121000');
+  const spare = create(db, 'account.account', { code: 'ACC009', name: 'Unused Receivable Fixture', account_type: 'asset_receivable' });
+  const receivable = read(spare.db, 'account.account', spare.id);
   const vat = search(db, 'account.tax').find((t) => t.name === 'VAT 14%');
-  const retyped = write(db, 'account.account', receivable.id, { account_type: 'income' });
-  assert.throws(() => applyDiff(db, diffDb(db, retyped), sales), /Only Accounting users can change/);
+  const retyped = write(spare.db, 'account.account', receivable.id, { account_type: 'income' });
+  assert.throws(() => applyDiff(spare.db, diffDb(spare.db, retyped), sales), /Only Accounting users can change/);
   const zeroed = write(db, 'account.tax', vat.id, { amount: 0 });
   assert.throws(() => applyDiff(db, diffDb(db, zeroed), sales), /Only Accounting users can change/);
-  assert.throws(() => applyDiff(db, { upserts: {}, deletes: { 'account.account': [receivable.id] } }, sales), /Only Accounting users can change/);
+  assert.throws(() => applyDiff(spare.db, { upserts: {}, deletes: { 'account.account': [receivable.id] } }, sales), /Only Accounting users can change/);
 });
 
 test('Accounting users and admins still maintain the configuration', () => {

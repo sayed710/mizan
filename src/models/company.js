@@ -220,6 +220,17 @@ function companyGuard(db, before, r) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  for (const [field, type, label] of [
+    ['default_sale_journal_id', 'sale', 'Default Sales Journal'],
+    ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
+    ['default_general_journal_id', 'general', 'Default General Journal'],
+  ]) {
+    if (!r[field]) continue;
+    const journal = record(db, 'account.journal', r[field]);
+    if (!journal || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
+      return `${label} must be a ${type} journal shared with or belonging to this company`;
+    }
+  }
   for (const [field, type, label] of [['account_default_receivable_id', 'asset_receivable', 'receivable'], ['account_default_payable_id', 'liability_payable', 'payable']]) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
@@ -228,6 +239,11 @@ function companyGuard(db, before, r) {
   if (r.down_payment_account_id) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
+  }
+  if (r.current_year_earnings_account_id) {
+    const account = record(db, 'account.account', r.current_year_earnings_account_id);
+    if (!account || !['equity', 'equity_unaffected'].includes(account.account_type)
+      || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an equity earnings account shared with or belonging to this company';
   }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
@@ -350,6 +366,9 @@ export const companyModels = {
       account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
       intercompany_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Inter-company Purchase Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      default_sale_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Sales Journal' },
+      default_purchase_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Purchase Journal' },
+      default_general_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default General Journal' },
       current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
@@ -367,6 +386,9 @@ export const companyModels = {
       resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
+      lock_date: { type: 'date', label: 'Lock Date' },
+      sale_lock_date: { type: 'date', label: 'Sales Lock Date' },
+      purchase_lock_date: { type: 'date', label: 'Purchase Lock Date' },
       hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
@@ -380,6 +402,7 @@ export const companyModels = {
     },
     defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly', deferred_amount_computation_method: 'days' }),
     guard: companyGuard,
+    onWrite: (db, after, before, vals) => (vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db),
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
@@ -391,7 +414,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'current_year_earnings_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'current_year_earnings_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

@@ -19,13 +19,13 @@ export const ACCOUNT_TYPES = [
 
 /** Default chart of accounts (codes follow a common 6-digit layout). */
 export const CHART = [
-  ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['101402', 'Outstanding Receipts', 'asset_current'], ['101403', 'Outstanding Payments', 'asset_current'], ['101404', 'Bank Suspense', 'asset_current'], ['121000', 'Account Receivable', 'asset_receivable'],
+  ['101401', 'Bank', 'asset_cash', 'liquidity_bank'], ['101501', 'Cash', 'asset_cash', 'liquidity_cash'], ['101402', 'Outstanding Receipts', 'asset_current'], ['101403', 'Outstanding Payments', 'asset_current'], ['101404', 'Bank Suspense', 'asset_current'], ['121000', 'Account Receivable', 'asset_receivable', 'receivable'],
   ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['110200', 'Stock Interim (Received)', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
-  ['211000', 'Account Payable', 'liability_payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
+  ['211000', 'Account Payable', 'liability_payable', 'payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
   ['212000', 'Deferred Revenue', 'liability_current'], ['132000', 'Prepaid Expenses', 'asset_current'], ['230000', 'Salaries Payable', 'liability_current'], ['230100', 'Employee Expenses Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
-  ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
-  ['500000', 'Cost of Goods Sold', 'expense_direct_cost'], ['600000', 'Expenses', 'expense'], ['610000', 'Travel & Meals', 'expense'],
-  ['620000', 'Salaries & Wages', 'expense'], ['630000', 'Rent', 'expense'], ['690000', 'Bank Fees', 'expense_other'],
+  ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income', 'sales'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
+  ['500000', 'Cost of Goods Sold', 'expense_direct_cost'], ['600000', 'Expenses', 'expense', 'purchases'], ['610000', 'Travel & Meals', 'expense'],
+  ['620000', 'Salaries & Wages', 'expense', 'salary'], ['630000', 'Rent', 'expense'], ['690000', 'Bank Fees', 'expense_other'],
   ['450100', 'Foreign Exchange Gain', 'income_other'], ['690100', 'Foreign Exchange Loss', 'expense_other'],
   ['450200', 'Cash Discount Gain', 'income_other'], ['690200', 'Cash Discount Loss', 'expense_other'],
   ['152000', 'Accumulated Depreciation', 'asset_fixed'], ['680000', 'Depreciation Expense', 'expense'],
@@ -35,22 +35,45 @@ export const CHART = [
 ];
 
 export const JOURNALS = [
-  ['INV', 'Customer Invoices', 'sale', '400000'], ['BILL', 'Vendor Bills', 'purchase', '600000'], ['BNK1', 'Bank', 'bank', '101401', true],
-  ['CSH1', 'Cash', 'cash', '101501'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', '620000'],
-  ['POSS', 'Point of Sale', 'sale', '400000'],
+  { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
+  { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true },
+  { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501' },
+  { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
+  { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
+  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1, company_default: 'pos' },
 ];
+
+const uniqueByCode = (records, model, code, predicate = () => true) => {
+  const matches = records.filter((record) => record.code === code && predicate(record));
+  if (matches.length > 1) throw new Error(`Multiple ${model} records use code ${code}; select a record explicitly`);
+  return matches[0] ?? null;
+};
 
 const idByCode = (db, model, code, company) => {
   const records = db.records[model] ?? [];
   if (company) {
-    const match = records.find((record) => record.code === code && record.company_id === company);
+    const match = uniqueByCode(records, model, code, (record) => record.company_id === company);
     if (match) return match.id;
+    return uniqueByCode(records, model, code, (record) => !record.company_id)?.id ?? null;
   }
-  return records.find((record) => record.code === code && (!company || !record.company_id))?.id ?? null;
+  return (uniqueByCode(records, model, code, (record) => !record.company_id)
+    ?? uniqueByCode(records, model, code))?.id ?? null;
 };
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
 export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
+
+/** Validate an explicitly configured account without resolving it through its code or another account's identity. */
+export function assertCompanyAccount(db, id, companyId, accountType, label) {
+  if (!id) throw new Error(`${label} is not configured`);
+  const account = read(db, 'account.account', id);
+  if (!account) throw new Error(`${label} does not exist`);
+  if (account.active === false) throw new Error(`${label} is archived`);
+  if (account.account_type !== accountType) throw new Error(`${label} must be a ${accountType.replaceAll('_', ' ')} account`);
+  if (account.company_id && account.company_id !== (companyId ?? 1)) throw new Error(`${label} must be shared with or belong to this company`);
+  return account.id;
+}
 
 export function resolveCompanyAccount(db, accountId, companyId) {
   if (!accountId) return null;
@@ -58,7 +81,8 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  return null;
+  const match = uniqueByCode(db.records['account.account'] ?? [], 'account.account', acc.code, (account) => account.company_id === comp);
+  return match?.id ?? null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -69,6 +93,20 @@ export const isBalanced = (lines = [], currency = null) =>
     return Number.isFinite(value) && Math.abs(value - roundCurrency(value, currency)) < 1e-9;
   })) && lines.reduce((s, l) => s + currencyUnits(l.debit, currency) - currencyUnits(l.credit, currency), 0) === 0;
 
+/** A partner's receivable or payable account for a company: its valid property, else the company default. */
+export function partnerAccount(db, partnerId, companyId, kind) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  const type = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const valid = (id) => {
+    const account = read(db, 'account.account', id);
+    return account?.company_id === company?.id && account?.account_type === type && account?.active !== false;
+  };
+  const property = read(db, 'res.partner', partnerId)?.[`property_account_${kind}_id`];
+  const id = valid(property) ? property : company?.[`account_default_${kind}_id`];
+  if (!valid(id)) throw new Error(`Configure the default ${kind} account for ${company?.name ?? 'the company'}`);
+  return id;
+}
+
 /** The receivable or payable account actually booked on an invoice. */
 export function invoiceCounterpartAccount(db, invoice) {
   const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
@@ -77,33 +115,46 @@ export function invoiceCounterpartAccount(db, invoice) {
   return ids[0];
 }
 
-export function resolveDocumentJournal(db, move) {
+export function resolveDocumentJournal(db, move, { required = false } = {}) {
   if (!move) return null;
-  let jId = move.journal_id;
-  if (!jId && move.id) {
-    jId = read(db, 'account.move', move.id)?.journal_id;
-  }
-  if (!jId && (move.session_id || move.pos_config_id || move.config_id)) {
+  const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
+  const posContext = Boolean(move.session_id || move.pos_config_id || move.config_id);
+  let journalId = move.journal_id;
+  if (!journalId && move.id) journalId = read(db, 'account.move', move.id)?.journal_id;
+  if (!journalId && (move.session_id || move.pos_config_id || move.config_id)) {
     const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
     const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
     const config = configId ? read(db, 'pos.config', configId) : null;
-    jId = session?.journal_id || config?.journal_id || journalId(db, 'POSS', session?.company_id ?? config?.company_id ?? move.company_id ?? 1);
+    journalId = session?.journal_id || config?.journal_id || null;
   }
-  if (!jId) {
-    const isEntry = move.move_type === 'entry';
-    const isPur = ['in_invoice', 'in_refund'].includes(move.move_type);
-    const code = isEntry ? 'MISC' : (isPur ? 'BILL' : 'INV');
-    jId = journalId(db, code, move.company_id ?? 1);
+  if (!journalId && !posContext && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type)) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    const company = read(db, 'res.company', companyId);
+    journalId = company?.[purchase ? 'default_purchase_journal_id' : 'default_sale_journal_id'] ?? null;
   }
-  return jId ? read(db, 'account.journal', jId) : null;
+  if (!journalId && move.move_type === 'entry') {
+    journalId = read(db, 'res.company', companyId)?.default_general_journal_id ?? null;
+  }
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  if (journalId && !journal) throw new Error('Selected journal does not exist');
+  if (required && !journal) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    if (purchase || ['out_invoice', 'out_refund'].includes(move.move_type)) {
+      const kind = purchase ? 'purchase' : 'sales';
+      const document = purchase ? 'vendor bill' : 'customer invoice';
+      throw new Error(`No ${document} journal for this company; select a journal or configure a default ${kind} journal for company ${companyId}`);
+    }
+    if (posContext) throw new Error('Configure a journal on the point of sale session or configuration');
+    throw new Error(`No general journal configured for company ${companyId}; select a journal or configure a default general journal`);
+  }
+  return journal;
 }
 
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const journal = resolveDocumentJournal(db, move);
-  if (!journal) throw new Error('Select a journal for this document');
-  const base = journal.default_account_id;
+  const journal = resolveDocumentJournal(db, move, { required: true });
+  const base = resolveCompanyAccount(db, journal.default_account_id, move.company_id);
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -114,9 +165,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    if (!base) {
-      throw new Error(`Journal "${journal.name || journal.code}" has no default account configured`);
-    }
+    if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
     return { accountId: base, configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
@@ -124,7 +173,9 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const source = getSourceAccount(l);
     if (!source.accountId) throw new Error(`No ${source.type} account found`);
     const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);
-    const resolved = resolveCompanyAccount(db, mapped, move.company_id);
+    const mappedAccount = read(db, 'account.account', mapped);
+    const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
+    const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
     if (!resolved) {
       if (source.configured) {
         throw new Error(`Configured ${source.type} account does not exist for the invoice company`);
@@ -243,14 +294,7 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const company = read(db, 'res.company', move.company_id ?? 1);
-  const property = read(db, 'res.partner', move.partner_id)?.[sale ? 'property_account_receivable_id' : 'property_account_payable_id'];
-  const partnerAccount = read(db, 'account.account', property);
-  const type = sale ? 'asset_receivable' : 'liability_payable';
-  const counterpart = partnerAccount?.company_id === company?.id && partnerAccount.account_type === type && partnerAccount.active !== false
-    ? partnerAccount.id : company?.[sale ? 'account_default_receivable_id' : 'account_default_payable_id'];
-  const configured = read(db, 'account.account', counterpart);
-  if (!configured || configured.company_id !== company?.id || configured.account_type !== type || configured.active === false) throw new Error(`Configure the default ${sale ? 'receivable' : 'payable'} account for ${company?.name ?? 'the company'}`);
+  const counterpart = partnerAccount(db, move.partner_id, move.company_id, sale ? 'receivable' : 'payable');
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
@@ -387,7 +431,13 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     let accId = null;
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
-    else if (l.account) accId = accountId(db, l.account, company) ?? accountId(db, l.account);
+    else if (l.account) {
+      accId = accountId(db, l.account, company);
+      if (!accId && company && (db.records['account.account'] ?? []).some((account) => account.code === l.account
+        && account.company_id && account.company_id !== company)) {
+        throw new Error(`Account ${l.account} belongs to another company`);
+      }
+    }
     if (!accId) throw new Error(`Account not found: ${l.account}`);
     const acc = read(db, 'account.account', accId);
     if (!acc) throw new Error(`Account not found: ${accId}`);
@@ -411,24 +461,24 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Resolve an explicitly selected or explicitly configured default bank/cash journal and its account. */
-export function paymentJournal(db, selectedJournalId, companyId = null) {
+/** Resolve the unique payment default or an explicitly selected liquidity journal. */
+export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
   if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
   if (!selectedJournalId) {
     const configured = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true);
-    const companyDefaults = companyId ? configured.filter((candidate) => candidate.company_id === companyId) : [];
-    const defaults = companyDefaults.length ? companyDefaults : configured.filter((candidate) => !candidate.company_id);
+    const own = configured.filter((candidate) => candidate.company_id === companyId);
+    const defaults = own.length ? own : configured.filter((candidate) => !candidate.company_id);
     if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
     if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
     [journal] = defaults;
   }
+  if (journal.active === false) throw new Error('The selected payment journal is archived');
   if (!['bank', 'cash'].includes(journal.type)) throw new Error('Payment journal must be a bank or cash journal');
   if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
-  const account = read(db, 'account.account', journal.default_account_id);
-  if (!account) throw new Error(`Configure a default account on the ${journal.name || 'selected'} payment journal`);
-  if (companyId && account.company_id && account.company_id !== companyId) throw new Error('Payment journal account belongs to another company');
-  return { id: journal.id, code: journal.code, account_id: account.id, account: account.code };
+  const id = assertCompanyAccount(db, journal.default_account_id, companyId, 'asset_cash', 'The selected journal liquidity account');
+  const account = read(db, 'account.account', id);
+  return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */

@@ -12,7 +12,7 @@ const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.l
 
 test('4. an inbound batch posts its payments to the selected bank journal', () => {
   let db = seed();
-  const bank2 = create(db, 'account.account', { code: '101402', name: 'Second bank', account_type: 'asset_cash' });
+  const bank2 = create(db, 'account.account', { code: '101499', name: 'Second bank', account_type: 'asset_cash' });
   const journal = create(bank2.db, 'account.journal', { code: 'BNK2', name: 'Second Bank', type: 'bank', default_account_id: bank2.id });
   const inv = create(journal.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   db = run(inv.db, 'account.move', inv.id, 'Confirm');

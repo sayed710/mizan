@@ -82,9 +82,9 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   assert.ok(isBalanced(reversal.line_ids));
   assert.throws(() => reopenFiscalYear(reopened, id), /already open/);
   assert.equal(profitAndLoss(closeFiscalYear(reopened, id), period, { includeClosing: true }).net, 0);
-  assert.throws(() => reopenFiscalYear(updateSettings(closed, { lock_date: '2025-12-31' }), id), /locked/);
-  assert.throws(() => reopenFiscalYear(updateSettings(closed, { hard_lock_date: period.to }), id), /locked/);
-  const differentLock = reopenFiscalYear(updateSettings(closed, { lock_date: '2023-12-31' }), id);
+  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' }), id), /locked/);
+  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { hard_lock_date: period.to }), 'res.company', 1, { hard_lock_date: period.to }), id), /locked/);
+  const differentLock = reopenFiscalYear(write(updateSettings(closed, { lock_date: '2023-12-31' }), 'res.company', 1, { lock_date: '2023-12-31' }), id);
   assert.equal(differentLock.settings.lock_date, '2023-12-31');
 });
 
