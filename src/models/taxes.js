@@ -30,6 +30,9 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
   return base;
 };
 
+/** Replace all snapshot fields when merging a newly selected tax into a line. */
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, ...snapshot });
+
 /** The tax a fiscal position substitutes for `taxId` (the same tax when unmapped; null when mapped to no tax). */
 export function mapTax(db, fpId, taxId) {
   const rule = (read(db, 'account.fiscal.position', fpId)?.tax_ids ?? []).find((m) => m.tax_src_id === taxId);
