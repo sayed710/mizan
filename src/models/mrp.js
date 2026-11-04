@@ -36,7 +36,7 @@ export function validateScrap(db, scrap, date = today()) {
     next = applyLots(move.db, read(move.db, 'stock.picking', move.id), -1);
     const automated = product.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(next, product, 'property_valuation'));
     const stockLine = { location_id: source, company_id: company, lot_name: scrap.lot_name };
-    const out = automated ? deliver(next, product.id, qty, { date, reference: `Scrap ${scrap.name}: ${product.name}`, counterpart: '600000', pickingId: move.id, stockLine }) : null;
+    const out = automated ? deliver(next, product.id, qty, { date, reference: `Scrap ${scrap.name}: ${product.name}`, counterpart_role: 'price_difference', pickingId: move.id, stockLine }) : null;
     const value = out?.value ?? round2(qty * (Number(product.cost) || 0));
     next = out?.db ?? moveValued(next, [{ product_id: product.id, qty }], -1, { stockLine, pickingId: move.id });
     const moveId = out ? next.records['stock.valuation.layer'].at(-1).move_id ?? null : null;
@@ -53,7 +53,8 @@ export function unbuild(db, order, date = today()) {
   if (product?.type === 'goods' && (Number(product.qty_available) || 0) < qty) throw new Error(`Only ${Number(product.qty_available) || 0} ${product.name} in stock`);
   const { move_raw } = explode(db, { bom_id: order.bom_id, product_qty: qty });
   const back = move_raw.map((m) => ({ product_id: m.product_id, qty: round2(m.to_consume) }));
-  const next = moveValued(moveValued(db, [{ product_id: order.product_id, qty }], -1, { date, reference: order.name, counterpart: '600000' }), back, 1, { date, reference: order.name, counterpart: '600000' });
+  const options = { date, reference: order.name, counterpart_role: 'production', company_id: order.company_id ?? 1 };
+  const next = moveValued(moveValued(db, [{ product_id: order.product_id, qty }], -1, options), back, 1, options);
   return write(next, 'mrp.unbuild', order.id, { state: 'done', date_done: date, components: back });
 }
 

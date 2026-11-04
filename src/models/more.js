@@ -116,12 +116,12 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
       consumed = moveValued(consumed, [l], -1);
       value += l.qty * (Number(p.cost) || 0);
     } else {
-      const out = deliver(consumed, p.id, l.qty, { reference: mo.name, counterpart: '600000' });
+      const out = deliver(consumed, p.id, l.qty, { reference: mo.name, counterpart_role: 'production', company_id: mo.company_id ?? 1 });
       consumed = out.db;
       value += out.value;
     }
   }
-  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000' });
+  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart_role: 'production', company_id: mo.company_id ?? 1 });
   if (mo.operation_cost_move_id && product?.valuation !== 'manual_periodic') {
     const operation = read(stocked, 'account.move', mo.operation_cost_move_id);
     const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);

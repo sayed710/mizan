@@ -811,7 +811,7 @@ test('automatically valued goods sold in a second company scope stock valuation 
 test('shared product POS valuation opens and consumes only the session company stock', () => {
   let db = seed();
   const company = createCompany(db, { name: 'Independent stock company' }); db = company.db;
-  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['301000', 'equity']]) {
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['301000', 'equity']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);

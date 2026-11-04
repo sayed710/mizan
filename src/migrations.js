@@ -12,7 +12,7 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
-import { journalId } from './models/ledger.js';
+import { journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { returnTaxLock } from './models/finance.js';
@@ -602,6 +602,18 @@ function migrateCashBasisOrigins(db) {
   return { ...next, settings };
 }
 
+
+MIGRATIONS.push({ version: 27, name: 'Explicit company stock accounts', up: (db) => ({
+  ...db, records: { ...db.records, 'res.company': (db.records['res.company'] ?? []).map((company) => {
+    const values = {};
+    for (const [field, [code, type]] of Object.entries(STOCK_CHART_ROLES)) {
+      if (company[field]) continue;
+      const matches = (db.records['account.account'] ?? []).filter((account) => account.company_id === company.id && account.code === code && account.account_type === type);
+      if (matches.length === 1) values[field] = matches[0].id;
+    }
+    return { ...company, ...values };
+  }) },
+}) });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

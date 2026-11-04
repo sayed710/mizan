@@ -8,6 +8,8 @@ import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { currentYearEarningsAccount } from './earnings.js';
+import { stockAccount } from './stock-accounts.js';
+export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
 
@@ -33,6 +35,7 @@ export const CHART = [
   ['260000', 'Loans Payable', 'liability_current'], ['690400', 'Interest Expense', 'expense_other'],
   ['450300', 'Gain on Asset Disposal', 'income_other'], ['690300', 'Loss on Asset Disposal', 'expense_other'],
 ];
+
 
 export const JOURNALS = [
   { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
@@ -161,7 +164,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
     if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) {
-      return { accountId: accountId(db, '110200', move.company_id), configured: true, type: 'valuation' };
+      return { accountId: stockAccount(db, p, 'input', move.company_id ?? 1), configured: true, type: 'valuation' };
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };

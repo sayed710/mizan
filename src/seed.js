@@ -5,7 +5,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -150,7 +150,7 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
   db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,
