@@ -1165,7 +1165,7 @@ const ar = {
   'Journal Audit': 'مراجعة دفاتر اليومية',
   'Data Inalterability Check': 'فحص عدم قابلية تعديل البيانات',
   'Incoterms': 'شروط التجارة الدولية (Incoterms)',
-  'Tax Units': 'الوحدات الضريبية', 'Tax Unit': 'الوحدة الضريبية',
+  'Tax Units': 'الوحدات الضريبية', 'Tax Unit': 'الوحدة الضريبية', 'Member Return Types': 'أنواع الإقرارات للأعضاء',
   'Depreciation Models': 'نماذج الإهلاك',
   'Incoterm': 'شرط التجارة (Incoterm)',
   'Incoterm Location': 'موقع شرط التجارة',

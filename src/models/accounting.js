@@ -1,7 +1,7 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
-import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
+import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -947,21 +947,39 @@ Object.assign(accountingModels, {
       vat: { type: 'char', label: 'Tax ID' },
       company_ids: { type: 'many2many', relation: 'res.company', label: 'Companies', required: true },
       main_company_id: { type: 'many2one', relation: 'res.company', label: 'Main Company', required: true },
+      member_return_type_ids: {
+        type: 'one2many',
+        label: 'Member Return Types',
+        fields: {
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+          type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true },
+        },
+        newLine: () => ({ company_id: null, type_id: null }),
+      },
     },
-    defaults: () => ({ company_ids: [] }),
+    defaults: () => ({ company_ids: [], member_return_type_ids: [] }),
     guard: (db, before, after) => {
       const companies = Array.isArray(after.company_ids) ? after.company_ids : [];
-      if (before && JSON.stringify([...new Set(before.company_ids ?? [])].sort()) !== JSON.stringify([...new Set(companies)].sort())
-        && (db.records['account.return'] ?? []).some((ret) => ret.tax_unit_id === before.id && ['submitted', 'paid'].includes(ret.state))) return 'Cannot change companies of a tax unit with submitted returns';
+      const unitReturns = (db.records['account.return'] ?? []).filter((ret) => ret.tax_unit_id === (after.id ?? before?.id));
+      const submittedReturns = unitReturns.filter((ret) => ['submitted', 'paid'].includes(ret.state));
+      if (before && submittedReturns.length) {
+        if (JSON.stringify([...new Set(before.company_ids ?? [])].sort()) !== JSON.stringify([...new Set(companies)].sort())) return 'Cannot change companies of a tax unit with submitted returns';
+        if (before.main_company_id !== after.main_company_id
+          || JSON.stringify(before.member_return_type_ids ?? []) !== JSON.stringify(after.member_return_type_ids ?? [])) return 'Cannot change member return types of a tax unit with submitted returns';
+      }
       if (new Set(companies).size < 2) return 'A tax unit must contain at least 2 companies';
       if (!after.main_company_id || !companies.includes(after.main_company_id)) return 'The main company must be one of the tax unit companies';
       if (companies.some((id) => !read(db, 'res.company', id))) return 'Select existing companies';
+      const mainTypes = unitReturns.map((ret) => read(db, 'account.return.type', ret.type_id)).filter(Boolean);
+      const { error } = taxUnitMemberTypeValidation(db, after, mainTypes);
+      if (error) return error;
       return null;
     },
     list: ['name', 'country', 'vat', 'main_company_id'],
     form: {
       title: 'name',
       groups: [['name', 'country', 'vat'], ['main_company_id', 'company_ids']],
+      tabs: [{ label: 'Member Return Types', fields: ['member_return_type_ids'] }],
     },
   },
 

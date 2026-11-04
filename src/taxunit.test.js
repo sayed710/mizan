@@ -26,6 +26,8 @@ test('tax unit return reviews and closes each company once', () => {
   }
   db = ensureReturnTypes(db);
   const type = search(db, 'account.return.type').find((t) => t.company_id === 1 && t.name === 'VAT Return');
+  const memberType = search(db, 'account.return.type').find((t) => t.company_id === company.id && t.name === 'VAT Return');
+  db = write(db, 'account.tax.unit', unit.id, { member_return_type_ids: [{ company_id: company.id, type_id: memberType.id }] });
   const ret = create(db, 'account.return', { name: 'Unit return', type_id: type.id, company_id: 1, tax_unit_id: unit.id, date_from: '2040-01-01', date_to: '2040-01-31' });
   db = ret.db;
   assert.deepEqual(taxReport(db, { from: '2040-01-01', to: '2040-01-31', company_id: 1, tax_unit_id: unit.id }), { output: 42, input: 0, payable: 42 });

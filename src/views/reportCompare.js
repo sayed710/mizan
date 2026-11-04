@@ -24,7 +24,7 @@ export function periodsFor(periodKey, mode, todayIso) {
   });
 }
 
-function columns(periods, reports, sectionDefs, totalDefs) {
+function columns(periods, reports, sectionDefs, totalDefs, { showVariance = true } = {}) {
   const sections = sectionDefs.map(([title, value, detail]) => {
     const lists = reports.map((r) => detail ? detail(r) : []);
     const accounts = new Map(lists.flat().map((r) => [r.account.id, r.account]));
@@ -37,11 +37,11 @@ function columns(periods, reports, sectionDefs, totalDefs) {
   });
   const totals = totalDefs.map(([label, value, strong = false]) => ({ label, values: reports.map(value), strong }));
   // Variances follow sections, then totals, in their respective array order.
-  const variance = [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
+  const variance = showVariance ? [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
     const previous = values.at(-2);
     const amount = previous == null ? null : round(values.at(-1) - previous);
     return { amount, pct: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
-  });
+  }) : null;
   return { headers: periods.map((p) => p.label), sections, totals, variance };
 }
 
@@ -80,13 +80,17 @@ export function balanceColumns(db, periods) {
 
 /** Horizontal comparison columns partitioned by a horizontal group for Profit & Loss. */
 export function pnlAnalyticColumns(db, group, period) {
-  const buckets = groupBuckets(db, group, journalItems(db, period));
-  return columns(buckets, buckets.map((b) => profitAndLoss(db, period, { weight: b.weight })), PNL_SECTIONS, PNL_TOTALS);
+  const filter = { ...period, company_id: group?.company_id ?? period?.company_id ?? 1 };
+  const buckets = groupBuckets(db, group, journalItems(db, filter));
+  return columns(buckets, buckets.map((b) => profitAndLoss(db, filter, { weight: b.weight })), PNL_SECTIONS, PNL_TOTALS, { showVariance: false });
 }
 
 /** Horizontal comparison columns partitioned by a horizontal group for the Balance Sheet. */
 export function balanceAnalyticColumns(db, group, period) {
-  const filter = typeof period === 'object' && period !== null ? period : { to: period };
+  const filter = {
+    to: typeof period === 'object' && period !== null ? period.to : period,
+    company_id: group?.company_id ?? (typeof period === 'object' && period !== null ? period.company_id : null) ?? 1,
+  };
   const buckets = groupBuckets(db, group, journalItems(db, filter));
-  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight })), BALANCE_SECTIONS, BALANCE_TOTALS);
+  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight })), BALANCE_SECTIONS, BALANCE_TOTALS, { showVariance: false });
 }
