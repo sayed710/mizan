@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
+import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
@@ -12,6 +12,7 @@ import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
 import { saveFormRecord } from './formSave.js';
+import { changeFormValue, newDefaults } from './formDefaults.js';
 import { RecordAnalysis } from './Analysis.jsx';
 
 /** Integrations whose buttons fall back to only recording a send when not configured. */
@@ -45,16 +46,6 @@ function PortalLink({ model, id }) {
 function withComputed(model, vals, db) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
-}
-
-/** Defaults for a new record: model defaults < menu defaults < smart-button parent < `default_<field>` URL params. */
-function newDefaults(db, model, leaf, params) {
-  const def = models[model];
-  const fromUrl = Object.fromEntries(
-    [...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k, v]) => [k.slice(8), v]),
-  );
-  const rel = parseRel(db, model, params.get('rel'));
-  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...(def.createDefaults?.(db, fromUrl) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
 }
 
 function Field({ db, model, name, value, onChange, readonly, record }) {
@@ -228,7 +219,8 @@ export function FormView({ leaf, id, base, params }) {
   const [error, setError] = useState(() => restored?.error ?? null);
   const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
-  const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
+  const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params, parseRel(db, model, params.get('rel'))) : null));
+  const stageExplicit = useRef(!isNew || Object.hasOwn(restored?.values ?? {}, 'stage_id') || Object.hasOwn(leaf.defaults ?? {}, 'stage_id') || params.has('default_stage_id'));
   const revRef = useRef(0);
 
   const view = params.get('view') ?? '';
@@ -245,11 +237,8 @@ export function FormView({ leaf, id, base, params }) {
   const current = withComputed(model, def.form.prepare?.(values, db) ?? values, db);
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
-    setChanges((c) => {
-      const next = { ...c, [k]: v };
-      const extra = def.onchange?.({ ...(isNew ? initial : rec), ...next }, k, getDb()) ?? {};
-      return { ...next, ...extra };
-    });
+    if (k === 'stage_id') stageExplicit.current = true;
+    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current));
     setError(null);
   };
   const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
@@ -394,7 +383,7 @@ export function FormView({ leaf, id, base, params }) {
   const idx = rec ? ids.indexOf(rec.id) : -1;
   const pageTo = (step) => leave(`${base}/${ids[(idx + step + ids.length) % ids.length]}${query}`);
 
-  const resolve = (v) => (typeof v === 'function' ? v(current, db) : v);
+  const resolve = (v) => (typeof v === 'function' ? v(current, db, { leaf, isNew }) : v);
   const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
   const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())));

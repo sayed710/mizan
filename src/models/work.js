@@ -208,10 +208,13 @@ export const workModels = {
       },
     },
     defaults: () => ({ state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [], date_last_stage_update: today() }),
-    createDefaults: (db, vals) => ({ stage_id: defaultStage(db, 'project.task.type', 'project_ids', vals.project_id) }),
+    createDefaults: (db, vals) => ({ stage_id: defaultStage(db, 'project.task.type', 'project_ids', Number(vals.project_id)) }),
     // Customer follows the project; a task blocked by open tasks waits and cannot be closed.
-    onchange: (r, key, db) => {
+    onchange: (r, key, db, context = {}) => {
       const updates = {};
+      if (key === 'project_id' && context.stageExplicit === false) {
+        updates.stage_id = defaultStage(db, 'project.task.type', 'project_ids', Number(r.project_id));
+      }
       if (key === 'stage_id') {
         updates.date_last_stage_update = today();
         const stage = typeof r.stage_id === 'number'

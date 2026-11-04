@@ -84,7 +84,7 @@ import { warehouseModels } from './warehouse.js';
 import { quantModels } from './quant.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
-import { taxReturnModels } from './taxreturn.js';
+import { isAuditReturn, taxReturnModels } from './taxreturn.js';
 import { auditReportModels } from './auditreport.js';
 import { partnerBankModels } from './partnerbank.js';
 import { calendarModels } from './calendar.js';
@@ -211,7 +211,7 @@ const allApps = [
         ] },
                 { label: 'Closing', children: [
           { key: 'reconcile', label: 'Reconcile', model: 'account.bank.statement.line' },
-          { key: 'tax-returns', label: 'Tax Returns', model: 'account.return', domain: (r, db) => !r.audit_status && (db ? read(db, 'account.return.type', r.type_id)?.category !== 'audit' : true) },
+          { key: 'tax-returns', label: 'Tax Returns', model: 'account.return', domain: (r, db) => !isAuditReturn(r, db) },
           { key: 'lock-dates', label: 'Lock Dates…', type: 'settings' },
           { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
         ] },
@@ -228,7 +228,7 @@ const allApps = [
             key: 'working-files',
             label: 'Working Files',
             model: 'account.return',
-            domain: (r, db) => Boolean(r.audit_status || (db && read(db, 'account.return.type', r.type_id)?.category === 'audit')),
+            domain: (r, db) => isAuditReturn(r, db),
             defaultFilters: ['ongoing', 'paused'],
             defaults: { audit_status: 'ongoing' },
           },
