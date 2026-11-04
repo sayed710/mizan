@@ -49,8 +49,8 @@ export function installments(term, total, invoiceDate, currency = null) {
 
 /** Due date of the final installment (dates do not depend on the amount). */
 export function dueDate(term, invoiceDate) {
-  const last = (term.line_ids ?? []).at(-1);
-  return last ? lineDate(last, invoiceDate) : invoiceDate;
+  const dates = (term.line_ids ?? []).map((line) => lineDate(line, invoiceDate));
+  return dates.length ? dates.reduce((latest, date) => date > latest ? date : latest) : invoiceDate;
 }
 
 /** Return the early-payment discount when payment falls within its configured window. */
