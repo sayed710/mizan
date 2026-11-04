@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { moreModels } from './models/more.js';
 import { analyticPlusModels, normalizeDistribution, distributionOfLine, analyticLinesForMove, postAnalytic, removeAnalytic, analyticBalance, budgetReport, checkMandatoryPlans } from './models/analyticplus.js';
 
@@ -16,7 +17,7 @@ const setup = () => {
 };
 const moveValues = (a, b, move_type = 'out_invoice') => ({
   name: 'Analytic test', move_type, state: 'posted', partner_id: 1, invoice_date: '2026-01-10',
-  invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 100, discount: 10, tax: 14, analytic_distribution: { [a]: 60, [b]: 40 } }],
+  invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 100, discount: 10, tax: 14, ...defaultTaxRepartitionLines(1), analytic_distribution: { [a]: 60, [b]: 40 } }],
 });
 const runBudget = (db, id, label) => analyticPlusModels['account.budget'].form.buttons.find((b) => b.label === label).run(db, read(db, 'account.budget', id)).db;
 

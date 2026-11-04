@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { create, read, search, unlink, write } from './orm.js';
 import { apps, leavesOf, models } from './models/index.js';
 import { seed } from './seed.js';
+import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -155,7 +157,8 @@ test('partial delivery invoices limit advances to the remaining order value', ()
 });
 
 test('sales invoice buttons cap outstanding advances and release cancelled or credited amounts', () => {
-  const order = create(seed(), 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10 }] });
+  const db0 = seed();
+  const order = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10, ...defaultTaxRepartitionLines(accountId(db0, '251000')) }] });
   let db = run(order.db, 'sale.order', order.id, 'Confirm').db;
   const button = models['sale.order'].form.buttons.find((b) => b.label === 'Create Invoice');
   const advance = (state, method, amount) => button.run(state, read(state, 'sale.order', order.id), { method, amount }).db;
@@ -216,7 +219,7 @@ test('company down payment account is snapshotted on advances and deductions wit
   db = write(db, 'account.account', defaultAccount.id, { code: '212999' });
   const alternate = create(db, 'account.account', { code: '220100', name: 'Customer deposits', account_type: 'liability_current' });
   db = write(alternate.db, 'res.company', 1, { down_payment_account_id: alternate.id });
-  const order = create(db, 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10 }] });
+  const order = create(db, 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10, ...defaultTaxRepartitionLines(accountId(db, '251000')) }] });
   db = run(order.db, 'sale.order', order.id, 'Confirm').db;
   const button = models['sale.order'].form.buttons.find((b) => b.label === 'Create Invoice');
   db = button.run(db, read(db, 'sale.order', order.id), { method: 'percentage', amount: 30 }).db;
@@ -241,7 +244,8 @@ test('company down payment account rejects missing and other-company accounts', 
 });
 
 test('down payment and final deduction post to the deferred revenue account with tax', () => {
-  const order = create(seed(), 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10 }] });
+  const db0 = seed();
+  const order = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10, ...defaultTaxRepartitionLines(accountId(db0, '251000')) }] });
   let db = run(order.db, 'sale.order', order.id, 'Confirm').db;
   db = models['sale.order'].form.buttons.find((b) => b.label === 'Create Invoice').run(db, read(db, 'sale.order', order.id), { method: 'fixed', amount: 110 }).db;
   const advance = search(db, 'account.move').find((m) => m.sale_id === order.id);
@@ -370,7 +374,8 @@ test('percentage down payment is invoiced and deducted from the final invoice', 
 });
 
 test('fixed down payment preserves tax on posted advances and final invoices, including cancelled drafts', () => {
-  const order = create(seed(), 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10 }] });
+  const db0 = seed();
+  const order = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 10, price_unit: 100, tax: 10, ...defaultTaxRepartitionLines(accountId(db0, '251000')) }] });
   let db = run(order.db, 'sale.order', order.id, 'Confirm').db;
   const button = models['sale.order'].form.buttons.find((b) => b.label === 'Create Invoice');
   assert.deepEqual(button.wizard(db, read(db, 'sale.order', order.id)).fields[0].options.map(([id]) => id), ['regular', 'percentage', 'fixed']);

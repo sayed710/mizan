@@ -1,5 +1,5 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
-import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry } from './pay.js';
@@ -236,6 +236,18 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
 ]);
+function recurringReversalDate(origin, nextDate) {
+  const start = origin.invoice_date ?? origin.date;
+  const end = origin.reverse_date;
+  if (!validDate(start) || !validDate(end) || end <= start) throw new Error('Reversal date must be after the accounting date');
+  const [sy, sm] = start.split('-').map(Number);
+  const [ey, em] = end.split('-').map(Number);
+  let months = (ey - sy) * 12 + em - sm;
+  if (shiftMonth(start, months) > end) months--;
+  const days = (Date.parse(end) - Date.parse(shiftMonth(start, months))) / 86400000;
+  return addDays(shiftMonth(nextDate, months), days);
+}
+
 function spawnRecurringMove(db, move) {
   const months = RECURRENCE_MONTHS[move.auto_post];
   if (!months) return db;
@@ -259,6 +271,7 @@ function spawnRecurringMove(db, move) {
     invoice_date: nextDate,
     date: nextDate,
     ...(nextDue ? { invoice_date_due: nextDue } : {}),
+    ...(move.auto_reverse ? { reverse_date: recurringReversalDate(read(db, 'account.move', origin), nextDate) } : {}),
     auto_post_origin_id: origin,
     invoice_line_ids: isInvoice(move) ? (raw.invoice_line_ids ?? []).map((l) => ({
       ...l,
@@ -374,7 +387,7 @@ export function postMove(db, id) {
     });
     checkMandatoryPlans(db, { ...r, line_ids });
     const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
-    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id }).db : posted;
+    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');
@@ -522,7 +535,7 @@ function draftAssetsFromBill(db, bill) {
     const values = {
       name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
       partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: model?.account_asset_id ?? booked.account,
+      account_asset_id: booked.account,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
@@ -691,7 +704,8 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const companyCurrency = companyCurrencyRecord(db, r.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const roundingMethod = companyRoundingMethod(db, r.company_id);
-  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, { roundingMethod })
+  const side = refund ? 'refund' : 'invoice';
+  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, { roundingMethod, side })
     .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
@@ -1074,7 +1088,8 @@ export const accountingModels = {
     guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
-    audited: (db) => db.settings?.audit_trail === true,
+    // The restrictive audit trail is a setting of the move's own company.
+    audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     onWrite: (db, after, before, vals) => {
       if (before.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type)) {
@@ -1425,7 +1440,14 @@ Object.assign(accountingModels, {
 
   'account.account.tag': {
     label: 'Account Tags',
-    guard: (db, before, after) => before && before.applicability !== after.applicability && ['account.account', 'account.tax'].some((model) => (db.records[model] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id))) ? 'A tag in use cannot change applicability' : null,
+    guard: (db, before, after) => {
+      if (!before || before.applicability === after.applicability) return null;
+      const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
+      const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
+        [...(r.invoice_repartition_line_ids ?? []), ...(r.refund_repartition_line_ids ?? [])].some((l) => (l.tag_ids ?? []).includes(after.id)),
+      );
+      return inAccounts || inTaxes ? 'A tag in use cannot change applicability' : null;
+    },
     fields: {
       name: { type: 'char', label: 'Tag Name', required: true },
       applicability: {

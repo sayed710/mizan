@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, setActiveCompany, write } from './orm.js';
 import { models } from './models/index.js';
 import { createCompany, ensureMainCompany, interCompanyRules } from './models/company.js';
-import { lineTaxOf, lineUntaxed } from './models/taxes.js';
+import { lineTaxOf, lineUntaxed, taxRepartitionLine, taxSnapshot } from './models/taxes.js';
 import { seed } from './seed.js';
 
 after(() => setActiveCompany(null));
@@ -26,12 +26,12 @@ const sold = (db, line) => {
 
 test('the buyer gets its own purchase tax, not the seller\'s output VAT', () => {
   const { db, saleTax, purchaseTax } = setup();
-  const line = { product_id: 2, qty: 3, price_unit: 100, discount: 0, tax_id: saleTax.id, tax: 14, tax_type: 'percent', tax_include: false, tax_account_id: saleTax.account_id, tax_cash_basis: false, tax_name: saleTax.name };
+  const line = { product_id: 2, qty: 3, price_unit: 100, discount: 0, ...taxSnapshot(saleTax) };
   const po = sold(db, line);
   const [l] = po.order_line;
   assert.equal(l.tax_id, purchaseTax.id);
-  assert.equal(l.tax_account_id, purchaseTax.account_id);
-  assert.notEqual(l.tax_account_id, saleTax.account_id);
+  assert.equal(taxRepartitionLine(l)?.account_id, taxRepartitionLine(purchaseTax)?.account_id);
+  assert.notEqual(taxRepartitionLine(l)?.account_id, taxRepartitionLine(saleTax)?.account_id);
   assert.equal(l.price_unit, 100);
   assert.equal(lineTaxOf(l), 42);
 });
@@ -39,7 +39,7 @@ test('the buyer gets its own purchase tax, not the seller\'s output VAT', () => 
 test('a price including the seller\'s VAT is bought at its net price', () => {
   const { db, purchaseTax } = setup();
   const included = search(db, 'account.tax').find((t) => t.type_tax_use === 'sale' && t.price_include) ?? null;
-  const line = { product_id: 2, qty: 1, price_unit: 114, discount: 0, tax_id: included?.id ?? null, tax: 14, tax_type: 'percent', tax_include: true, tax_account_id: null, tax_cash_basis: false, tax_name: 'VAT 14% incl.' };
+  const line = { product_id: 2, qty: 1, price_unit: 114, discount: 0, ...taxSnapshot(included) };
   const [l] = sold(db, line).order_line;
   assert.equal(l.tax_id, purchaseTax.id);
   assert.equal(l.price_unit, 100);

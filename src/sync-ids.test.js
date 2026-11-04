@@ -99,8 +99,10 @@ test('a queued company selection follows the new company id', () => {
 });
 
 test('invoice lines keep pointing at a tax account created in the same save', () => {
-  const out = remapDiff({ upserts: { 'account.move': [{ id: 1, invoice_line_ids: [{ id: 1, tax_account_id: 50, product_id: null }] }] } }, { 'account.account': { 50: 60 } });
-  assert.equal(out.upserts['account.move'][0].invoice_line_ids[0].tax_account_id, 60);
+  const rows = [{ repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] }, { repartition_type: 'tax', factor_percent: 100, account_id: 50, tag_ids: [] }];
+  const out = remapDiff({ upserts: { 'account.move': [{ id: 1, invoice_line_ids: [{ id: 1, invoice_repartition_line_ids: rows, refund_repartition_line_ids: rows, product_id: null }] }] } }, { 'account.account': { 50: 60 } });
+  assert.equal(out.upserts['account.move'][0].invoice_line_ids[0].invoice_repartition_line_ids[1].account_id, 60);
+  assert.equal(out.upserts['account.move'][0].invoice_line_ids[0].refund_repartition_line_ids[1].account_id, 60);
 });
 
 test('queued edits carry field bases through a server id remap', () => {

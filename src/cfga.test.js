@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { amounts } from './models/common.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { postMove } from './models/accounting.js';
-import { invoiceBaseGroups, isBalanced } from './models/ledger.js';
+import { accountId, invoiceBaseGroups, isBalanced } from './models/ledger.js';
 import { taxesByGrid, taxesByTax } from './models/finance.js';
 import { seed } from './seed.js';
 
@@ -40,8 +40,8 @@ test('mixed exigibility reports only invoice-basis tags at posting', () => {
   let db = seed();
   const a = create(db, 'account.account.tag', { name: 'Invoice base' }); db = a.db;
   const b = create(db, 'account.account.tag', { name: 'Cash base' }); db = b.db;
-  const vat = { ...findTax(db, 'VAT 14%'), tag_ids: [a.id] };
-  const cash = { ...findTax(db, 'VAT 14% (Cash Basis)'), tag_ids: [b.id] };
+  const vat = { ...findTax(db, 'VAT 14%'), ...defaultTaxRepartitionLines(accountId(db, '251000'), [a.id]) };
+  const cash = { ...findTax(db, 'VAT 14% (Cash Basis)'), ...defaultTaxRepartitionLines(accountId(db, '251000'), [b.id]) };
   const line = { qty: 1, price_unit: 100, ...taxSnapshot(vat), tax_breakdown: [taxSnapshot(vat), taxSnapshot(cash)] };
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2040-01-01', invoice_line_ids: [line] });
   db = postMove(made.db, made.id);

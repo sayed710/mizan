@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, search, read, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { taxReport, taxesByTax } from './models/finance.js';
 import { payOrder, refundOrder, startSession } from './models/pos.js';
 import { addDays, today } from './models/common.js';
@@ -74,10 +74,10 @@ test('separately taxed negative adjustments retain their signed base on invoices
 test('historical tax items retain their side after editing and archiving the tax', () => {
   const db = seed();
   const custom = create(db, 'account.account', { code: '259999', name: 'Custom VAT', account_type: 'liability_current' });
-  const tax = create(custom.db, 'account.tax', { name: 'Custom historical tax', amount: 10, type_tax_use: 'sale', account_id: custom.id });
+  const tax = create(custom.db, 'account.tax', { name: 'Custom historical tax', amount: 10, type_tax_use: 'sale', ...defaultTaxRepartitionLines(custom.id, []) });
   const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }]);
   const before = taxReport(tax.db, {});
-  const changed = write(posted.db, 'account.tax', tax.id, { account_id: null, active: false });
+  const changed = write(posted.db, 'account.tax', tax.id, { ...defaultTaxRepartitionLines(null, []), active: false });
   assert.equal(taxReport(changed, {}).output - before.output, 10);
   assert.deepEqual(row(taxesByTax(changed), 'Custom historical tax'), { side: 'sale', tax_id: tax.id, name: 'Custom historical tax', base: 100, tax: 10 });
 });
@@ -85,7 +85,7 @@ test('historical tax items retain their side after editing and archiving the tax
 test('sales and purchases using the same tax account remain on their own sides', () => {
   const db = seed();
   const account = db.records['account.account'].find((a) => a.code === '251000').id;
-  const tax = create(db, 'account.tax', { name: 'Shared input', amount: 10, type_tax_use: 'purchase', account_id: account });
+  const tax = create(db, 'account.tax', { name: 'Shared input', amount: 10, type_tax_use: 'purchase', ...defaultTaxRepartitionLines(account, []) });
   const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }], { move_type: 'in_invoice' });
   const before = taxReport(tax.db, {});
   const after = taxReport(posted.db, {});

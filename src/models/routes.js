@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { invoiceCounterpartAccount, partnerAccount, postEntry, postedBillLine } from './ledger.js';
-import { costMethod } from './valuation.js';
+import { costMethod, stockAccount } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
 import { allocateCents, round } from '../money.js';
 import { getForecast, orderOrderpoints } from './orderpoint.js';
@@ -125,18 +125,18 @@ function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expe
   for (const c of group.costs) {
     if (!isPeriodic && !lc.bill_id && !c.recognized_account_id) continue;
     const costAccount = read(db, 'account.account', c.account_id);
-    const costCode = costAccount?.code;
+    const costId = costAccount?.id;
     const isExpense = ['expense', 'expense_direct_cost', 'expense_other'].includes(costAccount?.account_type);
     // Bill-linked costs reclassify the posted amount to the selected account,
     // regardless of its type. Manual costs retain their existing expense treatment.
-    const debitAccount = c.recognized_account_id ? costCode : (isPeriodic ? (isExpense ? costCode : expense) : (costCode || expense));
-    const originalCode = read(db, 'account.account', c.recognized_account_id)?.code;
-    if (c.recognized && originalCode && originalCode !== debitAccount) {
-      entryLines.push({ account: originalCode, credit: c.recognized }, { account: debitAccount, debit: c.recognized });
+    const debitAccount = c.recognized_account_id ? costId : (isPeriodic ? (isExpense ? costId : expense) : (costId || expense));
+    const originalAccount = c.recognized_account_id;
+    if (c.recognized && originalAccount && originalAccount !== debitAccount) {
+      entryLines.push({ account: originalAccount, credit: c.recognized }, { account: debitAccount, debit: c.recognized });
     }
     const difference = round(c.amount - c.recognized);
     if (!difference) continue;
-    const creditAccount = !lc.bill_id && !c.recognized_account_id && !isExpense && costCode && costCode !== '110200' ? costCode : payable();
+    const creditAccount = !lc.bill_id && !c.recognized_account_id && !isExpense && costId && costId !== stockAccount(db, group.product, 'input', lc.company_id ?? 1) ? costId : payable();
     const value = Math.abs(difference);
     entryLines.push(
       difference > 0 ? { account: debitAccount, debit: value } : { account: debitAccount, credit: value },
@@ -145,7 +145,7 @@ function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expe
   }
   if (!isPeriodic) {
     const credits = group.costs.filter((c) => c.amount).map((c) => ({
-      account: read(db, 'account.account', c.account_id)?.code || (lc.bill_id ? expense : payable()),
+      account: c.account_id || (lc.bill_id ? expense : payable()),
       credit: c.amount,
     }));
     entryLines.push(
@@ -237,8 +237,8 @@ export function applyLandedCost(db, lc) {
     if (!isPeriodic && method === 'average' && capitalized && qty > 0) next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + capitalized / qty) });
     let entryId = null;
     if (group.costs.some((c) => c.amount || c.recognized)) {
-      const stock = read(next, 'account.account', productProperty(next, p, 'property_stock_valuation_account_id'))?.code || '110100';
-      const expense = read(next, 'account.account', productProperty(next, p, 'property_account_expense_id'))?.code || '500000';
+      const stock = isPeriodic ? null : stockAccount(next, p, 'valuation', lc.company_id ?? 1);
+      const expense = stockAccount(next, p, 'cogs', lc.company_id ?? 1);
       const journal = read(next, 'account.journal', lc.journal_id || productProperty(next, p, 'property_stock_journal'))?.code || 'MISC';
       const entryLines = landedCostEntryLines(next, lc, group, { stock, expense, capitalized, expensed, isPeriodic });
       if (entryLines.length) {

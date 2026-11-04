@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { postMove, payWithDiscount } from './models/accounting.js';
 import { partnerLedger } from './models/reports.js';
 import { validateTaxReturnPeriod } from './models/finance.js';
+import { defaultTaxRepartitionLines, taxRepartitionLine, taxRepartitionLines, taxSnapshot } from './models/taxes.js';
 
 const runBtn = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -82,7 +83,7 @@ test('Finding 7: cash rounding with biggest_tax strategy alters posted journal i
     partner_id: 3,
     invoice_date: '2026-01-01',
     invoice_cash_rounding_id: rounding.id,
-    invoice_line_ids: [{ qty: 1, price_unit: 100.02, tax_id: tax.id, tax: 14 }],
+    invoice_line_ids: [{ qty: 1, price_unit: 100.02, ...taxSnapshot(tax) }],
   });
 
   const doc = read(inv.db, 'account.move', inv.id);
@@ -198,16 +199,14 @@ test('Finding 12: manual invoice lines default to company default sale/purchase 
     type_tax_use: 'sale',
     amount: 15,
     amount_type: 'percent',
-    account_id: saleAcc,
-    tag_ids: [tagSale.id],
+    ...defaultTaxRepartitionLines(saleAcc, [tagSale.id]),
   });
   const tax15Purch = create(tax15Sale.db, 'account.tax', {
     name: 'VAT 15% Purchase',
     type_tax_use: 'purchase',
     amount: 15,
     amount_type: 'percent',
-    account_id: purchAcc,
-    tag_ids: [tagPurch.id],
+    ...defaultTaxRepartitionLines(purchAcc, [tagPurch.id]),
   });
 
   const coConfigured = write(tax15Purch.db, 'res.company', mainCo.id, {
@@ -220,16 +219,16 @@ test('Finding 12: manual invoice lines default to company default sale/purchase 
   const saleLine = models['account.move'].fields.invoice_line_ids.newLine(customerInv, coConfigured);
   assert.equal(saleLine.tax, 15);
   assert.equal(saleLine.tax_id, tax15Sale.id);
-  assert.equal(saleLine.tax_account_id, saleAcc);
-  assert.deepEqual(saleLine.tax_tag_ids, [tagSale.id]);
+  assert.equal(taxRepartitionLine(saleLine)?.account_id, saleAcc);
+  assert.deepEqual(taxRepartitionLine(saleLine)?.tag_ids, [tagSale.id]);
 
   // Test Vendor Bill manual line
   const bill = { move_type: 'in_invoice', company_id: mainCo.id };
   const billLine = models['account.move'].fields.invoice_line_ids.newLine(bill, coConfigured);
   assert.equal(billLine.tax, 15);
   assert.equal(billLine.tax_id, tax15Purch.id);
-  assert.equal(billLine.tax_account_id, purchAcc);
-  assert.deepEqual(billLine.tax_tag_ids, [tagPurch.id]);
+  assert.equal(taxRepartitionLine(billLine)?.account_id, purchAcc);
+  assert.deepEqual(taxRepartitionLine(billLine)?.tag_ids, [tagPurch.id]);
 
   // Posting an invoice with this manual line must not fail validateTaxReturnPeriod
   const createdInv = create(coConfigured, 'account.move', {
@@ -249,5 +248,5 @@ test('Finding 12: manual invoice lines default to company default sale/purchase 
   const noTaxLine = models['account.move'].fields.invoice_line_ids.newLine(customerInv, coNoTax);
   assert.equal(noTaxLine.tax, 0);
   assert.equal(noTaxLine.tax_id, null);
-  assert.deepEqual(noTaxLine.tax_tag_ids, []);
+  assert.deepEqual(taxRepartitionLines(noTaxLine), []);
 });

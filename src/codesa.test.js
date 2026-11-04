@@ -7,6 +7,7 @@ import { closeSession } from './models/pos.js';
 import { postDueEntries } from './models/deferred.js';
 import { createSheet, submitSheet, approveSheet, postSheet } from './models/expenseplus.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 test('bank reconciliation uses the selected journal suspense account', () => {
   let db = seed();
@@ -77,7 +78,7 @@ test('expense report posts to configured expense and tax accounts', () => {
   let db = seed();
   const expenseAccount = create(db, 'account.account', { name: 'Custom costs', code: '928006', account_type: 'expense', company_id: 1 });
   const taxAccount = create(expenseAccount.db, 'account.account', { name: 'Custom tax', code: '928007', account_type: 'asset_current', company_id: 1 });
-  const tax = create(taxAccount.db, 'account.tax', { name: 'Custom tax', type_tax_use: 'purchase', amount: 14, amount_type: 'percent', account_id: taxAccount.id, company_id: 1 });
+  const tax = create(taxAccount.db, 'account.tax', { name: 'Custom tax', type_tax_use: 'purchase', amount: 14, amount_type: 'percent', ...defaultTaxRepartitionLines(taxAccount.id), company_id: 1 });
   const journal = search(tax.db, 'account.journal').find((j) => j.type === 'purchase');
   db = write(tax.db, 'account.journal', journal.id, { default_account_id: expenseAccount.id });
   const expense = create(db, 'hr.expense', { name: 'Custom expense', employee_id: 2, total_amount: 114, tax: 14, tax_id: tax.id });
@@ -104,4 +105,15 @@ test('migration maps only company-owned chart accounts by code and type', () => 
   const migrated = migrate(db);
   assert.equal(read(migrated, 'account.journal', journal.id).suspense_account_id, suspense.id);
   assert.equal(read(migrated, 'account.journal', journal.id).profit_account_id ?? null, null);
+});
+
+test('migration resolves a stored statement counterpart code to that company account', () => {
+  let db = seed();
+  const rent = search(db, 'account.account').find((a) => a.code === '630000' && (a.company_id ?? 1) === 1);
+  const line = search(db, 'account.bank.statement.line').find((l) => l.counterpart_account_id === rent.id);
+  const { counterpart_account_id: _drop, ...legacy } = line;
+  db = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => (l.id === line.id ? { ...legacy, counterpart: '630000' } : l)) } };
+  const migrated = read(migrate(db), 'account.bank.statement.line', line.id);
+  assert.equal(migrated.counterpart_account_id, rent.id);
+  assert.equal('counterpart' in migrated, false);
 });

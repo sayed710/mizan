@@ -5,6 +5,7 @@ import { create, read, search, write } from './orm.js';
 import { postMove } from './models/accounting.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, postDepreciation } from './models/assets.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { seed } from './seed.js';
 import { models } from './registry.js';
 
@@ -161,7 +162,7 @@ test('posting a bill line on a fixed-asset account creates one draft asset', () 
   const base = seed();
   const { db, id } = create(base, 'account.move', {
     move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01',
-    invoice_line_ids: [{ name: 'Forklift', product_id: 1, qty: 1, price_unit: 30000, tax: 14, account_id: accountId(base, '151000') }, { product_id: 1, qty: 1, price_unit: 100, tax: 14 }],
+    invoice_line_ids: [{ name: 'Forklift', product_id: 1, qty: 1, price_unit: 30000, tax: 14, ...defaultTaxRepartitionLines(accountId(base, '131000')), account_id: accountId(base, '151000') }, { product_id: 1, qty: 1, price_unit: 100, tax: 14, ...defaultTaxRepartitionLines(accountId(base, '131000')) }],
   });
   const posted = postMove(db, id);
   const assets = search(posted, 'account.asset').filter((a) => a.bill_id === id);

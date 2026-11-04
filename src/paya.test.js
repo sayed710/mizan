@@ -79,7 +79,7 @@ test('follow-up totals and reminder text keep currencies separate', () => {
   assert.match(followUpText(db, group), /Total:.*USD.*EUR|Total:.*EUR.*USD/);
 });
 
-test('cash basis releases use invoice identity and migration leaves ambiguous releases unlinked', () => {
+test('cash basis releases use invoice identity and migration links them only through the recording payment', () => {
   let db = seed();
   const tax = search(db, 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)' && t.type_tax_use === 'sale');
   const invoice = () => {
@@ -98,10 +98,17 @@ test('cash basis releases use invoice identity and migration leaves ambiguous re
   const secondRelease = read(db, 'account.move', second).payments.at(-1).cash_basis_move_id;
   const taxLine = read(db, 'account.move', secondRelease).line_ids.find((l) => l.tax_id === tax.id);
   assert.equal(taxLine.credit, 140);
-  const legacy = { ...db, schema_version: 24, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === release ? { ...m, cash_basis_origin_move_id: null } : m) } };
+  // Legacy data: both releases lost their origin; only the first is still recorded on its invoice payment.
+  const legacy = { ...db, schema_version: 24, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => {
+    if (m.id === release || m.id === secondRelease) return { ...m, cash_basis_origin_move_id: null };
+    if (m.id === second) return { ...m, payments: m.payments.map((p) => ({ ...p, cash_basis_move_id: null })) };
+    return m;
+  }) } };
   const migrated = migrate(legacy);
-  assert.equal(read(migrated, 'account.move', release).cash_basis_origin_move_id, null);
-  assert.ok(migrated.messages.some((m) => m.model === 'account.move' && m.res_id === release && m.body === 'Cash-basis origin invoice could not be determined; review this entry.'));
+  assert.equal(read(migrated, 'account.move', release).cash_basis_origin_move_id, first);
+  assert.equal(read(migrated, 'account.move', secondRelease).cash_basis_origin_move_id, null);
+  assert.ok(migrated.messages.some((m) => m.model === 'account.move' && m.res_id === secondRelease && m.body === 'Cash-basis origin invoice could not be determined; review this entry.'));
+  assert.ok(!migrated.messages.some((m) => m.model === 'account.move' && m.res_id === release && m.body === 'Cash-basis origin invoice could not be determined; review this entry.'));
   assert.equal(migrate(migrated), migrated);
 });
 

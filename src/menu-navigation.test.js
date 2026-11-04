@@ -296,7 +296,7 @@ test('Loans Analysis menu reports posted loan activity as of the selected date a
   await initStore();
   const other = createCompany(seed(), { name: 'Other loan company' });
   let db = updateSettings(other.db, { current_company_id: 1, allowed_company_ids: [1] });
-  const loan = create(db, 'account.loan', { name: 'ANALYSIS LOAN', company_id: 1, lender_id: 2, amount: 1200, start_date: '2026-01-10', duration: 6, interest_rate: 6, method: 'linear' });
+  const loan = create(db, 'account.loan', { journal_id: db.records['account.journal'].find((j) => j.code === 'BNK1').id, bank_account_id: db.records['account.account'].find((a) => a.code === '101401').id, principal_account_id: db.records['account.account'].find((a) => a.code === '260000').id, interest_account_id: db.records['account.account'].find((a) => a.code === '690400').id, name: 'ANALYSIS LOAN', company_id: 1, lender_id: 2, amount: 1200, start_date: '2026-01-10', duration: 6, interest_rate: 6, method: 'linear' });
   db = confirmLoan(loan.db, read(loan.db, 'account.loan', loan.id));
   db = postDueLines(db, read(db, 'account.loan', loan.id), '2026-02-28');
   db = earlyRepayment(db, read(db, 'account.loan', loan.id), { date: '2026-03-05', amount: 300 });

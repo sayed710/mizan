@@ -3,7 +3,7 @@
 // to different records don't overwrite each other.
 import { models } from './registry.js';
 import { analyticAccountKey } from './analytic_distribution.js';
-import { postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
+import { postTracking, read, referenceTo, validate, SHARED_MODELS } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
@@ -321,7 +321,11 @@ function remapRefs(model, rec, remapped) {
         const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
           ? { analytic_distribution: remapDistribution(distribution, remapped) }
           : null;
-        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...analytic } : line;
+        // JSON rows (e.g. tax repartition snapshots) declare which of their keys hold record ids.
+        const rows = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'json' && s.refs && Array.isArray(line[k]))
+          .map(([k, s]) => [k, line[k].map((row) => (row && typeof row === 'object' ? { ...row, ...Object.fromEntries(Object.entries(s.refs).filter(([rk]) => rk in row)
+            .map(([rk, rel]) => [rk, Array.isArray(row[rk]) ? row[rk].map((id) => to(rel, id)) : to(rel, row[rk])])) } : row))]);
+        return subs.length || analytic || rows.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic } : line;
       });
     }
   }
@@ -553,7 +557,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const seq = { ...db.seq };
   for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
-  const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
+  const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db, read(db, m.model, m.res_id))).map((m) => m.id));
   // A limited user may only comment on a record that exists in the result and that they can see.
   const onVisibleRecord = (m) => {
     if (!companies) return true;
@@ -615,7 +619,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let next = { ...db, records, seq, settings, numbering: highWater(marks, records), messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
   // The audit trail shows the number the server finally gave, not only the one the browser proposed.
   for (const [model, id, from, to] of [...numbered.renamed, ...(d.sequenceRenamed ?? [])]) {
-    if (models[model].audited?.(next)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
+    if (models[model].audited?.(next, read(next, model, id))) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
   }
   growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
   if (settings !== db.settings) growth += json(settings) - json(db.settings);

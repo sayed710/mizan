@@ -103,7 +103,7 @@ function createMockDomParser() {
 test('Finding 5: migration preserves global lock date matching closed fiscal year end without clearing it', () => {
   const dates = { date_from: '2032-01-01', date_to: '2032-12-31' };
   const company = createCompany(seed(), { name: 'Independent Subsidiary' });
-  const expense = create(company.db, 'account.account', { code: '600000', name: 'Sub expense', account_type: 'expense', company_id: company.id });
+  const expense = { db: company.db, id: read(company.db, 'res.company', company.id).account_price_difference_id };
   const year = create(expense.db, 'account.fiscal.year', { name: 'FY 2032', ...dates, company_id: 1 });
   const closed = closeFiscalYear(year.db, year.id);
 
@@ -375,9 +375,7 @@ test('Finding 24: analytic weights resolve distribution models using the documen
     analytic_distribution: { [analytic2.id]: 100 },
   }).db;
 
-  const branchExp = create(db, 'account.account', {
-    name: 'Branch Expense', code: '600000', company_id: branch.id, account_type: 'expense',
-  }); db = branchExp.db;
+  const branchExp = { id: read(db, 'res.company', branch.id).account_price_difference_id };
 
   // Post entry in Branch company without explicit analytic_distribution on the line
   const date = '2027-03-01';

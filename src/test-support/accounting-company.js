@@ -41,7 +41,7 @@ export function accountingCompany(db) {
   }
   const purchase = create(next, 'account.journal', { name: 'Branch expense journal', code: 'EXP2', type: 'purchase', company_id: branch.id, default_account_id: accountIds['600000'] });
   const sourceTax = read(purchase.db, 'account.tax', read(purchase.db, 'res.company', 1).account_purchase_tax_id);
-  const tax = create(purchase.db, 'account.tax', { ...sourceTax, company_id: branch.id, account_id: accountIds['131000'] });
+  const tax = create(purchase.db, 'account.tax', { ...sourceTax, company_id: branch.id, ...Object.fromEntries(['invoice_repartition_line_ids', 'refund_repartition_line_ids'].map((key) => [key, (sourceTax[key] ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: accountIds['131000'] } : l))])) });
   next = write(tax.db, 'res.company', branch.id, { account_default_receivable_id: accountIds['121000'], account_default_payable_id: accountIds['211000'], default_purchase_journal_id: purchase.id, account_purchase_tax_id: tax.id });
   next = write(next, 'account.journal', bankJournalId, { default_for_payments: true });
   return { db: next, id: branch.id };

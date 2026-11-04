@@ -4,7 +4,7 @@ import { accountId, ensureBankSuspense, paymentJournal, postEntry } from './ledg
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, taxSnapshot } from './taxes.js';
+import { lineTaxOf, taxRepartitionLine, taxSnapshot } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -69,15 +69,40 @@ function writeOff(db, rule, line) {
   const via = paymentJournal(db, line.journal_id, company);
   const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrencyRecord(db, company)), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
   const items = counterparts.flatMap((l) => {
-    const taxes = (l.tax_ids ?? []).map((id) => { const tax = read(db, 'account.tax', id); if (!tax || !tax.account_id) throw new Error('Tax and its account must exist'); return tax; });
+    const taxes = (l.tax_ids ?? []).map((id) => {
+      const tax = read(db, 'account.tax', id);
+      const taxRow = taxRepartitionLine(tax, 'invoice', 'tax');
+      if (!tax || !taxRow?.account_id) throw new Error('Tax and its account must exist');
+      return { tax, taxRow, baseRow: taxRepartitionLine(tax, 'invoice', 'base') };
+    });
     const taxAt = (tax, base) => lineTaxOf({ ...taxSnapshot(tax), qty: 1, price_unit: tax.price_include && tax.amount_type !== 'fixed' ? base * (1 + Number(tax.amount) / 100) : base });
-    const fixed = taxes.reduce((sum, tax) => sum + taxAt(tax, 0), 0);
-    const factor = 1 + taxes.reduce((sum, tax) => sum + taxAt(tax, 1) - taxAt(tax, 0), 0);
+    const fixed = taxes.reduce((sum, { tax }) => sum + taxAt(tax, 0), 0);
+    const factor = 1 + taxes.reduce((sum, { tax }) => sum + taxAt(tax, 1) - taxAt(tax, 0), 0);
     const base = roundCurrency((l.value - fixed) / factor, currency);
-    const amounts = taxes.map((tax) => roundCurrency(taxAt(tax, base), currency));
+    const amounts = taxes.map(({ tax }) => roundCurrency(taxAt(tax, base), currency));
     const net = roundCurrency(l.value - amounts.reduce((a, b) => a + b, 0), currency);
     const partner = l.partner_id ?? partner_id;
-    return [side(net, !incoming, { account: l.account_code, partner_id: partner, name: l.label || line.payment_ref, ...(taxes.length ? { tax_side: incoming ? 'sale' : 'purchase', tax_grid_base: true, tax_tag_ids: [...new Set(taxes.flatMap((tax) => tax.tag_ids ?? []))] } : {}) }), ...taxes.map((tax, i) => side(amounts[i], !incoming, { account: tax.account_id, partner_id: partner, name: tax.name, tax_name: tax.name, tax_side: incoming ? 'sale' : 'purchase', tax_base: toCompany(db, journalCurrency, net, line.date, company), tax_tag_ids: tax.tag_ids }))];
+    return [
+      side(net, !incoming, {
+        account: l.account_code,
+        partner_id: partner,
+        name: l.label || line.payment_ref,
+        ...(taxes.length ? {
+          tax_side: incoming ? 'sale' : 'purchase',
+          tax_grid_base: true,
+          tax_tag_ids: [...new Set(taxes.flatMap(({ baseRow }) => baseRow?.tag_ids ?? []))],
+        } : {}),
+      }),
+      ...taxes.map(({ tax, taxRow }, i) => side(amounts[i], !incoming, {
+        account: taxRow.account_id,
+        partner_id: partner,
+        name: tax.name,
+        tax_name: tax.name,
+        tax_side: incoming ? 'sale' : 'purchase',
+        tax_base: toCompany(db, journalCurrency, net, line.date, company),
+        tax_tag_ids: taxRow.tag_ids ?? [],
+      })),
+    ];
   });
   const gap = roundCurrency(companyValue - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));
   if (gap && items.length) { const key = incoming ? 'credit' : 'debit'; items[0][key] = roundCurrency(items[0][key] + gap, companyCurrencyRecord(db, company)); }

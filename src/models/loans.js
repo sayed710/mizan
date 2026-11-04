@@ -1,7 +1,7 @@
 // Loans: borrowings repaid by monthly instalments (annuity or fixed principal), posted as they fall due.
 import { read, write } from '../orm.js';
 import { promptedAmount, today } from './common.js';
-import { paymentJournal, postEntry } from './ledger.js';
+import { postEntry } from './ledger.js';
 import { cents } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
@@ -34,6 +34,20 @@ function instalments(opening, months, rate, method) {
 const rateOf = (loan) => (Number(loan.interest_rate) || 0) / 12 / 100;
 const board = (loan) => amortization(loan).map((l) => ({ ...l, posted: false, move_id: null }));
 
+function postingConfig(db, loan) {
+  const company = loan.company_id ?? 1;
+  for (const [field, model, label] of [
+    ['journal_id', 'account.journal', 'journal'],
+    ['bank_account_id', 'account.account', 'bank account'],
+    ['principal_account_id', 'account.account', 'principal liability account'],
+    ['interest_account_id', 'account.account', 'interest expense account'],
+  ]) {
+    const record = loan[field] && read(db, model, loan[field]);
+    if (!record) throw new Error(`Configure the loan ${label}`);
+    if (record.company_id && record.company_id !== company) throw new Error(`Loan ${label} belongs to another company`);
+  }
+}
+
 /** Monthly schedule: one line per month end, starting the month after the start date. */
 export function amortization(loan) {
   check(loan);
@@ -55,13 +69,12 @@ function computeBoard(db, loan) {
 /** Check the terms, book the money received from the lender and start the schedule. */
 export function confirmLoan(db, loan) {
   check(loan);
-  const companyId = loan.company_id ?? 1;
-  const via = paymentJournal(db, null, companyId);
+  postingConfig(db, loan);
   const { db: booked, id: receiptId } = postEntry(db, {
-    journal: via.code, journal_id: via.id, company: companyId, date: loan.start_date, ref: `Loan received ${loan.name}`,
+    journal: loan.journal_id, company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
-      { account_id: via.accountId, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
-      { account: '260000', credit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.bank_account_id, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.principal_account_id, credit: loan.amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   return write(booked, 'account.loan', loan.id, { receipt_move_id: receiptId, line_ids: board(loan), state: 'running' });
@@ -69,16 +82,15 @@ export function confirmLoan(db, loan) {
 
 /** Post every unposted line dated on or before `upTo`; the loan closes once all lines are paid. */
 export function postDueLines(db, loan, upTo = today()) {
-  const companyId = loan.company_id ?? 1;
+  postingConfig(db, loan);
   const { db: next, line_ids } = (loan.line_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, line_ids: [...acc.line_ids, l] };
-    const via = paymentJournal(acc.db, null, companyId);
     const { db: booked, id } = postEntry(acc.db, {
-      journal: via.code, journal_id: via.id, company: companyId, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
+      journal: loan.journal_id, company: loan.company_id, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
       lines: [
-        { account: '260000', debit: l.principal, partner_id: loan.lender_id ?? undefined },
-        { account: '690400', debit: l.interest, partner_id: loan.lender_id ?? undefined },
-        { account_id: via.accountId, credit: l.payment, partner_id: loan.lender_id ?? undefined },
+        { account: loan.principal_account_id, debit: l.principal, partner_id: loan.lender_id ?? undefined },
+        { account: loan.interest_account_id, debit: l.interest, partner_id: loan.lender_id ?? undefined },
+        { account: loan.bank_account_id, credit: l.payment, partner_id: loan.lender_id ?? undefined },
       ],
     });
     return { db: booked, line_ids: [...acc.line_ids, { ...l, posted: true, move_id: id }] };
@@ -93,13 +105,12 @@ export function earlyRepayment(db, loan, { date, amount }) {
   const pay = cents(amount);
   if (!(pay > 0)) throw new Error('The repayment amount must be positive');
   if (pay > outstanding) throw new Error('The repayment cannot exceed the outstanding balance');
-  const companyId = loan.company_id ?? 1;
-  const via = paymentJournal(db, null, companyId);
+  postingConfig(db, loan);
   const { db: booked, id: repaymentId } = postEntry(db, {
-    journal: via.code, journal_id: via.id, company: companyId, date, ref: `Early repayment ${loan.name}`,
+    journal: loan.journal_id, company: loan.company_id, date, ref: `Early repayment ${loan.name}`,
     lines: [
-      { account: '260000', debit: amount, partner_id: loan.lender_id ?? undefined },
-      { account_id: via.accountId, credit: amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.principal_account_id, debit: amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.bank_account_id, credit: amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   const posted = (loan.line_ids ?? []).filter((l) => l.posted);
@@ -125,6 +136,10 @@ export const loanModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       lender_id: { type: 'many2one', relation: 'res.partner', label: 'Lender' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      bank_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Account' },
+      principal_account_id: { type: 'many2one', relation: 'account.account', label: 'Principal Liability Account' },
+      interest_account_id: { type: 'many2one', relation: 'account.account', label: 'Interest Expense Account' },
       amount: { type: 'monetary', label: 'Amount Borrowed' },
       start_date: { type: 'date', label: 'Start Date' },
       duration: { type: 'integer', label: 'Duration (months)' },
@@ -180,7 +195,7 @@ export const loanModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['lender_id', 'amount'], ['start_date', 'duration', 'interest_rate', 'method'], ['outstanding_balance', 'total_interest']],
+      groups: [['lender_id', 'amount'], ['journal_id', 'bank_account_id', 'principal_account_id', 'interest_account_id', 'company_id'], ['start_date', 'duration', 'interest_rate', 'method'], ['outstanding_balance', 'total_interest']],
       tabs: [{ label: 'Amortization Schedule', fields: ['line_ids'] }],
       chatter: true,
     },

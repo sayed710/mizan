@@ -133,7 +133,7 @@ test('manual company bill recognition respects hard lock without disturbing earl
   const company = createCompany(db, { name: 'Other company', ...invoiceJournalDefaults(db), deferred_expense_account_id: accountId(db, '132000') });
   db = company.db;
   const deferred = create(db, 'account.account', { name: 'Prepaid', code: '132000', account_type: 'asset_current', company_id: company.id });
-  const expense = create(deferred.db, 'account.account', { name: 'Expense', code: '600000', account_type: 'expense', company_id: company.id });
+  const expense = { db: deferred.db, id: read(deferred.db, 'res.company', company.id).account_price_difference_id };
   const billJournal = create(expense.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id, invoice_sequence_prefix: 'DEF-BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'DEF-RBILL/', refund_sequence_next_number: 1 });
   const journal = create(billJournal.db, 'account.journal', { name: 'Misc', code: 'MISC', type: 'general', company_id: company.id });
   db = write(journal.db, 'res.company', company.id, { default_purchase_journal_id: billJournal.id, deferred_expense_account_id: deferred.id, deferred_generation_method: 'manual' });

@@ -1,10 +1,10 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
-import { accountId, resolveDocumentJournal } from './ledger.js';
+import { resolveDocumentJournal } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
-import { valuationModels } from './valuation.js';
+import { stockAccount, valuationModels } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
 import { round } from '../money.js';
 import { sameCommercialPartner } from './reconcile.js';
@@ -112,7 +112,8 @@ export function checkBillMatch(db, bill) {
 
 /** Compute the review recommendation from current receipts and other posted bills. */
 export function shouldBePaid(db, bill) {
-  if (bill.move_type !== 'in_invoice' || !db.settings?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
+  const company = read(db, 'res.company', bill.company_id ?? 1);
+  if (bill.move_type !== 'in_invoice' || !company?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
   return matches(db, bill).some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') ? 'exception' : 'yes';
 }
 
@@ -126,7 +127,9 @@ export function priceDifferenceLines(db, bill) {
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
-    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation')) || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
+    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) continue;
+    const input = stockAccount(db, p, 'input', bill.company_id ?? 1);
+    if (l.account_id && l.account_id !== input) continue;
     let skip = totalQty(prior, p.id) + (used.get(p.id) ?? 0), left = number(l.qty), value = 0;
     const layers = search(db, 'stock.valuation.layer').filter((v) => {
       const picking = read(db, 'stock.picking', v.picking_id);
@@ -144,10 +147,10 @@ export function priceDifferenceLines(db, bill) {
     used.set(p.id, (used.get(p.id) ?? 0) + number(l.qty));
     const difference = round(round(subtotal(l) / rate) - round(value + (number(l.qty) ? subtotal(l) * left / number(l.qty) / rate : 0)));
     if (!difference) continue;
-    if (!accountId(db, '110200') || !accountId(db, '600000')) throw new Error('Configure stock interim and expense accounts first');
+    const priceDifference = stockAccount(db, p, 'price_difference', bill.company_id ?? 1);
     result.push(
-      { account_id: accountId(db, '110200'), partner_id: bill.partner_id, name: 'Price Difference', debit: difference < 0 ? -difference : 0, credit: difference > 0 ? difference : 0 },
-      { account_id: accountId(db, '600000'), partner_id: bill.partner_id, name: 'Price Difference', debit: difference > 0 ? difference : 0, credit: difference < 0 ? -difference : 0 },
+      { account_id: input, partner_id: bill.partner_id, name: 'Price Difference', debit: difference < 0 ? -difference : 0, credit: difference > 0 ? difference : 0 },
+      { account_id: priceDifference, partner_id: bill.partner_id, name: 'Price Difference', debit: difference > 0 ? difference : 0, credit: difference < 0 ? -difference : 0 },
     );
   }
   return result;

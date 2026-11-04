@@ -5,7 +5,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -13,6 +13,7 @@ import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -88,8 +89,8 @@ export function seed() {
     return res.id;
   };
   const set = (model, id, vals) => { db = write(db, model, id, vals); };
-  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
-  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
+  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
+  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
   const cashFlowTags = {
     operating: add('account.account.tag', { name: 'Operating Activities', cash_flow_activity: 'operating' }),
@@ -130,7 +131,28 @@ export function seed() {
     }
   });
   if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
-  const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
+  const tax = (name, type_tax_use, amount, account, vals = {}) => {
+    const accId = account ? accountId(db, account) : null;
+    return add('account.tax', {
+      name,
+      type_tax_use,
+      amount,
+      amount_type: 'percent',
+      tax_exigibility: 'on_invoice',
+      price_include: false,
+      active: true,
+      tax_group: 'VAT',
+      invoice_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      refund_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      ...vals,
+    });
+  };
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
   const zeroExport = tax('0% Exports', 'sale', 0, null);
@@ -152,7 +174,7 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
   db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'] });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,

@@ -69,7 +69,7 @@ test('vendor bill matching recommends review without blocking posting and allows
   const plainPosted = confirm.run(plain.db, read(plain.db, 'account.move', plain.id)).db;
   assert.equal(read(plainPosted, 'account.move', plain.id).state, 'posted');
   assert.equal(read(plainPosted, 'account.move', plain.id).should_be_paid, 'yes');
-  const matched = bill(updateSettings(po.db, { three_way_matching: true }));
+  const matched = bill(write(updateSettings(po.db, { three_way_matching: true }), 'res.company', 1, { three_way_matching: true }));
   const posted = confirm.run(matched.db, read(matched.db, 'account.move', matched.id)).db;
   assert.equal(read(posted, 'account.move', matched.id).state, 'posted');
   assert.equal(read(posted, 'account.move', matched.id).should_be_paid, 'exception');
