@@ -8,7 +8,7 @@ import { applyDiff, diffDb } from './sync.js';
 const LOCK = '2026-12-31';
 const locked = () => {
   const db = seed();
-  return { ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } };
+  return write({ ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
 };
 const invoiceIn = (db) => db.records['account.move'].map((m) => read(db, 'account.move', m.id))
   .find((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.invoice_date <= LOCK && m.amount_residual > 0);
@@ -69,7 +69,7 @@ test('an early-payment discount after the lock settles a locked invoice', async 
   const made = create(base, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-12-30', invoice_payment_term_id: term, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const { models } = await import('./models/index.js');
   const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(made.db, read(made.db, 'account.move', made.id)).db;
-  const db = { ...posted, settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } };
+  const db = write({ ...posted, settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
   const saved = save(db, payWithDiscount(db, made.id, 98, '2027-01-02'));
   assert.equal(read(saved, 'account.move', made.id).amount_residual, 0);
 });

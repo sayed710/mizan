@@ -31,13 +31,13 @@ export function invoiceQrPayload(settings, company, move, invoiceCurrency = move
   return epcPayload({ name: company.name, iban: settings.company_iban, amount: move.amount_residual, reference: move.payment_reference || move.name });
 }
 
-/** Resolve QR mode and issuer identity from the document company; global legacy values apply only to that company. */
+/** Resolve QR mode and issuer identity from the document company. */
 export function invoiceQrSettingsForCompany(db, company) {
-  const legacySettingsApply = company.id === (db.settings?.current_company_id ?? 1);
+  const comp = company ?? db ?? {};
   return {
-    invoice_qr: company.invoice_qr ?? (legacySettingsApply ? db.settings?.invoice_qr : null),
-    company_vat: company.vat ?? (legacySettingsApply ? db.settings?.company_vat : '') ?? '',
-    company_iban: company.company_iban ?? (legacySettingsApply ? db.settings?.company_iban : '') ?? '',
+    invoice_qr: comp.invoice_qr ?? null,
+    company_vat: comp.vat ?? '',
+    company_iban: comp.company_iban ?? '',
   };
 }
 

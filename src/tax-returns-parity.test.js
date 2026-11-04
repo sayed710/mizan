@@ -128,14 +128,14 @@ test('submission revalidates drafts created after review through form actions', 
 });
 
 test('a forged tax closing reference cannot bypass a period lock', () => {
-  const db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  const db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
   assert.throws(() => postEntry(db, { journal: 'MISC', date: '2025-03-15', ref: 'Tax Closing: forged', lines: [
     { account: '101401', debit: 100 }, { account: '211000', credit: 100 },
   ] }), /locked/i);
 });
 
 test('a return closing cannot post into a globally locked period', () => {
-  let db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  let db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
   const bank = search(db, 'account.account').find((a) => a.code === '101401');
   const payable = search(db, 'account.account').find((a) => a.code === '211000');
   const forged = { name: 'MISC/2025/99999', move_type: 'entry', company_id: 1, date: '2025-03-31', invoice_date: '2025-03-31',
@@ -797,7 +797,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const vatType = search(db, 'account.return.type').find((t) => t.name === 'VAT Return');
 
   // 1. Pre-existing manual lock date preserved on reset
-  db = updateSettings(db, { lock_date: '2025-12-31' });
+  db = write(updateSettings(db, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' });
   const r1 = create(db, 'account.return', {
     name: 'VAT Jan 2026',
     type_id: vatType.id,
@@ -828,7 +828,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
-  const laterLocked = updateSettings(sub2, { lock_date: '2026-12-31' });
+  const laterLocked = write(updateSettings(sub2, { lock_date: '2026-12-31' }), 'res.company', 1, { lock_date: '2026-12-31' });
 
   // A later global lock also protects the closing from cancellation.
   assert.throws(() => resetReturnToDraft(laterLocked, r2.id), /locked/i);

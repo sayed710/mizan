@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { diffDb } from '../src/sync.js';
-import { create, postTracking, read, search, unlink, updateSettings } from '../src/orm.js';
+import { create, postTracking, read, search, unlink, updateSettings, write } from '../src/orm.js';
 import { models } from '../src/models/index.js';
 import { createCompany } from '../src/models/company.js';
 import { companyViewDb } from '../src/companyView.js';
@@ -238,7 +238,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const ret = create(db, 'account.return', { name: 'HTTP VAT', type_id: type.id, company_id: 1, date_from: '2020-03-01', date_to: '2020-03-31' });
     const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
     const reviewed = review.run(ret.db, read(ret.db, 'account.return', ret.id)).db;
-    const setup = updateSettings(reviewed, { lock_date: '2020-03-31' });
+    const setup = write(updateSettings(reviewed, { lock_date: '2020-03-31' }), 'res.company', 1, { lock_date: '2020-03-31' });
     const setupResponse = await admin('POST', '/api/diff', diffDb(db, setup));
     assert.equal(setupResponse.status, 200, JSON.stringify(setupResponse.body));
     db = setupResponse.body;
@@ -253,7 +253,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const blocked = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(blocked.status, 400);
     assert.match(blocked.body.error, /locked/i);
-    const unlocked = await admin('POST', '/api/diff', diffDb(db, updateSettings(db, { lock_date: null })));
+    const unlocked = await admin('POST', '/api/diff', diffDb(db, write(updateSettings(db, { lock_date: null }), 'res.company', 1, { lock_date: null })));
     assert.equal(unlocked.status, 200);
     const submitted = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));

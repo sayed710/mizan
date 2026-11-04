@@ -13,6 +13,7 @@ import { reconcileWith } from './models/bank.js';
 import { generateReturns } from './models/taxreturn.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany } from './models/qr.js';
 import { taxSnapshot } from './models/taxes.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 
 test('Finding 1: new document creation inherits current company from db', () => {
   let db = seed();
@@ -277,4 +278,131 @@ test('Finding 10: invoice QR settings persisted on res.company generate QR for m
   const payload = invoiceQrPayload(settings, comp2, move, 'EUR');
   assert.ok(payload, 'QR payload should be generated for company 2 invoice');
   assert.match(payload, /FR7630006000011234567890189/);
+});
+
+test('Finding 3: migration 25 copies global locks to all companies and clears settings', () => {
+  let db = seed();
+  const c2 = createCompany(db, { name: 'Company Two' });
+  db = c2.db;
+  const oldDb = {
+    ...db,
+    schema_version: 24,
+    settings: {
+      ...db.settings,
+      lock_date: '2026-03-31',
+      sale_lock_date: '2026-03-31',
+      purchase_lock_date: '2026-02-28',
+      hard_lock_date: '2026-01-31',
+    },
+  };
+  const migrated = migrate(oldDb);
+  assert.equal(SCHEMA_VERSION, 25);
+  assert.equal(migrated.schema_version, 25);
+  assert.equal('lock_date' in migrated.settings, false);
+  assert.equal('sale_lock_date' in migrated.settings, false);
+  assert.equal('purchase_lock_date' in migrated.settings, false);
+  assert.equal('hard_lock_date' in migrated.settings, false);
+
+  const comp1 = read(migrated, 'res.company', 1);
+  const comp2 = read(migrated, 'res.company', c2.id);
+  assert.equal(comp1.lock_date, '2026-03-31');
+  assert.equal(comp1.sale_lock_date, '2026-03-31');
+  assert.equal(comp1.purchase_lock_date, '2026-02-28');
+  assert.equal(comp1.hard_lock_date, '2026-01-31');
+
+  assert.equal(comp2.lock_date, '2026-03-31');
+  assert.equal(comp2.sale_lock_date, '2026-03-31');
+  assert.equal(comp2.purchase_lock_date, '2026-02-28');
+  assert.equal(comp2.hard_lock_date, '2026-01-31');
+});
+
+test('Finding 10: migration 25 migrates global QR/VAT/IBAN settings to current company', () => {
+  let db = seed();
+  const c2 = createCompany(db, { name: 'Company Two' });
+  db = c2.db;
+  const oldDb = {
+    ...db,
+    schema_version: 24,
+    settings: {
+      ...db.settings,
+      current_company_id: 1,
+      invoice_qr: 'epc',
+      company_vat: 'DE123456789',
+      company_iban: 'DE89370400440532013000',
+    },
+  };
+  const migrated = migrate(oldDb);
+  const comp1 = read(migrated, 'res.company', 1);
+  const comp2 = read(migrated, 'res.company', c2.id);
+  assert.equal(comp1.invoice_qr, 'epc');
+  assert.equal(comp1.vat, 'DE123456789');
+  assert.equal(comp1.company_iban, 'DE89370400440532013000');
+  assert.equal(comp2.invoice_qr ?? null, null);
+  assert.notEqual(comp2.vat, 'DE123456789');
+  assert.notEqual(comp2.company_iban, 'DE89370400440532013000');
+});
+
+test('Finding 3: hard lock cannot move back or be removed through write()', () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { hard_lock_date: '2026-03-31' });
+  assert.equal(read(db, 'res.company', 1).hard_lock_date, '2026-03-31');
+
+  db = write(db, 'res.company', 1, { hard_lock_date: '2026-04-30' });
+  assert.equal(read(db, 'res.company', 1).hard_lock_date, '2026-04-30');
+
+  assert.throws(() => write(db, 'res.company', 1, { hard_lock_date: '2026-04-15' }), /cannot be moved back/i);
+  assert.throws(() => write(db, 'res.company', 1, { hard_lock_date: null }), /cannot be moved back/i);
+  assert.throws(() => write(db, 'res.company', 1, { hard_lock_date: '' }), /cannot be moved back/i);
+});
+
+test('Finding 10: qr.js reads only document company without global fallback', () => {
+  let db = seed();
+  const c2 = createCompany(db, { name: 'Company Two' });
+  db = c2.db;
+  db = {
+    ...db,
+    settings: {
+      ...db.settings,
+      current_company_id: 1,
+      invoice_qr: 'zatca',
+      company_vat: 'GLOBAL-VAT',
+      company_iban: 'GLOBAL-IBAN',
+    },
+  };
+  const comp2 = read(db, 'res.company', c2.id);
+  const settings = invoiceQrSettingsForCompany(db, comp2);
+  assert.equal(settings.invoice_qr, null);
+  assert.equal(settings.company_vat, '');
+  assert.equal(settings.company_iban, '');
+
+  const comp1 = read(db, 'res.company', 1);
+  const settings1 = invoiceQrSettingsForCompany(db, comp1);
+  assert.equal(settings1.invoice_qr, null);
+  assert.equal(settings1.company_vat, '');
+  assert.equal(settings1.company_iban, '');
+});
+
+test('Finding 3: companyLockDate reads only the move company record with no global settings fallback', () => {
+  let db = seed();
+  // Ensure company 1 has no lock_date
+  db = write(db, 'res.company', 1, { lock_date: null, sale_lock_date: null });
+  // Set dirty global setting
+  db = { ...db, settings: { ...db.settings, lock_date: '2026-03-31', sale_lock_date: '2026-03-31' } };
+
+  const partner = search(db, 'res.partner')[0];
+  const journal = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id === 1 || !j.company_id));
+  const incomeAccount = search(db, 'account.account').find((a) => a.code === '400000' && (a.company_id === 1 || !a.company_id));
+
+  const inv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    company_id: 1,
+    journal_id: journal.id,
+    partner_id: partner.id,
+    invoice_date: '2026-03-15',
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, account_id: incomeAccount.id }],
+  });
+  // Since company 1 has no lock, posting must succeed without being blocked by db.settings
+  assert.doesNotThrow(() => {
+    postMove(inv.db, inv.id);
+  });
 });

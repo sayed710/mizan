@@ -181,7 +181,7 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   assert.throws(() => generateGroupedEntries(lockedDb, { date: '2026-02-28', kind: 'revenue' }), /lock/i, 'Rejects when period is locked');
   assert.throws(() => generateGroupedEntries(lockedDb, { date: '2026-02-28', kind: 'expense' }), /lock/i, 'Rejects when period is locked');
 
-  const settingsLocked = updateSettings(db, { lock_date: '2026-02-28' });
+  const settingsLocked = write(updateSettings(db, { lock_date: '2026-02-28' }), 'res.company', 1, { lock_date: '2026-02-28' });
   assert.throws(() => generateGroupedEntries(settingsLocked, { date: '2026-02-28', kind: 'revenue' }), /lock/i, 'Rejects when settings lock date set');
 
   // Resetting a source invoice keeps later generations consistent

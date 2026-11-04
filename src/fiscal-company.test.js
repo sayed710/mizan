@@ -52,32 +52,32 @@ test('migration retains global closing locks without clearing them for closed fi
   const company = createCompany(seed(), { name: 'Other company' });
   const year = create(company.db, 'account.fiscal.year', { name: 'Legacy year', ...dates });
   const closed = closeFiscalYear(year.db, year.id);
-  const legacy = { ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } };
+  const legacy = write(write({ ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } }, 'res.company', 1, { lock_date: dates.date_to }), 'res.company', company.id, { lock_date: dates.date_to });
   assert.throws(() => reopenFiscalYear(legacy, year.id), /locked/);
-  const migrated = migrate(legacy);
+  const migrated = migrate(legacy, 21);
   assert.equal(migrated.settings.lock_date, dates.date_to);
   assert.equal(legacy.settings.lock_date, dates.date_to);
   assert.equal(closedYearLock(migrated, 1), dates.date_to);
   assert.throws(() => book(migrated, 1, 1), /locked/);
   assert.throws(() => book(migrated, company.id, 1), /locked/);
-  const unlocked = updateSettings(migrated, { lock_date: null });
+  const unlocked = write(write(updateSettings(migrated, { lock_date: null }), 'res.company', 1, { lock_date: null }), 'res.company', company.id, { lock_date: null });
   const otherBooked = book(unlocked, company.id, 1);
   const reopened = reopenFiscalYear(otherBooked, year.id);
   assert.equal(read(reopened, 'account.fiscal.year', year.id).state, 'open');
   assert.ok(read(reopened, 'account.move', read(reopened, 'account.fiscal.year', year.id).opening_move_id));
   assert.equal(closedYearLock(reopened, 1), '');
   assert.doesNotThrow(() => book(reopened, 1, 1));
-  assert.equal(migrate(migrated), migrated);
+  assert.equal(migrate(migrated, 21), migrated);
 });
 
 test('migration preserves global locks not matching a closed fiscal year', () => {
   const year = create(seed(), 'account.fiscal.year', { name: 'Legacy year', ...dates });
   const closed = closeFiscalYear(year.db, year.id);
   for (const lock_date of ['2031-12-31', '2033-12-31']) {
-    const migrated = migrate({ ...closed, schema_version: 20, settings: { ...closed.settings, lock_date } });
+    const migrated = migrate({ ...closed, schema_version: 20, settings: { ...closed.settings, lock_date } }, 21);
     assert.equal(migrated.settings.lock_date, lock_date);
   }
-  const open = migrate({ ...year.db, schema_version: 20, settings: { ...year.db.settings, lock_date: dates.date_to } });
+  const open = migrate({ ...year.db, schema_version: 20, settings: { ...year.db.settings, lock_date: dates.date_to } }, 21);
   assert.equal(open.settings.lock_date, dates.date_to);
 });
 

@@ -88,7 +88,7 @@ test('locked count, including zero-valued stock, is refused without mutation', (
   let db = transfer(base, product, 5, 'incoming', null, a);
   const q = quants(db, product).find((r) => r.location_id === a);
   db = write(db, 'stock.quant', q.id, { inventory_quantity: 8 });
-  db = { ...db, settings: { ...db.settings, lock_date: date } };
+  db = write({ ...db, settings: { ...db.settings, lock_date: date } }, 'res.company', 1, { lock_date: date });
   const original = structuredClone(db);
   assert.throws(() => applyInventory(db, [q.id], { date }), /lock|closed/i);
   assert.deepEqual(db, original);
@@ -201,7 +201,7 @@ test('zero-value and periodic counts obey hard and closed fiscal-year locks', ()
   db = transfer(db, product, 5, 'incoming', null, a);
   const q = quants(db, product).find((q) => q.quantity);
   db = write(db, 'stock.quant', q.id, { inventory_quantity: 6 });
-  assert.throws(() => applyInventory({ ...db, settings: { ...db.settings, hard_lock_date: date } }, [q.id], { date }), /lock|closed/i);
+  assert.throws(() => applyInventory(write({ ...db, settings: { ...db.settings, hard_lock_date: date } }, 'res.company', 1, { hard_lock_date: date }), [q.id], { date }), /lock|closed/i);
   const closed = { ...db, records: { ...db.records, 'account.fiscal.year': [{ id: 1, company_id: 1, date_from: '2026-01-01', date_to: '2026-12-31', state: 'closed' }] } };
   assert.throws(() => applyInventory(closed, [q.id], { date }), /lock|closed/i);
 });
