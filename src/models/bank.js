@@ -25,10 +25,11 @@ const modelFor = (db, line) => suggestRule(db, line)
 const inboundTypes = ['out_invoice', 'in_refund'];
 const outboundTypes = ['in_invoice', 'out_refund'];
 
-/** Why this line cannot settle this invoice/bill: not open or wrong company/direction. */
-export function matchError(line, move) {
+/** Why this line cannot settle this invoice/bill. */
+export function matchError(db, line, move) {
   if (!move) return 'Select an invoice or bill to match';
   if ((line.company_id ?? 1) !== (move.company_id ?? 1)) return 'The invoice belongs to another company';
+  if (line.partner_id && !sameCommercialPartner(db, line.partner_id, move.partner_id)) return 'The invoice belongs to a different commercial partner';
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) return 'A bank transaction of 0 cannot be reconciled';
   if (move.state !== 'posted' || !(move.amount_residual > 0)) return `${move.name} has nothing left to pay`;
   const incoming = line.amount > 0;
@@ -51,7 +52,7 @@ export function candidates(db, line) {
 /** Apply the available statement balance to an invoice; an excess is held in bank suspense. */
 export function reconcileWith(db, line, moveId) {
   const move = read(db, 'account.move', moveId);
-  const err = matchError(line, move);
+  const err = matchError(db, line, move);
   if (err) throw new Error(err);
   if (line.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
   const date = line.date ?? today();
@@ -268,9 +269,9 @@ function autoReconcile(db, line) {
     if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice candidate');
     throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');
   }
-  const match = exact.find((m) => sameCommercialPartner(db, m.partner_id, line.partner_id));
-  if (!match) throw new Error('No open invoice or bill with this exact amount belongs to the statement partner. Pick one in "Match with" or book it to an account.');
-  return { db: reconcileWith(db, line, match.id) };
+  if (!exact.length) throw new Error('No open invoice or bill with this exact amount belongs to the statement partner. Pick one in "Match with" or book it to an account.');
+  if (exact.length > 1) throw new Error('Multiple invoices match. Review and select one in "Match with".');
+  return { db: reconcileWith(db, line, exact[0].id) };
 }
 
 function bookToAccount(db, line) {
