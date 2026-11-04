@@ -209,7 +209,7 @@ test('Customer Statement menu displays the selected customer and period and prin
   entry('2026-02-01', 50, 'INVOICE TEST');
   entry('2026-02-02', -20, 'PAYMENT TEST');
   entry('2026-02-04', -10, 'CREDIT NOTE TEST');
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: other.id }).db;
+  for (const [code, type] of [['400000', 'income']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: other.id }).db;
   db = create(db, 'account.journal', { code: 'MISC', name: 'Other journal', type: 'general', company_id: other.id }).db;
   db = postEntry(db, { journal: 'MISC', date: '2026-02-03', ref: 'HIDDEN COMPANY ENTRY', company: other.id, lines: [{ account: '121000', partner_id: partner.id, debit: 700 }, { account: '400000', credit: 700 }] }).db;
   await commit(db);
@@ -388,7 +388,7 @@ test('Fiscal Report menu groups period movements by category, drills down and fo
   const { createRoot } = await import('react-dom/client');
   const { initStore, commit } = await import('./store.js');
   const { seed } = await import('./seed.js');
-  const { create, updateSettings, write } = await import('./orm.js');
+  const { create, read, updateSettings, write } = await import('./orm.js');
   const { createCompany } = await import('./models/company.js');
   const { accountId, postEntry } = await import('./models/ledger.js');
   const { trialBalance } = await import('./models/reports.js');
@@ -399,9 +399,8 @@ test('Fiscal Report menu groups period movements by category, drills down and fo
   const category = create(other.db, 'account.fiscal.category', { name: 'Fiscal Test Category', company_id: 1 });
   const foreign = create(category.db, 'account.fiscal.category', { name: 'Fiscal Foreign Category', company_id: other.id });
   let db = write(foreign.db, 'account.account', accountId(foreign.db, '121000', 1), { fiscal_category_id: category.id });
-  for (const [code, name, type] of [['121000', 'Foreign Receivable', 'asset_receivable'], ['400000', 'Foreign Income', 'income']]) {
-    db = create(db, 'account.account', { code, name, account_type: type, company_id: other.id, ...(code === '121000' ? { fiscal_category_id: foreign.id } : {}) }).db;
-  }
+  db = write(db, 'account.account', read(db, 'res.company', other.id).account_default_receivable_id, { fiscal_category_id: foreign.id });
+  db = create(db, 'account.account', { code: '400000', name: 'Foreign Income', account_type: 'income', company_id: other.id }).db;
   db = create(db, 'account.journal', { code: 'MISC', name: 'Foreign Misc', type: 'general', company_id: other.id }).db;
   const post = (company, date, amount) => { db = postEntry(db, { journal: 'MISC', company, date, lines: [{ account: '121000', debit: amount }, { account: '400000', credit: amount }] }).db; };
   post(1, '2026-01-01', 900);
@@ -524,7 +523,7 @@ test('Journal Items menu lists posted lines, filters, groups and opens entries w
   let db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1] });
   const entry = postEntry(db, { journal: 'MISC', company: 1, date: '2026-02-01', ref: 'VISIBLE JOURNAL LINE', lines: [{ account: '121000', partner_id: 1, debit: 55 }, { account: '400000', credit: 55 }] });
   db = entry.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: company.id }).db;
+  for (const [code, type] of [['400000', 'income']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: company.id }).db;
   db = create(db, 'account.journal', { code: 'MISC', name: 'Other journal', type: 'general', company_id: company.id }).db;
   db = postEntry(db, { journal: 'MISC', company: company.id, date: '2026-02-01', ref: 'HIDDEN JOURNAL LINE', lines: [{ account: '121000', debit: 99 }, { account: '400000', credit: 99 }] }).db;
   db = create(db, 'account.move', { move_type: 'entry', state: 'draft', company_id: 1, name: 'DRAFT JOURNAL LINE', line_ids: [{ name: 'DRAFT JOURNAL LINE', debit: 12 }] }).db;

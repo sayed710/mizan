@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
-import { paymentJournal, postEntry } from './ledger.js';
+import { partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { toCompany } from './currency.js';
 
@@ -122,7 +122,7 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const booked = postEntry(db, { journal: via.code, journal_id: journalId ?? null, date, ref: `Prepayment ${r.name}`, company: r.company_id ?? 1, lines: [
     { account: via.account, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
-    { account: '121000', credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
+    { account: partnerAccount(db, r.partner_id, companyId, 'receivable'), credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
   ] });
   const payment = create(booked.db, 'account.payment', {
     name, state: 'posted', partner_type: 'customer', payment_type: 'inbound', partner_id: r.partner_id,
