@@ -1,4 +1,4 @@
-import { create, postNote, read, search, write } from '../orm.js';
+import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
@@ -78,6 +78,8 @@ export function paymentGuard(db, before, after, ctx) {
     }
   }
   const leavesPosted = before?.state === 'posted' && after.state !== 'posted';
+  if (leavesPosted && before.move_type === 'in_invoice' && (db.records['account.asset'] ?? []).some((asset) => asset.bill_id === before.id
+    && (['open', 'paused', 'close'].includes(asset.state) || (asset.depreciation_ids ?? []).some((line) => line.posted)))) return 'Handle the bill\'s running or depreciated assets before resetting it';
   // A posted credit may have enabled an advance; resetting it must not undo that protection.
   if (leavesPosted && before.move_type === 'out_refund' && before.sale_id) {
     const order = read(db, 'sale.order', before.sale_id);
@@ -229,6 +231,7 @@ function creditCheck(db, note) {
   if (invoice.move_type !== (note.move_type === 'out_refund' ? 'out_invoice' : 'in_invoice')) throw new Error(`A ${note.move_type === 'out_refund' ? 'credit note' : 'refund'} can only reverse a ${note.move_type === 'out_refund' ? 'customer invoice' : 'vendor bill'}`);
   if (invoice.partner_id !== note.partner_id) throw new Error(`The partner must be the one of ${invoice.name}`);
   if ((invoice.currency_id ?? null) !== (note.currency_id ?? null)) throw new Error(`The currency must be the one of ${invoice.name}`);
+  if ((invoice.company_id ?? 1) !== (note.company_id ?? 1)) throw new Error('The credit note must belong to the invoice company');
   if (!(total(note) > 0)) throw new Error('A credit note must have a positive total');
   const credited = creditNotesOf(db, invoice.id, note.id).filter((m) => m.state === 'posted').reduce((s, m) => s + total(m), 0);
   if (round2(credited + total(note)) > round2(total(invoice))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(round2(total(invoice) - credited))} is left to credit`);
@@ -254,13 +257,13 @@ function offsetCreditNote(db, noteId) {
   const sale = !isPurchase(invoice);
   const gap = round2(invoicePortion - notePortion);
   if (gap) {
-    const account = sale ? '121000' : '211000';
+    const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
     // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const open = clearsDebit ? { account, debit: amount, partner_id: invoice.partner_id } : { account, credit: amount, partner_id: invoice.partner_id };
-    const fxLine = clearsDebit ? { account: '450100', credit: amount } : { account: '690100', debit: amount };
-    next = postEntry(next, { journal: 'MISC', date, ref: `Exchange difference ${note.name}`, lines: [open, fxLine] }).db;
+    const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? amount : -amount);
+    next = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines] }).db;
   }
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
@@ -268,21 +271,30 @@ function offsetCreditNote(db, noteId) {
 /** Bill lines booked on a fixed-asset account become draft assets (once per bill line). */
 function draftAssetsFromBill(db, bill) {
   const fixed = new Set((db.records['account.account'] ?? []).filter((a) => a.account_type === 'asset_fixed').map((a) => a.id));
-  const already = new Set((db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id).map((a) => a.bill_line));
-  return (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
+  const existing = (db.records['account.asset'] ?? []).filter((a) => a.bill_id === bill.id && a.state === 'draft');
+  const retained = new Set();
+  const result = (bill.invoice_line_ids ?? []).reduce((next, line, index) => {
     const booked = postedBillLine(bill, index);
-    if (!booked || booked.amount === 0 || already.has(index)) return next;
+    if (!booked || booked.amount === 0) return next;
     const account = read(next, 'account.account', booked.account);
     const model = account?.asset_model_id ? read(next, 'account.asset.model', account.asset_model_id) : null;
     if (!fixed.has(booked.account) && !model) return next;
     const product = read(next, 'product', line.product_id);
-    return create(next, 'account.asset', {
+    const values = {
       name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
       partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
       account_asset_id: model?.account_asset_id ?? booked.account,
       ...(model ? { model_id: model.id, method: model.method ?? 'linear', method_number: model.method_number ?? 5, method_period: model.method_period ?? '12', method_progress_factor: model.method_progress_factor ?? 0.3, prorata: Boolean(model.prorata), account_depreciation_id: model.account_depreciation_id ?? null, account_expense_id: model.account_expense_id ?? null, journal_id: model.journal_id ?? null, analytic_distribution: model.analytic_distribution ?? null } : {}),
-    }).db;
+    };
+    const asset = existing.find((a) => a.bill_line === index);
+    if (asset) {
+      retained.add(asset.id);
+      return write(next, 'account.asset', asset.id, { ...values, depreciation_ids: [] });
+    }
+    return create(next, 'account.asset', values).db;
   }, db);
+  const obsolete = existing.filter((asset) => !retained.has(asset.id)).map((asset) => asset.id);
+  return obsolete.length ? unlink(result, 'account.asset', obsolete) : result;
 }
 
 /**
