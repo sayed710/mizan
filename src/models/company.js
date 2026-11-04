@@ -321,7 +321,7 @@ export const companyModels = {
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
-      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual']] },
+      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },
       deferred_amount_computation_method: { type: 'selection', label: 'Based on', options: [['months', 'Months'], ['full_months', 'Full Months'], ['days', 'Days']] },
       income_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Gain Account' },
       expense_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Loss Account' },

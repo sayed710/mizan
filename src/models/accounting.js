@@ -745,6 +745,9 @@ export const accountingModels = {
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
       revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
+      deferral_date: { type: 'date', label: 'Deferral Date', readonly: true },
+      deferral_kind: { type: 'selection', label: 'Deferral Kind', readonly: true, options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']] },
+      is_deferred_grouped: { type: 'boolean', label: 'Grouped Deferral Entry', readonly: true, hidden: true },
       reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
       correction_of_id: { type: 'many2one', relation: 'account.move', label: 'Correction of', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },

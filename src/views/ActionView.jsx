@@ -126,9 +126,14 @@ export function ActionView({ leaf, base, params }) {
       {(def.listActions ?? []).map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
         try {
           const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
-          if (!ids.length) return;
+          if (!ids.length && !action.noSelection) return;
           let options;
-          if (action.label === 'Request a count') {
+          if (action.ask) {
+            const promptDefault = typeof action.ask.default === 'function' ? action.ask.default() : (action.ask.default ?? '');
+            const val = prompt(t(action.ask.label), promptDefault);
+            if (val == null) return;
+            options = val;
+          } else if (action.label === 'Request a count') {
             const date = prompt(t('Scheduled Count Date'), new Date().toISOString().slice(0, 10));
             if (date == null) return;
             const name = prompt(t('Counter (name, optional)'), '');
@@ -136,8 +141,7 @@ export function ActionView({ leaf, base, params }) {
             const user = name ? searchRecords(getDb(), 'hr.employee').find((u) => u.name === name) : null;
             if (name && !user) throw new Error(t('Select an existing counter'));
             options = { date, user_id: user?.id ?? null };
-          }
-          if (action.label === 'Snooze') {
+          } else if (action.label === 'Snooze') {
             const duration = prompt(t('Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)'), '1 day');
             if (duration == null) return;
             options = duration;
