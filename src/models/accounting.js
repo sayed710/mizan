@@ -15,6 +15,7 @@ import { t } from '../i18n.js';
 import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
+import { ASSET_DEPRECIATION_DEFAULTS } from './assets.js';
 
 const exchangeLines = (db, companyId, difference) => {
   if (!difference) return [];
@@ -179,6 +180,13 @@ export function postMove(db, id) {
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   if (!validInvoiceTotal(r)) throw new Error('The total must be positive; use a credit note or refund instead');
+  const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
+  if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
+  const journalRecord = read(db, 'account.journal', journal);
+  if (!journalRecord) throw new Error('Selected journal does not exist');
+  if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
+  const expectedType = isPurchase(r) ? 'purchase' : 'sale';
+  if (journalRecord.type !== expectedType) throw new Error(`Journal must be of type ${expectedType}`);
   if (r.sale_id) {
     const sale = read(db, 'sale.order', r.sale_id);
     if (sale && (sale.company_id ?? 1) !== (r.company_id ?? 1)) throw new Error('Invoice and sales order must belong to the same company');
@@ -200,10 +208,6 @@ export function postMove(db, id) {
     return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
   });
   const updatedR = { ...r, invoice_line_ids: resolvedLines };
-  const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
-  if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
-  const journalRecord = read(db, 'account.journal', journal);
-  if (journalRecord?.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (line_ids.some((line) => {
     const account = read(db, 'account.account', line.account_id);
@@ -298,7 +302,25 @@ function draftAssetsFromBill(db, bill) {
       name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
       partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
       account_asset_id: model?.account_asset_id ?? booked.account,
-      ...(model ? { model_id: model.id, method: model.method ?? 'linear', method_number: model.method_number ?? 5, method_period: model.method_period ?? '12', method_progress_factor: model.method_progress_factor ?? 0.3, prorata: Boolean(model.prorata), account_depreciation_id: model.account_depreciation_id ?? null, account_expense_id: model.account_expense_id ?? null, journal_id: model.journal_id ?? null, analytic_distribution: model.analytic_distribution ?? null } : {}),
+      ...(model ? {
+        model_id: model.id,
+        method: model.method ?? 'linear',
+        method_number: model.method_number ?? 5,
+        method_period: model.method_period ?? '12',
+        method_progress_factor: model.method_progress_factor ?? 0.3,
+        prorata: Boolean(model.prorata),
+        account_depreciation_id: model.account_depreciation_id ?? null,
+        account_expense_id: model.account_expense_id ?? null,
+        journal_id: model.journal_id ?? null,
+        analytic_distribution: model.analytic_distribution ?? null,
+      } : {
+        model_id: null,
+        ...ASSET_DEPRECIATION_DEFAULTS,
+        account_depreciation_id: null,
+        account_expense_id: null,
+        journal_id: null,
+        analytic_distribution: null,
+      }),
     };
     const asset = existing.find((a) => a.bill_line === index);
     if (asset) {
@@ -704,7 +726,12 @@ export const accountingModels = {
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
       move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      journal_id: {
+        type: 'many2one',
+        relation: 'account.journal',
+        label: 'Journal',
+        domain: (j, r) => (!j.company_id || j.company_id === (r?.company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
+      },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },

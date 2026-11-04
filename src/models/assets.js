@@ -5,6 +5,9 @@ import { accountId, journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
 
+/** Depreciation settings of an asset without a model. */
+export const ASSET_DEPRECIATION_DEFAULTS = { method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false };
+
 const DAY = 86400000;
 const pad2 = (n) => String(n).padStart(2, '0');
 const monthEnd = (y, m) => `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
@@ -200,7 +203,7 @@ export const assetModels = {
       account_gain_id: { type: 'many2one', relation: 'account.account', label: 'Gain Account' },
       account_loss_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
     },
-    defaults: () => ({ acquisition_date: today(), method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, state: 'draft', depreciation_ids: [], company_id: 1 }),
+    defaults: () => ({ acquisition_date: today(), ...ASSET_DEPRECIATION_DEFAULTS, state: 'draft', depreciation_ids: [], company_id: 1 }),
     createDefaults: (db, vals) => {
       const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
       if (!model) return {};

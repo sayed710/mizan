@@ -48,6 +48,17 @@ const idByCode = (db, model, code, company) => {
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
 export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
 
+export function resolveCompanyAccount(db, accountId, companyId) {
+  if (!accountId) return null;
+  const acc = read(db, 'account.account', accountId);
+  if (!acc) return null;
+  const comp = companyId ?? 1;
+  if (!acc.company_id || acc.company_id === comp) return acc.id;
+  const records = db.records['account.account'] ?? [];
+  const match = records.find((a) => a.code === acc.code && a.company_id === comp);
+  return match?.id ?? null;
+}
+
 /** Whether any line has a negative debit or credit. */
 export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) || 0) < 0 || (Number(l.credit) || 0) < 0);
 export const isBalanced = (lines = []) =>
@@ -66,28 +77,29 @@ export function invoiceBaseGroups(db, move) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const base = accountId(db, sale ? '400000' : '600000', move.company_id);
   const byAccount = new Map();
-  const productAccount = (l) => {
+  const getSourceAccount = (l) => {
+    if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
-    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200', move.company_id);
-    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
-    const acc = configured ? read(db, 'account.account', configured) : null;
-    if (acc) {
-      if (!acc.company_id || acc.company_id === (move.company_id ?? 1)) return acc.id;
-      const matched = accountId(db, acc.code, move.company_id);
-      if (matched) return matched;
+    if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) {
+      return { accountId: accountId(db, '110200', move.company_id), configured: true, type: 'valuation' };
     }
-    return null;
+    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+    if (configured) return { accountId: configured, configured: true, type: 'product' };
+    return { accountId: base, configured: false, type: 'default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
-    let lineAcc = l.account_id;
-    if (lineAcc) {
-      const acc = read(db, 'account.account', lineAcc);
-      if (acc && acc.company_id && acc.company_id !== (move.company_id ?? 1)) {
-        lineAcc = accountId(db, acc.code, move.company_id) || lineAcc;
+    const source = getSourceAccount(l);
+    if (!source.accountId) throw new Error(`No ${source.type} account found`);
+    const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);
+    const resolved = resolveCompanyAccount(db, mapped, move.company_id);
+    if (!resolved) {
+      if (source.configured) {
+        throw new Error(`Configured ${source.type} account does not exist for the invoice company`);
       }
+      throw new Error('No valid account for the invoice company');
     }
-    const original = mapAccount(db, move.fiscal_position_id, lineAcc || productAccount(l) || base);
+    const original = resolved;
     const deferred = l.deferred_start_date || l.deferred_end_date;
     if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
     const company = read(db, 'res.company', move.company_id ?? 1);
@@ -147,12 +159,9 @@ export function invoiceLines(db, move) {
   const taxAccountFor = (l) => {
     if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
     if (l.tax_account_id) {
-      const acc = read(db, 'account.account', l.tax_account_id);
-      if (acc) {
-        if (!acc.company_id || acc.company_id === (move.company_id ?? 1)) return acc.id;
-        const matched = accountId(db, acc.code, move.company_id);
-        if (matched) return matched;
-      }
+      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
+      if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
+      return resolved;
     }
     return taxAcc;
   };
