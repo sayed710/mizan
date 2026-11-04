@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { round } from '../money.js';
+import { companyCurrencyRecord, roundCurrency } from '../money.js';
 import { read, search } from '../orm.js';
 import { amounts } from '../models/common.js';
 import { closeSession, openSession, payOrder, posOrderTotal, priceLines, sessionTotals, startSession } from '../models/pos.js';
@@ -12,11 +12,14 @@ import { relationCandidates } from '../companyView.js';
 /** No open session: count the opening cash and start one. */
 function OpenSession() {
   const [cash, setCash] = useState('0');
+  const db = useDb();
+  const config = search(db, 'pos.config')[0];
+  const currency = companyCurrencyRecord(db, config?.company_id);
   return (
     <main className="pos pos-done">
       <form className="sheet receipt" onSubmit={(e) => { e.preventDefault(); commit(startSession(getDb(), cash).db); }}>
         <h2>{t('Opening Cash Control')}</h2>
-        <label>{t('Opening Cash')} <input type="number" step="0.01" min="0" value={cash} onChange={(e) => setCash(e.target.value)} autoFocus /></label>
+        <label>{t('Opening Cash')} <input type="number" step={currency?.rounding ?? 0.01} min="0" value={cash} onChange={(e) => setCash(e.target.value)} autoFocus /></label>
         <button type="submit" className="btn primary">{t('Open Session')}</button>
       </form>
     </main>
@@ -38,6 +41,8 @@ export function Pos() {
   const session = openSession(db);
   const configId = session?.config_id ?? (search(db, 'pos.config')[0]?.id ?? null);
   const config = configId ? read(db, 'pos.config', configId) : null;
+  const currency = companyCurrencyRecord(db, session?.company_id ?? config?.company_id);
+  const roundMoney = (value) => roundCurrency(value, currency);
 
   // Available Presets
   const availablePresets = (config?.available_preset_ids ?? []).map((id) => read(db, 'pos.preset', id)).filter(Boolean);
@@ -66,13 +71,13 @@ export function Pos() {
   const shown = posProducts(db, { configId, selectedCatId, query });
 
   const lines = priceLines(db, cart, Number(partner) || null, { pricelistId: preset?.pricelist_id ?? null, fiscalPositionId: preset?.fiscal_position_id ?? null });
-  const total = amounts(lines);
+  const total = amounts(lines, currency);
 
   // Cash rounding
   const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
   const { roundedTotal: payableTotal, roundingDifference } = posOrderTotal(db, lines, { configId, payments: splitPayments });
-  const paidSoFar = round(splitPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
-  const remaining = round(payableTotal - paidSoFar);
+  const paidSoFar = roundMoney(splitPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const remaining = roundMoney(payableTotal - paidSoFar);
   const validPayments = splitPayments.length > 0 && splitPayments.every((p) => {
     const amount = Number(p.amount);
     return p.amount !== '' && Number.isFinite(amount) && (payableTotal === 0 ? amount === 0 : payableTotal < 0 ? amount < 0 : amount > 0);
@@ -82,7 +87,7 @@ export function Pos() {
     requestKey.current = null;
     const next = [...splitPayments, { payment_method_id: method.id, amount: 0 }];
     const nextTotal = posOrderTotal(db, lines, { configId, payments: next }).roundedTotal;
-    next[next.length - 1].amount = round(nextTotal - paidSoFar);
+    next[next.length - 1].amount = roundMoney(nextTotal - paidSoFar);
     setSplitPayments(next);
   };
 
@@ -172,7 +177,7 @@ export function Pos() {
           preset_id: presetId ?? null,
         });
         commit(booked);
-        receipt = { id, name: read(booked, 'pos.order', id).name, total: total ?? round(read(booked, 'pos.order', id).amount_total + (Number(read(booked, 'pos.order', id).rounding_difference) || 0)) };
+        receipt = { id, name: read(booked, 'pos.order', id).name, total: total ?? roundMoney(read(booked, 'pos.order', id).amount_total + (Number(read(booked, 'pos.order', id).rounding_difference) || 0)) };
       }
     } catch (e) {
       alert(e.message);
@@ -328,7 +333,7 @@ export function Pos() {
                       <span>{method?.name}</span>
                       <input
                         type="number"
-                        step="0.01"
+                        step={currency?.rounding ?? 0.01}
                         aria-label={t('{method} amount', { method: method?.name })}
                         disabled={pending}
                         value={p.amount}
@@ -363,7 +368,7 @@ export function Pos() {
               type="button"
               className="btn primary"
               disabled={pending || !lines.length || !validPayments || Math.abs(remaining) > 0.005}
-              onClick={() => pay(splitPayments.map((p) => ({ ...p, amount: round(Number(p.amount)) })))}
+              onClick={() => pay(splitPayments.map((p) => ({ ...p, amount: roundMoney(Number(p.amount)) })))}
             >
               {t('Validate')}
             </button>

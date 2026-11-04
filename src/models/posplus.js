@@ -4,7 +4,7 @@ import { amounts } from './common.js';
 import { moreModels } from './more.js';
 import { openSession, payOrder, posOrderTotal, refundOrder, tendersOf, posPaymentMethods, resolvePosConfigAndPreset, orderCompany, resolvePosOrderCheckout } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { companyFilter } from './company.js';
 
 const baseOrder = moreModels['pos.order'];
@@ -141,7 +141,9 @@ export function applyLoyaltyToOrder(db, orderId, code) {
 /** Pay using method-specific settlements, returning cash overpayment as change. */
 export function payWithMethods(db, orderId, payments) {
   const order = draftOrder(db, orderId);
-  const unrounded = amounts(order.lines).total;
+  const currency = companyCurrencyRecord(db, orderCompany(db, order));
+  const roundMoney = (value) => roundCurrency(value, currency);
+  const unrounded = amounts(order.lines, currency).total;
   if (!order.lines.length || !Number.isFinite(unrounded) || unrounded < 0) throw new Error('The bill must have a non-negative total and at least one line');
   const session = openSession(db);
   if (!session) throw new Error('Open a session first');
@@ -171,20 +173,20 @@ export function payWithMethods(db, orderId, payments) {
       : enabledMethods.find((m) => m.type === legacyMethod || m.name?.toLowerCase() === payment.method?.toLowerCase());
     if (!match || !['cash', 'bank'].includes(match.type)) throw new Error('Payment method is not enabled');
     const method = match.type;
-    byMethod[method] = round(byMethod[method] + payment.amount);
-    resolved.push({ payment_method_id: match.id, method, amount: round(payment.amount) });
+    byMethod[method] = roundMoney(byMethod[method] + payment.amount);
+    resolved.push({ payment_method_id: match.id, method, amount: roundMoney(payment.amount) });
   }
-  const change = round(byMethod.cash + byMethod.bank - total);
+  const change = roundMoney(byMethod.cash + byMethod.bank - total);
   if (change < 0) throw new Error('Payments must cover the order total');
   if (change > byMethod.cash) throw new Error('Only cash may exceed the order total');
-  byMethod.cash = round(byMethod.cash - change);
+  byMethod.cash = roundMoney(byMethod.cash - change);
 
   // One settlement with the whole bill, its money split by method (FLOW-017: quantities are never split).
   let remainingChange = change;
   const tenders = resolved.map((p) => {
     const deduction = p.method === 'cash' ? Math.min(p.amount, remainingChange) : 0;
-    remainingChange = round(remainingChange - deduction);
-    return { ...p, amount: round(p.amount - deduction) };
+    remainingChange = roundMoney(remainingChange - deduction);
+    return { ...p, amount: roundMoney(p.amount - deduction) };
   }).filter((p) => p.amount > 0);
   const primaryMethodId = resolved[0]?.payment_method_id ?? enabledMethods.find((m) => m.type === 'cash')?.id ?? enabledMethods[0]?.id ?? 'cash';
 

@@ -3,7 +3,7 @@ import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
-import { allocateCents, companyCurrencyRecord, round } from '../money.js';
+import { allocateCents, companyCurrencyRecord, roundCurrency } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
@@ -57,7 +57,7 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const contribution of contributions) {
       if (!scheduleIds.has(contribution.schedule_id)) continue;
       const reversal = read(db, 'account.move', original.reversal_move_id);
-      const amount = round((contribution.board_lines ?? []).reduce((sum, line) => sum + line.amount, 0));
+      const amount = roundCurrency((contribution.board_lines ?? []).reduce((sum, line) => sum + line.amount, 0), companyCurrencyRecord(db, original.company_id));
       const deferred = original.line_ids?.[contribution.deferred_line_index];
       const recognized = original.line_ids?.[contribution.recognition_line_index];
       if (!reversal || reversal.state !== 'posted' || reversal.reversed_entry_id !== original.id || !deferred || !recognized || !(amount > 0)
@@ -156,6 +156,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
     throw new Error('Set a valid period end date');
   }
 
+  const currency = companyCurrencyRecord(db, companyId);
   const kindsToProcess = kind ? [kind] : ['revenue', 'expense'];
   let currentDb = db;
 
@@ -180,7 +181,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
     for (const s of schedules) {
       const boardLines = (s.board ?? []).map((line, index) => ({ line, index }))
         .filter(({ line }) => line.date <= date && !line.posted && !line.move_id);
-      const recognized = round(boardLines.reduce((sum, { line }) => sum + (Number(line.amount) || 0), 0));
+      const recognized = roundCurrency(boardLines.reduce((sum, { line }) => sum + (Number(line.amount) || 0), 0), currency);
       if (recognized > 0) {
         const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
         const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
@@ -203,7 +204,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
     const isRev = k === 'revenue';
     const deferredTotals = new Map();
     for (const item of recognizedItems) {
-      deferredTotals.set(item.deferred_account_id, round((deferredTotals.get(item.deferred_account_id) ?? 0) + item.amount));
+      deferredTotals.set(item.deferred_account_id, roundCurrency((deferredTotals.get(item.deferred_account_id) ?? 0) + item.amount, currency));
     }
 
     const lines = [

@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { amounts, nextName, subtotal, today } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
+import { TRANSITION, isSectionOrNote, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { installments } from './terms.js';
@@ -92,6 +92,7 @@ export function invoiceBaseGroups(db, move) {
     return { accountId: base, configured: false, type: 'default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
+    if (isSectionOrNote(l)) continue;
     const source = getSourceAccount(l);
     if (!source.accountId) throw new Error(`No ${source.type} account found`);
     const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);

@@ -43,10 +43,14 @@ export function productTax(db, product, side, fpId) {
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
 export const taxLabel = (l) => l.tax_name || `${Number(l.tax) || 0}%`;
 
+/** Display-only lines must not contribute to accounting amounts. */
+export const isSectionOrNote = (line) => Boolean(line && ['line_section', 'line_note'].includes(line.display_type));
+
 /** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
 export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null) {
   const by = new Map();
   for (const l of lines ?? []) {
+    if (isSectionOrNote(l)) continue;
     const account_id = accountOf(l);
     const tax_name = taxLabel(l);
     const key = `${account_id}|${tax_name}`;
@@ -67,11 +71,12 @@ export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, company
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
 export function lineTaxOf(l) {
+  if (isSectionOrNote(l)) return 0;
   const t = Number(l.tax) || 0;
   if (l.tax_type === 'fixed') return (Number(l.qty) || 0) * t;
   return l.tax_include ? gross(l) - gross(l) / (1 + t / 100) : (gross(l) * t) / 100;
 }
-export const lineUntaxed = (l) => gross(l) - (l.tax_include ? lineTaxOf(l) : 0);
+export const lineUntaxed = (l) => isSectionOrNote(l) ? 0 : gross(l) - (l.tax_include ? lineTaxOf(l) : 0);
 
 const TAX_TYPES = [['sale', 'Sales'], ['purchase', 'Purchases'], ['none', 'None']];
 

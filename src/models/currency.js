@@ -36,7 +36,17 @@ export const toCompany = (db, currencyId, amount, date, companyId = null) => rou
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
-    guard: (db, before, after) => Number.isFinite(Number(after.rounding ?? 0.01)) && Number(after.rounding ?? 0.01) > 0 ? null : 'Currency rounding must be positive',
+    guard: (db, before, after) => {
+      const rounding = Number(after.rounding ?? 0.01);
+      if (!Number.isFinite(rounding) || rounding <= 0) return 'Currency rounding must be positive';
+      if (!before || Number(before.rounding ?? 0.01) === rounding) return null;
+      const id = before.id;
+      const used = (db.records['res.company'] ?? []).some((company) => company.currency_id === id)
+        || (db.records['account.payment'] ?? []).some((payment) => payment.state === 'posted' && payment.currency_id === id)
+        || (db.records['account.move'] ?? []).some((move) => (move.state === 'posted' && move.currency_id === id)
+          || (move.line_ids ?? []).some((line) => line.currency_id === id));
+      return used ? 'Currency rounding cannot be changed while the currency is in use' : null;
+    },
     fields: {
       name: { type: 'char', label: 'Currency', required: true },
       symbol: { type: 'char', label: 'Symbol' },

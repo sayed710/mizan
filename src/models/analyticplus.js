@@ -6,6 +6,8 @@ import { moreModels } from './more.js';
 import { invoiceLines, invoiceLineAccount } from './ledger.js';
 import { round } from '../money.js';
 import { currentCompany } from './company.js';
+import { isSectionOrNote } from './taxes.js';
+export { isSectionOrNote } from './taxes.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
@@ -91,10 +93,6 @@ export function distributionOfLine(line, db, move) {
   }
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
-
-/** Whether a line is a section or note line. */
-export const isSectionOrNote = (line) =>
-  Boolean(line && ['line_section', 'line_note'].includes(line.display_type));
 
 /** Determine the winning applicability for a plan on a given move line context. */
 export function planApplicability(db, plan, line, move = null) {

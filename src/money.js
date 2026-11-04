@@ -28,11 +28,12 @@ export function roundCurrency(amount, currency) {
 export function currencyDecimalPlaces(currency) {
   const step = Number(currency?.rounding ?? 0.01);
   if (!Number.isFinite(step) || step <= 0) throw new Error('Currency rounding must be positive');
-  for (let digits = 0; digits < 15; digits++) {
-    const scaled = step * 10 ** digits;
-    if (Math.abs(scaled - Math.round(scaled)) < 1e-9) return digits;
-  }
-  return 15;
+  // Number#toString supplies the shortest decimal representing the increment,
+  // including scientific notation for very small values. Avoid an absolute
+  // tolerance here: it can mistake a nonzero increment for zero.
+  const [coefficient, exponent = '0'] = step.toString().split('e');
+  const fractionalDigits = (coefficient.split('.')[1] ?? '').length;
+  return Math.min(15, Math.max(0, fractionalDigits - Number(exponent)));
 }
 
 /** Format using the configured increment's decimal places, not an ISO-code default. */
