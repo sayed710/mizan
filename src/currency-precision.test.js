@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { allocateCents, currencyDecimalPlaces, currencyUnits, formatCurrency, roundCurrency } from './money.js';
 import { createCompany, ensureMainCompany } from './models/company.js';
 import { payMove, postMove, payWithDiscount } from './models/accounting.js';
-import { accountId } from './models/ledger.js';
+import { accountId, journalId } from './models/ledger.js';
 import { installments } from './models/terms.js';
 import { deferralBoard } from './models/deferred.js';
 import { unrealizedExchange, revalueForeignBalances } from './models/closing.js';
@@ -39,6 +39,7 @@ function setupPrecision(rounding, foreign) {
   const made = create(db, 'res.currency', { name: rounding === 1 ? 'JPY' : 'KWD', rounding, rate_ids: [{ date: '2025-01-01', rate: 2 }, { date: '2025-02-01', rate: 4 }] });
   db = made.db;
   let company = 1;
+  if (foreign) db = write(db, 'account.journal', journalId(db, 'BNK1'), { currency_id: made.id });
   if (!foreign) {
     const created = createCompany(db, { name: `Precision ${rounding}`, currency_id: made.id });
     db = created.db;
