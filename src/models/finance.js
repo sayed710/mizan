@@ -65,8 +65,14 @@ export function lockDateFor(settings = {}, move = {}) {
 
 const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
 const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
+export function returnCompanies(db, ret) {
+  if (!ret.tax_unit_id) return [ret.company_id ?? 1];
+  const unit = read(db, 'account.tax.unit', ret.tax_unit_id);
+  if (!unit || !(unit.company_ids ?? []).includes(ret.company_id ?? 1)) throw new Error('Tax unit must contain the return company');
+  return [...new Set(unit.company_ids)];
+}
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
-  .filter((r) => (r.company_id ?? 1) === companyId && r.id !== excludeId && ['submitted', 'paid'].includes(r.state))
+  .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state) && returnCompanies(db, r).includes(companyId))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
 function taxLockFor(db, move, settings = db.settings) {
@@ -416,6 +422,7 @@ export function taxAccounts(db, companyId) {
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
+  if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
   const accounts = taxAccounts(db, period?.company_id ?? period?.company);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   const transitions = new Set([accountId(db, TRANSITION.sale), accountId(db, TRANSITION.purchase)]);
@@ -449,6 +456,10 @@ export function taxReport(db, period) {
 
 
 export function validateTaxReturnPeriod(db, ret) {
+  if (ret.tax_unit_id) {
+    const reports = returnCompanies(db, ret).map((company_id) => validateTaxReturnPeriod(db, { ...ret, company_id, tax_unit_id: null }));
+    return { output: round(reports.reduce((s, r) => s + r.output, 0)), input: round(reports.reduce((s, r) => s + r.input, 0)), payable: round(reports.reduce((s, r) => s + r.payable, 0)) };
+  }
   // 1. Check for draft moves in the period
   const drafts = search(db, 'account.move').filter(
     (m) => m.state === 'draft'
@@ -479,9 +490,10 @@ export function validateTaxReturnPeriod(db, ret) {
 
 
 /** Calculate the closing from posted tax accounts and the return's payment configuration. */
-function taxClosingSpec(db, ret) {
+function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
   const type = read(db, 'account.return.type', ret.type_id);
   if (!type || (type.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
+  ret = { ...ret, company_id: companyId, tax_unit_id: null };
   const report = validateTaxReturnPeriod(db, ret);
   const accounts = taxAccounts(db, ret.company_id);
   const taxIds = new Set([...accounts.sale, ...accounts.purchase]);
@@ -512,20 +524,26 @@ function taxClosingSpec(db, ret) {
 /** Validate a submitted closing against its linked return and the posted ledger. */
 export function taxClosingMatchesReturn(db, ret) {
   const ids = ret.closing_move_ids ?? [];
-  if (ids.length !== 1) return false;
-  const move = read(db, 'account.move', ids[0]);
-  if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
-    || move.date !== ret.date_to || move.invoice_date !== ret.date_to || (move.company_id ?? 1) !== (ret.company_id ?? 1)) return false;
   // The candidate link may not yet be written on a local transition.
   const staged = { ...db, records: { ...db.records, 'account.return': (db.records['account.return'] ?? []).map((r) => r.id === ret.id ? ret : r) } };
   try {
-    const spec = taxClosingSpec(staged, ret);
-    const expected = spec.lines.map((line) => {
-      const net = round((line.debit ?? 0) - (line.credit ?? 0));
-      return [accountId(db, line.account, ret.company_id), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
-    });
-    const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
-    return round(Number(ret.total_amount_to_pay) || 0) === spec.payable && JSON.stringify(actual) === JSON.stringify(expected);
+    const companies = returnCompanies(staged, ret);
+    if (ids.length !== companies.length || new Set(ids).size !== ids.length) return false;
+    let payable = 0;
+    for (const companyId of companies) {
+      const move = ids.map((id) => read(db, 'account.move', id)).find((m) => (m?.company_id ?? 1) === companyId);
+      if (!move || move.tax_return_id !== ret.id || move.state !== 'posted' || move.move_type !== 'entry'
+        || move.date !== ret.date_to || move.invoice_date !== ret.date_to) return false;
+      const spec = taxClosingSpec(staged, ret, companyId);
+      payable = round(payable + spec.payable);
+      const expected = spec.lines.map((line) => {
+        const net = round((line.debit ?? 0) - (line.credit ?? 0));
+        return [accountId(db, line.account, companyId), line.partner_id ?? null, Math.max(0, net), Math.max(0, -net)];
+      });
+      const actual = (move.line_ids ?? []).map((line) => [line.account_id, line.partner_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0]);
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) return false;
+    }
+    return round(Number(ret.total_amount_to_pay) || 0) === payable;
   } catch {
     return false;
   }
@@ -535,9 +553,15 @@ export function taxClosingMatchesReturn(db, ret) {
 export function postTaxReturnClosing(db, returnId) {
   const ret = read(db, 'account.return', returnId);
   if (!ret || ret.state !== 'reviewed') throw new Error('A reviewed tax return is required for closing');
-  const { lines, payable } = taxClosingSpec(db, ret);
-  const entry = postEntry(db, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company: ret.company_id, tax_return_id: ret.id });
-  return { ...entry, payable };
+  const specs = returnCompanies(db, ret).map((company) => ({ company, ...taxClosingSpec(db, ret, company) }));
+  let next = db;
+  const ids = [];
+  for (const { company, lines } of specs) {
+    const entry = postEntry(next, { journal: 'MISC', date: ret.date_to, ref: `Tax Closing: ${ret.name}`, lines, company, tax_return_id: ret.id });
+    next = entry.db;
+    ids.push(entry.id);
+  }
+  return { db: next, ids, payable: round(specs.reduce((s, spec) => s + spec.payable, 0)) };
 }
 
 const BUCKETS = [['current', 'Not due', -Infinity, 0], ['1_30', '1-30', 1, 30], ['31_60', '31-60', 31, 60], ['61_90', '61-90', 61, 90], ['older', 'Older', 91, Infinity]];
@@ -562,7 +586,10 @@ export function taxesByTax(db, period = {}) {
 export function taxesByGrid(db, period = {}) {
   const rows = new Map();
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  for (const line of journalItems(db, period)) {
+  const items = period.tax_unit_id
+    ? returnCompanies(db, period).flatMap((company_id) => journalItems(db, { ...period, tax_unit_id: null, company_id }))
+    : journalItems(db, period);
+  for (const line of items) {
     if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
     const move = moves.get(line.move_id);
     const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);

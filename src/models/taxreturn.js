@@ -4,15 +4,14 @@ import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { accountId } from './ledger.js';
 import { postPayment } from './pay.js';
-import { moveDate, postTaxReturnClosing, returnTaxLock, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
+import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 
 /** The tax lock follows the latest submitted or paid return. */
-const syncTaxLockDate = (db, companyId, excludeId = null) => {
-  const date = returnTaxLock(db, companyId, excludeId) || null;
-  return updateSettings(db, {
-    tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: date },
-  });
+const syncTaxLockDate = (db, ret, excludeId = null) => {
+  const dates = { ...db.settings?.tax_lock_dates };
+  for (const companyId of returnCompanies(db, ret)) dates[companyId] = returnTaxLock(db, companyId, excludeId) || null;
+  return updateSettings(db, { tax_lock_dates: dates });
 };
 
 /** Determine if a return is an audit working file rather than a standard tax return. */
@@ -307,7 +306,7 @@ export function submitReturn(db, returnId) {
   const currentRet = read(currentDb, 'account.return', returnId);
   const closing = postTaxReturnClosing(currentDb, currentRet.id);
   let nextDb = closing.db;
-  const moveId = closing.id;
+  const moveIds = closing.ids;
   const finalPayable = closing.payable;
 
   nextDb = write(nextDb, 'account.return', currentRet.id, {
@@ -315,11 +314,11 @@ export function submitReturn(db, returnId) {
     date_lock: currentRet.date_to,
     date_submission: today(),
     total_amount_to_pay: finalPayable,
-    closing_move_ids: moveId ? [moveId] : currentRet.closing_move_ids ?? [],
+    closing_move_ids: moveIds,
     is_completed: false,
   });
 
-  return syncTaxLockDate(nextDb, currentRet.company_id ?? 1);
+  return syncTaxLockDate(nextDb, currentRet);
 }
 
 /** Pay a submitted tax return: registers outbound payment or inbound refund to payment_partner_id. */
@@ -394,7 +393,7 @@ export function payReturn(db, returnId) {
     state: 'paid',
     is_completed: true,
     ...(paymentId ? { payment_id: paymentId } : {}),
-  }), ret.company_id ?? 1);
+  }), ret);
 }
 
 /** Reset to draft: cancels closing move and unlocks period, forbidden after pay. */
@@ -405,7 +404,7 @@ export function resetReturnToDraft(db, returnId) {
     throw new Error('Paid returns cannot be reset to draft');
   }
 
-  let nextDb = syncTaxLockDate(db, ret.company_id ?? 1, ret.id);
+  let nextDb = syncTaxLockDate(db, ret, ret.id);
 
   // Cancel closing moves after removing this return's tax lock.
   for (const moveId of ret.closing_move_ids ?? []) {
@@ -425,13 +424,16 @@ export function resetReturnToDraft(db, returnId) {
     is_completed: false,
   });
 
-  return syncTaxLockDate(nextDb, ret.company_id ?? 1);
+  return syncTaxLockDate(nextDb, ret);
 }
 
 function returnGuard(db, before, after) {
   const isAudit = isAuditReturn(after, db);
   if (before && isAuditReturn(before, db) !== isAudit) return 'Cannot change a return between tax and audit workflows';
   if (!isAudit && after.audit_status != null) return 'Audit status requires an audit return type';
+  if (!isAudit && after.tax_unit_id) {
+    try { returnCompanies(db, after); } catch (error) { return error.message; }
+  }
   if (isAudit) {
     if (before?.audit_status === 'done') {
       const fields = new Set([...Object.keys(before), ...Object.keys(after)]);
@@ -467,7 +469,7 @@ function returnGuard(db, before, after) {
       || Number(payment.amount) !== Math.abs(Number(after.total_amount_to_pay))))) return 'Tax return payment requires a posted payment';
   }
   if (before && ['submitted', 'paid'].includes(before.state)) {
-    const LOCKED = ['type_id', 'date_from', 'date_to', 'company_id', 'total_amount_to_pay'];
+    const LOCKED = ['type_id', 'date_from', 'date_to', 'company_id', 'tax_unit_id', 'total_amount_to_pay'];
     if (LOCKED.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
       return 'Submitted or paid tax returns cannot be modified';
     }
@@ -567,10 +569,12 @@ export const taxReturnModels = {
     },
     fields: {
       name: { type: 'char', label: 'Return', required: true },
-      type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true },
+      // Working files (audit_status set) pick audit types, tax returns pick tax types, both in the record's company.
+      type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true, domain: (type, r) => (type.company_id ?? 1) === (r?.company_id ?? 1) && (type.category === 'audit') === Boolean(r?.audit_status) },
       date_from: { type: 'date', label: 'Start Date', required: true },
       date_to: { type: 'date', label: 'End Date', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      tax_unit_id: { type: 'many2one', relation: 'account.tax.unit', label: 'Tax Unit', domain: (unit, ret) => (unit.company_ids ?? []).includes(ret?.company_id ?? 1) },
       state: {
         type: 'selection',
         label: 'Status',
@@ -671,7 +675,7 @@ export const taxReturnModels = {
         ['type_id', 'date_from', 'date_to', 'company_id'],
         ['audit_status', 'date_deadline'],
       ] : [
-        ['type_id', 'date_from', 'date_to', 'company_id'],
+        ['type_id', 'date_from', 'date_to', 'company_id', 'tax_unit_id'],
         ['date_deadline', 'date_lock', 'date_submission', 'total_amount_to_pay', 'is_completed'],
       ]),
       tabs: (r, db, context) => (auditForm(r, db, context) ? [

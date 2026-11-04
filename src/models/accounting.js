@@ -927,6 +927,8 @@ Object.assign(accountingModels, {
     defaults: () => ({ company_ids: [] }),
     guard: (db, before, after) => {
       const companies = Array.isArray(after.company_ids) ? after.company_ids : [];
+      if (before && JSON.stringify([...new Set(before.company_ids ?? [])].sort()) !== JSON.stringify([...new Set(companies)].sort())
+        && (db.records['account.return'] ?? []).some((ret) => ret.tax_unit_id === before.id && ['submitted', 'paid'].includes(ret.state))) return 'Cannot change companies of a tax unit with submitted returns';
       if (new Set(companies).size < 2) return 'A tax unit must contain at least 2 companies';
       if (!after.main_company_id || !companies.includes(after.main_company_id)) return 'The main company must be one of the tax unit companies';
       if (companies.some((id) => !read(db, 'res.company', id))) return 'Select existing companies';

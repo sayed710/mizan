@@ -498,7 +498,7 @@ export function FormView({ leaf, id, base, params }) {
                 </div>
                 <div className="tab-panel" role="tabpanel">
                   {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
-                    <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id }} />
+                    <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id, tax_unit_id: current.tax_unit_id }} />
                   ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
                     ? (
                       <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
