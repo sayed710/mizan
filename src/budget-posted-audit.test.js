@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import './models/index.js';
 import { create, search } from './orm.js';
 import { seed } from './seed.js';
@@ -9,7 +10,7 @@ import { budgetReport } from './models/analyticplus.js';
 test('budget report uses posted analytic lines for each company and line period, with refund and drill-down', () => {
   let db = seed();
   const analytic = create(db, 'account.analytic.account', { name: 'Budget project' }); db = analytic.db;
-  const company = create(db, 'res.company', { name: 'Other company' }); db = company.db;
+  const company = create(db, 'res.company', { name: 'Other company', ...invoiceJournalDefaults(db) }); db = company.db;
   const post = (type, date, amount, companyId) => {
     const move = create(db, 'account.move', { move_type: type, partner_id: 1, company_id: companyId, invoice_date: date,
       invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: amount, tax: 0, analytic_distribution: { [analytic.id]: 100 } }] });

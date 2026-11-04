@@ -1,10 +1,10 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 import { journalItems } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -12,7 +12,7 @@ const LINE = 'account.bank.statement.line';
 const run = (db, id) => models[LINE].form.buttons.find((b) => b.label === 'Match').run(db, read(db, LINE, id)).db;
 function setup(type = 'out_invoice') {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch cash', account_type: 'asset_cash' });
   const journal = create(bank.db, 'account.journal', { company_id: branch.id, code: 'B2', name: 'Branch bank', type: 'bank', default_account_id: bank.id });
   const account = create(journal.db, 'account.account', { company_id: branch.id, code: '690777', name: 'Write-off', account_type: 'expense' });

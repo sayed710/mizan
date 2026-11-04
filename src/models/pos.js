@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, postEntry } from './ledger.js';
+import { accountId, invoiceLines, journalId, postEntry } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -564,9 +564,12 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
 }
 
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
+  const posJournalId = journalId(stocked, 'POSS', session.company_id);
+  if (!posJournalId) throw new Error('Configure a point of sale journal for this company');
   const sale = invoiceLines(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
     company_id: session.company_id,
+    journal_id: posJournalId,
     partner_id,
     fiscal_position_id: presetSnapshot.fiscal_position_id,
     name,
@@ -591,7 +594,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: 'POSS', company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {

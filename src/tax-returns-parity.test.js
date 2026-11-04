@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { seed } from './seed.js';
 import { today, addDays } from './models/common.js';
@@ -236,11 +237,19 @@ test('invoice confirmation only uses journals and accounts available to its comp
   db = foreignAccount.db;
   assert.equal(accountId(db, 'FOREIGN', company.id), null);
   assert.equal(accountId(db, 'FOREIGN'), foreignAccount.id);
+  const companyJournalDefaults = {};
   for (const [code, type] of [['INV', 'sale'], ['BILL', 'purchase']]) {
-    const journal = create(db, 'account.journal', { name: `Company ${code}`, code, type, company_id: company.id });
+    const journal = create(db, 'account.journal', {
+      name: `Company ${code}`, code, type, company_id: company.id,
+      default_account_id: accountId(db, type === 'sale' ? '400000' : '600000', company.id),
+      invoice_sequence_prefix: `PARITY-${code}/`, invoice_sequence_next_number: 1,
+      refund_sequence_prefix: `PARITY-R${code}/`, refund_sequence_next_number: 1,
+    });
     db = journal.db;
+    companyJournalDefaults[type === 'sale' ? 'default_sale_journal_id' : 'default_purchase_journal_id'] = journal.id;
     assert.equal(journalId(db, code, company.id), journal.id);
   }
+  db = write(db, 'res.company', company.id, companyJournalDefaults);
   const wrongAccount = makeInvoice(db, 'out_invoice', foreignAccount.id);
   assert.throws(() => confirm.run(wrongAccount.db, read(wrongAccount.db, 'account.move', wrongAccount.id)), /account.*company/i);
   for (const type of ['out_invoice', 'in_invoice']) {
@@ -286,9 +295,10 @@ test('journal entries sync with exact, shared and other-company account fallback
   assert.throws(() => postEntry(db, { journal: 'MISC', company: company.id, lines: [{ account: '987003', debit: 10 }, { account: '101401', credit: 10 }] }), /another company/i);
   const fallback = account('987003', 'Shared fallback', null);
   const makeEntry = (companyId) => {
+    const selected = companyId ? [exact, shared, fallback] : [first, shared, fallback];
     const entry = postEntry(db, { journal: 'MISC', date: '2025-01-15', company: companyId, lines: [
-      { account: '987001', debit: 10 }, { account: '987002', debit: 10 },
-      { account: '987003', debit: 10 }, { account: '101401', credit: 30 },
+      { account: selected[0], debit: 10 }, { account: selected[1], debit: 10 },
+      { account: selected[2], debit: 10 }, { account: accountId(db, '101401'), credit: 30 },
     ] });
     return read(applyDiff(db, diffDb(db, entry.db), { isAdmin: true }), 'account.move', entry.id);
   };
@@ -586,7 +596,7 @@ test('company isolation: tax report, journal items, and closing entries isolate 
   db = postMove(inv1.db, inv1.id);
 
   // Ensure Company 2 exists and post invoice in Company 2 (500 tax)
-  const co2 = createCompany(db, { name: 'Company Two' });
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Company Two' });
   db = co2.db;
   const inv2 = create(db, 'account.move', {
     company_id: co2.id, move_type: 'out_invoice', partner_id: 1, invoice_date: from,

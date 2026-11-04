@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { create, read } from './orm.js';
 import { models } from './models/index.js';
 import { applyDiff } from './sync.js';
-import { accountId, invoiceLines, isBalanced, postEntry } from './models/ledger.js';
+import { accountId, invoiceLines, isBalanced, journalId, postEntry } from './models/ledger.js';
 import { seed } from './seed.js';
 
 const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.move', id)).db;
@@ -11,7 +11,7 @@ const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.la
 test('a negative bucket on an invoice moves to the other side instead of a negative amount', () => {
   const db = seed();
   const other = accountId(db, '450000');
-  const lines = invoiceLines(db, { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [
+  const lines = invoiceLines(db, { move_type: 'out_invoice', partner_id: 3, journal_id: journalId(db, 'INV'), invoice_line_ids: [
     { product_id: 1, qty: 1, price_unit: 100, tax: 0 },
     { product_id: 1, qty: 1, price_unit: -150, tax: 0, account_id: other },
     { product_id: 1, qty: 1, price_unit: 200, tax: 0 },

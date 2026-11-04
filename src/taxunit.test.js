@@ -1,9 +1,9 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
-import { createCompany } from './models/company.js';
 import { postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { ensureReturnTypes } from './models/taxreturn.js';
@@ -11,7 +11,7 @@ import { taxReport, taxesByTax } from './models/finance.js';
 
 test('tax unit return reviews and closes each company once', () => {
   let db = seed();
-  const company = createCompany(db, { name: 'Subsidiary' });
+  const company = createCompanyWithDefaultInvoiceJournals(db, { name: 'Subsidiary' });
   db = company.db;
   const unit = create(db, 'account.tax.unit', { name: 'Unit', company_ids: [1, company.id], main_company_id: 1 });
   db = unit.db;

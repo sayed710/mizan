@@ -26,7 +26,7 @@ test('sale order of company 2 creates invoice belonging to company 2 and uses co
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
   // Create accounts and journal for company 2
-  const invJournalCo2 = create(db, 'account.journal', { name: 'Customer Invoices Co2', code: 'INV', type: 'sale', company_id: co.id });
+  const invJournalCo2 = create(db, 'account.journal', { name: 'Customer Invoices Co2', code: 'INV', type: 'sale', company_id: co.id, invoice_sequence_prefix: 'CO2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'CO2-RINV/', refund_sequence_next_number: 1, default_account_id: accountId(db, '400000', co.id) });
   db = invJournalCo2.db;
 
   const sale = create(db, 'sale.order', {
@@ -259,7 +259,7 @@ test('purchase order of company 2 creates bill belonging to company 2 and posts 
   const co = createCompany(db, { name: 'Purchase branch' });
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
-  const billJournalCo2 = create(db, 'account.journal', { name: 'Vendor Bills Co2', code: 'BILL', type: 'purchase', company_id: co.id });
+  const billJournalCo2 = create(db, 'account.journal', { name: 'Vendor Bills Co2', code: 'BILL', type: 'purchase', company_id: co.id, invoice_sequence_prefix: 'CO2-BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'CO2-RBILL/', refund_sequence_next_number: 1, default_account_id: accountId(db, '600000', co.id) });
   db = billJournalCo2.db;
 
   const p = create(db, 'product', {

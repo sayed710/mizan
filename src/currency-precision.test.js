@@ -1,10 +1,11 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { allocateCents, currencyDecimalPlaces, currencyUnits, formatCurrency, roundCurrency } from './money.js';
-import { createCompany, ensureMainCompany } from './models/company.js';
+import {ensureMainCompany} from './models/company.js';
 import { payMove, postMove, payWithDiscount } from './models/accounting.js';
 import { accountId, journalId } from './models/ledger.js';
 import { installments } from './models/terms.js';
@@ -41,7 +42,7 @@ function setupPrecision(rounding, foreign) {
   let company = 1;
   if (foreign) db = write(db, 'account.journal', journalId(db, 'BNK1'), { currency_id: made.id });
   if (!foreign) {
-    const created = createCompany(db, { name: `Precision ${rounding}`, currency_id: made.id });
+    const created = createCompanyWithDefaultInvoiceJournals(db, { name: `Precision ${rounding}`, currency_id: made.id });
     db = created.db;
     company = created.id;
   }
@@ -120,7 +121,7 @@ test('cash rounding and installments post in three-decimal foreign currency unit
 test('posting a deferred invoice builds a board in company currency units', () => {
   let db = ensureMainCompany(seed());
   const currency = create(db, 'res.currency', { name: 'KWD', rounding: 0.001 });
-  const company = createCompany(currency.db, { name: 'Deferral company', currency_id: currency.id });
+  const company = createCompanyWithDefaultInvoiceJournals(currency.db, { name: 'Deferral company', currency_id: currency.id });
   const made = create(company.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, company_id: company.id, currency_id: currency.id, invoice_date: '2025-01-02', invoice_line_ids: [{ qty: 1, price_unit: 10.125, tax: 0, deferred_start_date: '2025-01-01', deferred_end_date: '2025-03-31' }] });
   db = postMove(made.db, made.id);
   const schedule = search(db, 'account.deferral').find((d) => d.source_move_id === made.id);
@@ -183,7 +184,7 @@ for (const rounding of [1, 0.001]) {
   test(`${rounding === 1 ? 'zero' : 'three'} decimal company books and revalues a foreign invoice in company units`, () => {
     let db = ensureMainCompany(seed());
     const own = create(db, 'res.currency', { name: rounding === 1 ? 'JPY' : 'KWD', rounding, rate_ids: [{ date: '2025-01-01', rate: 2 }, { date: '2025-02-01', rate: 4 }] });
-    const company = createCompany(own.db, { name: 'Foreign books', currency_id: own.id });
+    const company = createCompanyWithDefaultInvoiceJournals(own.db, { name: 'Foreign books', currency_id: own.id });
     db = company.db;
     const usd = search(db, 'res.currency').find((c) => c.name === 'USD');
     const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, company_id: company.id, currency_id: usd.id, invoice_date: '2025-01-02', invoice_line_ids: [{ qty: 1, price_unit: 10.13, tax: 0 }] });

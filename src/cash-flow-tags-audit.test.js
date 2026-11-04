@@ -60,11 +60,17 @@ test('migration classifies legacy accounts using code and name defaults', () => 
   ];
   const ids = [];
   for (const [code, name, account_type, , amount] of cases) {
-    const account = create(db, 'account.account', { code, name, account_type, tag_ids: [] });
-    ids.push(account.id);
-    const cash = search(account.db, 'account.account').find((item) => item.code === '101401');
-    const move = create(account.db, 'account.move', { move_type: 'entry', invoice_date: '2040-03-05', line_ids: [
-      { account_id: account.id, credit: amount }, { account_id: cash.id, debit: amount },
+    const id = (db.seq['account.account'] ?? 0) + 1;
+    const legacyAccount = { id, code, name, account_type, tag_ids: [] };
+    db = {
+      ...db,
+      records: { ...db.records, 'account.account': [...db.records['account.account'], legacyAccount] },
+      seq: { ...db.seq, 'account.account': id },
+    };
+    ids.push(id);
+    const cash = search(db, 'account.account').find((item) => item.code === '101401');
+    const move = create(db, 'account.move', { move_type: 'entry', invoice_date: '2040-03-05', line_ids: [
+      { account_id: id, credit: amount }, { account_id: cash.id, debit: amount },
     ] });
     db = postMove(move.db, move.id);
   }

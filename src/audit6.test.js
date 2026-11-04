@@ -1,10 +1,10 @@
-﻿import test from 'node:test';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { create, read, search, updateSettings, write } from './orm.js';
-import { createCompany } from './models/company.js';
 import { postMove } from './models/accounting.js';
 import { confirmAsset } from './models/assets.js';
 import { accountId, journalItems } from './models/ledger.js';
@@ -21,7 +21,7 @@ const billWithAsset = () => {
 test('foreign credit settlement uses the document company and booked counterpart', () => {
   for (const [type, refund, partner, counterpartType] of [['out_invoice', 'out_refund', 2, 'asset_receivable'], ['in_invoice', 'in_refund', 3, 'liability_payable']]) {
     let db = seed();
-    const company = createCompany(db, { name: 'Other company' });
+    const company = createCompanyWithDefaultInvoiceJournals(db, { name: 'Other company' });
     db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
     let counterpart;
     for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {

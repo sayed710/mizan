@@ -1,6 +1,22 @@
 import { create, read } from '../orm.js';
 import { createCompany } from '../models/company.js';
 
+/** Copy the seeded company's explicit invoice journals into fixtures for a new company. */
+export function invoiceJournalDefaults(db, sourceCompanyId = 1) {
+  const company = read(db, 'res.company', sourceCompanyId);
+  const sales = company?.default_sale_journal_id && read(db, 'account.journal', company.default_sale_journal_id);
+  const purchases = company?.default_purchase_journal_id && read(db, 'account.journal', company.default_purchase_journal_id);
+  if (!sales || sales.type !== 'sale' || !purchases || purchases.type !== 'purchase') {
+    throw new Error(`Configure default sales and purchase journals on company ${sourceCompanyId} before creating this fixture`);
+  }
+  return { default_sale_journal_id: sales.id, default_purchase_journal_id: purchases.id };
+}
+
+/** A fixture company with the explicitly configured sales and purchase journals copied from company 1. */
+export function createCompanyWithDefaultInvoiceJournals(db, vals) {
+  return createCompany(db, { ...invoiceJournalDefaults(db), ...vals });
+}
+
 /** A second company with its own copies of selected accounts and journals. */
 export function accountingCompany(db) {
   const branch = createCompany(db, { name: 'Accounting branch', currency_id: db.records['res.company'][0].currency_id });

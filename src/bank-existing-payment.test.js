@@ -1,10 +1,10 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 test('match a registered invoice payment through outstanding receipts without another payment', () => {
@@ -37,7 +37,7 @@ test('match a registered invoice payment through outstanding receipts without an
 
 test('outgoing payment uses company and journal outstanding defaults and unmatches in its own company', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch Bank', account_type: 'asset_cash' });
   const outstandingAccount = create(bank.db, 'account.account', { company_id: branch.id, code: '101403', name: 'Branch Outstanding', account_type: 'asset_current' });
   const journal = create(outstandingAccount.db, 'account.journal', { company_id: branch.id, name: 'Branch Bank', code: 'BRB', type: 'bank', default_account_id: bank.id, outstanding_payments_account_id: outstandingAccount.id });

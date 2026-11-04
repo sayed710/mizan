@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import { DatabaseSync } from 'node:sqlite';
 import { seed } from './seed.js';
 import { create, read, write } from './orm.js';
@@ -16,7 +17,7 @@ const server = (old, next) => applyDiff(old, diffDb(old, next), { isAdmin: true 
 const entry = (db, company, date = '2026-01-01') => postEntry(db, { journal: 'SEC', date, company, lines: [{ account: '600000', debit: 100 }, { account: '211000', credit: 100 }] });
 const setup = () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = create(db, 'res.company', { name: 'Second company', ...invoiceJournalDefaults(db) }); db = company.db;
   const journal = create(db, 'account.journal', { name: 'Secure journal', code: 'SEC', restrict_mode_hash_table: true }); db = journal.db;
   return { db, company: company.id, journal: journal.id };
 };

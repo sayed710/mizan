@@ -31,22 +31,51 @@ export const CHART = [
 ];
 
 export const JOURNALS = [
-  ['INV', 'Customer Invoices', 'sale', '400000'], ['BILL', 'Vendor Bills', 'purchase', '600000'], ['BNK1', 'Bank', 'bank', '101401'],
-  ['CSH1', 'Cash', 'cash', '101501'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', '620000'],
-  ['POSS', 'Point of Sale', 'sale', '400000'],
+  { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
+  { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401' },
+  { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501' },
+  { code: 'MISC', name: 'Miscellaneous Operations', type: 'general' },
+  { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
+  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1 },
 ];
+
+const uniqueByCode = (records, model, code, predicate = () => true) => {
+  const matches = records.filter((record) => record.code === code && predicate(record));
+  if (matches.length > 1) throw new Error(`Multiple ${model} records use code ${code}; select a record explicitly`);
+  return matches[0] ?? null;
+};
 
 const idByCode = (db, model, code, company) => {
   const records = db.records[model] ?? [];
   if (company) {
-    const match = records.find((record) => record.code === code && record.company_id === company);
+    const match = uniqueByCode(records, model, code, (record) => record.company_id === company);
     if (match) return match.id;
+    return uniqueByCode(records, model, code, (record) => !record.company_id)?.id ?? null;
   }
-  return records.find((record) => record.code === code && (!company || !record.company_id))?.id ?? null;
+  return (uniqueByCode(records, model, code, (record) => !record.company_id)
+    ?? uniqueByCode(records, model, code))?.id ?? null;
 };
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
 export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
+
+/** Resolve a selected invoice journal or its explicit company default. */
+export function resolveInvoiceJournal(db, move, { required = false } = {}) {
+  if (move.journal_id) return move.journal_id;
+  const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+  const sale = ['out_invoice', 'out_refund'].includes(move.move_type);
+  if (!purchase && !sale && move.move_type) return null;
+  const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  const journal = company?.[purchase ? 'default_purchase_journal_id' : 'default_sale_journal_id'];
+  if (!journal && required) {
+    const kind = purchase ? 'purchase' : 'sales';
+    const document = purchase ? 'vendor bill' : 'customer invoice';
+    throw new Error(`No ${document} journal for this company; select a journal or configure a default ${kind} journal for company ${companyId}`);
+  }
+  return journal ?? null;
+}
 
 export function resolveCompanyAccount(db, accountId, companyId) {
   if (!accountId) return null;
@@ -54,8 +83,7 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  const records = db.records['account.account'] ?? [];
-  const match = records.find((a) => a.code === acc.code && a.company_id === comp);
+  const match = uniqueByCode(db.records['account.account'] ?? [], 'account.account', acc.code, (account) => account.company_id === comp);
   return match?.id ?? null;
 }
 
@@ -78,7 +106,19 @@ export function invoiceCounterpartAccount(db, invoice) {
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const base = accountId(db, sale ? '400000' : '600000', move.company_id);
+  let base;
+  const journalDefaultAccount = () => {
+    if (base) return base;
+    const journalId = resolveInvoiceJournal(db, move, { required: true });
+    const journal = read(db, 'account.journal', journalId);
+    const account = journal?.default_account_id && read(db, 'account.account', journal.default_account_id);
+    if (!account) throw new Error('Configure a default account on the selected journal');
+    if (account.company_id && account.company_id !== (move.company_id ?? 1)) {
+      throw new Error('The selected journal default account belongs to another company');
+    }
+    base = account.id;
+    return base;
+  };
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -89,7 +129,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    return { accountId: base, configured: false, type: 'default' };
+    return { accountId: journalDefaultAccount(), configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     if (isSectionOrNote(l)) continue;
@@ -316,7 +356,13 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     let accId = null;
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
-    else if (l.account) accId = accountId(db, l.account, company) ?? accountId(db, l.account);
+    else if (l.account) {
+      accId = accountId(db, l.account, company);
+      if (!accId && company && (db.records['account.account'] ?? []).some((account) => account.code === l.account
+        && account.company_id && account.company_id !== company)) {
+        throw new Error(`Account ${l.account} belongs to another company`);
+      }
+    }
     if (!accId) throw new Error(`Account not found: ${l.account}`);
     const acc = read(db, 'account.account', accId);
     if (!acc) throw new Error(`Account not found: ${accId}`);

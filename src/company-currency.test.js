@@ -1,10 +1,11 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
-import { createCompany, ensureMainCompany } from './models/company.js';
+import {ensureMainCompany} from './models/company.js';
 import { accountId } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
 import { rateAt } from './models/currency.js';
@@ -14,7 +15,7 @@ const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.la
 const currency = (db, name) => search(db, 'res.currency').find((c) => c.name === name)?.id;
 const setup = () => {
   const base = ensureMainCompany(seed());
-  const db = createCompany(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') }).db;
+  const db = createCompanyWithDefaultInvoiceJournals(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') }).db;
   return { db, company: search(db, 'res.company').at(-1).id };
 };
 const invoice = (db, company, currencyId, price) => {

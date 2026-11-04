@@ -1,9 +1,9 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { accountId } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { register } from 'node:module';
@@ -17,7 +17,7 @@ function invoice(db, company, amount) {
 }
 
 test('journal-less inbound batch matches a statement in its payments company', () => {
-  const branch = createCompany(seed(), { name: 'Branch' });
+  const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
   let db = write(branch.db, 'res.company', branch.id, { outstanding_receipts_account_id: accountId(branch.db, '101402', branch.id) });
   const inv = invoice(db, branch.id, 100);
   const batch = create(inv.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: inv.id, amount: 100 }] });
@@ -32,7 +32,7 @@ test('journal-less inbound batch matches a statement in its payments company', (
 });
 
 test('journal-less inbound batch rejects mixed-company invoices before posting', () => {
-  const branch = createCompany(seed(), { name: 'Branch' });
+  const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
   const first = invoice(branch.db, 1, 40);
   const second = invoice(first.db, branch.id, 60);
   const batch = create(second.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: first.id, amount: 40 }, { move_id: second.id, amount: 60 }] });
@@ -42,7 +42,7 @@ test('journal-less inbound batch rejects mixed-company invoices before posting',
 });
 
 test('matching rejects an existing journal-less batch with payments from different companies', () => {
-  const branch = createCompany(seed(), { name: 'Branch' });
+  const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
   const first = invoice(branch.db, 1, 40);
   const second = invoice(first.db, branch.id, 60);
   const batches = [];
@@ -145,8 +145,8 @@ test('customer statement selects an allowed company independently of the active 
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
   await initStore();
-  const branch = createCompany(getDb(), { name: 'Allowed branch' });
-  const other = createCompany(branch.db, { name: 'Restricted branch' });
+  const branch = createCompanyWithDefaultInvoiceJournals(getDb(), { name: 'Allowed branch' });
+  const other = createCompanyWithDefaultInvoiceJournals(branch.db, { name: 'Restricted branch' });
   const first = invoice(other.db, 1, 120);
   const second = invoice(first.db, branch.id, 240);
   const db = { ...second.db, settings: { ...second.db.settings, current_company_id: 1, allowed_company_ids: [1, branch.id] } };

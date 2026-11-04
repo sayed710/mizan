@@ -11,6 +11,7 @@ import { diffDb } from '../src/sync.js';
 import { create, postTracking, read, search, unlink, updateSettings } from '../src/orm.js';
 import { models } from '../src/models/index.js';
 import { createCompany } from '../src/models/company.js';
+import { createCompanyWithDefaultInvoiceJournals } from '../src/test-support/accounting-company.js';
 import { companyViewDb } from '../src/companyView.js';
 import { logManualFollowUp, runFollowUps } from '../src/models/finance.js';
 import { seed } from '../src/seed.js';
@@ -95,7 +96,7 @@ test('company-owned partner reminders stay private in local views, server snapsh
     const admin = client(url);
     await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
     const db = (await admin('GET', '/api/db')).body;
-    const branch = createCompany(db, { name: 'Reminder branch', currency_id: db.records['res.company'][0].currency_id });
+    const branch = createCompanyWithDefaultInvoiceJournals(db, { name: 'Reminder branch', currency_id: db.records['res.company'][0].currency_id });
     const partner = db.records['res.partner'][0];
     const invoice = create(branch.db, 'account.move', { move_type: 'out_invoice', partner_id: partner.id, company_id: branch.id, invoice_date: '2020-01-01', invoice_date_due: '2020-01-02', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 123, tax: 0 }] });
     const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(invoice.db, read(invoice.db, 'account.move', invoice.id)).db;

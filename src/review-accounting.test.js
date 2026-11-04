@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { remapDiff } from './sync.js';
-import { accountId, invoiceLines } from './models/ledger.js';
+import { accountId, invoiceLines, journalId } from './models/ledger.js';
 import { lockedSettlementInvariant } from './models/finance.js';
 import { payMove, postMove } from './models/accounting.js';
 import { installments } from './models/terms.js';
@@ -14,7 +14,7 @@ const cents = (n) => Math.round(n * 100);
 test('review #1: negative invoice buckets always post nonnegative debit and credit', () => {
   const db = seed();
   for (const move_type of ['out_invoice', 'in_invoice', 'out_refund', 'in_refund']) {
-    const lines = invoiceLines(db, { move_type, invoice_line_ids: [
+    const lines = invoiceLines(db, { move_type, journal_id: journalId(db, ['in_invoice', 'in_refund'].includes(move_type) ? 'BILL' : 'INV'), invoice_line_ids: [
       { qty: 1, price_unit: 100, tax: 0 },
       { qty: 1, price_unit: -10, tax: 0, account_id: accountId(db, '450000') },
     ] });
@@ -80,7 +80,7 @@ test('review #5: foreign account buckets absorb rounding while preserving the co
   const db = seed();
   const currency = search(db, 'res.currency').find((c) => c.name === 'SAR');
   for (const move_type of ['out_invoice', 'in_invoice', 'out_refund', 'in_refund']) {
-    const lines = invoiceLines(db, { move_type, currency_id: currency.id, invoice_date: '2026-10-01', invoice_line_ids: [
+    const lines = invoiceLines(db, { move_type, journal_id: journalId(db, ['in_invoice', 'in_refund'].includes(move_type) ? 'BILL' : 'INV'), currency_id: currency.id, invoice_date: '2026-10-01', invoice_line_ids: [
       { qty: 1, price_unit: 0.02, tax: 0 },
       { qty: 1, price_unit: 0.02, tax: 0, account_id: accountId(db, '450000') },
     ] });
@@ -210,7 +210,8 @@ test('review #4: second company foreign payment-term instalments conserve compan
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: c2.id }).db;
   }
   const acc = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
-  db = create(db, 'account.journal', { name: 'C2 Sale', code: 'INV', type: 'sale', company_id: c2.id, default_account_id: acc('400000').id }).db;
+  const saleJournal = create(db, 'account.journal', { name: 'C2 Sale', code: 'INV', type: 'sale', company_id: c2.id, default_account_id: acc('400000').id, invoice_sequence_prefix: 'REVIEW-C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'REVIEW-C2-RINV/', refund_sequence_next_number: 1 });
+  db = write(saleJournal.db, 'res.company', c2.id, { default_sale_journal_id: saleJournal.id, default_purchase_journal_id: read(saleJournal.db, 'res.company', 1).default_purchase_journal_id });
 
   const term = create(db, 'account.payment.term', { name: 'Split', line_ids: [
     { value: 50, value_type: 'percent', nb_days: 0 },

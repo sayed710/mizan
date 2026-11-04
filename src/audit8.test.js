@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
@@ -10,7 +11,7 @@ import { reversePayment } from './models/pay.js';
 import { accountId, journalItems } from './models/ledger.js';
 import { taxSnapshot } from './models/taxes.js';
 import { taxesByTax } from './models/finance.js';
-import { createCompany, currentCompany } from './models/company.js';
+import {currentCompany} from './models/company.js';
 import { customerStatement } from './models/reports.js';
 import { recordAnalyses } from './models/analysis.js';
 
@@ -266,7 +267,7 @@ test('Item 1d: Statement line open amount mismatch with selected payments throws
 
 test('Item 1e: Statement line rejects batch_payment_id from another company', () => {
   let db = seed();
-  const c2 = createCompany(db, { name: 'Branch 2' });
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch 2' });
   db = c2.db;
 
   const bill2 = create(db, 'account.move', {
@@ -401,7 +402,7 @@ test('Item 2b: Early payment discount on a cash-basis customer invoice clears tr
 test('Item 3: Customer Statement scopes to company and defaults to current company', () => {
   let db = seed();
   const c1 = 1;
-  const c2 = createCompany(db, { name: 'Branch 2' });
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch 2' });
   db = c2.db;
 
   const partner = create(db, 'res.partner', { name: 'Multi-Company Client' });

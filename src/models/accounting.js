@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveInvoiceJournal } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
@@ -20,6 +20,83 @@ import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS } from './assets.js';
 
 export { invoiceTaxAmount, total };
+
+function accountTypeGuard(db, before, after) {
+  if (before && before.account_type !== after.account_type
+    && (db.records['account.move'] ?? []).some((move) => move.state === 'posted'
+      && (move.line_ids ?? []).some((line) => line.account_id === before.id))) {
+    return 'An account type cannot change after journal items have been posted to it';
+  }
+  return null;
+}
+
+function accountCodeGuard(db, before, after) {
+  const codeOrCompanyChanged = !before || before.code !== after.code || (before.company_id ?? null) !== (after.company_id ?? null);
+  if (codeOrCompanyChanged && (db.records['account.account'] ?? []).some((account) => account.id !== after.id
+    && account.code === after.code && (account.company_id ?? null) === (after.company_id ?? null))) {
+    return `Account code ${after.code} is already used for this company`;
+  }
+  return null;
+}
+
+function journalSequenceGuard(db, before, after) {
+  const sequences = [
+    ['invoice_sequence_prefix', 'invoice_sequence_next_number'],
+    ['refund_sequence_prefix', 'refund_sequence_next_number'],
+  ];
+  const allPrefixes = sequences.map(([prefixField]) => after[prefixField]);
+  if (allPrefixes.some((prefix) => prefix != null && (!String(prefix).trim() || String(prefix).trim() !== prefix))) {
+    return 'Invoice sequence prefixes cannot be empty or start or end with spaces';
+  }
+  const prefixes = allPrefixes.filter((prefix) => prefix != null && String(prefix).trim() !== '');
+  for (const [prefixField, numberField] of sequences) {
+    const prefix = after[prefixField];
+    const nextNumber = after[numberField];
+    if (nextNumber != null && (!Number.isSafeInteger(Number(nextNumber)) || Number(nextNumber) < 1)) {
+      return 'Journal sequence next numbers must be positive integers';
+    }
+    if (nextNumber != null && (!prefix || !String(prefix).trim())) {
+      return 'Configure a sequence prefix before its next number';
+    }
+    if (before?.[numberField] != null && nextNumber != null && Number(nextNumber) < Number(before[numberField])) {
+      return 'Journal sequence next numbers cannot move backwards';
+    }
+    const sequenceUsed = before && (db.records['account.move'] ?? []).some((move) => move.state === 'posted'
+      && move.journal_id === before.id && move.move_type != null && move.move_type !== 'entry'
+      && (prefixField === 'refund_sequence_prefix') === isRefund(move));
+    if (sequenceUsed && before[prefixField] !== prefix) {
+      return 'A journal sequence prefix cannot change after a document is posted in that sequence';
+    }
+    if (sequenceUsed && (nextNumber == null || Number(nextNumber) < Number(before[numberField]))) {
+      return 'A used journal sequence next number cannot be removed or moved backwards';
+    }
+  }
+  if (new Set(prefixes).size !== prefixes.length) return 'Invoice and refund sequence prefixes must be different';
+  const configured = new Set(prefixes);
+  const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== before?.id
+    && [journal.invoice_sequence_prefix, journal.refund_sequence_prefix].some((prefix) => configured.has(prefix)));
+  return duplicates ? 'Each journal sequence prefix must be unique' : null;
+}
+
+export function journalInvoiceSequence(journal, move) {
+  const refund = isRefund(move);
+  const prefixField = refund ? 'refund_sequence_prefix' : 'invoice_sequence_prefix';
+  const numberField = refund ? 'refund_sequence_next_number' : 'invoice_sequence_next_number';
+  const prefix = journal[prefixField];
+  const nextNumber = Number(journal[numberField]);
+  if (!prefix || !String(prefix).trim()) {
+    throw new Error(`Configure the ${isRefund(move) ? 'refund' : 'invoice'} sequence prefix on the selected journal`);
+  }
+  if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) {
+    throw new Error(`Configure a positive next ${refund ? 'refund' : 'invoice'} sequence number on the selected journal`);
+  }
+  const year = (move.invoice_date ?? move.date ?? today()).slice(0, 4);
+  return {
+    name: `${prefix}${year}/${String(nextNumber).padStart(5, '0')}`,
+    numberField,
+    nextNumber,
+  };
+}
 
 const exchangeLines = (db, companyId, difference) => {
   if (!difference) return [];
@@ -227,8 +304,9 @@ export function postMove(db, id) {
     r = { ...r, invoice_line_ids: refreshAdvanceDeductions(db, order, r.invoice_line_ids, id) };
   }
   const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
-  const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
+  const enteredName = r.name && r.name !== '/' ? r.name : null;
   if (!isInvoice(r)) {
+    const name = enteredName ?? nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     const entryDate = r.invoice_date ?? r.date ?? today();
@@ -260,8 +338,8 @@ export function postMove(db, id) {
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   if (!validInvoiceTotal(r, db)) throw new Error('The total must be positive; use a credit note or refund instead');
-  const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
-  if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
+  if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
+  const journal = resolveInvoiceJournal(db, r, { required: true });
   const journalRecord = read(db, 'account.journal', journal);
   if (!journalRecord) throw new Error('Selected journal does not exist');
   if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
@@ -282,19 +360,24 @@ export function postMove(db, id) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
+  const postingMove = { ...r, journal_id: journal };
   const resolvedLines = (r.invoice_line_ids ?? []).map((line) => {
     if (line.analytic_distribution && Object.keys(line.analytic_distribution).length > 0) return line;
-    const dist = distributionOfLine(line, db, r);
+    const dist = distributionOfLine(line, db, postingMove);
     return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
   });
-  const updatedR = { ...r, invoice_line_ids: resolvedLines };
-  const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
+  const sequence = journalInvoiceSequence(journalRecord, r);
+  const name = enteredName ?? sequence.name;
+  const updatedR = { ...r, journal_id: journal, invoice_line_ids: resolvedLines };
+  let line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (line_ids.some((line) => {
     const account = read(db, 'account.account', line.account_id);
     return account?.company_id && account.company_id !== (r.company_id ?? 1);
   })) throw new Error('Journal account belongs to another company');
-  if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  line_ids = line_ids.map((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)
+    ? { ...line, name } : line);
+  const postedMove = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  const posted = write(postedMove, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) return spawnRecurringMove(offsetCreditNote(deferred, id), read(deferred, 'account.move', id));
   const withAssets = r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
@@ -801,6 +884,10 @@ export const accountingModels = {
     },
     defaults: () => ({ account_type: 'expense' }),
     guard: (db, before, after) => {
+      const useError = accountTypeGuard(db, before, after);
+      if (useError) return useError;
+      const codeError = accountCodeGuard(db, before, after);
+      if (codeError) return codeError;
       if ((after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'accounts')) return 'Select only account tags';
       if (after.fiscal_category_id) {
         const category = read(db, 'account.fiscal.category', after.fiscal_category_id);
@@ -850,12 +937,16 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
-    guard: secureHeadsGuard,
+    guard: (db, before, after) => journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after),
     protectDelete: (db, journal) => (journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null,
     fields: {
       name: { type: 'char', label: 'Journal Name', required: true },
       code: { type: 'char', label: 'Short Code', required: true },
       type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
+      invoice_sequence_prefix: { type: 'char', label: 'Invoice Sequence Prefix' },
+      invoice_sequence_next_number: { type: 'integer', label: 'Next Invoice Number' },
+      refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
+      refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
@@ -874,7 +965,7 @@ export const accountingModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['default_account_id', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
+      groups: [['code', 'type'], ['invoice_sequence_prefix', 'invoice_sequence_next_number', 'refund_sequence_prefix', 'refund_sequence_next_number'], ['default_account_id', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
     },
   },
 

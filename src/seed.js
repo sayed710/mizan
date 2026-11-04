@@ -101,7 +101,20 @@ export function seed() {
     reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
     tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
   }));
-  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  const companyJournals = {};
+  JOURNALS.forEach((journal) => {
+    const id = add('account.journal', {
+      code: journal.code,
+      name: journal.name,
+      type: journal.type,
+      default_account_id: journal.account ? accountId(db, journal.account) : null,
+      ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
+      ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
+      ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
+      ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
+    });
+    if (journal.company_default) companyJournals[journal.company_default] = id;
+  });
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -123,6 +136,10 @@ export function seed() {
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = ensureMainCompany(db);
+  set('res.company', 1, {
+    default_sale_journal_id: companyJournals.sales,
+    default_purchase_journal_id: companyJournals.purchases,
+  });
 
   const crmStages = [
     { name: 'New', sequence: 1, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
