@@ -1,6 +1,7 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { balances, balanceSheet, journalItems, profitAndLoss } from './ledger.js';
+import { accountId, balances, balanceSheet, journalItems, profitAndLoss } from './ledger.js';
+import { exchangeAccount } from './exchange-account.js';
 import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
@@ -136,6 +137,12 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
+/** The accounts a company's realized exchange gains and losses are booked to (the same resolver payments post with). */
+const exchangeAccountIds = (db, companyId) => new Set([1, -1].map((difference) => {
+  const account = exchangeAccount(db, companyId, difference);
+  return typeof account === 'number' ? account : accountId(db, account, companyId);
+}));
+
 export function cashFlow(db, { from, to, company_id } = {}) {
   const targetCompany = company_id;
   const cash = accountIds(db, 'asset_cash');
@@ -201,7 +208,8 @@ export function cashFlow(db, { from, to, company_id } = {}) {
     const cashNet = items.filter((l) => cash.has(l.account_id)).reduce((sum, l) => sum + netOf(l), 0);
     if (!denominator || !cashNet) continue;
     const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet));
-    const fxItems = items.map((line) => ({ line, account: read(db, 'account.account', line.account_id) })).filter((x) => ['450100', '690100'].includes(x.account?.code));
+    const fxAccounts = exchangeAccountIds(db, doc.company_id ?? 1);
+    const fxItems = items.filter((line) => fxAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
     if (!fxAmount || !delta) continue;
     for (const x of fxItems) add(x.account, delta * netOf(x.line) / fxAmount);
