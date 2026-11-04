@@ -7,6 +7,26 @@ import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { postMove } from './models/accounting.js';
 import { analyticActuals } from './models/finance.js';
 
+test('journal entry analytics use the accounting date when posted and backfilled', () => {
+  const analytic = create(seed(), 'account.analytic.account', { name: 'Historical entry' });
+  const accounts = search(analytic.db, 'account.account');
+  const expense = accounts.find((account) => account.code === '600000');
+  const cash = accounts.find((account) => account.account_type === 'asset_cash');
+  const move = create(analytic.db, 'account.move', {
+    move_type: 'entry', date: '2020-12-31', invoice_date: '2021-01-15', line_ids: [
+      { account_id: expense.id, debit: 100, analytic_distribution: { [analytic.id]: 100 } },
+      { account_id: cash.id, credit: 100 },
+    ],
+  });
+  const posted = postMove(move.db, move.id);
+  const lines = (db) => search(db, 'account.analytic.line').filter((line) => line.move_id === move.id);
+  const legacy = { ...posted, schema_version: 18, records: { ...posted.records,
+    'account.analytic.line': posted.records['account.analytic.line'].filter((line) => line.move_id !== move.id),
+  } };
+  assert.deepEqual(lines(migrate(legacy)).map((line) => [line.date, line.amount]), [['2020-12-31', -100]]);
+  assert.deepEqual(lines(posted).map((line) => [line.date, line.amount]), [['2020-12-31', -100]]);
+});
+
 test('migration restores historical analytic actuals without duplicating posted allocations', () => {
   const analytic = create(seed(), 'account.analytic.account', { name: 'Historical project' });
   let db = analytic.db;

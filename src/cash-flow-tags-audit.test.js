@@ -4,7 +4,7 @@ import './models/index.js';
 import { create, search } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { cashFlow } from './models/reports.js';
+import { accountCashFlowActivity, cashFlow } from './models/reports.js';
 import { companyViewDb } from './companyView.js';
 import { migrate } from './migrations.js';
 
@@ -47,6 +47,32 @@ test('cash flow does not classify an account using tag or account names', () => 
   db = postMove(move.db, move.id);
   const report = cashFlow(db, { from: '2040-02-01', to: '2040-02-01' });
   assert.deepEqual([report.operating, report.financing, report.unclassified, report.net], [0, 0, 100, 100]);
+});
+
+test('migration classifies legacy accounts using code and name defaults', () => {
+  let db = seed();
+  const cases = [
+    ['159901', 'Equipment', 'expense', 'investing', 11],
+    ['309901', 'Capital', 'expense', 'financing', 22],
+    ['260000', 'Debt', 'expense', 'financing', 33],
+    ['779901', 'Business Loan', 'liability_current', 'financing', 44],
+    ['159902', 'Loan equipment', 'liability_current', 'investing', 55],
+  ];
+  const ids = [];
+  for (const [code, name, account_type, , amount] of cases) {
+    const account = create(db, 'account.account', { code, name, account_type, tag_ids: [] });
+    ids.push(account.id);
+    const cash = search(account.db, 'account.account').find((item) => item.code === '101401');
+    const move = create(account.db, 'account.move', { move_type: 'entry', invoice_date: '2040-03-05', line_ids: [
+      { account_id: account.id, credit: amount }, { account_id: cash.id, debit: amount },
+    ] });
+    db = postMove(move.db, move.id);
+  }
+  const migrated = migrate({ ...db, schema_version: 18 });
+  const accounts = search(migrated, 'account.account');
+  assert.deepEqual(ids.map((id) => accountCashFlowActivity(migrated, accounts.find((account) => account.id === id))), cases.map((entry) => entry[3]));
+  const report = cashFlow(migrated, { from: '2040-03-05', to: '2040-03-05' });
+  assert.deepEqual([report.operating, report.investing, report.financing, report.unclassified], [0, 66, 99, 0]);
 });
 
 test('migration preserves legacy cash-flow categories by account type without changing existing tags', () => {

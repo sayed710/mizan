@@ -16,6 +16,7 @@ import { journalId } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { returnTaxLock } from './models/finance.js';
+import { defaultCashFlowActivity } from './models/reports.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -462,8 +463,7 @@ function migrateCashFlowActivities(db) {
   for (const account of db.records['account.account'] ?? []) {
     const tags = account.tag_ids ?? [];
     if (tags.some((tag) => activities.includes((typeof tag === 'object' ? tag : (next.records['account.account.tag'] ?? []).find((item) => item.id === tag))?.cash_flow_activity))) continue;
-    const activity = account.account_type === 'asset_fixed' ? 'investing'
-      : ['equity', 'liability_non_current'].includes(account.account_type) ? 'financing' : 'operating';
+    const activity = defaultCashFlowActivity(account.code, account.account_type, account.name);
     const id = tagFor(activity);
     next = write(next, 'account.account', account.id, { tag_ids: [...tags, id] });
   }
@@ -520,6 +520,12 @@ export const MIGRATIONS = [
 MIGRATIONS.push({ version: 20, name: 'Fiscal years: assign legacy years to company 1', up: (db) => ({
   ...db, records: { ...db.records, 'account.fiscal.year': (db.records['account.fiscal.year'] ?? []).map((year) => ({ ...year, company_id: year.company_id ?? 1 })) },
 }) });
+MIGRATIONS.push({ version: 21, name: 'Fiscal years: remove legacy global closing lock', up: (db) => {
+  const lock = db.settings?.lock_date;
+  if (!lock || !(db.records['account.fiscal.year'] ?? []).some((year) => year.state === 'closed' && year.date_to === lock)) return db;
+  // Closed years already enforce company-specific locks. The former global lock did not retain its previous value.
+  return { ...db, settings: { ...db.settings, lock_date: null } };
+} });
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

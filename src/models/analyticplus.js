@@ -111,7 +111,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
   if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
     const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
-    name: line.name || move.name || '/', date: move.invoice_date || today(), account_id: Number(id),
+    name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
     general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
     partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
