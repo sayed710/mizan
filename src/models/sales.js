@@ -630,7 +630,6 @@ export const salesModels = {
       date_order: { type: 'date', label: 'Order Date' },
       commitment_date: { type: 'date', label: 'Promised Delivery' },
       note: { type: 'text', label: 'Terms and Conditions' },
-      credit_warning: { type: 'text', label: 'Credit Warning', readonly: true, compute: (r, db) => creditWarning(db, r.partner_id, amounts(r.order_line).total) },
       invoice_status: { type: 'selection', label: 'Invoice Status', options: INVOICE_STATUS, compute: saleInvoiceStatus },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
@@ -738,7 +737,8 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
-      warning: 'credit_warning',
+      // Evaluated for the record on screen only: it scans the partner's receivables.
+      warning: (r, db) => creditWarning(db, r.partner_id, amounts(r.order_line).total),
       groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id', 'incoterm_id', 'incoterm_location'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }, { label: 'Notes', fields: ['note'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],

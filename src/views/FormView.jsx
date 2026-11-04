@@ -392,7 +392,7 @@ export function FormView({ leaf, id, base, params }) {
   const tabs = resolve(def.form.tabs);
   const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   // A non-blocking warning shown above the form, such as an exceeded credit limit.
-  const warning = def.form.warning ? def.fields[def.form.warning]?.compute?.(current, db) : null;
+  const warning = def.form.warning?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
 
