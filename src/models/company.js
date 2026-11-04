@@ -41,6 +41,8 @@ export function setCompanies(db, { current, allowed }) {
 }
 
 // Configuration is shared even when older ORM versions stamped it with company 1.
+// Accounting configuration belongs to its company; other configuration is readable across companies.
+const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
   'account.incoterm', 'account.account.tag', 'account.asset.model']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
@@ -58,7 +60,7 @@ export function visibleTo(companies, model, r, db = null) {
   if (!companies) return true;
   if (model === 'res.company') return companies.has(r?.id);
   if (GROUP_WIDE.has(model)) return false;
-  if (CONFIG_MODELS.has(model)) return true;
+  if (CONFIG_MODELS.has(model)) return !COMPANY_CONFIG.has(model) || shared(r?.company_id) || companies.has(r?.company_id);
   if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
   if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
   return companies.has(r.company_id);
@@ -170,8 +172,8 @@ export function restrictRecords(db, companies) {
 
 /** Keep shared records and records belonging to an allowed company. */
 export function companyFilter(db, records, model = null) {
-  if (CONFIG_MODELS.has(model)) return records;
   const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  if (CONFIG_MODELS.has(model)) return COMPANY_CONFIG.has(model) ? records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id)) : records;
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }
 
