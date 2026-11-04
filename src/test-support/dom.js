@@ -63,6 +63,7 @@ export function setupDom() {
     removeEventListener: () => {},
   };
   globalThis.window = globalThis;
+  globalThis.print = () => {};
   globalThis.dispatchEvent = () => {};
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   return { makeEl };
