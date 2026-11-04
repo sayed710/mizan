@@ -40,7 +40,7 @@ export function checkRegisterRows(db, batches = db.records['account.batch.paymen
     return [current, ...voided];
   }));
   const individualRows = payments
-    .filter((payment) => payment.state === 'posted' && payment.payment_type === 'outbound' && payment.check_number != null && !batchedPaymentIds.has(payment.id))
+    .filter((payment) => ['posted', 'reversed'].includes(payment.state) && payment.payment_type === 'outbound' && payment.check_number != null && !batchedPaymentIds.has(payment.id))
     .flatMap((payment) => {
       const voided = payment.voided_check_numbers ?? [];
       const rows = voided.map((item, index) => ({
@@ -58,7 +58,7 @@ export function checkRegisterRows(db, batches = db.records['account.batch.paymen
           date: payment.date,
           paymentId: payment.id,
           amount: payment.amount,
-          state: 'Issued',
+          state: payment.state === 'reversed' ? 'Reversed' : 'Issued',
         });
       }
       return rows;
@@ -128,6 +128,8 @@ export function postBatch(db, batch) {
   if (currency.error) throw new Error(currency.error);
   const journalConfig = paymentJournal(db, batch.journal_id, company);
   const journal = read(db, 'account.journal', journalConfig.id);
+  // A journal without its own currency accepts any currency; a fixed one only its own.
+  if (journal.currency_id && currency.id !== journal.currency_id) throw new Error('Batch currency must match the journal currency');
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
   if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
   if (!['bank', 'cash'].includes(journal.type) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
