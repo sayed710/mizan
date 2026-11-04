@@ -162,14 +162,15 @@ export function syncInvoicedQty(db, move) {
   if (!order) return db;
   const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
   const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
-  const byKey = new Map(lines.map((l, i) => [l.sale_line_key, i]).filter(([key]) => key));
+  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_key';
+  const byKey = new Map(lines.map((l, i) => [l[lineKey], i]).filter(([key]) => key));
   const unlinked = [];
   for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
     if (l.down_payment_key) continue;
     const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(l.qty) || 0);
-    const ix = model === 'sale.order' && l.sale_line_key ? byKey.get(l.sale_line_key) : undefined;
+    const ix = l[lineKey] ? byKey.get(l[lineKey]) : undefined;
     if (ix !== undefined && lines[ix].product_id === l.product_id) lines[ix].qty_invoiced += fromStock(db, lines[ix], toStock(db, l, qty));
-    else if (!l.sale_line_key) unlinked.push({ ...l, qty });
+    else if (!l[lineKey]) unlinked.push({ ...l, qty });
   }
   const reset = write(db, model, order.id, { order_line: lines });
   return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', unlinked);
