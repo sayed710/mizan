@@ -6,6 +6,7 @@ import { moveStock, salesModels } from './sales.js';
 import { allocateCents, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { rateAt } from './currency.js';
+import { convert, uomForLegacy } from './uom.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
 export const isPeriodicValuation = (db, p) => ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'));
@@ -165,10 +166,13 @@ export function receive(db, productId, qty, unitCost, { date = today(), referenc
         if (line.product_id !== productId) continue;
         const lineQty = Number(line.qty) || 0;
         if (lineQty <= 0) continue;
+        const stockUom = p?.uom_id ?? uomForLegacy(next, p?.uom ?? 'unit')?.id;
+        const stockQty = line.uom_id && stockUom ? convert(next, lineQty, line.uom_id, stockUom, { round: false }) : lineQty;
+        if (stockQty <= 0) continue;
         const lineSub = round(subtotal(line) / rate);
-        const unitPrice = lineSub / lineQty;
-        const avail = Math.max(0, lineQty - skip);
-        skip = Math.max(0, skip - lineQty);
+        const unitPrice = lineSub / stockQty;
+        const avail = Math.max(0, stockQty - skip);
+        skip = Math.max(0, skip - stockQty);
         if (avail <= 0) continue;
         const take = Math.min(left, avail);
         billedValue += take * unitPrice;
