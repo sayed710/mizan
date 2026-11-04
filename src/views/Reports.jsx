@@ -170,6 +170,7 @@ export function TaxReportTable({ db, period }) {
 function Tax({ db, period }) {
   const r = taxReport(db, period);
   const byTax = taxesByTax(db, period);
+  const grids = taxesByGrid(db, period);
   const side = (key, title) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td><td /><td /></tr>
@@ -183,8 +184,8 @@ function Tax({ db, period }) {
     <tbody>
       {side('sale', 'Sales')}
       {side('purchase', 'Purchases')}
-      <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>
-      {taxesByGrid(db, period).map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>)}
+      {grids.length > 0 && <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>}
+      {grids.map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>)}
       {line('Output Tax', r.output)}
       {line('Input Tax', r.input)}
       {line('Tax Payable', r.payable, true)}
