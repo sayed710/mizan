@@ -328,8 +328,10 @@ writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret',
 const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
 // Page unlock cookie: a scrypt key bound to the page and its current password, so a password change revokes old cookies.
 const pageToken = (p) => scryptSync(String(p.visibility_password ?? ''), `${PAGE_SECRET}:${p.id}`, 32).toString('hex');
+// The cookie name carries a keyed hash of the page id, not the record id itself.
+const pageCookie = (p) => `mizan_page_${createHash('sha256').update(`${PAGE_SECRET}:${p.id}`).digest('hex').slice(0, 24)}`;
 const pageUnlocked = (req, p) => {
-  const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`mizan_page_${p.id}=`))?.split('=')[1] ?? '';
+  const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${pageCookie(p)}=`))?.split('=')[1] ?? '';
   return /^[a-f0-9]{64}$/.test(given) && timingSafeEqual(Buffer.from(given), Buffer.from(pageToken(p)));
 };
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
@@ -1013,7 +1015,7 @@ async function website(req, res, path) {
       let raw;
       try { raw = await readRaw(req, 4096); } catch { return send(res, 413, { error: 'Request too large' }); }
       if (checkPagePassword(page, new URLSearchParams(raw.toString('utf8')).get('password'))) {
-        res.writeHead(303, { Location: path, 'Cache-Control': 'no-store', 'Set-Cookie': `mizan_page_${page.id}=${pageToken(page)}; HttpOnly; SameSite=Lax; Path=${/^[\w\-./%~]*$/.test(path) ? path : '/'}; Max-Age=1209600${SECURE ? '; Secure' : ''}` });
+        res.writeHead(303, { Location: path, 'Cache-Control': 'no-store', 'Set-Cookie': `${pageCookie(page)}=${pageToken(page)}; HttpOnly; SameSite=Lax; Path=${/^[\w\-./%~]*$/.test(path) ? path : '/'}; Max-Age=1209600${SECURE ? '; Secure' : ''}` });
         return res.end();
       }
       status = 403;
