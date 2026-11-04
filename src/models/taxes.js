@@ -94,24 +94,46 @@ export function resolveLineTaxes(l) {
   return [];
 }
 
+/** Validate tax ownership, including mapped and grouped taxes. */
+export function validateTaxCompany(db, ids, companyId, fpId = null) {
+  if (!companyId) return;
+  const seen = new Set();
+  const visit = (id, map = true) => {
+    if (!id || seen.has(`${id}:${map}`)) return;
+    seen.add(`${id}:${map}`);
+    const tax = read(db, 'account.tax', id);
+    if (!tax) throw new Error('Selected tax does not exist');
+    if (tax.company_id && tax.company_id !== companyId) throw new Error('Tax belongs to another company');
+    const mapped = map && fpId ? mapTax(db, fpId, id) : id;
+    if (mapped !== id) { visit(mapped, false); return; }
+    for (const child of tax.children_tax_ids ?? []) visit(child);
+  };
+  for (const id of ids) visit(id);
+}
+
 /** Fiscal position for a partner: its own one, else the first auto-applied position for its country. */
-export function fiscalPositionFor(db, partnerId) {
+export function fiscalPositionFor(db, partnerId, companyId = null) {
   const p = read(db, 'res.partner', partnerId);
   if (!p) return null;
-  if (p.property_account_position_id) return p.property_account_position_id;
+  if (p.property_account_position_id) {
+    const position = read(db, 'account.fiscal.position', p.property_account_position_id);
+    if (!companyId || !position?.company_id || position.company_id === companyId) return p.property_account_position_id;
+  }
   const country = (p.country ?? '').trim().toLowerCase();
-  const matches = search(db, 'account.fiscal.position').filter((fp) => fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()));
+  const matches = search(db, 'account.fiscal.position').filter((fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()));
   matches.sort((a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id);
   return matches[0]?.id ?? null;
 }
 
 /** Line tax values for a product (sales or purchase side) after the fiscal position. */
-export function productTax(db, product, side, fpId) {
+export function productTax(db, product, side, fpId, companyId = null) {
   const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
   // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
   const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
   if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
-  return taxSnapshot(read(db, 'account.tax', mapTax(db, fpId, own)), db, fpId);
+  validateTaxCompany(db, [own], companyId, fpId);
+  const mapped = mapTax(db, fpId, own);
+  return { ...taxSnapshot(read(db, 'account.tax', mapped), db, fpId), ...(mapped !== own ? { tax_source_id: own } : {}) };
 }
 
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */

@@ -58,9 +58,7 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  const records = db.records['account.account'] ?? [];
-  const match = records.find((a) => a.code === acc.code && a.company_id === comp);
-  return match?.id ?? null;
+  return null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -209,7 +207,7 @@ function invoiceTaxAccountFor(db, move) {
   return (l) => {
     if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
     if (l.tax_account_id) {
-      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
+      const resolved = resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, l.tax_account_id), move.company_id);
       if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
       return resolved;
     }
