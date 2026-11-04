@@ -28,6 +28,20 @@ function datedBoard(amount, start, end, method = 'days', currency = null) {
   return rows.map((row, index) => ({ date: row.date, amount: amounts[index], posted: false, move_id: null }));
 }
 
+/** Cumulative recognition for one board period through an inclusive cut-off date. */
+function recognitionTargetThroughDate(schedule, index, date, method, currency) {
+  const line = schedule.board[index];
+  const start = index === 0 ? (schedule.start_date ?? line.date) : addDays(schedule.board[index - 1].date, 1);
+  const end = schedule.end_date && schedule.end_date < line.date ? schedule.end_date : line.date;
+  if (date < start) return 0;
+  const elapsedThrough = date < end ? date : end;
+  if (method === 'full_months' && elapsedThrough < end) return 0;
+  const elapsedDays = Math.floor((Date.parse(elapsedThrough) - Date.parse(start)) / DAY) + 1;
+  const periodDays = Math.floor((Date.parse(end) - Date.parse(start)) / DAY) + 1;
+  if (periodDays <= 0) throw new Error(`Invalid deferred service period on ${schedule.name}`);
+  return roundCurrency((Number(line.amount) || 0) * elapsedDays / periodDays, currency);
+}
+
 const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
 
 /** Make schedules from the protected posted company amounts, once per source line. */
@@ -161,6 +175,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
   }
 
   const currency = companyCurrencyRecord(db, companyId);
+  const method = read(db, 'res.company', companyId)?.deferred_amount_computation_method ?? 'days';
   const kindsToProcess = kind ? [kind] : ['revenue', 'expense'];
   let currentDb = db;
 
@@ -184,15 +199,19 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
     const recognizedItems = [];
     for (const s of schedules) {
       const boardLines = (s.board ?? []).map((line, index) => ({ line, index }))
-        .filter(({ line }) => line.date <= date && !line.posted && !line.move_id);
-      const recognized = roundCurrency(boardLines.reduce((sum, { line }) => sum + (Number(line.amount) || 0), 0), currency);
+        .map(({ line, index }) => {
+          const target = line.posted ? 0 : recognitionTargetThroughDate(s, index, date, method, currency);
+          return { line, index, amount: target };
+        })
+        .filter(({ amount }) => amount !== 0);
+      const recognized = roundCurrency(boardLines.reduce((sum, { amount }) => sum + amount, 0), currency);
       if (recognized !== 0) {
         const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
         const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
         const recognitionAcc = s.recognition_account_id ?? (k === 'expense' ? defaultDebit : defaultCredit);
         recognizedItems.push({
           schedule: s,
-          boardLines: boardLines.map(({ line, index }) => ({ index, date: line.date, amount: Number(line.amount) || 0 })),
+          boardLines: boardLines.map(({ line, index, amount }) => ({ index, date: line.date, amount })),
           amount: recognized,
           recognition_account_id: recognitionAcc,
           deferred_account_id: deferredAcc,

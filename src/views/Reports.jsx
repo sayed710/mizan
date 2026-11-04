@@ -451,7 +451,7 @@ function JournalAudit({ db, period, companyId }) {
       return <tr key={`${move.id}-${i}`} className="rep-detail"><td>{date}</td><td><a href={`#/open/account.move/${move.id}`}>{move.name}</a></td><td>{read(db, 'res.partner', line.partner_id ?? move.partner_id)?.name ?? ''}</td><td>{account ? `${account.code} ${account.name}` : ''}</td><td>{line.name}</td><td className="num">{line.debit ? money(line.debit) : ''}</td><td className="num">{line.credit ? money(line.credit) : ''}</td></tr>;
     })}
     <tr className="rep-total strong"><td colSpan={5}>{t('Total')} - {journal.name}</td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
-    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.name}><td colSpan={3} /><td>{tax.name}</td><td className="num">{money(tax.base)}</td><td colSpan={2} className="num">{money(tax.tax)}</td></tr>)}</>}
+    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.tax_id ?? 'unidentified-tax'}><td colSpan={3} /><td>{tax.name}</td><td className="num">{money(tax.base)}</td><td colSpan={2} className="num">{money(tax.tax)}</td></tr>)}</>}
   </Fragment>)}</tbody>;
 }
 

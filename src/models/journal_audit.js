@@ -18,12 +18,20 @@ export function journalAudit(db, { from = '', to = '', companyId = null } = {}) 
       if (line.tax_name) {
         const side = line.tax_side || (String(move.move_type).startsWith('in_') ? 'purchase' : 'sale');
         const amount = line.tax_zero ? 0 : side === 'purchase' ? debit - credit : credit - debit;
-        const tax = group.taxes.get(line.tax_name) ?? { name: line.tax_name, base: 0, tax: 0 };
+        const taxId = line.tax_id ?? null;
+        const tax = group.taxes.get(taxId) ?? { tax_id: taxId, name: line.tax_name, base: 0, tax: 0 };
         tax.base = round(tax.base + (amount < 0 ? -1 : 1) * (Number(line.tax_base) || 0));
         tax.tax = round(tax.tax + amount);
-        group.taxes.set(line.tax_name, tax);
+        group.taxes.set(taxId, tax);
       }
     }
   }
-  return [...groups.values()].map((g) => ({ ...g, items: g.items.sort((a, b) => a.date.localeCompare(b.date) || a.move.name.localeCompare(b.move.name)), taxes: [...g.taxes.values()].sort((a, b) => a.name.localeCompare(b.name)) }));
+  return [...groups.values()].map((g) => ({
+    ...g,
+    items: g.items.sort((a, b) => a.date.localeCompare(b.date) || a.move.name.localeCompare(b.move.name)),
+    taxes: [...g.taxes.values()].sort((a, b) => a.name.localeCompare(b.name) || (a.tax_id ?? 0) - (b.tax_id ?? 0)).map(({ tax_id, ...row }) => {
+      Object.defineProperty(row, 'tax_id', { value: tax_id });
+      return row;
+    }),
+  }));
 }

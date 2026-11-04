@@ -123,6 +123,16 @@ export function seed() {
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = ensureMainCompany(db);
+  const mainCompanyId = db.settings?.current_company_id ?? 1;
+  const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
+  const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
+    (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');
+  if (mainTaxTypes.length !== 1) throw new Error('Demo setup needs exactly one main-company tax return type');
+  db = write(db, 'account.return.type', mainTaxTypes[0].id, {
+    tax_payable_account_id: accountId(db, '251000', mainCompanyId),
+    tax_receivable_account_id: accountId(db, '131000', mainCompanyId),
+    payment_partner_id: taxAuthorityId,
+  });
 
   const crmStages = [
     { name: 'New', sequence: 1, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
@@ -425,8 +435,8 @@ export function seed() {
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
-  add('account.followup.level', { name: 'First reminder', delay: 15, message: 'Friendly reminder: please settle the amount below.' });
-  add('account.followup.level', { name: 'Second reminder', delay: 30, message: 'Your account is overdue; please pay within 7 days.' });
+  add('account.followup.level', { name: 'First reminder', delay: 15, channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
+  add('account.followup.level', { name: 'Second reminder', delay: 30, channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
   (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });

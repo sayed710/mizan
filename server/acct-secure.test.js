@@ -704,10 +704,12 @@ test('account.secure.entries.wizard onchange recomputes analysis on hash_date ch
 
 test('Journal Audit: registered report groups posted items and exact tax totals for the selected period', () => {
   let db = seed();
+  const vat = create(db, 'account.tax', { name: 'VAT', type_tax_use: 'sale', amount_type: 'percent', amount: 14 });
+  db = vat.db;
   const journal = create(db, 'account.journal', { name: 'Audit Test', code: 'AUD' }); db = journal.db;
   const posted = postEntry(db, { journal: 'AUD', date: '2026-02-01', lines: [
     { account: '101401', debit: 114 }, { account: '400000', credit: 100 },
-    { account: '251000', credit: 14, tax_name: 'VAT', tax_base: 100, tax_side: 'sale' },
+    { account: '251000', credit: 14, tax_id: vat.id, tax_name: 'VAT', tax_base: 100, tax_side: 'sale' },
   ] }); db = posted.db;
   db = postEntry(db, { journal: 'AUD', date: '2026-03-01', lines: [{ account: '101401', debit: 20 }, { account: '400000', credit: 20 }] }).db;
   const groups = journalAudit(db, { from: '2026-02-01', to: '2026-02-28', companyId: 1 });
