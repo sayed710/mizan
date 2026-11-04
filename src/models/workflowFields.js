@@ -18,6 +18,16 @@ const FIELDS = {
     revaluation_date: hidden('date', 'Revaluation Date'), // closing.js: one revaluation per date
     reversal_move_id: m2o('account.move', 'Reversal Entry'),
     repair_id: m2o('repair.order', 'Repair Order'),
+    deferred_contributions: {
+      type: 'one2many', label: 'Deferred Contributions', readonly: true, hidden: true,
+      fields: {
+        schedule_id: m2o('account.deferral', 'Schedule'),
+        board_lines: hidden('json', 'Board Lines'),
+        deferred_line_index: hidden('integer', 'Line Index'),
+        recognition_line_index: hidden('integer', 'Line Index'),
+      },
+      newLine: () => ({ schedule_id: null, board_lines: [] }),
+    },
   },
   'account.payment': { sale_id: m2o('sale.order', 'Sales Order') }, // quoteplus.js prepayments
   'approval.request': { leave_id: m2o('hr.leave', 'Time Off'), purchase_id: m2o('purchase.order', 'Purchase Order') },
