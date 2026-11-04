@@ -477,9 +477,9 @@ function taxItems(db, period) {
     const move = l.tax_name && moves.get(l.move_id);
     const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
     const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
-    // Untagged manual items on a shared tax account use their debit/credit direction.
-    const manualSide = sale && purchase ? (l.balance < 0 ? 'sale' : 'purchase') : sale ? 'sale' : purchase ? 'purchase' : null;
-    const side = l.tax_side || (!transitions.has(l.account_id) && documentSide) || manualSide;
+    // A manual item on a tax account used by both sides has no explicit side, so it stays out of the tax report.
+    const accountSide = sale && purchase ? null : sale ? 'sale' : purchase ? 'purchase' : null;
+    const side = l.tax_side || (!transitions.has(l.account_id) && documentSide) || l.type_tax_use || accountSide;
     if (!side) return [];
     const balance = (Number(l.debit) || 0) - (Number(l.credit) || 0);
     // Invoice tax bases retain the signed document base; a refund reverses that sign.

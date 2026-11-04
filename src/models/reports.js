@@ -113,10 +113,10 @@ export function partnerLedger(db, { from, to } = {}, kind = 'receivable') {
     .sort((a, b) => name(a.partner_id).localeCompare(name(b.partner_id)));
 }
 
-/** Default cash flow activity for an account by code, type and name. */
-export function defaultCashFlowActivity(code, account_type, name = '') {
-  if (account_type === 'asset_fixed' || (code && String(code).startsWith('15'))) return 'investing';
-  if (account_type === 'equity' || (code && String(code).startsWith('30')) || code === '260000' || account_type === 'liability_non_current' || /loan/i.test(name)) return 'financing';
+/** Default cash flow activity for an account from its account type (fixed assets invest, equity and long-term debt finance). */
+export function defaultCashFlowActivity(account_type) {
+  if (account_type === 'asset_fixed') return 'investing';
+  if (account_type === 'equity' || account_type === 'liability_non_current') return 'financing';
   return 'operating';
 }
 
