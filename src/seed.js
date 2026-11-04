@@ -157,7 +157,10 @@ export function seed() {
     });
   });
   const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
-  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...p }));
+  // Demo products sold to customers carry explicit tax records; components keep only their plain percentage.
+  const untaxedCodes = new Set(['COMP-001', 'COMP-002', 'COMP-003']);
+  const productTaxes = (code) => (untaxedCodes.has(code) ? {} : { tax_id: vatSale, supplier_tax_id: vatPurchase });
+  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...productTaxes(p.default_code), ...p }));
   add('delivery.carrier', { name: 'Standard Delivery', delivery_type: 'fixed', fixed_price: 25, free_over: 2000 });
   add('delivery.carrier', { name: 'Freight by weight', delivery_type: 'rules', rules: [{ max_weight: 50, price: 40 }, { max_weight: 300, price: 120 }, { max_weight: 2000, price: 450 }] });
   add('delivery.carrier', { name: 'Aramex Express', delivery_type: 'api', api_url: '', tracking_url: 'https://www.aramex.com/track/results?ShipmentNumber={ref}' });

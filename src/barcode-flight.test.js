@@ -70,7 +70,7 @@ test('server-backed receipt for a rounded checkout displays the authoritative ro
       ...db.records,
       'account.cash.rounding': [...(db.records['account.cash.rounding'] ?? []), rounding],
       'pos.config': db.records['pos.config'].map((c) => c.id === cfg1.id ? { ...c, cash_rounding: true, rounding_method_id: rounding.id, only_round_cash_method: false } : c),
-      product: db.records.product.map((p) => p.id === 1 ? { ...p, list_price: 10.02, sale_tax: 0 } : p),
+      product: db.records.product.map((p) => p.id === 1 ? { ...p, list_price: 10.02, sale_tax: 0, tax_id: null } : p),
     },
   };
   db = startSession(db, 0, cfg1.id).db;

@@ -105,11 +105,10 @@ export function fiscalPositionFor(db, partnerId) {
 /** Line tax values for a product (sales or purchase side) after the fiscal position. */
 export function productTax(db, product, side, fpId) {
   const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
-  // Products without a tax record fall back to the plain percentage they carry.
+  // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
   const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
-  const legacy = own ?? search(db, 'account.tax').find((t) => t.type_tax_use === side && t.amount_type === 'percent' && !t.price_include && t.tax_exigibility !== 'on_payment' && Number(t.amount) === Number(percent))?.id;
-  if (legacy == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
-  return taxSnapshot(read(db, 'account.tax', mapTax(db, fpId, legacy)), db, fpId);
+  if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
+  return taxSnapshot(read(db, 'account.tax', mapTax(db, fpId, own)), db, fpId);
 }
 
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
