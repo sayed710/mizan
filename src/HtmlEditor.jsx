@@ -140,8 +140,8 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
     return () => document.removeEventListener('selectionchange', onSelectionChange);
   }, []);
 
-  const handleInput = (e) => {
-    const raw = editorRef.current?.innerHTML ?? e?.target?.value ?? '';
+  const handleInput = () => {
+    const raw = editorRef.current?.innerHTML ?? '';
     const clean = sanitizeHtml(raw) ?? '';
     lastEmittedRef.current = clean;
     onChange?.(clean);
