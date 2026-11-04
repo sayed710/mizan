@@ -265,7 +265,7 @@ export function setCompanyCurrency(db, companyId, code) {
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 
-const TAX_KEYS = Object.keys(taxSnapshot(null));
+const TAX_KEYS = [...Object.keys(taxSnapshot(null)), 'tax_include_base_amount', 'tax_is_base_affected', 'tax_sequence', 'tax_breakdown'];
 
 /**
  * The buyer's purchase line for a sold line: same product, quantity, discount and net price,
@@ -336,6 +336,7 @@ export const companyModels = {
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
       logo: { type: 'text', label: 'Logo' }, active: { type: 'boolean', label: 'Active' },
       intercompany_rule: { type: 'selection', label: 'Inter-Company Rule', options: [['none', 'None'], ['sale_purchase', 'Create Purchase from Sale']] },
+      tax_calculation_rounding_method: { type: 'selection', label: 'Tax Calculation Rounding Method', options: [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']] },
       tax_periodicity: { type: 'selection', label: 'Tax Periodicity', options: [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']] },
       tax_start_date: { type: 'date', label: 'Tax Period Start' },
     },

@@ -1,8 +1,9 @@
 import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
-import { lineTaxOf, lineUntaxed, productTax, taxSnapshot } from './taxes.js';
-import { documentCurrency, roundCurrency } from '../money.js';
+import { computeLineTaxes, expandTaxIds, lineUntaxed, productTax, taxLabel, taxSnapshot } from './taxes.js';
+import { cashRound, documentCurrency, roundCurrency } from '../money.js';
+import { mixedDiscountFactor } from './terms.js';
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
@@ -64,12 +65,59 @@ export function promptedAmount(input) {
   return amount;
 }
 
+/** Company tax rounding method ('round_per_line' | 'round_globally' | null). */
+export const companyRoundingMethod = (db, companyId) => (db ? read(db, 'res.company', companyId ?? 1)?.tax_calculation_rounding_method ?? null : null);
+
 /** @returns {{untaxed:number, tax:number, total:number}} */
-export function amounts(lines = [], currency = null) {
-  const untaxed = lines.reduce((s, l) => s + subtotal(l), 0);
-  const tax = lines.reduce((s, l) => s + lineTaxOf(l), 0);
+export function amounts(lines = [], currency = null, { roundingMethod = null } = {}) {
   const rounded = (n) => roundCurrency(n, currency);
-  return { untaxed: rounded(untaxed), tax: rounded(tax), total: rounded(rounded(untaxed) + rounded(tax)) };
+  let untaxed = 0;
+  let lineTaxSum = 0;
+  const byTax = new Map();
+  for (const l of lines ?? []) {
+    const c = computeLineTaxes(l, { currency, roundingMethod });
+    untaxed += c.untaxed;
+    lineTaxSum += c.tax;
+    for (const t of c.taxes) {
+      const tags = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b).join(',');
+      const key = `${t.tax_account_id ?? ''}|${taxLabel(t)}|${tags}`;
+      byTax.set(key, (byTax.get(key) ?? 0) + t.amount);
+    }
+  }
+  const finalUntaxed = rounded(untaxed);
+  const finalTax = roundingMethod === 'round_globally'
+    ? rounded([...byTax.values()].reduce((s, v) => s + rounded(v), 0))
+    : rounded(lineTaxSum);
+  return { untaxed: finalUntaxed, tax: finalTax, total: rounded(finalUntaxed + finalTax) };
+}
+
+/** Tax amount of an invoice/bill, applying mixed early-payment discount factor when present. */
+export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(db, r?.company_id)) {
+  const docCurr = documentCurrency(db, r);
+  const rawTax = amounts(r.invoice_line_ids, docCurr, { roundingMethod }).tax;
+  const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
+  return roundCurrency(rawTax * mixedDiscountFactor(term), docCurr);
+}
+
+/** Total of an account.move (invoice, bill, refund, or manual entry). */
+export function total(r, db) {
+  if (r.move_type === 'entry') return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
+  const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
+  const mixed = mixedDiscountFactor(term) !== 1;
+  const docCurr = documentCurrency(db, r);
+  const roundingMethod = companyRoundingMethod(db, r?.company_id);
+  const base = !db && r.amount_total != null
+    ? r.amount_total
+    : mixed
+      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).untaxed + invoiceTaxAmount(r, db, roundingMethod), docCurr)
+      : amounts(r.invoice_line_ids, docCurr, { roundingMethod }).total;
+  if (r.invoice_cash_rounding_id && r.state === 'posted') {
+    const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
+    if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
+  }
+  const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
+  if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), docCurr);
+  return base;
 }
 
 /** One2many product lines; `priceField` is the product field copied into the unit price on product change. */
@@ -83,10 +131,15 @@ export const productLines = (label, priceField) => ({
     price_unit: { type: 'monetary', label: 'Unit Price' },
     discount: { type: 'float', label: 'Disc.%' },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes' },
+    tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
     tax: { type: 'float', label: 'Tax %', readonly: true },
     // Snapshot of the chosen tax, so totals and postings never need the tax record.
     tax_type: { type: 'char', label: 'Tax Computation', hidden: true },
     tax_include: { type: 'boolean', label: 'Included in Price', hidden: true },
+    tax_include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes', hidden: true },
+    tax_is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes', hidden: true },
+    tax_sequence: { type: 'integer', label: 'Tax Sequence', hidden: true },
+    tax_breakdown: { type: 'json', label: 'Tax Breakdown', hidden: true },
     tax_cash_basis: { type: 'boolean', label: 'Cash Basis', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
     tax_account_id: { type: 'integer', ref: 'account.account', label: 'Tax Account', hidden: true }, // ref: id remaps follow it
@@ -98,7 +151,11 @@ export const productLines = (label, priceField) => ({
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
   onchange: (line, key, db, record) => {
-    if (key === 'tax_id') return { ...line, ...taxSnapshot(read(db, 'account.tax', line.tax_id)) };
+    if (key === 'tax_id') return { ...line, ...taxSnapshot(read(db, 'account.tax', line.tax_id), db) };
+    if (key === 'tax_ids') {
+      const expanded = expandTaxIds(db, line.tax_ids ?? []);
+      return { ...line, ...(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
+    }
     if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);
     const stock = product?.uom_id ?? uomForLegacy(db, product?.uom ?? 'unit')?.id;
@@ -112,9 +169,9 @@ export const productLines = (label, priceField) => ({
 });
 
 export const amountFields = (lineField) => ({
-  amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).untaxed },
-  amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).tax },
-  amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).total },
+  amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed },
+  amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).tax },
+  amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).total },
 });
 
 /**
