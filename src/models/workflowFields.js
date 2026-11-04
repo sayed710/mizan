@@ -14,6 +14,7 @@ const FIELDS = {
     is_tax_payment: hidden('boolean', 'Tax Payment'),
     tax_return_id: m2o('account.return', 'Tax Return'),
     is_closing: hidden('boolean', 'Closing Entry'), // closing.js: year-end entries are excluded from the P&L
+    closing_fiscal_year_id: m2o('account.fiscal.year', 'Fiscal Year'),
     force_post: hidden('boolean', 'Post Despite Quantity Mismatch'), // billcontrol.js
     revaluation_date: hidden('date', 'Revaluation Date'), // closing.js: one revaluation per date
     reversal_move_id: m2o('account.move', 'Reversal Entry'),

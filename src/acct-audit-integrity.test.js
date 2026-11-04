@@ -241,13 +241,17 @@ test('assets post with company and validate journal and accounts across two comp
   const m2 = read(db, 'account.move', a2.depreciation_ids[0].move_id);
   assert.equal(m2.company_id, co2Id, 'Co2 depreciation entry must belong to company 2');
 
-  db = disposeAsset(db, read(db, 'account.asset', asset1.id), { date: '2027-12-31', saleValue: 1000 });
+  const sale1 = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 1000, tax: 0 }] });
+  db = postMove(sale1.db, sale1.id);
+  db = disposeAsset(db, read(db, 'account.asset', asset1.id), { date: '2027-12-31', saleValue: 1000, invoiceId: sale1.id });
   const disp1 = search(db, 'account.move').find((m) => m.ref === 'Co1 Equipment disposal');
   assert.equal(disp1.company_id, 1, 'Co1 disposal move must belong to company 1');
   assert.ok(isBalanced(disp1.line_ids));
 
   // Dispose Co2 asset and check company_id
-  db = disposeAsset(db, read(db, 'account.asset', asset2.id), { date: '2027-12-31', saleValue: 5000 });
+  const sale2 = create(db, 'account.move', { move_type: 'out_invoice', company_id: co2Id, partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 5000, tax: 0 }] });
+  db = postMove(sale2.db, sale2.id);
+  db = disposeAsset(db, read(db, 'account.asset', asset2.id), { date: '2027-12-31', saleValue: 5000, invoiceId: sale2.id });
   const dispMove = search(db, 'account.move').find((m) => m.ref === 'Co2 Van disposal');
   assert.ok(dispMove, 'Disposal move must exist');
   assert.equal(dispMove.company_id, co2Id, 'Co2 disposal move must belong to company 2');
