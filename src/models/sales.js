@@ -13,6 +13,7 @@ import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
+import { journalId } from './ledger.js';
 
 const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 
@@ -268,7 +269,11 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
   }
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
+  const companyId = order.company_id ?? 1;
+  const journal = journalId(db, moveType === 'out_invoice' ? 'INV' : 'BILL', companyId);
   const { db: next, id } = create(db, 'account.move', {
+    company_id: companyId,
+    journal_id: journal ?? null,
     move_type: moveType,
     partner_id: order.partner_invoice_id ?? order.partner_id,
     invoice_date: today(),

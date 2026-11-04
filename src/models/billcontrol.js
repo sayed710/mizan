@@ -1,7 +1,7 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
-import { accountId } from './ledger.js';
+import { accountId, journalId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
@@ -43,7 +43,11 @@ function createBill(db, r) {
   const lines = po.order_line.map(({ qty_delivered, qty_invoiced, purchase_method, ...l }, i) => ({ ...l, qty: eligible[i].toBill })).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('Nothing is eligible for billing');
   const term = read(db, 'account.payment.term', po.payment_term_id);
+  const companyId = po.company_id ?? 1;
+  const journal = journalId(db, 'BILL', companyId);
   const out = create(db, 'account.move', {
+    company_id: companyId,
+    journal_id: journal ?? null,
     move_type: 'in_invoice', partner_id: po.partner_id, purchase_id: po.id, invoice_origin: po.name,
     invoice_date: today(), invoice_payment_term_id: term?.id ?? null,
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),

@@ -1,10 +1,11 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
 import { create, getActiveCompany, postNote, read, search, setActiveCompany, write } from '../orm.js';
-import { nextName, today } from './common.js';
+import { nextName, subtotal, today } from './common.js';
 import { accountId, postEntry } from './ledger.js';
 import { moveStock, salesModels } from './sales.js';
 import { allocateCents, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
+import { rateAt } from './currency.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
 export const isPeriodicValuation = (db, p) => ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'));
@@ -134,16 +135,64 @@ export function receive(db, productId, qty, unitCost, { date = today(), referenc
   const p = product(next, productId);
   const method = costMethod(next, productId);
   const standard = method === 'standard';
-  const cost = standard ? Number(p.cost) || 0 : unitCost;
+
+  const picking = pickingId ? read(next, 'stock.picking', pickingId) : null;
+  const po = picking?.purchase_id
+    ? read(next, 'purchase.order', picking.purchase_id)
+    : (picking?.origin ? (next.records['purchase.order'] ?? []).find((o) => o.name === picking.origin) : null);
+
+  let billedValue = 0;
+  let billedQty = 0;
+  if (po) {
+    const priorReceivedQty = (next.records['stock.valuation.layer'] ?? []).filter((l) => {
+      if (l.product_id !== productId || l.kind !== 'in' || (l.company_id ?? 1) !== compId) return false;
+      const pick = l.picking_id && read(next, 'stock.picking', l.picking_id);
+      return pick && (pick.purchase_id ? pick.purchase_id === po.id : pick.origin === po.name);
+    }).reduce((s, l) => s + (Number(l.quantity) || 0), 0);
+
+    const bills = (next.records['account.move'] ?? []).filter((b) =>
+      b.move_type === 'in_invoice' &&
+      b.state === 'posted' &&
+      (b.company_id ?? 1) === compId &&
+      (b.purchase_id === po.id || (b.invoice_origin || b.origin) === po.name)
+    ).sort((a, b) => a.id - b.id);
+
+    let skip = priorReceivedQty;
+    let left = qty;
+    for (const bill of bills) {
+      const rate = rateAt(next, bill.currency_id, bill.invoice_date ?? today(), bill.company_id);
+      for (const line of bill.invoice_line_ids ?? []) {
+        if (line.product_id !== productId) continue;
+        const lineQty = Number(line.qty) || 0;
+        if (lineQty <= 0) continue;
+        const lineSub = round(subtotal(line) / rate);
+        const unitPrice = lineSub / lineQty;
+        const avail = Math.max(0, lineQty - skip);
+        skip = Math.max(0, skip - lineQty);
+        if (avail <= 0) continue;
+        const take = Math.min(left, avail);
+        billedValue += take * unitPrice;
+        billedQty += take;
+        left -= take;
+        if (left <= 0) break;
+      }
+      if (left <= 0) break;
+    }
+  }
+
+  const totalEffectiveValue = billedQty > 0 ? round(billedValue + (qty - billedQty) * unitCost) : round(qty * unitCost);
+  const effectiveUnitCost = billedQty > 0 ? totalEffectiveValue / qty : unitCost;
+
+  const cost = standard ? Number(p.cost) || 0 : effectiveUnitCost;
   const value = round(qty * cost);
   const onHand = stockQuantity(next, p, compId);
   if (!standard) next = write(next, 'product', productId, {
-    cost: method === 'average' ? (valueOf(layers(next, productId, compId)) + value) / (onHand + qty) : unitCost,
+    cost: method === 'average' ? (valueOf(layers(next, productId, compId)) + value) / (onHand + qty) : effectiveUnitCost,
   });
   next = moveStock(next, [{ ...stockLine, product_id: productId, qty, company_id: compId }], 1);
   return addLayer(next, { product_id: productId, date, reference, description: reference || 'Receipt',
     quantity: qty, unit_cost: cost, value, remaining_qty: qty, remaining_value: value,
-    price_difference: standard ? round(qty * unitCost) - value : 0, kind: 'in', counterpart, picking_id: pickingId, company_id: compId });
+    price_difference: standard ? totalEffectiveValue - value : 0, kind: 'in', counterpart, picking_id: pickingId, company_id: compId });
 }
 
 function consume(db, productId, qty, method, company = companyOf(db)) {
