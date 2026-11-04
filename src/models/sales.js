@@ -13,7 +13,7 @@ import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
 import { fiscalPositionFor, isSectionOrNote, productTax, replaceTaxSnapshot, taxSnapshot } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
-import { journalId } from './ledger.js';
+import { resolveDocumentJournal } from './ledger.js';
 import { documentCurrency, roundCurrency } from '../money.js';
 
 const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
@@ -268,6 +268,8 @@ function uninvoicedAmount(db, order) {
 
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField, options = {}) {
+  const companyId = order.company_id ?? 1;
+  const journal = resolveDocumentJournal(db, { move_type: moveType, company_id: companyId }, { required: true }).id;
   const method = options.method ?? 'regular';
   if (!['regular', 'percentage', 'fixed'].includes(method)) throw new Error('Choose a valid invoicing method');
   if (moveType === 'out_invoice' && order.order_line.some((l) => !l.sale_line_key)) {
@@ -286,8 +288,6 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
   }
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
-  const companyId = order.company_id ?? 1;
-  const journal = journalId(db, moveType === 'out_invoice' ? 'INV' : 'BILL', companyId);
   const { db: next, id } = create(db, 'account.move', {
     company_id: companyId,
     journal_id: journal ?? null,

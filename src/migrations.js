@@ -542,6 +542,47 @@ MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared
     ...currency, rate_ids: (currency.rate_ids ?? []).map((row) => ({ ...row, company_id: row.company_id ?? null })),
   })) },
 }) });
+MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
+MIGRATIONS.push({ version: 26, name: 'Lock dates and payment QR settings live on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const lockKeys = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date'];
+  const currentCompId = settings.current_company_id ?? 1;
+  const qrSetting = settings.invoice_qr;
+  const vatSetting = settings.company_vat ?? settings.vat;
+  const ibanSetting = settings.company_iban;
+
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    let updated = { ...c };
+    for (const k of lockKeys) {
+      if (settings[k] != null && settings[k] !== '' && (c[k] == null || c[k] === '')) {
+        updated[k] = settings[k];
+      }
+    }
+    if (c.id === currentCompId) {
+      if (qrSetting && (c.invoice_qr == null || c.invoice_qr === '')) {
+        updated.invoice_qr = qrSetting;
+      }
+      if (vatSetting && (c.vat == null || c.vat === '')) {
+        updated.vat = vatSetting;
+      }
+      if (ibanSetting && (c.company_iban == null || c.company_iban === '')) {
+        updated.company_iban = ibanSetting;
+      }
+    }
+    return updated;
+  });
+
+  const nextSettings = { ...settings };
+  for (const k of lockKeys) {
+    delete nextSettings[k];
+  }
+
+  return {
+    ...db,
+    settings: nextSettings,
+    records: { ...db.records, 'res.company': companies },
+  };
+} });
 
 function migrateCashBasisOrigins(db) {
   const moves = db.records['account.move'] ?? [];
@@ -561,16 +602,15 @@ function migrateCashBasisOrigins(db) {
   return { ...next, settings };
 }
 
-MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
-export function migrate(db) {
+export function migrate(db, toVersion = SCHEMA_VERSION) {
   if (!db?.records) return db;
   const from = db.schema_version ?? 0;
-  if (from > SCHEMA_VERSION) throw new Error(`Database schema ${from} is newer than this version of Mizan (${SCHEMA_VERSION})`);
-  const pending = MIGRATIONS.filter((m) => m.version > from);
+  if (from > toVersion) throw new Error(`Database schema ${from} is newer than this version of Mizan (${toVersion})`);
+  const pending = MIGRATIONS.filter((m) => m.version > from && m.version <= toVersion);
   if (!pending.length) return db;
-  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: SCHEMA_VERSION };
+  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: toVersion };
 }

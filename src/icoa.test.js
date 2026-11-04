@@ -3,13 +3,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
 import { create, read, write } from './orm.js';
-import { createCompany } from './models/company.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { postMove, accountingModels } from './models/accounting.js';
 import { salesModels } from './models/sales.js';
 
 const setup = () => {
   const db = seed();
-  return createCompany(db, { name: 'Other', currency_id: db.records['res.company'][0].currency_id });
+  return createCompanyWithDefaultInvoiceJournals(db, { name: 'Other', currency_id: db.records['res.company'][0].currency_id });
 };
 
 test('manual posting rejects foreign company accounts', () => {

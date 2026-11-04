@@ -407,7 +407,9 @@ test('public server-path regression: zero-total stockable sale refunded in a ses
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
   const c2Journal = create(db, 'account.journal', { name: 'C2 Cash Journal', code: 'CSH2', type: 'cash', company_id: c2.id, default_account_id: account('101501').id });
   db = c2Journal.db;
-  const cfg2 = create(db, 'pos.config', { name: 'C2 POS', company_id: c2.id });
+  const c2PosJournal = create(db, 'account.journal', { name: 'C2 POS Journal', code: 'BPOS', type: 'sale', company_id: c2.id, default_account_id: account('400000').id });
+  db = c2PosJournal.db;
+  const cfg2 = create(db, 'pos.config', { name: 'C2 POS', company_id: c2.id, journal_id: c2PosJournal.id });
   db = cfg2.db;
   const c2CashMethod = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: c2.id, config_ids: [cfg2.id], journal_id: c2Journal.id });
   db = c2CashMethod.db;

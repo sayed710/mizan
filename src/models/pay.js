@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { journalId, outstandingAccount, paymentJournal, postEntry, partnerAccount } from './ledger.js';
+import { invoiceCounterpartAccount, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { isInvoice, payMove, releaseCashBasis, residual } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -11,6 +11,7 @@ import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched } from './bank.js';
+import { shouldBePaid } from './billcontrol.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -43,7 +44,8 @@ export function postPayment(db, p) {
     ? []
     : search(db, 'account.move')
         .filter((m) => m.state === 'posted' && m.partner_id === currentPayment.partner_id && (m.company_id ?? 1) === (currentPayment.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[currentPayment.partner_type]?.[currentPayment.payment_type]?.includes(m.move_type)
-          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id))
+          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id)
+          && shouldBePaid(db, m) !== 'exception')
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', via.id);
@@ -75,11 +77,7 @@ export function postPayment(db, p) {
   } else if (currentPayment.destination_account_code) {
     throw new Error('Select the destination account by record');
   } else {
-    counterpart = partnerAccount(db, {
-      companyId: currentPayment.company_id ?? 1,
-      partnerId: currentPayment.partner_id,
-      accountType: currentPayment.partner_type === 'supplier' ? 'liability_payable' : 'asset_receivable',
-    });
+    counterpart = partnerAccount(db, currentPayment.partner_id, currentPayment.company_id, currentPayment.partner_type === 'supplier' ? 'payable' : 'receivable');
   }
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
@@ -133,7 +131,7 @@ export function allocatePaymentToInvoice(db, payment, invoice, availableCredit, 
   if (diff) {
     const counterpart = payment.destination_account_code
       || (payment.destination_account_id ? read(db, 'account.account', payment.destination_account_id)?.code : null)
-      || (['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000');
+      || invoiceCounterpartAccount(db, invoice);
     const fx = postEntry(withFx, {
       journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
       lines: diff > 0

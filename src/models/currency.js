@@ -89,7 +89,15 @@ export const currencyModels = {
         fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' }, company_id: { type: 'many2one', relation: 'res.company', label: 'Company' } },
         newLine: () => ({ date: today(), rate: 1, company_id: null }),
       },
-      current_rate: { type: 'float', label: 'Current Rate', compute: (r, db) => Number(applicableRate(r, today(), db.settings?.current_company_id ?? null)?.rate) || 1 },
+      current_rate: {
+        type: 'float',
+        label: 'Current Rate',
+        compute: (r, db) => {
+          if (companyCurrencyRecord(db, db.settings?.current_company_id ?? 1)?.id === r.id) return 1;
+          const rate = applicableRate(r, today(), db.settings?.current_company_id ?? null);
+          return rate ? Number(rate.rate) : null;
+        },
+      },
     },
     defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },

@@ -16,4 +16,3 @@ test('a manual item on a shared tax account stays out of the tax report until it
   const tagged = postEntry(db, { journal: 'MISC', date: '2025-04-01', lines: [{ account_id: account, credit: 100, tax_side: 'sale' }, { account: '600000', debit: 100 }] });
   assert.equal(taxReport(tagged.db, { from: '2025-04-01', to: '2025-04-01' }).output, 100);
 });
-

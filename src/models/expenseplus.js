@@ -97,7 +97,7 @@ export function postSheet(db, id, date = today()) {
   const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
   const companyId = r.company_id ?? 1;
   const via = own ? null : paymentJournal(contact.db, null, companyId);
-  const payable = own ? partnerAccount(contact.db, { companyId, partnerId: contact.id, accountType: 'liability_payable' }) : null;
+  const payable = own ? partnerAccount(contact.db, contact.id, companyId, 'payable') : null;
   const debits = lines.flatMap((l) => {
     const product = read(db, 'product', l.product_id);
     const expenseAccount = productProperty(db, product, 'property_account_expense_id');
@@ -124,7 +124,7 @@ export function registerPayment(db, id, amount, date = today()) {
   if (value > due) throw new Error('Reimbursement exceeds the outstanding amount');
   const companyId = r.company_id ?? 1;
   const via = paymentJournal(db, null, companyId);
-  const payable = partnerAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' });
+  const payable = partnerAccount(db, r.partner_id, companyId, 'payable');
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Reimbursement: ${r.name}`, company: companyId, lines: [
     { account_id: payable, debit: value, partner_id: r.partner_id }, { account_id: via.accountId, credit: value, partner_id: r.partner_id },
   ] });

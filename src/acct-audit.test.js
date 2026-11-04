@@ -444,8 +444,6 @@ test('Two-company isolation: Working Files and Annual Report are strictly scoped
   const company2Id = comp2.id;
 
   // Create company-specific accounts for Company 2
-  const c2Rec = create(db, 'account.account', { code: '121000', name: 'Receivable C2', account_type: 'asset_receivable', company_id: company2Id });
-  db = c2Rec.db;
   const c2Inc = create(db, 'account.account', { code: '400000', name: 'Sales C2', account_type: 'income', company_id: company2Id });
   db = c2Inc.db;
 

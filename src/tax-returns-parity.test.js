@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { seed } from './seed.js';
 import { today, addDays } from './models/common.js';
@@ -130,17 +131,19 @@ test('submission revalidates drafts created after review through form actions', 
 });
 
 test('a forged tax closing reference cannot bypass a period lock', () => {
-  const db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  const db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
   assert.throws(() => postEntry(db, { journal: 'MISC', date: '2025-03-15', ref: 'Tax Closing: forged', lines: [
     { account: '101401', debit: 100 }, { account: '211000', credit: 100 },
   ] }), /locked/i);
 });
 
 test('a return closing cannot post into a globally locked period', () => {
-  let db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  let db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
+  const manualJournal = create(db, 'account.journal', { name: 'Lock test journal', code: 'LOCKTEST', type: 'general', company_id: 1 });
+  db = manualJournal.db;
   const bank = search(db, 'account.account').find((a) => a.code === '101401');
   const payable = search(db, 'account.account').find((a) => a.code === '211000');
-  const forged = { name: 'MISC/2025/99999', move_type: 'entry', company_id: 1, date: '2025-03-31', invoice_date: '2025-03-31',
+  const forged = { name: 'LOCKTEST/2025/99999', move_type: 'entry', company_id: 1, journal_id: manualJournal.id, date: '2025-03-31', invoice_date: '2025-03-31',
     ref: 'Tax Closing: impersonated', line_ids: [{ account_id: bank.id, debit: 100 }, { account_id: payable.id, credit: 100 }] };
   assert.throws(() => create(db, 'account.move', { ...forged, state: 'posted' }), /locked/i);
   const draft = create(db, 'account.move', { ...forged, state: 'draft' });
@@ -252,11 +255,19 @@ test('invoice confirmation only uses journals and accounts available to its comp
   db = foreignAccount.db;
   assert.equal(accountId(db, 'FOREIGN', company.id), null);
   assert.equal(accountId(db, 'FOREIGN'), foreignAccount.id);
+  const companyJournalDefaults = {};
   for (const [code, type, acc] of [['INV', 'sale', '400000'], ['BILL', 'purchase', '600000']]) {
-    const journal = create(db, 'account.journal', { name: `Company ${code}`, code, type, company_id: company.id, default_account_id: accountId(db, acc) });
+    const journal = create(db, 'account.journal', {
+      name: `Company ${code}`, code, type, company_id: company.id,
+      default_account_id: accountId(db, acc, company.id),
+      invoice_sequence_prefix: `PARITY-${code}/`, invoice_sequence_next_number: 1,
+      refund_sequence_prefix: `PARITY-R${code}/`, refund_sequence_next_number: 1,
+    });
     db = journal.db;
+    companyJournalDefaults[type === 'sale' ? 'default_sale_journal_id' : 'default_purchase_journal_id'] = journal.id;
     assert.equal(journalId(db, code, company.id), journal.id);
   }
+  db = write(db, 'res.company', company.id, companyJournalDefaults);
   const wrongAccount = makeInvoice(db, 'out_invoice', foreignAccount.id);
   assert.throws(() => confirm.run(wrongAccount.db, read(wrongAccount.db, 'account.move', wrongAccount.id)), /account.*company/i);
   for (const type of ['out_invoice', 'in_invoice']) {
@@ -302,9 +313,10 @@ test('journal entries sync with exact, shared and other-company account fallback
   assert.throws(() => postEntry(db, { journal: 'MISC', company: company.id, lines: [{ account: '987003', debit: 10 }, { account: '101401', credit: 10 }] }), /another company/i);
   const fallback = account('987003', 'Shared fallback', null);
   const makeEntry = (companyId) => {
+    const selected = companyId ? [exact, shared, fallback] : [first, shared, fallback];
     const entry = postEntry(db, { journal: 'MISC', date: '2025-01-15', company: companyId, lines: [
-      { account: '987001', debit: 10 }, { account: '987002', debit: 10 },
-      { account: '987003', debit: 10 }, { account: '101401', credit: 30 },
+      { account: selected[0], debit: 10 }, { account: selected[1], debit: 10 },
+      { account: selected[2], debit: 10 }, { account: accountId(db, '101401'), credit: 30 },
     ] });
     return read(applyDiff(db, diffDb(db, entry.db), { isAdmin: true }), 'account.move', entry.id);
   };
@@ -607,7 +619,7 @@ test('company isolation: tax report, journal items, and closing entries isolate 
   db = postMove(inv1.db, inv1.id);
 
   // Ensure Company 2 exists and post invoice in Company 2 (500 tax)
-  const co2 = createCompany(db, { name: 'Company Two' });
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Company Two' });
   db = co2.db;
   const inv2 = create(db, 'account.move', {
     company_id: co2.id, move_type: 'out_invoice', partner_id: 1, invoice_date: from,
@@ -804,7 +816,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const vatType = search(db, 'account.return.type').find((t) => t.name === 'VAT Return');
 
   // 1. Pre-existing manual lock date preserved on reset
-  db = updateSettings(db, { lock_date: '2025-12-31' });
+  db = write(updateSettings(db, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' });
   const r1 = create(db, 'account.return', {
     name: 'VAT Jan 2026',
     type_id: vatType.id,
@@ -835,7 +847,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
-  const laterLocked = updateSettings(sub2, { lock_date: '2026-12-31' });
+  const laterLocked = write(updateSettings(sub2, { lock_date: '2026-12-31' }), 'res.company', 1, { lock_date: '2026-12-31' });
 
   // A later global lock also protects the closing from cancellation.
   assert.throws(() => resetReturnToDraft(laterLocked, r2.id), /locked/i);
@@ -1362,7 +1374,7 @@ test('invoice writes preserve manual analytics without a model and apply matchin
   const partner = create(position.db, 'res.partner', { name: 'Original vendor' });
   const target = create(partner.db, 'res.partner', { name: 'Matching vendor' });
   const unmatched = create(target.db, 'res.partner', { name: 'Unmatched vendor' });
-  const company = create(unmatched.db, 'res.company', { name: 'Analytic company' });
+  const company = createCompanyWithDefaultInvoiceJournals(unmatched.db, { name: 'Analytic company', currency_id: unmatched.db.settings.base_currency_id });
   const product = create(company.db, 'product', { name: 'Analytic service', type: 'service', property_account_expense_id: source.id });
   db = create(product.db, 'account.analytic.distribution.model', { partner_id: target.id, company_id: 1, analytic_distribution: { [automatic]: 100 } }).db;
   db = create(db, 'account.analytic.distribution.model', { partner_id: partner.id, company_id: 1, account_prefix: '623211', analytic_distribution: { [automatic]: 100 } }).db;

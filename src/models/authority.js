@@ -81,7 +81,7 @@ function sheetBookingError(db, r) {
     return r.state === 'done' && close(credit(entry, liquidity), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
   }
   let payable;
-  try { payable = partnerAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' }); }
+  try { payable = partnerAccount(db, r.partner_id, companyId, 'payable'); }
   catch (error) { return error.message; }
   if (r.payment_mode !== 'own_account' || !close(credit(entry, payable), total)) return 'Employee expenses need their posted payable accounting entry';
   if (r.state === 'done') {

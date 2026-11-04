@@ -35,18 +35,30 @@ export const CHART = [
 ];
 
 export const JOURNALS = [
-  ['INV', 'Customer Invoices', 'sale', 'sales'], ['BILL', 'Vendor Bills', 'purchase', 'purchases'], ['BNK1', 'Bank', 'bank', 'liquidity_bank', 'default_payment'],
-  ['CSH1', 'Cash', 'cash', 'liquidity_cash'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', 'salary'],
-  ['POSS', 'Point of Sale', 'sale', 'sales'],
+  { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
+  { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true },
+  { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501' },
+  { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
+  { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
+  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1, company_default: 'pos' },
 ];
+
+const uniqueByCode = (records, model, code, predicate = () => true) => {
+  const matches = records.filter((record) => record.code === code && predicate(record));
+  if (matches.length > 1) throw new Error(`Multiple ${model} records use code ${code}; select a record explicitly`);
+  return matches[0] ?? null;
+};
 
 const idByCode = (db, model, code, company) => {
   const records = db.records[model] ?? [];
   if (company) {
-    const match = records.find((record) => record.code === code && record.company_id === company);
+    const match = uniqueByCode(records, model, code, (record) => record.company_id === company);
     if (match) return match.id;
+    return uniqueByCode(records, model, code, (record) => !record.company_id)?.id ?? null;
   }
-  return records.find((record) => record.code === code && (!company || !record.company_id))?.id ?? null;
+  return (uniqueByCode(records, model, code, (record) => !record.company_id)
+    ?? uniqueByCode(records, model, code))?.id ?? null;
 };
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
@@ -63,30 +75,14 @@ export function assertCompanyAccount(db, id, companyId, accountType, label) {
   return account.id;
 }
 
-/** Resolve a partner override, otherwise the company's configured counterpart account. */
-export function partnerAccount(db, { companyId = 1, partnerId = null, accountType, accountOverrideId = null }) {
-  const company = read(db, 'res.company', companyId ?? 1);
-  if (!company) throw new Error('The accounting company does not exist');
-  const sale = accountType === 'asset_receivable';
-  if (!sale && accountType !== 'liability_payable') throw new Error('Choose a receivable or payable counterpart type');
-  const partner = partnerId == null ? null : read(db, 'res.partner', partnerId);
-  if (partnerId != null && !partner) throw new Error('The accounting partner does not exist');
-  const valid = (account) => account?.company_id === company.id && account.account_type === accountType && account.active !== false;
-  if (accountOverrideId != null) return assertCompanyAccount(db, accountOverrideId, company.id, accountType, 'The selected counterpart account');
-  const property = partner?.[sale ? 'property_account_receivable_id' : 'property_account_payable_id'];
-  const candidate = read(db, 'account.account', property);
-  const id = valid(candidate) ? candidate.id : company[sale ? 'account_default_receivable_id' : 'account_default_payable_id'];
-  if (!valid(read(db, 'account.account', id))) throw new Error(`Configure the default ${sale ? 'receivable' : 'payable'} account for ${company.name ?? 'the company'}`);
-  return id;
-}
-
 export function resolveCompanyAccount(db, accountId, companyId) {
   if (!accountId) return null;
   const acc = read(db, 'account.account', accountId);
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  return null;
+  const match = uniqueByCode(db.records['account.account'] ?? [], 'account.account', acc.code, (account) => account.company_id === comp);
+  return match?.id ?? null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -97,6 +93,20 @@ export const isBalanced = (lines = [], currency = null) =>
     return Number.isFinite(value) && Math.abs(value - roundCurrency(value, currency)) < 1e-9;
   })) && lines.reduce((s, l) => s + currencyUnits(l.debit, currency) - currencyUnits(l.credit, currency), 0) === 0;
 
+/** A partner's receivable or payable account for a company: its valid property, else the company default. */
+export function partnerAccount(db, partnerId, companyId, kind) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  const type = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const valid = (id) => {
+    const account = read(db, 'account.account', id);
+    return account?.company_id === company?.id && account?.account_type === type && account?.active !== false;
+  };
+  const property = read(db, 'res.partner', partnerId)?.[`property_account_${kind}_id`];
+  const id = valid(property) ? property : company?.[`account_default_${kind}_id`];
+  if (!valid(id)) throw new Error(`Configure the default ${kind} account for ${company?.name ?? 'the company'}`);
+  return id;
+}
+
 /** The receivable or payable account actually booked on an invoice. */
 export function invoiceCounterpartAccount(db, invoice) {
   const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
@@ -105,33 +115,46 @@ export function invoiceCounterpartAccount(db, invoice) {
   return ids[0];
 }
 
-export function resolveDocumentJournal(db, move) {
+export function resolveDocumentJournal(db, move, { required = false } = {}) {
   if (!move) return null;
-  let jId = move.journal_id;
-  if (!jId && move.id) {
-    jId = read(db, 'account.move', move.id)?.journal_id;
-  }
-  if (!jId && (move.session_id || move.pos_config_id || move.config_id)) {
+  const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
+  const posContext = Boolean(move.session_id || move.pos_config_id || move.config_id);
+  let journalId = move.journal_id;
+  if (!journalId && move.id) journalId = read(db, 'account.move', move.id)?.journal_id;
+  if (!journalId && (move.session_id || move.pos_config_id || move.config_id)) {
     const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
     const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
     const config = configId ? read(db, 'pos.config', configId) : null;
-    jId = session?.journal_id || config?.journal_id || journalId(db, 'POSS', session?.company_id ?? config?.company_id ?? move.company_id ?? 1);
+    journalId = session?.journal_id || config?.journal_id || null;
   }
-  if (!jId) {
-    const isEntry = move.move_type === 'entry';
-    const isPur = ['in_invoice', 'in_refund'].includes(move.move_type);
-    const code = isEntry ? 'MISC' : (isPur ? 'BILL' : 'INV');
-    jId = journalId(db, code, move.company_id ?? 1);
+  if (!journalId && !posContext && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type)) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    const company = read(db, 'res.company', companyId);
+    journalId = company?.[purchase ? 'default_purchase_journal_id' : 'default_sale_journal_id'] ?? null;
   }
-  return jId ? read(db, 'account.journal', jId) : null;
+  if (!journalId && move.move_type === 'entry') {
+    journalId = read(db, 'res.company', companyId)?.default_general_journal_id ?? null;
+  }
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  if (journalId && !journal) throw new Error('Selected journal does not exist');
+  if (required && !journal) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    if (purchase || ['out_invoice', 'out_refund'].includes(move.move_type)) {
+      const kind = purchase ? 'purchase' : 'sales';
+      const document = purchase ? 'vendor bill' : 'customer invoice';
+      throw new Error(`No ${document} journal for this company; select a journal or configure a default ${kind} journal for company ${companyId}`);
+    }
+    if (posContext) throw new Error('Configure a journal on the point of sale session or configuration');
+    throw new Error(`No general journal configured for company ${companyId}; select a journal or configure a default general journal`);
+  }
+  return journal;
 }
 
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const journal = resolveDocumentJournal(db, move);
-  if (!journal) throw new Error('Select a journal for this document');
-  const base = journal.default_account_id;
+  const journal = resolveDocumentJournal(db, move, { required: true });
+  const base = resolveCompanyAccount(db, journal.default_account_id, move.company_id);
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -142,9 +165,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    if (!base) {
-      throw new Error(`Journal "${journal.name || journal.code}" has no default account configured`);
-    }
+    if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
     return { accountId: base, configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
@@ -152,7 +173,9 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const source = getSourceAccount(l);
     if (!source.accountId) throw new Error(`No ${source.type} account found`);
     const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);
-    const resolved = resolveCompanyAccount(db, mapped, move.company_id);
+    const mappedAccount = read(db, 'account.account', mapped);
+    const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
+    const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
     if (!resolved) {
       if (source.configured) {
         throw new Error(`Configured ${source.type} account does not exist for the invoice company`);
@@ -271,11 +294,7 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = partnerAccount(db, {
-    companyId: move.company_id ?? 1,
-    partnerId: move.partner_id,
-    accountType: sale ? 'asset_receivable' : 'liability_payable',
-  });
+  const counterpart = partnerAccount(db, move.partner_id, move.company_id, sale ? 'receivable' : 'payable');
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
@@ -412,7 +431,13 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     let accId = null;
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
-    else if (l.account) accId = accountId(db, l.account, company) ?? accountId(db, l.account);
+    else if (l.account) {
+      accId = accountId(db, l.account, company);
+      if (!accId && company && (db.records['account.account'] ?? []).some((account) => account.code === l.account
+        && account.company_id && account.company_id !== company)) {
+        throw new Error(`Account ${l.account} belongs to another company`);
+      }
+    }
     if (!accId) throw new Error(`Account not found: ${l.account}`);
     const acc = read(db, 'account.account', accId);
     if (!acc) throw new Error(`Account not found: ${accId}`);
