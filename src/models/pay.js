@@ -232,6 +232,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     partner_id: source.partner_id ?? null,
     name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
@@ -280,7 +281,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
   const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company });
-  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id, cash_basis_origin_move_id: invoice.id });
 }
 
 /** Reverse a write-off settlement without changing unrelated invoice applications. */
@@ -502,7 +503,7 @@ export const payModels = {
         },
         { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
-        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r) }) },
+        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',

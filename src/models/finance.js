@@ -863,6 +863,18 @@ export function journalCards(db, at = today()) {
   });
 }
 
+function followUpSummary(invoices) {
+  const byCurrency = new Map();
+  for (const invoice of invoices) {
+    const currency = invoice.followup_currency;
+    if (!currency) throw new Error('Configure an invoice currency before preparing follow-ups');
+    const previous = byCurrency.get(currency.id) ?? { currency, amount: 0 };
+    byCurrency.set(currency.id, { currency, amount: roundCurrency(previous.amount + invoice.amount_residual, currency) });
+  }
+  const totals = [...byCurrency.values()];
+  return { totals, total: totals.length === 1 ? totals[0].amount : null };
+}
+
 /** Partners with overdue invoices, for payment reminders. */
 export function followUps(db, at = today(), { ignoreNextActionDate = false } = {}) {
   const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
@@ -881,8 +893,8 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false } = {
     return [{ ...m, invoice_date_due: dues[0].date, amount_residual: amount }];
   });
   const by = new Map();
-  for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push(m);
-  return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
+  for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push({ ...m, followup_currency: documentCurrency(db, m) });
+  return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, ...followUpSummary(invoices), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
 // A shared contact can have invoices in several companies; never combine their private notes.
@@ -894,7 +906,7 @@ export const followUpCompanies = (f) => {
     groups.get(cId).push(invoice);
   }
   return [...groups.entries()].map(([company_id, invoices]) => ({
-    ...f, company_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
+    ...f, company_id, invoices, ...followUpSummary(invoices), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
   }));
 };
 const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, company_id: f.company_id ?? f.invoices[0].company_id ?? 1 });
@@ -990,7 +1002,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(nextDb, 'res.partner', partner.id,
-        `${level.name}: ${round(f.total)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+        `${level.name}: ${formatFollowUpTotals(f)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
       const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
@@ -1030,10 +1042,15 @@ export function followUpLevel(db, reminder, at = today()) {
     .sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0))[0];
 }
 
-const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.name ?? db.settings?.currency ?? '';
+const currencyOf = (db, move) => {
+  const currency = documentCurrency(db, move);
+  if (!currency) throw new Error('Configure an invoice currency before preparing follow-ups');
+  return currency.name;
+};
 
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
-export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
+export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${amount} ${currency.name}`).join(', ');
+export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
