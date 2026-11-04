@@ -26,8 +26,8 @@ test('OFX transactions parse with unclosed SGML tags and comma decimals', () => 
 
 test('CAMT.053 entries parse with debit sign, date-time and escaped references', () => {
   assert.deepEqual(parseCamt(CAMT), [
-    { date: '2026-05-04', amount: 200, payment_ref: 'Order S00012 & more', unique_import_id: 'C1' },
-    { date: '2026-05-05', amount: -80.1, payment_ref: 'Rent May', unique_import_id: null },
+    { date: '2026-05-04', currency: 'EUR', amount: 200, payment_ref: 'Order S00012 & more', unique_import_id: 'C1' },
+    { date: '2026-05-05', currency: 'EUR', amount: -80.1, payment_ref: 'Rent May', unique_import_id: null },
   ]);
 });
 
@@ -40,6 +40,6 @@ test('importing creates lines to reconcile and skips transactions already import
   const lines = search(again.db, 'account.bank.statement.line');
   assert.equal(lines.length, before + 2);
   assert.ok(lines.slice(-2).every((l) => l.state === 'to_check'));
-  assert.equal(importStatement(seed(), 'stmt.xml', CAMT).count, 2);
+  assert.equal(importStatement(seed(), 'stmt.xml', CAMT.replaceAll('Ccy="EUR"', 'Ccy="USD"')).count, 2);
   assert.throws(() => importStatement(seed(), 'x.ofx', 'nothing'), /No transactions/);
 });

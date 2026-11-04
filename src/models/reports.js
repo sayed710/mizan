@@ -100,7 +100,7 @@ export function partnerLedger(db, { from, to } = {}, kind = 'receivable') {
     const credit = round(Number(l.credit) || 0);
     r.debit += debit;
     r.credit += credit;
-    r.lines.push({ date: l.date, move_name: l.move_name, debit, credit });
+    r.lines.push({ date: l.date, move_name: l.move_name, debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null });
   }
   const name = (id) => read(db, 'res.partner', id)?.name ?? '';
   return [...rows.values()]

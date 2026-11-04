@@ -4,6 +4,7 @@ import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLed
 import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { formatCurrency } from '../money.js';
 
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
@@ -44,10 +45,10 @@ function PartnerRows({ db, p }) {
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')}</td>
-        {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}
+        {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}<td />
       </tr>
       {open && p.lines.map((l, i) => (
-        <tr key={i} className="rep-detail"><td>{l.date} · {l.move_name}</td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}</tr>
+        <tr key={i} className="rep-detail"><td>{l.date} · {l.move_name}</td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}<td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td></tr>
       ))}
     </>
   );
@@ -58,7 +59,7 @@ export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}
-      <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}</tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
 };

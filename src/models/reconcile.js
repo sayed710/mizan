@@ -2,7 +2,9 @@
 import { read, search, write } from '../orm.js';
 import { accountId, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith } from './bank.js';
-import { allocateCents, round } from '../money.js';
+import { allocateCents, round, roundCurrency, companyCurrencyRecord } from '../money.js';
+import { toCompany } from './currency.js';
+import { lineTaxOf, taxSnapshot } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -51,26 +53,49 @@ function splitCounterparts(lines, balance) {
 
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
-  const balance = round(line.open_amount ?? Math.abs(line.amount));
+  const company = line.company_id ?? 1;
+  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
+  const currency = read(db, 'res.currency', journalCurrency);
+  const balance = line.open_amount != null ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / toCompany(db, journalCurrency, Math.abs(line.amount), line.date, company) : 1), currency) : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance).filter((l) => l.value);
   const unknown = counterparts.find((l) => !accountId(db, l.account_code, line.company_id ?? 1) && !accountId(db, l.account_code));
   if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
+  const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: toCompany(db, journalCurrency, value, line.date, company), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
+  const items = counterparts.flatMap((l) => {
+    const taxes = (l.tax_ids ?? []).map((id) => { const tax = read(db, 'account.tax', id); if (!tax || !tax.account_id) throw new Error('Tax and its account must exist'); return tax; });
+    const taxAt = (tax, base) => lineTaxOf({ ...taxSnapshot(tax), qty: 1, price_unit: tax.price_include && tax.amount_type !== 'fixed' ? base * (1 + Number(tax.amount) / 100) : base });
+    const fixed = taxes.reduce((sum, tax) => sum + taxAt(tax, 0), 0);
+    const factor = 1 + taxes.reduce((sum, tax) => sum + taxAt(tax, 1) - taxAt(tax, 0), 0);
+    const base = roundCurrency((l.value - fixed) / factor, currency);
+    const amounts = taxes.map((tax) => roundCurrency(taxAt(tax, base), currency));
+    const net = roundCurrency(l.value - amounts.reduce((a, b) => a + b, 0), currency);
+    const partner = l.partner_id ?? partner_id;
+    return [side(net, !incoming, { account: l.account_code, partner_id: partner, name: l.label || line.payment_ref }), ...taxes.map((tax, i) => side(amounts[i], !incoming, { account: tax.account_id, partner_id: partner, name: tax.name, tax_name: tax.name, tax_base: toCompany(db, journalCurrency, net, line.date, company), tax_tag_ids: tax.tag_ids }))];
+  });
+  const gap = roundCurrency(toCompany(db, journalCurrency, balance, line.date, company) - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));
+  if (gap && items.length) { const key = incoming ? 'credit' : 'debit'; items[0][key] = roundCurrency(items[0][key] + gap, companyCurrencyRecord(db, company)); }
   const { db: booked, id } = postEntry(db, {
     journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
-      { account: line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : paymentJournal(db, line.journal_id).account, [incoming ? 'debit' : 'credit']: balance, partner_id },
-      ...counterparts.map((l) => ({ account: l.account_code, [incoming ? 'credit' : 'debit']: l.value, partner_id, name: l.label || line.payment_ref })),
+      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : paymentJournal(db, line.journal_id).account, partner_id }),
+      ...items,
     ],
   });
-  return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: balance }] });
+  return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: toCompany(db, journalCurrency, balance, line.date, company) }] });
 }
 
 /** Apply a rule to a statement line: match the first candidate invoice/bill, or post its write-off entry. */
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
+  const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_code);
+  if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
+    if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
+    return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
+  }
   if (rule.rule_type === 'invoice_matching') {
     // Only an exact amount match, and from the line's partner when it has one: never pay someone else's invoice.
     const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && round(m.amount_residual) === round(line.open_amount ?? Math.abs(line.amount)));
@@ -126,6 +151,8 @@ export const reconcileModels = {
         fields: {
           account_code: { type: 'char', label: 'Account' },
           label: { type: 'char', label: 'Label' },
+          partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+          tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes' },
           amount_type: { type: 'selection', label: 'Amount Type', options: [['percentage', 'Percentage of balance'], ['fixed', 'Fixed']] },
           amount: { type: 'float', label: 'Amount' },
         },

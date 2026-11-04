@@ -10,6 +10,13 @@ import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 
+/** Statement amounts use the journal currency; open allocations use company currency. */
+function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+  const company = line.company_id ?? 1;
+  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  return toCompany(db, currency, amount, line.date ?? today(), company);
+}
+
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
   ?? search(db, 'account.reconcile.model').filter((m) => m.active !== false && m.rule_type === 'writeoff_button' && ruleMatches(m, line)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))[0] ?? null;
@@ -51,7 +58,7 @@ export function reconcileWith(db, line, moveId) {
   const docCurrency = documentCurrency(db, move);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const step = Number(docCurrency?.rounding ?? 0.01);
-  const available = round(line.open_amount ?? Math.abs(Number(line.amount)));
+  const available = round(line.open_amount ?? statementCompanyAmount(db, line));
   const rate = rateAt(db, move.currency_id, date, company);
   const value = Math.min(docRound(move.amount_residual), Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
   const used = toCompany(db, move.currency_id, value, date, company);
@@ -74,16 +81,20 @@ export function reconcileWith(db, line, moveId) {
   let current = db;
   let bankMoveId = line.bank_move_id;
   let suspense = null;
-  if (bankMoveId || remaining > 0) {
+  const bankCurrency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  if (bankMoveId || remaining > 0 || (bankCurrency && bankCurrency !== companyCurrencyRecord(db, company)?.id)) {
     const ensured = ensureBankSuspense(current, company);
     current = ensured.db;
     suspense = ensured.id;
     if (!bankMoveId) {
       const via = paymentJournal(db, line.journal_id);
       const incoming = line.amount > 0;
-      const amount = round(Math.abs(line.amount));
+      const amount = statementCompanyAmount(db, line);
+      const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
+      const foreign = currency && currency !== companyCurrencyRecord(db, company)?.id;
+      const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * Math.abs(line.amount) } : {};
       const booked = postEntry(current, { journal: via.code, journal_id: line.journal_id, date, ref: line.payment_ref, company,
-        lines: incoming ? [{ account: via.account, debit: amount }, { account: suspense, credit: amount }] : [{ account: suspense, debit: amount }, { account: via.account, credit: amount }] });
+        lines: incoming ? [{ account: via.account, debit: amount, ...fx(1) }, { account: suspense, credit: amount, ...fx(-1) }] : [{ account: suspense, debit: amount, ...fx(1) }, { account: via.account, credit: amount, ...fx(-1) }] });
       bankMoveId = booked.id;
       current = write(booked.db, 'account.bank.statement.line', line.id, { bank_move_id: bankMoveId, open_amount: available });
     }
@@ -185,15 +196,19 @@ function matchPayment(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   const { payments, via, journal } = resolveAndValidatePayments(db, line);
   const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via));
-  const amount = round(Math.abs(line.amount));
+  const amount = statementCompanyAmount(db, line);
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
   if (paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
 
   const incoming = line.amount > 0;
-  const bankLine = incoming ? { account: via.account, debit: amount } : { account: via.account, credit: amount };
-  const paymentLines = outstandingItems.map((item) => (incoming
-    ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name }
-    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name }));
+  const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
+  const fxAmounts = foreign ? payments.map((p) => roundCurrency(p.amount, read(db, 'res.currency', journal.currency_id))) : [];
+  if (foreign && roundCurrency(fxAmounts.reduce((a, b) => a + b, 0), read(db, 'res.currency', journal.currency_id)) !== roundCurrency(Math.abs(line.amount), read(db, 'res.currency', journal.currency_id))) throw new Error('The selected payments must total the bank transaction currency amount');
+  const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
+  const bankLine = incoming ? { account: via.account, debit: amount, ...fx(Math.abs(line.amount)) } : { account: via.account, credit: amount, ...fx(-Math.abs(line.amount)) };
+  const paymentLines = outstandingItems.map((item, i) => (incoming
+    ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(-fxAmounts[i]) }
+    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }));
 
   const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
   const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
@@ -215,7 +230,7 @@ function matchPayment(db, line) {
 
 function autoReconcile(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
-  const match = candidates(db, line).find((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? Math.abs(line.amount)));
+  const match = candidates(db, line).find((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? statementCompanyAmount(db, line)));
   if (!match) throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');
   return { db: reconcileWith(db, line, match.id) };
 }
@@ -224,12 +239,16 @@ function bookToAccount(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   const account = line.counterpart ?? (line.amount > 0 ? '450000' : '600000');
-  const value = round(line.open_amount ?? Math.abs(line.amount));
+  const value = round(line.open_amount ?? statementCompanyAmount(db, line));
   if (!(value > 0)) throw new Error('This bank transaction has no open amount');
   const liquidity = line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : paymentJournal(db, line.journal_id).account;
+  const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const foreign = currency && currency !== companyCurrencyRecord(db, line.company_id)?.id;
+  const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / statementCompanyAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
+  const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * foreignValue } : {};
   const lines = line.amount > 0
-    ? [{ account: liquidity, debit: value }, { account, credit: value }]
-    : [{ account, debit: value }, { account: liquidity, credit: value }];
+    ? [{ account: liquidity, debit: value, ...fx(1) }, { account, credit: value, ...fx(-1) }]
+    : [{ account, debit: value, ...fx(1) }, { account: liquidity, credit: value, ...fx(-1) }];
   const { db: booked, id } = postEntry(db, { journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: value }] }) };
 }
@@ -299,7 +318,7 @@ function unreconcile(db, line) {
 function lineGuard(db, before, after) {
   if (before && (before.state === 'reconciled' || before.bank_move_id) && after.state === 'to_check' && !after.move_id) return unreconcileError(db, before, after);
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id', 'currency_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (before?.bank_move_id) {
@@ -328,17 +347,17 @@ function lineGuard(db, before, after) {
     const batchCompany = batchPaymentCompany(db, batch);
     if (!batch || batchCompany !== company) return 'The linked payment belongs to another company or does not exist';
   }
-  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > round(Math.abs(after.amount)))) return 'Invalid open bank transaction amount';
+  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > statementCompanyAmount(db, after))) return 'Invalid open bank transaction amount';
   if (before?.bank_move_id && JSON.stringify((after.allocations ?? []).slice(0, (before.allocations ?? []).length)) !== JSON.stringify(before.allocations ?? [])) return 'Bank transaction allocations cannot be changed';
   if (after.bank_move_id && after.open_amount != null) {
     const allocations = after.allocations ?? [];
     const allocated = allocations.reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
-    if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== round(Math.abs(after.amount))) return 'Bank transaction allocations must match its amount';
+    if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== statementCompanyAmount(db, after)) return 'Bank transaction allocations must match its amount';
     const bankEntry = read(db, 'account.move', after.bank_move_id);
     const via = paymentJournal(db, after.journal_id);
     const bankAccount = accountId(db, via.account, company);
     const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
-    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== round(Math.abs(after.amount))) return 'The bank entry must book the transaction amount once';
+    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== statementCompanyAmount(db, after)) return 'The bank entry must book the transaction amount once';
     const suspense = accountId(db, '101404', company);
     for (const allocation of allocations) {
       const entry = read(db, 'account.move', allocation.payment_move_id);
@@ -389,6 +408,7 @@ export const bankModels = {
       payment_ref: { type: 'char', label: 'Label', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       amount: { type: 'monetary', label: 'Amount', required: true },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal' },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
@@ -417,6 +437,7 @@ export const bankModels = {
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ date: today(), state: 'to_check' }),
+    createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
     defaultFilters: ['open'],
     filters: [[{ id: 'open', label: 'To Reconcile', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Reconciled', fn: (r) => r.state === 'reconciled' }],
       [{ id: 'in', label: 'Incoming', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Outgoing', fn: (r) => r.amount < 0 }]],
