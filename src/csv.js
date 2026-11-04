@@ -32,3 +32,62 @@ export function fromCsv(text) {
   if (!rows.length) throw new Error('Empty file');
   return rows;
 }
+
+/** Extracts 2D array of string cells from a table element or tree. */
+export function tableToRows(table) {
+  if (!table) return [];
+  const rows = [];
+  const collect = (node) => {
+    if (!node) return;
+    const tag = node.tagName?.toUpperCase();
+    if (tag === 'TR') {
+      const cells = [];
+      const extractText = (cellNode) => {
+        let txt = '';
+        const walk = (c) => {
+          if (!c) return;
+          if (c.nodeType === 1 && (c.className === 'caret' || (c.tagName?.toUpperCase() === 'BUTTON' && (c.textContent === '▾' || c.textContent === '▸')))) return;
+          if (c.nodeType === 3) txt += c.nodeValue;
+          else if (c.childNodes && c.childNodes.length) c.childNodes.forEach(walk);
+          else if (c.textContent) txt += c.textContent;
+        };
+        walk(cellNode);
+        return txt.trim();
+      };
+      const findCells = (trChild) => {
+        if (!trChild) return;
+        const ctag = trChild.tagName?.toUpperCase();
+        if (ctag === 'TH' || ctag === 'TD') {
+          cells.push(extractText(trChild));
+          return;
+        }
+        for (const child of trChild.childNodes ?? []) findCells(child);
+      };
+      for (const child of node.childNodes ?? []) findCells(child);
+      if (cells.length > 0) rows.push(cells);
+      return;
+    }
+    for (const child of node.childNodes ?? []) collect(child);
+  };
+  collect(table);
+  return rows;
+}
+
+/** Downloads RFC 4180 CSV via a dynamic link in browser, returns CSV text. */
+export function downloadCsv(filename, rows) {
+  const text = typeof rows === 'string' ? rows : toCsv(rows);
+  if (typeof document !== 'undefined') {
+    const a = document.createElement('a');
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof Blob !== 'undefined') {
+      a.href = URL.createObjectURL(new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' }));
+      a.download = filename;
+      a.click?.();
+      if (typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(a.href);
+    } else {
+      a.download = filename;
+      a.click?.();
+    }
+  }
+  return text;
+}
+

@@ -14,7 +14,7 @@ export function TrialBalance({ db, period }) {
   return (
     <tbody>
       {rows.map((r) => (
-        <tr key={r.account.id} className="rep-detail"><td>{r.account.code} {r.account.name}</td>{num(r.initial)}{num(r.debit)}{num(r.credit)}{num(r.end)}</tr>
+        <tr key={r.account.id} className="rep-detail"><td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>{num(r.initial)}{num(r.debit)}{num(r.credit)}{num(r.end)}</tr>
       ))}
       <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.initial)}{num(totals.debit)}{num(totals.credit)}{num(totals.end)}</tr>
     </tbody>
@@ -26,7 +26,7 @@ function FiscalCategoryRows({ row }) {
   const name = row.category ? row.category.name : t('Uncategorized');
   return <>
     <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{num(row.debit)}{num(row.credit)}{num(row.balance)}</tr>
-    {open && row.accounts.map((line) => <tr key={line.account.id} className="rep-detail"><td>{line.account.code} {line.account.name}</td>{num(line.debit)}{num(line.credit)}{num(line.balance)}</tr>)}
+    {open && row.accounts.map((line) => <tr key={line.account.id} className="rep-detail"><td><a href={`#/open/account.account/${line.account.id}`}>{line.account.code} {line.account.name}</a></td>{num(line.debit)}{num(line.credit)}{num(line.balance)}</tr>)}
   </>;
 }
 
@@ -90,7 +90,7 @@ export function CashFlow({ db, period, companyId }) {
     <>
       <tr className="rep-section"><td>{t(title)}</td>{num(r[key])}</tr>
       {r.lines.filter((l) => l.section === key).map((l) => (
-        <tr key={`${key}-${l.account.id}`} className="rep-detail"><td>{l.account.code} {l.account.name}</td>{num(l.amount)}</tr>
+        <tr key={`${key}-${l.account.id}`} className="rep-detail"><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td>{num(l.amount)}</tr>
       ))}
     </>
   );

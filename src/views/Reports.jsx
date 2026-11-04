@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
@@ -14,6 +14,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { downloadCsv, tableToRows } from '../csv.js';
 import { balanceAnalyticColumns, balanceColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -59,7 +60,7 @@ function Section({ title, total, rows, sign = 1, totals, variance, showVariance 
       </tr>
       {open && rows?.map((r) => (
         <tr key={r.account.id} className="rep-detail">
-          <td>{r.account.code} {r.account.name}</td>
+          <td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>
           {totals ? <ComparisonCells values={r.values} showVariance={showVariance} /> : <td className="num">{money(r.balance)}</td>}
         </tr>
       ))}
@@ -89,8 +90,8 @@ function Pnl({ db, period }) {
       <Total label="Gross Profit" value={p.gross} />
       <Section title="Expenses" total={p.expense} rows={p.detail.expense} />
       <Total label="Net Operating Income" value={p.operating} />
-      <Section title="Other Income" total={p.otherIncome} />
-      <Section title="Other Expenses" total={p.otherExpense} />
+      <Section title="Other Income" total={p.otherIncome} rows={p.detail.otherIncome} />
+      <Section title="Other Expenses" total={p.otherExpense} rows={p.detail.otherExpense} />
       <Total label="Net Income" value={p.net} strong />
     </tbody>
   );
@@ -568,6 +569,10 @@ function ReportPage({ leaf }) {
     : periods
       ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods))
       : null;
+  const tableRef = useRef(null);
+  const exportCsv = () => {
+    downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
+  };
   return (
     <main className="action report-page">
       <div className="control-panel">
@@ -623,9 +628,10 @@ function ReportPage({ leaf }) {
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
+        <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       </div>
       <div className="list-wrap">
-        <table className="list report">
+        <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
           {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
         </table>

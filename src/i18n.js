@@ -23,6 +23,7 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Download CSV': 'تنزيل CSV',
   'Report not found': 'لم يتم العثور على التقرير',
   'Accounting Reports': 'التقارير المحاسبية', 'Accounting Report': 'التقرير المحاسبي', 'Horizontal Groups': 'المجموعات الأفقية',
   'Report Lines': 'بنود التقرير', 'Parent Code': 'رمز البند الأصلي', 'Open Report': 'فتح التقرير',
