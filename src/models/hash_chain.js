@@ -1,6 +1,7 @@
 // Inalterability hash chain for secure entries (Odoo 20 accounting parity).
 import { read, search, write } from '../orm.js';
 import { currentCompany } from './company.js';
+import { resolveDocumentJournal } from './ledger.js';
 import { today } from './common.js';
 import { t } from '../i18n.js';
 
@@ -105,7 +106,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     if ((m.company_id ?? 1) !== company) return false;
 
 
-    const jId = m.journal_id || (m.move_type ? (db.records['account.journal'] ?? []).find((j) => j.code === (m.move_type.startsWith('in_') ? 'BILL' : 'INV'))?.id : null);
+    const jId = resolveDocumentJournal(db, m)?.id ?? null;
     return restrictedIds.has(jId);
   });
 
@@ -125,7 +126,7 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
     if ((m.company_id ?? 1) !== company || m.state !== 'draft') return false;
     const date = m.invoice_date ?? m.date ?? '';
     if (proposedLockDate && date <= proposedLockDate) return true;
-    const jId = m.journal_id || (m.move_type ? (db.records['account.journal'] ?? []).find((j) => j.code === (m.move_type.startsWith('in_') ? 'BILL' : 'INV'))?.id : null);
+    const jId = resolveDocumentJournal(db, m)?.id ?? null;
     return restrictedIds.has(jId) && date <= targetDate;
   });
 

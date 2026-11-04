@@ -28,6 +28,20 @@ function datedBoard(amount, start, end, method = 'days', currency = null) {
   return rows.map((row, index) => ({ date: row.date, amount: amounts[index], posted: false, move_id: null }));
 }
 
+/** Cumulative recognition for one board period through an inclusive cut-off date. */
+function recognitionTargetThroughDate(schedule, index, date, method, currency) {
+  const line = schedule.board[index];
+  const start = index === 0 ? (schedule.start_date ?? line.date) : addDays(schedule.board[index - 1].date, 1);
+  const end = schedule.end_date && schedule.end_date < line.date ? schedule.end_date : line.date;
+  if (date < start) return 0;
+  const elapsedThrough = date < end ? date : end;
+  if (method === 'full_months' && elapsedThrough < end) return 0;
+  const elapsedDays = Math.floor((Date.parse(elapsedThrough) - Date.parse(start)) / DAY) + 1;
+  const periodDays = Math.floor((Date.parse(end) - Date.parse(start)) / DAY) + 1;
+  if (periodDays <= 0) throw new Error(`Invalid deferred service period on ${schedule.name}`);
+  return roundCurrency((Number(line.amount) || 0) * elapsedDays / periodDays, currency);
+}
+
 const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
 
 /** Make schedules from the protected posted company amounts, once per source line. */
@@ -161,19 +175,18 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
   }
 
   const currency = companyCurrencyRecord(db, companyId);
+  const method = read(db, 'res.company', companyId)?.deferred_amount_computation_method ?? 'days';
   const kindsToProcess = kind ? [kind] : ['revenue', 'expense'];
   let currentDb = db;
 
   for (const k of kindsToProcess) {
-    const existing = (currentDb.records['account.move'] ?? []).some((m) =>
+    const existing = (currentDb.records['account.move'] ?? []).find((m) =>
       m.is_deferred_grouped &&
       !m.reversed_entry_id &&
       m.deferral_kind === k &&
       m.deferral_date === date &&
       (m.company_id ?? 1) === companyId
     );
-    if (existing) continue;
-
     const schedules = (currentDb.records['account.deferral'] ?? []).filter((d) =>
       d.state !== 'cancel' &&
       (d.company_id ?? 1) === companyId &&
@@ -184,15 +197,19 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
     const recognizedItems = [];
     for (const s of schedules) {
       const boardLines = (s.board ?? []).map((line, index) => ({ line, index }))
-        .filter(({ line }) => line.date <= date && !line.posted && !line.move_id);
-      const recognized = roundCurrency(boardLines.reduce((sum, { line }) => sum + (Number(line.amount) || 0), 0), currency);
+        .map(({ line, index }) => {
+          const target = line.posted ? 0 : recognitionTargetThroughDate(s, index, date, method, currency);
+          return { line, index, amount: target };
+        })
+        .filter(({ amount }) => amount !== 0);
+      const recognized = roundCurrency(boardLines.reduce((sum, { amount }) => sum + amount, 0), currency);
       if (recognized !== 0) {
         const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
         const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
         const recognitionAcc = s.recognition_account_id ?? (k === 'expense' ? defaultDebit : defaultCredit);
         recognizedItems.push({
           schedule: s,
-          boardLines: boardLines.map(({ line, index }) => ({ index, date: line.date, amount: Number(line.amount) || 0 })),
+          boardLines: boardLines.map(({ line, index, amount }) => ({ index, date: line.date, amount })),
           amount: recognized,
           recognition_account_id: recognitionAcc,
           deferred_account_id: deferredAcc,
@@ -203,6 +220,19 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       }
     }
 
+    if (existing) {
+      const contributions = existing.deferred_contributions ?? [];
+      const unchanged = contributions.length === recognizedItems.length && recognizedItems.every((item) => {
+        const old = contributions.find((c) => c.schedule_id === item.schedule.id);
+        return old && JSON.stringify(old.board_lines) === JSON.stringify(item.boardLines)
+          && existing.line_ids?.[old.deferred_line_index]?.account_id === item.deferred_account_id
+          && existing.line_ids?.[old.recognition_line_index]?.account_id === item.recognition_account_id
+          && (existing.line_ids?.[old.recognition_line_index]?.partner_id ?? null) === (item.partner_id ?? null)
+          && JSON.stringify(existing.line_ids?.[old.recognition_line_index]?.analytic_distribution ?? null) === JSON.stringify(item.analytic_distribution ?? null);
+      });
+      if (!unchanged) throw new Error('Grouped deferral contributions changed; reverse and replace the existing entries before regenerating');
+      continue;
+    }
     if (!recognizedItems.length) continue;
 
     const isRev = k === 'revenue';
@@ -347,7 +377,12 @@ export const deferredModels = {
       buttons: [
         { label: 'Compute', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
         { label: 'Post Due Entries', primary: true, when: (r) => ['running', 'done'].includes(r.state), run: (db, r) => ({ db: postDueEntries(db, read(db, 'account.deferral', r.id)) }) },
-        { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), vals: { state: 'cancel' } },
+        { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), run: (db, r) => {
+          const schedule = read(db, 'account.deferral', r.id);
+          const grouped = (db.records['account.move'] ?? []).some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === r.id));
+          if (grouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id)) throw new Error('Reverse the recognition entries before cancelling this deferral');
+          return { db: write(db, 'account.deferral', r.id, { state: 'cancel' }) };
+        } },
       ],
       title: 'name',
       groups: [['kind', 'partner_id', 'company_id', 'amount', 'analytic_distribution'], ['start_date', 'end_date', 'months']],

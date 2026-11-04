@@ -35,7 +35,7 @@ test('computing a manual schedule keeps months consistent with its explicit date
 test('grouped generation on consecutive days ignores the prior reversal and remains idempotent', () => {
   let db = write(seed(), 'res.company', 1, { deferred_generation_method: 'manual_grouped' });
   const schedule = create(db, 'account.deferral', {
-    name: 'Contract', kind: 'revenue', company_id: 1, state: 'running',
+    name: 'Contract', kind: 'revenue', company_id: 1, state: 'running', start_date: '2026-01-01', end_date: '2026-02-01',
     deferred_account_id: accountId(db, '212000'), recognition_account_id: accountId(db, '410000'),
     board: [
       { date: '2026-01-31', amount: 100, posted: false, move_id: null },
@@ -61,7 +61,7 @@ test('grouped generation on consecutive days ignores the prior reversal and rema
 test('grouped snapshots record their schedule lines and block individual posting while remaining cumulative', () => {
   let db = write(seed(), 'res.company', 1, { deferred_generation_method: 'manual_grouped' });
   const first = create(db, 'account.deferral', {
-    name: 'First', kind: 'revenue', company_id: 1, state: 'running',
+    name: 'First', kind: 'revenue', company_id: 1, state: 'running', start_date: '2026-01-01', end_date: '2026-02-28',
     deferred_account_id: accountId(db, '212000'), recognition_account_id: accountId(db, '410000'),
     board: [
       { date: '2026-01-31', amount: 100, posted: false, move_id: null },
@@ -69,7 +69,7 @@ test('grouped snapshots record their schedule lines and block individual posting
     ],
   });
   const second = create(first.db, 'account.deferral', {
-    name: 'Second', kind: 'revenue', company_id: 1, state: 'running',
+    name: 'Second', kind: 'revenue', company_id: 1, state: 'running', start_date: '2026-02-01', end_date: '2026-02-28',
     deferred_account_id: accountId(db, '212000'), recognition_account_id: accountId(db, '410000'),
     board: [{ date: '2026-02-28', amount: 25, posted: false, move_id: null }],
   });
@@ -96,7 +96,7 @@ test('grouped snapshots record their schedule lines and block individual posting
 test('grouped generation rejects non-grouped companies through model and list actions', () => {
   let db = write(seed(), 'res.company', 1, { deferred_generation_method: 'manual' });
   const schedule = create(db, 'account.deferral', {
-    name: 'Contract', kind: 'revenue', company_id: 1, state: 'running',
+    name: 'Contract', kind: 'revenue', company_id: 1, state: 'running', start_date: '2026-01-01', end_date: '2026-01-31',
     deferred_account_id: accountId(db, '212000'), recognition_account_id: accountId(db, '410000'),
     board: [{ date: '2026-01-31', amount: 100, posted: false, move_id: null }],
   });

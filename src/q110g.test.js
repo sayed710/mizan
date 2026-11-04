@@ -222,13 +222,14 @@ test('finding 15: taxes with foreign configured account reject posting when comp
   const company2Id = c2.id;
 
   // Setup Company 2 journals and base accounts
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV15/', invoice_sequence_next_number: 1 });
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV15/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV15/', refund_sequence_next_number: 1 });
   db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = rec2.db;
   const inc2 = create(db, 'account.account', { name: 'B2 Inc', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2.db;
   db = write(db, 'account.journal', j2.id, { default_account_id: inc2.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
   const defTax2 = create(db, 'account.account', { name: 'B2 Def Tax', code: '251000', account_type: 'liability_current', company_id: company2Id });
   db = defTax2.db;
 
@@ -260,6 +261,9 @@ test('finding 15: taxes with foreign configured account reject posting when comp
   const taxAccC2 = create(db, 'account.account', { name: 'B2 Tax Acc', code: '259999', account_type: 'liability_current', company_id: company2Id });
   db = taxAccC2.db;
 
+  // Explicitly map the configured tax account to Company 2's account.
+  const fp = create(db, 'account.fiscal.position', { name: 'B2 tax mapping', company_id: company2Id, account_ids: [{ account_src_id: taxAccC1.id, account_dest_id: taxAccC2.id }] });
+  db = write(fp.db, 'account.move', inv.id, { fiscal_position_id: fp.id });
   // Now posting should succeed and use B2's tax account
   const posted = postMove(db, inv.id);
   const postedMove = read(posted, 'account.move', inv.id);
@@ -274,13 +278,14 @@ test('finding 16: fiscal account rules apply to original selected account before
   db = c2.db;
   const company2Id = c2.id;
 
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV16/', invoice_sequence_next_number: 1 });
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV16/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV16/', refund_sequence_next_number: 1 });
   db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = rec2.db;
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
   db = write(db, 'account.journal', j2.id, { default_account_id: inc2Base.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
   const inc2Dest = create(db, 'account.account', { name: 'B2 Inc Export', code: '400100', account_type: 'income', company_id: company2Id });
   db = inc2Dest.db;
 
@@ -350,13 +355,14 @@ test('finding 17: product with foreign configured account rejects posting when c
   db = c2.db;
   const company2Id = c2.id;
 
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV17/', invoice_sequence_next_number: 1 });
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV17/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV17/', refund_sequence_next_number: 1 });
   db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = rec2.db;
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
   db = write(db, 'account.journal', j2.id, { default_account_id: inc2Base.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
 
   // Account only in Company 1
   const specAccC1 = create(db, 'account.account', { name: 'C1 Only Income', code: '499999', account_type: 'income', company_id: 1 });

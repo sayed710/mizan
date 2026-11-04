@@ -8,6 +8,7 @@ import { postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { ensureReturnTypes } from './models/taxreturn.js';
 import { taxReport, taxesByTax } from './models/finance.js';
+import { accountId } from './models/ledger.js';
 
 test('tax unit return reviews and closes each company once', () => {
   let db = seed();
@@ -27,6 +28,11 @@ test('tax unit return reviews and closes each company once', () => {
   db = ensureReturnTypes(db);
   const type = search(db, 'account.return.type').find((t) => t.company_id === 1 && t.name === 'VAT Return');
   const memberType = search(db, 'account.return.type').find((t) => t.company_id === company.id && t.name === 'VAT Return');
+  db = write(db, 'account.return.type', memberType.id, {
+    tax_payable_account_id: accountId(db, '251000', company.id),
+    tax_receivable_account_id: accountId(db, '131000', company.id),
+    payment_partner_id: type.payment_partner_id,
+  });
   db = write(db, 'account.tax.unit', unit.id, { member_return_type_ids: [{ company_id: company.id, type_id: memberType.id }] });
   const ret = create(db, 'account.return', { name: 'Unit return', type_id: type.id, company_id: 1, tax_unit_id: unit.id, date_from: '2040-01-01', date_to: '2040-01-31' });
   db = ret.db;

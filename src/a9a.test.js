@@ -347,8 +347,10 @@ test('asset disposal: due depreciation is posted, the loss entry balances and th
   const asset = create(db, 'account.asset', { name: 'Truck', acquisition_date: '2026-01-01', original_value: 12000, salvage_value: 0, method: 'linear', method_number: 5, method_period: '12' });
   db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
   db = postDepreciation(db, read(db, 'account.asset', asset.id), '2027-12-31');
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2028-12-31', invoice_line_ids: [{ qty: 1, price_unit: 5000, tax: 0 }] });
+  db = postMove(invoice.db, invoice.id);
   const button = models['account.asset'].form.buttons.find((b) => b.label === 'Sell or Dispose');
-  db = button.run(db, read(db, 'account.asset', asset.id), { date: '2028-12-31', sale_value: 5000 }).db;
+  db = button.run(db, read(db, 'account.asset', asset.id), { date: '2028-12-31', sale_value: 5000, invoice_id: invoice.id, invoice_line: '0' }).db;
   const a = read(db, 'account.asset', asset.id);
   assert.equal(a.state, 'close');
   assert.equal(a.depreciation_ids.length, 3);

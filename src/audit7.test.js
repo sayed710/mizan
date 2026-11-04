@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
@@ -22,12 +23,13 @@ const balance = (state, code, company = null) => {
 
 test('sale order of company 2 creates invoice belonging to company 2 and uses company 2 accounts and journals', () => {
   let db = seed();
-  const co = createCompany(db, { name: 'Order branch' });
+  const co = createCompany(db, { name: 'Order branch', currency_id: db.settings.base_currency_id });
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
   // Create accounts and journal for company 2
   const invJournalCo2 = create(db, 'account.journal', { name: 'Customer Invoices Co2', code: 'INV', type: 'sale', company_id: co.id, invoice_sequence_prefix: 'CO2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'CO2-RINV/', refund_sequence_next_number: 1, default_account_id: accountId(db, '400000', co.id) });
   db = invJournalCo2.db;
+  db = write(db, 'res.company', co.id, { default_sale_journal_id: invJournalCo2.id });
 
   const sale = create(db, 'sale.order', {
     company_id: co.id,
@@ -56,7 +58,7 @@ test('sale order of company 2 creates invoice belonging to company 2 and uses co
 
 test('down payment for sale order of company 2 belongs to company 2 and posts successfully', () => {
   let db = seed();
-  const co = createCompany(db, { name: 'Order branch DP' });
+  const co = createCompanyWithDefaultInvoiceJournals(db, { name: 'Order branch DP', currency_id: db.settings.base_currency_id });
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
   // 1. Down payment via Create Invoice wizard with percentage
@@ -256,11 +258,12 @@ test('standard costing: price difference clears interim account and posts varian
 
 test('purchase order of company 2 creates bill belonging to company 2 and posts successfully', () => {
   let db = seed();
-  const co = createCompany(db, { name: 'Purchase branch' });
+  const co = createCompanyWithDefaultInvoiceJournals(db, { name: 'Purchase branch', currency_id: db.settings.base_currency_id });
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
   const billJournalCo2 = create(db, 'account.journal', { name: 'Vendor Bills Co2', code: 'BILL', type: 'purchase', company_id: co.id, invoice_sequence_prefix: 'CO2-BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'CO2-RBILL/', refund_sequence_next_number: 1, default_account_id: accountId(db, '600000', co.id) });
   db = billJournalCo2.db;
+  db = write(db, 'res.company', co.id, { default_purchase_journal_id: billJournalCo2.id });
 
   const p = create(db, 'product', {
     name: 'PO Goods',

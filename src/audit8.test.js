@@ -279,7 +279,8 @@ test('Item 1e: Statement line rejects batch_payment_id from another company', ()
   });
   db = postMove(bill2.db, bill2.id);
 
-  const journal2 = create(db, 'account.journal', { name: 'Bank 2', code: 'BNK2', type: 'bank', company_id: c2.id });
+  const liquidity = create(db, 'account.account', { name: 'Bank 2 Liquidity', code: '999802', account_type: 'asset_cash', company_id: c2.id });
+  const journal2 = create(liquidity.db, 'account.journal', { name: 'Bank 2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: liquidity.id });
   db = journal2.db;
 
   const batch2 = create(db, 'account.batch.payment', {
@@ -402,7 +403,7 @@ test('Item 2b: Early payment discount on a cash-basis customer invoice clears tr
 test('Item 3: Customer Statement scopes to company and defaults to current company', () => {
   let db = seed();
   const c1 = 1;
-  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch 2' });
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch 2', currency_id: db.records['res.company'][0].currency_id });
   db = c2.db;
 
   const partner = create(db, 'res.partner', { name: 'Multi-Company Client' });

@@ -24,7 +24,7 @@ import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
-import { smtpConfig } from './smtp.js';
+import { smtpConfig, sendMail } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
@@ -1087,12 +1087,18 @@ listen();
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;
-const runJobs = () => {
+let jobsRunning = false;
+const runJobs = async () => {
+  if (jobsRunning) return;
+  jobsRunning = true;
   try {
-    const next = runScheduledJobs(db, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }) });
-    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    const base = db;
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null });
+    if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
+  } finally {
+    jobsRunning = false;
   }
 };
 // The first run waits until the server is listening, so a restart answers requests before the jobs finish.

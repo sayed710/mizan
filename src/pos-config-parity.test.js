@@ -540,10 +540,13 @@ test('POS posts and closes in the session company using that company journals an
     db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: company.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
+  let branchPosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501']]) {
-    db = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id }).db;
+    const journal = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id });
+    db = journal.db;
+    if (code === 'POSS') branchPosJournalId = journal.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id }); db = cfg.db;
+  const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id, journal_id: branchPosJournalId }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'Branch cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   db = startSession(db, 0, cfg.id).db;
   const paid = payOrder(db, { lines: [{ product_id: 5, qty: 1, price_unit: 10, tax: 0 }], method: method.id });
@@ -769,10 +772,13 @@ test('automatically valued goods sold in a second company scope stock valuation 
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
+  let c2PosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    db = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id }).db;
+    const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id });
+    db = journal.db;
+    if (code === 'POSS') c2PosJournalId = journal.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id }); db = cfg.db;
+  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id, journal_id: c2PosJournalId }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
 
   const prod = create(db, 'product', { name: 'Valued Widget', type: 'goods', valuation: 'automated', cost: 15, list_price: 30, company_id: company.id, available_in_pos: true, sale_ok: true, qty_available: 5 });
@@ -799,10 +805,13 @@ test('shared product POS valuation opens and consumes only the session company s
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
+  let c2PosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    db = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id }).db;
+    const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id });
+    db = journal.db;
+    if (code === 'POSS') c2PosJournalId = journal.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id }); db = cfg.db;
+  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id, journal_id: c2PosJournalId }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: (db.records['account.journal'] ?? []).find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   const prod = create(db, 'product', { name: 'Shared FIFO', type: 'goods', company_id: null, valuation: 'real_time', cost_method: 'fifo', cost: 20, qty_available: 5, property_stock_valuation_account_id: accountId(db, '110100', 1), property_stock_journal: journalId(db, 'MISC', 1) }); db = prod.db;
   const loc1 = (db.records['stock.location'] ?? []).find((l) => l.usage === 'internal' && (l.company_id ?? 1) === 1);
@@ -1339,7 +1348,9 @@ test('refunds, return cancellations, and restaurant settlements validate company
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
   const c2Journal = create(db, 'account.journal', { name: 'Branch Cash Journal', code: 'BCSH', type: 'cash', company_id: c2.id, default_account_id: account('101501').id });
   db = c2Journal.db;
-  const cfg2 = create(db, 'pos.config', { name: 'Branch POS', company_id: c2.id, module_restaurant: true });
+  const c2PosJournal = create(db, 'account.journal', { name: 'Branch POS Journal', code: 'BPOS', type: 'sale', company_id: c2.id, default_account_id: account('400000').id });
+  db = c2PosJournal.db;
+  const cfg2 = create(db, 'pos.config', { name: 'Branch POS', company_id: c2.id, journal_id: c2PosJournal.id, module_restaurant: true });
   db = cfg2.db;
   const c2Cash = create(db, 'pos.payment.method', { name: 'Branch Cash', type: 'cash', company_id: c2.id, config_ids: [cfg2.id], journal_id: c2Journal.id });
   db = c2Cash.db;

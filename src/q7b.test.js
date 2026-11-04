@@ -241,7 +241,7 @@ test('horizontal group reports exclude entries from other allowed companies and 
   await initStore();
 
   let db = seed();
-  const other = createCompanyWithDefaultInvoiceJournals(db, { name: 'Sister Firm' });
+  const other = createCompanyWithDefaultInvoiceJournals(db, { name: 'Sister Firm', currency_id: db.records['res.company'][0].currency_id });
   db = updateSettings(other.db, { current_company_id: 1, allowed_company_ids: [1, other.id] });
 
   const a1 = create(db, 'account.analytic.account', { name: 'Main Project', code: 'MP', plan: 'project' });

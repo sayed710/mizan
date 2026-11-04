@@ -12,7 +12,9 @@ const line = (qty = 2, price = 50, tax = 10) => ({ product_id: 1, qty, price_uni
 const round = (n) => Math.round(n * 100) / 100;
 
 function setup() {
-  const config = create(seed(), 'pos.config', { name: 'Restaurant', module_restaurant: true, iface_tipproduct: true, tip_product_id: 5, loyalty_enabled: true, payment_method_ids: [{ name: 'Cash', journal: 'cash' }, { name: 'Card', journal: 'bank' }] });
+  const base = seed();
+  const defaultConfig = read(base, 'pos.config', base.settings.default_pos_config_id);
+  const config = create(base, 'pos.config', { name: 'Restaurant', journal_id: defaultConfig.journal_id, module_restaurant: true, iface_tipproduct: true, tip_product_id: 5, loyalty_enabled: true, payment_method_ids: [{ name: 'Cash', journal: 'cash' }, { name: 'Card', journal: 'bank' }] });
   const started = startSession(config.db, 100, config.id);
   const floor = create(started.db, 'restaurant.floor', { name: 'Main', config_id: config.id, table_ids: [{ name: 'A', seats: 4, shape: 'square' }, { name: 'B', seats: 2, shape: 'round' }, { name: 'C', seats: 2, shape: 'square' }] });
   const order = openTableOrder(floor.db, { configId: config.id, floorId: floor.id, tableName: 'A', customerCount: 2 });

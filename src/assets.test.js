@@ -103,7 +103,9 @@ test('depreciation uses persisted running state when the caller has a stale paus
 
 test('selling above book value books a gain with a balanced entry', () => {
   const { db, id } = running();
-  const sold = disposeAsset(db, read(db, 'account.asset', id), { date: '2027-12-31', saleValue: 7000 });
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 7000, tax: 0, account_id: accountId(db, '101401') }] });
+  const invoiced = postMove(invoice.db, invoice.id);
+  const sold = disposeAsset(invoiced, read(invoiced, 'account.asset', id), { date: '2027-12-31', saleValue: 7000, invoiceId: invoice.id });
   const a = read(sold, 'account.asset', id);
   assert.equal(a.state, 'close');
   assert.equal(a.depreciation_ids.length, 2);

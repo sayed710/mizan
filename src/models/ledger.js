@@ -6,10 +6,14 @@ import { TRANSITION, computeLineTaxes, isSectionOrNote, lineTaxOf, mapAccount, t
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
+import { reportingBookedAmount } from './money.js';
+import { currentYearEarningsAccount } from './earnings.js';
+
+export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
 
 export const ACCOUNT_TYPES = [
-  ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
-  ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['equity', 'Equity'],
+  ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
+  ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['liability_non_current', 'Non-current Liabilities'], ['liability_credit_card', 'Credit Card'], ['equity', 'Equity'], ['equity_unaffected', 'Current Year Earnings'], ['off_balance', 'Off-Balance Sheet'],
   ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_other', 'Other Expenses'],
 ];
 
@@ -33,11 +37,11 @@ export const CHART = [
 export const JOURNALS = [
   { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
   { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
-  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true },
   { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501' },
-  { code: 'MISC', name: 'Miscellaneous Operations', type: 'general' },
+  { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
   { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
-  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1 },
+  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1, company_default: 'pos' },
 ];
 
 const uniqueByCode = (records, model, code, predicate = () => true) => {
@@ -59,23 +63,6 @@ const idByCode = (db, model, code, company) => {
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
 export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
-
-/** Resolve a selected invoice journal or its explicit company default. */
-export function resolveInvoiceJournal(db, move, { required = false } = {}) {
-  if (move.journal_id) return move.journal_id;
-  const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
-  const sale = ['out_invoice', 'out_refund'].includes(move.move_type);
-  if (!purchase && !sale && move.move_type) return null;
-  const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
-  const company = read(db, 'res.company', companyId);
-  const journal = company?.[purchase ? 'default_purchase_journal_id' : 'default_sale_journal_id'];
-  if (!journal && required) {
-    const kind = purchase ? 'purchase' : 'sales';
-    const document = purchase ? 'vendor bill' : 'customer invoice';
-    throw new Error(`No ${document} journal for this company; select a journal or configure a default ${kind} journal for company ${companyId}`);
-  }
-  return journal ?? null;
-}
 
 export function resolveCompanyAccount(db, accountId, companyId) {
   if (!accountId) return null;
@@ -103,22 +90,46 @@ export function invoiceCounterpartAccount(db, invoice) {
   return ids[0];
 }
 
+export function resolveDocumentJournal(db, move, { required = false } = {}) {
+  if (!move) return null;
+  const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
+  const posContext = Boolean(move.session_id || move.pos_config_id || move.config_id);
+  let journalId = move.journal_id;
+  if (!journalId && move.id) journalId = read(db, 'account.move', move.id)?.journal_id;
+  if (!journalId && (move.session_id || move.pos_config_id || move.config_id)) {
+    const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
+    const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
+    const config = configId ? read(db, 'pos.config', configId) : null;
+    journalId = session?.journal_id || config?.journal_id || null;
+  }
+  if (!journalId && !posContext && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type)) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    const company = read(db, 'res.company', companyId);
+    journalId = company?.[purchase ? 'default_purchase_journal_id' : 'default_sale_journal_id'] ?? null;
+  }
+  if (!journalId && move.move_type === 'entry') {
+    journalId = read(db, 'res.company', companyId)?.default_general_journal_id ?? null;
+  }
+  const journal = journalId ? read(db, 'account.journal', journalId) : null;
+  if (journalId && !journal) throw new Error('Selected journal does not exist');
+  if (required && !journal) {
+    const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
+    if (purchase || ['out_invoice', 'out_refund'].includes(move.move_type)) {
+      const kind = purchase ? 'purchase' : 'sales';
+      const document = purchase ? 'vendor bill' : 'customer invoice';
+      throw new Error(`No ${document} journal for this company; select a journal or configure a default ${kind} journal for company ${companyId}`);
+    }
+    if (posContext) throw new Error('Configure a journal on the point of sale session or configuration');
+    throw new Error(`No general journal configured for company ${companyId}; select a journal or configure a default general journal`);
+  }
+  return journal;
+}
+
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  let base;
-  const journalDefaultAccount = () => {
-    if (base) return base;
-    const journalId = resolveInvoiceJournal(db, move, { required: true });
-    const journal = read(db, 'account.journal', journalId);
-    const account = journal?.default_account_id && read(db, 'account.account', journal.default_account_id);
-    if (!account) throw new Error('Configure a default account on the selected journal');
-    if (account.company_id && account.company_id !== (move.company_id ?? 1)) {
-      throw new Error('The selected journal default account belongs to another company');
-    }
-    base = account.id;
-    return base;
-  };
+  const journal = resolveDocumentJournal(db, move, { required: true });
+  const base = resolveCompanyAccount(db, journal.default_account_id, move.company_id);
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -129,14 +140,17 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    return { accountId: journalDefaultAccount(), configured: true, type: 'journal default' };
+    if (!base) throw new Error(`Journal "${journal.name || journal.code}" has no default account configured for this company`);
+    return { accountId: base, configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     if (isSectionOrNote(l)) continue;
     const source = getSourceAccount(l);
     if (!source.accountId) throw new Error(`No ${source.type} account found`);
     const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);
-    const resolved = resolveCompanyAccount(db, mapped, move.company_id);
+    const mappedAccount = read(db, 'account.account', mapped);
+    const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
+    const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
     if (!resolved) {
       if (source.configured) {
         throw new Error(`Configured ${source.type} account does not exist for the invoice company`);
@@ -153,13 +167,39 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const docCurrency = documentCurrency(db, move);
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
-    const zero = !computed.tax && !cashBasis ? (l.tax_name || taxLabel(l)) : '';
-    const tags = [...new Set([...(l.tax_tag_ids ?? []), ...computed.taxes.flatMap((t) => t.tax_tag_ids ?? [])])].sort((a, b) => a - b);
-    const key = `${account}:${zero}:${tags.join(',')}:${cashBasis}`;
-    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis, amount: 0, lines: [] };
-    group.amount += computed.untaxed;
-    group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
-    byAccount.set(key, group);
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
+    const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
+
+    if (!computed.tax && !cashBasis) {
+      const zeroTaxes = computed.taxes.length
+        ? computed.taxes
+        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), tax_tag_ids: l.tax_tag_ids ?? [] }];
+      for (const [compIndex, t] of zeroTaxes.entries()) {
+        const zero = taxLabel(t);
+        const zeroTaxId = t.tax_id ?? null;
+        const tags = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b);
+        const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
+        const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
+        if (compIndex === 0) {
+          group.amount += computed.untaxed;
+          group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+        }
+        group.base += t.base ?? computed.untaxed;
+        byAccount.set(key, group);
+      }
+    } else {
+      const zero = '';
+      const zeroTaxId = null;
+      const tags = [...new Set(computed.taxes.length
+        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => t.tax_tag_ids ?? [])
+        : cashBasis ? [] : (l.tax_tag_ids ?? []))].sort((a, b) => a - b);
+      const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
+      const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
+      group.amount += computed.untaxed;
+      group.base += computed.untaxed;
+      group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+      byAccount.set(key, group);
+    }
   }
   return [...byAccount.values()];
 }
@@ -193,7 +233,7 @@ function invoiceTaxAccountFor(db, move) {
   return (l) => {
     if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
     if (l.tax_account_id) {
-      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
+      const resolved = resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, l.tax_account_id), move.company_id);
       if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
       return resolved;
     }
@@ -233,7 +273,17 @@ export function invoiceLines(db, move) {
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
+  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, base, zero, lines, tags, zeroTaxId, distribution }) => [
+    account,
+    companyRound(docRound(amount) / rate),
+    docRound(amount),
+    zero,
+    lines,
+    tags,
+    zeroTaxId,
+    distribution,
+    companyRound(docRound(base ?? amount) / rate),
+  ]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
   const mixedDiscount = discountFactor !== 1;
@@ -321,8 +371,8 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, cashBasis]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: !cashBasis } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
@@ -373,7 +423,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
     if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
-    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   const journalCode = j?.code ?? journal;
@@ -386,11 +436,24 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Bank or cash journal code and its default account code (BNK1 / 101401 when unset or not a payment journal). */
-export function paymentJournal(db, journalId) {
-  const j = read(db, 'account.journal', journalId);
-  const account = j && ['bank', 'cash'].includes(j.type) ? read(db, 'account.account', j.default_account_id)?.code : null;
-  return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
+/** Resolve an explicitly selected or explicitly configured default bank/cash journal and its account. */
+export function paymentJournal(db, selectedJournalId, companyId = null) {
+  let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
+  if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
+  if (!selectedJournalId) {
+    const configured = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true);
+    const companyDefaults = companyId ? configured.filter((candidate) => candidate.company_id === companyId) : [];
+    const defaults = companyDefaults.length ? companyDefaults : configured.filter((candidate) => !candidate.company_id);
+    if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
+    if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
+    [journal] = defaults;
+  }
+  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Payment journal must be a bank or cash journal');
+  if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
+  const account = read(db, 'account.account', journal.default_account_id);
+  if (!account) throw new Error(`Configure a default account on the ${journal.name || 'selected'} payment journal`);
+  if (companyId && account.company_id && account.company_id !== companyId) throw new Error('Payment journal account belongs to another company');
+  return { id: journal.id, code: journal.code, account_id: account.id, account: account.code };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */
@@ -411,15 +474,16 @@ export function outstandingAccount(db, journal, company, inbound) {
   return id;
 }
 
-/** Posted journal items with their move date, optionally limited to [from, to] and company. */
-export function journalItems(db, { from, to, company_id, company } = {}) {
+/** Journal items with their move date, optionally limited by review status, date and company. */
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
+  const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
   const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
-  return search(db, 'account.move')
+  const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      return m.state === 'posted'
+      return m.state === wantedState
       && (!from || date >= from)
       && (!to || date <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany)
@@ -432,6 +496,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,
+        move_state: m.state,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,
         is_closing: !!m.is_closing,
@@ -439,12 +504,18 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         is_tax_payment: isTaxSettlement,
       }));
     });
+  if (reviewMode !== 'unreconciled') return rows;
+  return rows.filter((line) => {
+    const account = read(db, 'account.account', line.account_id);
+    const reconcilable = account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+    return reconcilable && line.reconciled !== true;
+  });
 }
 
 /** Balance per account (debit − credit) over the given items. */
 export function balances(db, items) {
   const map = new Map();
-  for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + (Number(l.debit) || 0) - (Number(l.credit) || 0));
+  for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + reportingBookedAmount(db, l, (Number(l.debit) || 0) - (Number(l.credit) || 0)));
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
@@ -474,14 +545,15 @@ export function balanceSheet(db, at = today(), { weight } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
   const rows = balances(db, weighted(journalItems(db, filter), weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
-  const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_fixed'], 1);
-  const liabilities = pick(['liability_payable', 'liability_current'], -1);
-  const equity = pick(['equity'], -1);
+  const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
+  const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
+  const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
+  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
-    assets, liabilities, equity, earnings,
+    assets, liabilities, equity, earnings, earningsAccount,
     totalAssets: total(assets), totalLiabilities: total(liabilities), totalEquity: round(total(equity) + earnings),
   };
 }

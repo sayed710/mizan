@@ -228,7 +228,7 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   const co2Inc = create(db, 'account.account', { code: '410000', name: 'Income Co2', account_type: 'income', company_id: co2 });
   const co2Def = create(co2Inc.db, 'account.account', { code: '212000', name: 'Def Rev Co2', account_type: 'liability_current', company_id: co2 });
   const co2Rec = create(co2Def.db, 'account.account', { code: '121000', name: 'AR Co2', account_type: 'asset_receivable', company_id: co2 });
-  const co2InvJnl = create(co2Rec.db, 'account.journal', { code: 'INV', name: 'Invoices Co2', type: 'sale', company_id: co2, default_account_id: co2Inc.id, invoice_sequence_prefix: 'DEFG-CO2-INV/', invoice_sequence_next_number: 1 });
+  const co2InvJnl = create(co2Rec.db, 'account.journal', { code: 'INV', name: 'Invoices Co2', type: 'sale', company_id: co2, default_account_id: co2Inc.id, invoice_sequence_prefix: 'DEFG-CO2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'DEFG-CO2-RINV/', refund_sequence_next_number: 1 });
   const co2MiscJnl = create(co2InvJnl.db, 'account.journal', { code: 'MISC', name: 'Misc Co2', type: 'general', company_id: co2 });
   db = write(co2MiscJnl.db, 'res.company', co2, {
     default_sale_journal_id: co2InvJnl.id,

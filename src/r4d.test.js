@@ -63,7 +63,8 @@ test('Finding 7: Add Open Invoices only adds invoices from the batch company and
 // ---------------------------------------------------------------------------
 test('Finding 8: journal-less batch updates company_id to invoice company on post, allowing branch users to find it and match statements', () => {
   try {
-    const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
+    const base = seed();
+    const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.settings.base_currency_id });
     let db = write(branch.db, 'res.company', branch.id, {
       outstanding_receipts_account_id: accountId(branch.db, '101402', branch.id),
     });
@@ -139,6 +140,8 @@ test('Finding 13: each kind-filtered deferral menu generates only its own kind',
     name: 'Rev Schedule',
     kind: 'revenue',
     company_id: 1,
+    start_date: '2026-01-01',
+    end_date: '2026-01-31',
     state: 'running',
     deferred_account_id: accountId(db, '212000'),
     recognition_account_id: accountId(db, '410000'),
@@ -148,6 +151,8 @@ test('Finding 13: each kind-filtered deferral menu generates only its own kind',
     name: 'Exp Schedule',
     kind: 'expense',
     company_id: 1,
+    start_date: '2026-01-01',
+    end_date: '2026-01-31',
     state: 'running',
     deferred_account_id: accountId(db, '132000'),
     recognition_account_id: accountId(db, '600000'),
@@ -338,7 +343,6 @@ test('Finding 16: picking a mismatched return type does not block saving and kee
   const savedDirect = read(directAudit.db, 'account.return', directAudit.id);
   assert.equal(savedDirect.audit_status, 'ongoing', 'prepareCreate defaults audit_status to ongoing for audit type');
 });
-
 
 
 

@@ -121,7 +121,7 @@ test('cash-basis discount reversal removes only the releases created by each all
     assert.equal(allocations.at(-1).discount, true);
     assert.equal(allocations.at(-1).cash_basis_move_id, null);
     assert.ok(allocations[0].cash_basis_move_id);
-    const check = (base, taxAmount) => assert.deepEqual(taxesByTax(db).find((r) => r.name === tax.name), { side: 'sale', name: tax.name, base, tax: taxAmount });
+    const check = (base, taxAmount) => assert.deepEqual(taxesByTax(db).find((r) => r.name === tax.name), { side: 'sale', tax_id: tax.id, name: tax.name, base, tax: taxAmount });
     check(98, 13.72);
     if (legacy) db = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => m.id === inv.id ? { ...m, payments: m.payments.map(({ cash_basis_move_id, ...p }) => p) } : m) } };
     db = reverse(db, payment.id);
@@ -255,7 +255,7 @@ test('reversing a legacy payment (row without cash_basis_move_id) posts the prop
   const legacyInv = read(legacyDb, 'account.move', inv.id);
   assert.equal(Object.hasOwn(legacyInv.payments[0], 'cash_basis_move_id'), false);
 
-  const check = (db, base, taxAmount) => assert.deepEqual(taxesByTax(db).find((r) => r.name === tax.name), { side: 'sale', name: tax.name, base, tax: taxAmount });
+  const check = (db, base, taxAmount) => assert.deepEqual(taxesByTax(db).find((r) => r.name === tax.name), { side: 'sale', tax_id: tax.id, name: tax.name, base, tax: taxAmount });
   check(legacyDb, 100, 14);
 
   const reversed = reverse(legacyDb, payment.id);

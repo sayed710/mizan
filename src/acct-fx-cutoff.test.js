@@ -63,7 +63,7 @@ test('revaluation uses the company configured exchange accounts', () => {
 
 test('companies revalue only their own invoices using their own journal and accounts', () => {
   const first = fixture();
-  const secondCompany = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'Second company' });
+  const secondCompany = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'Second company', currency_id: first.db.settings.base_currency_id });
   let db = secondCompany.db;
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: code, account_type: type, company_id: secondCompany.id }).db;
@@ -110,7 +110,7 @@ test('untracked legacy payments reject revaluation without posting anything', ()
 
 test('revaluation uses the actual company two receivable account even with a different code', () => {
   const first = fixture();
-  const company = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'Alternative chart' });
+  const company = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'Alternative chart', currency_id: first.db.settings.base_currency_id });
   const account = create(company.db, 'account.account', { name: 'Receivable alternative', code: '129999', account_type: 'asset_receivable', company_id: company.id });
   const invoice = create(account.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: company.id, currency_id: read(account.db, 'account.move', first.id).currency_id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   const posted = postMove(invoice.db, invoice.id);

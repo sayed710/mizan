@@ -21,7 +21,7 @@ const billWithAsset = () => {
 test('foreign credit settlement uses the document company and booked counterpart', () => {
   for (const [type, refund, partner, counterpartType] of [['out_invoice', 'out_refund', 2, 'asset_receivable'], ['in_invoice', 'in_refund', 3, 'liability_payable']]) {
     let db = seed();
-    const company = createCompanyWithDefaultInvoiceJournals(db, { name: 'Other company' });
+    const company = createCompanyWithDefaultInvoiceJournals(db, { name: 'Other company', currency_id: db.settings.base_currency_id });
     db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
     let counterpart;
     for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {

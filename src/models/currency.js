@@ -5,16 +5,31 @@ import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../
 
 
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
-const applicableRate = (currency, date) => (currency.rate_ids ?? []).filter((r) => Number(r.rate) > 0 && r.date && r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
+const applicableRate = (currency, date) => (currency.rate_ids ?? []).filter((r) => Number.isFinite(Number(r.rate)) && Number(r.rate) > 0 && r.date && r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
 
-function baseRate(db, currencyId, date) {
+export function baseCurrency(db) {
+  const currency = read(db, 'res.currency', db.settings?.base_currency_id);
+  if (!currency) throw new Error('Configure the base currency before converting currencies');
+  return currency;
+}
+
+export function conversionRate(db, sourceId, targetId, date) {
+  const source = read(db, 'res.currency', sourceId);
+  const target = read(db, 'res.currency', targetId);
+  if (!source || !target) throw new Error('Configure a valid company and document currency before converting currencies');
+  if (source.id === target.id) return 1;
+  const base = baseCurrency(db);
+  const targetRate = baseRate(db, target.id, date, base.id);
+  const sourceRate = baseRate(db, source.id, date, base.id);
+  return targetRate == null || sourceRate == null ? null : targetRate / sourceRate;
+}
+
+function baseRate(db, currencyId, date, baseId) {
   const c = currencyId ? read(db, 'res.currency', currencyId) : null;
   if (!c) throw new Error('Select an existing currency before converting an amount');
-  const rates = (c?.rate_ids ?? []).filter((r) => Number(r.rate) > 0 && r.date).sort((a, b) => a.date.localeCompare(b.date));
-  if (!rates.length) throw new Error(`No ${c.name} exchange rate is configured`);
+  if (currencyId === baseId) return 1;
   const rate = applicableRate(c, date);
-  if (!rate) throw new Error(`No ${c.name} rate on or before ${date}`);
-  return Number(rate.rate);
+  return rate ? Number(rate.rate) : null;
 }
 
 /** The currency a company keeps its books in (null: the base currency). */
@@ -25,21 +40,23 @@ export const companyCurrency = (db, companyId) => (companyId ? read(db, 'res.com
  * Without a company the base currency (settings.currency) is the reference.
  */
 export function rateAt(db, currencyId, date = today(), companyId = null) {
-  const own = companyCurrency(db, companyId);
   if (!currencyId) return 1;
-  const currency = read(db, 'res.currency', currencyId);
-  if (!currency) throw new Error('Select an existing currency before converting an amount');
-  const baseCurrency = (db.records['res.currency'] ?? []).find((item) => item.name === db.settings?.currency)?.id;
-  if (currencyId === own || (companyId == null && currencyId === baseCurrency)) return 1;
-  const currencyRate = currencyId === baseCurrency ? 1 : baseRate(db, currencyId, date);
-  const companyRate = own && own !== baseCurrency ? baseRate(db, own, date) : 1;
-  return currencyRate / companyRate;
+  const own = companyId == null ? baseCurrency(db).id : companyCurrency(db, companyId);
+  if (!own) throw new Error('Configure the company currency before converting currencies');
+  const rate = conversionRate(db, own, currencyId, date);
+  if (rate == null) {
+    const base = baseCurrency(db);
+    const missing = [currencyId, own].map((id) => read(db, 'res.currency', id)).find((currency) => baseRate(db, currency.id, date, base.id) == null);
+    const hasRates = (missing.rate_ids ?? []).some((row) => row.date && Number.isFinite(Number(row.rate)) && Number(row.rate) > 0);
+    throw new Error(hasRates ? `No ${missing.name} rate on or before ${date}; configure an exchange rate` : `No ${missing.name} exchange rate is configured`);
+  }
+  return rate;
 }
 
 /** Amount in `currencyId` expressed in the company's currency at `date`. */
 export const toCompany = (db, currencyId, amount, date, companyId = null) => roundCurrency(
   (Number(amount) || 0) / rateAt(db, currencyId, date, companyId),
-  companyId == null ? (db.records['res.currency'] ?? []).find((currency) => currency.name === db.settings?.currency) : companyCurrencyRecord(db, companyId),
+  companyId == null ? baseCurrency(db) : companyCurrencyRecord(db, companyId),
 );
 
 export const currencyModels = {
@@ -59,6 +76,7 @@ export const currencyModels = {
     fields: {
       name: { type: 'char', label: 'Currency', required: true },
       symbol: { type: 'char', label: 'Symbol' },
+      unit_name: { type: 'char', label: 'Whole Unit Name for Amounts in Words' },
       rounding: { type: 'float', label: 'Rounding', required: true, digits: 15 },
       decimal_places: { type: 'integer', label: 'Decimal Places', compute: (r) => currencyDecimalPlaces(r) },
       rate_ids: {
@@ -78,7 +96,7 @@ export const currencyModels = {
     },
     defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },
-    list: ['name', 'symbol', 'rounding', 'decimal_places', 'current_rate'],
-    form: { title: 'name', groups: [['symbol', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
+    list: ['name', 'symbol', 'unit_name', 'rounding', 'decimal_places', 'current_rate'],
+    form: { title: 'name', groups: [['symbol', 'unit_name', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
   },
 };

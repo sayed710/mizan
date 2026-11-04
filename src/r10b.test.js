@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { creditNote, postMove } from './models/accounting.js';
 import { today } from './models/common.js';
 import { accountId, postEntry } from './models/ledger.js';
+import { startSession } from './models/pos.js';
 
 test('sales journal entries respect the sales lock', () => {
   let db = seed();
@@ -64,7 +65,8 @@ test('invoice sequences are selected and advanced independently by journal', () 
   const invoiceJournal = read(db, 'account.journal', read(db, 'res.company', 1).default_sale_journal_id);
   const extra = create(db, 'account.journal', {
     name: 'Alternate Sales', code: 'ALT', type: 'sale', company_id: 1,
-    invoice_sequence_prefix: 'ALT/', invoice_sequence_next_number: 1, default_account_id: invoiceJournal.default_account_id,
+    invoice_sequence_prefix: 'ALT/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'ALT-R/', refund_sequence_next_number: 1,
+    default_account_id: invoiceJournal.default_account_id,
   });
   db = extra.db;
   const unconfigured = create(db, 'account.journal', {
@@ -142,4 +144,18 @@ test('foreign currency rate is empty when missing while the company currency rem
   assert.equal(read(currency.db, 'res.currency', currency.id).current_rate, null);
   const companyCurrency = read(db, 'res.company', 1).currency_id;
   assert.equal(read(db, 'res.currency', companyCurrency).current_rate, 1);
+});
+
+test('POS sessions use an explicitly configured default configuration and journal', () => {
+  const db = seed();
+  const config = read(db, 'pos.config', db.settings.default_pos_config_id);
+  const started = startSession(db);
+  const session = read(started.db, 'pos.session', started.id);
+  assert.equal(session.config_id, config.id);
+  assert.equal(session.journal_id, config.journal_id);
+
+  const noDefault = { ...db, settings: { ...db.settings, default_pos_config_id: null } };
+  assert.throws(() => startSession(noDefault), /Select a point of sale configuration or configure a default/i);
+  const noJournal = write(db, 'pos.config', config.id, { journal_id: null });
+  assert.throws(() => startSession(noJournal), /Configure a sales journal for this point of sale configuration and company/i);
 });

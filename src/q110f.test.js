@@ -17,7 +17,8 @@ function invoice(db, company, amount) {
 }
 
 test('journal-less inbound batch matches a statement in its payments company', () => {
-  const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
+  const base = seed();
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.settings.base_currency_id });
   let db = write(branch.db, 'res.company', branch.id, { outstanding_receipts_account_id: accountId(branch.db, '101402', branch.id) });
   const inv = invoice(db, branch.id, 100);
   const batch = create(inv.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: inv.id, amount: 100 }] });
@@ -145,8 +146,9 @@ test('customer statement selects an allowed company independently of the active 
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
   await initStore();
-  const branch = createCompanyWithDefaultInvoiceJournals(getDb(), { name: 'Allowed branch' });
-  const other = createCompanyWithDefaultInvoiceJournals(branch.db, { name: 'Restricted branch' });
+  const base = getDb();
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Allowed branch', currency_id: base.records['res.company'][0].currency_id });
+  const other = createCompanyWithDefaultInvoiceJournals(branch.db, { name: 'Restricted branch', currency_id: base.records['res.company'][0].currency_id });
   const first = invoice(other.db, 1, 120);
   const second = invoice(first.db, branch.id, 240);
   const db = { ...second.db, settings: { ...second.db.settings, current_company_id: 1, allowed_company_ids: [1, branch.id] } };

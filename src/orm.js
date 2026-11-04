@@ -4,7 +4,7 @@
 import { models } from './registry.js';
 import { distributionError } from './analytic_distribution.js';
 
-export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD' } });
+export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD', currency_unit: 'Dollars', currency_unit_currency: 'USD' } });
 
 export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 

@@ -21,6 +21,17 @@ const shared = (id) => id == null || id === false || id === '';
 /** Current company ID, defaulting to the main company before initialization. */
 export const currentCompany = (db) => db.settings?.current_company_id ?? 1;
 
+/** Resolve the company for a document or a single-company batch without consulting the active UI company. */
+export function documentCompany(db, document) {
+  const companyIds = document?.company_id ? new Set([document.company_id]) : new Set((document?.lines ?? [])
+    .map((line) => read(db, 'account.move', line.move_id)?.company_id).filter(Boolean));
+  if (companyIds.size !== 1) return null;
+  const company = read(db, 'res.company', [...companyIds][0]);
+  if (!company) return null;
+  const currency = company.currency_id ? read(db, 'res.currency', company.currency_id) : null;
+  return { ...company, currency: currency?.name ?? null };
+}
+
 /** Select active companies without changing the caller's database or selection. */
 export function setCompanies(db, { current, allowed }) {
   if (!Array.isArray(allowed) || !allowed.length || !allowed.includes(current)) throw new Error('Select at least one company including the current company');
@@ -210,6 +221,7 @@ function companyGuard(db, before, r) {
   for (const [field, type, label] of [
     ['default_sale_journal_id', 'sale', 'Default Sales Journal'],
     ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
+    ['default_general_journal_id', 'general', 'Default General Journal'],
   ]) {
     if (!r[field]) continue;
     const journal = record(db, 'account.journal', r[field]);
@@ -220,6 +232,11 @@ function companyGuard(db, before, r) {
   if (r.down_payment_account_id) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
+  }
+  if (r.current_year_earnings_account_id) {
+    const account = record(db, 'account.account', r.current_year_earnings_account_id);
+    if (!account || !['equity', 'equity_unaffected'].includes(account.account_type)
+      || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an equity earnings account shared with or belonging to this company';
   }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
@@ -236,11 +253,12 @@ export function createCompany(db, vals) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
-    const res = create(next, 'res.company', { ...values, partner_id: partner.id });
-    return { ...res, db: ensureReturnTypes(res.db) };
+    values.partner_id = partner.id;
   }
   const res = create(next, 'res.company', values);
-  return { ...res, db: ensureReturnTypes(res.db) };
+  if (values.current_year_earnings_account_id) return { ...res, db: ensureReturnTypes(res.db) };
+  const account = create(res.db, 'account.account', { code: '302000', name: 'Retained Earnings', account_type: 'equity', company_id: res.id });
+  return { ...res, db: ensureReturnTypes(write(account.db, 'res.company', res.id, { current_year_earnings_account_id: account.id })) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -254,8 +272,13 @@ export function ensureMainCompany(db) {
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const code = db.settings?.currency ?? 'USD';
   const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const base = currency ? { db, id: currency.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
-  const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  const unitName = db.settings?.currency_unit_currency === code ? String(db.settings?.currency_unit ?? '').trim() : '';
+  if (!currency && !unitName) throw new Error('Configure the whole currency unit name before initializing the company');
+  const base = currency
+    ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
+    : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
+  const configured = updateSettings(base.db, { base_currency_id: base.id });
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: base.id }).db;
   return ensureReturnTypes(created);
 }
 
@@ -275,20 +298,20 @@ export function setCompanyCurrency(db, companyId, code) {
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 
-const TAX_KEYS = [...Object.keys(taxSnapshot(null)), 'tax_include_base_amount', 'tax_is_base_affected', 'tax_sequence', 'tax_breakdown'];
+const TAX_KEYS = [...Object.keys(taxSnapshot(null)), 'tax_source_id', 'tax_ids', 'tax_include_base_amount', 'tax_is_base_affected', 'tax_sequence', 'tax_breakdown'];
 
 /**
  * The buyer's purchase line for a sold line: same product, quantity, discount and net price,
  * but the buyer's purchase tax (through the seller's fiscal position) instead of the seller's output VAT.
  */
-function purchaseLine(db, line, fpId) {
+function purchaseLine(db, line, fpId, companyId) {
   const { qty_delivered, qty_invoiced, ...rest } = line;
   const kept = Object.fromEntries(Object.entries(rest).filter(([k]) => !TAX_KEYS.includes(k)));
   const qty = Number(line.qty) || 0;
   const factor = qty * (1 - (Number(line.discount) || 0) / 100);
   const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
   const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
-  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId) ?? taxSnapshot(null);
+  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId, companyId) ?? taxSnapshot(null);
   // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
   // inside the discounted price, so the discount is undone for it).
   const kept_share = 1 - (Number(line.discount) || 0) / 100;
@@ -311,10 +334,10 @@ export function interCompanyRules(db, saleOrderId) {
   if (!seller?.partner_id) throw new Error('Set the selling company and its contact first');
   const existing = (db.records['purchase.order'] ?? []).find((p) => p.auto_sale_id === sale.id);
   if (existing) return write(db, 'sale.order', sale.id, { auto_purchase_id: existing.id });
-  const fpId = fiscalPositionFor(db, seller.partner_id);
+  const fpId = fiscalPositionFor(db, seller.partner_id, buyer.id);
   const purchase = create(db, 'purchase.order', {
     company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name, fiscal_position_id: fpId ?? null,
-    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId)),
+    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId, buyer.id)),
     ...(sale.currency_id ? { currency_id: sale.currency_id } : {}),
   });
   return write(purchase.db, 'sale.order', sale.id, { auto_purchase_id: purchase.id });
@@ -329,8 +352,12 @@ export const companyModels = {
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       default_sale_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Sales Journal' },
       default_purchase_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Purchase Journal' },
+      default_general_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default General Journal' },
+      current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
@@ -365,7 +392,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'current_year_earnings_account_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

@@ -96,25 +96,34 @@ export function seed() {
     investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
     financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
   };
+  // The demo chart tags loans payable as financing explicitly; every other account follows its type.
+  const chartActivity = { '260000': 'financing' };
   CHART.forEach(([code, name, account_type]) => add('account.account', {
     code, name, account_type,
     reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-    tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
+    tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
   }));
   const companyJournals = {};
+  let demoBankJournal = null;
   JOURNALS.forEach((journal) => {
     const id = add('account.journal', {
       code: journal.code,
       name: journal.name,
       type: journal.type,
       default_account_id: journal.account ? accountId(db, journal.account) : null,
+      default_for_payments: journal.default_for_payments === true,
       ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
       ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
       ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
       ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
     });
     if (journal.company_default) companyJournals[journal.company_default] = id;
+    if (journal.default_for_payments === true) {
+      if (demoBankJournal) throw new Error('Demo setup needs exactly one default payment journal');
+      demoBankJournal = id;
+    }
   });
+  if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -136,9 +145,23 @@ export function seed() {
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = ensureMainCompany(db);
-  set('res.company', 1, {
+  const mainCompanyId = db.settings?.current_company_id ?? 1;
+  set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,
     default_purchase_journal_id: companyJournals.purchases,
+    default_general_journal_id: companyJournals.general,
+  });
+  const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
+  db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
+  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1 }] });
+  const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
+  const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
+    (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');
+  if (mainTaxTypes.length !== 1) throw new Error('Demo setup needs exactly one main-company tax return type');
+  db = write(db, 'account.return.type', mainTaxTypes[0].id, {
+    tax_payable_account_id: accountId(db, '251000', mainCompanyId),
+    tax_receivable_account_id: accountId(db, '131000', mainCompanyId),
+    payment_partner_id: taxAuthorityId,
   });
 
   const crmStages = [
@@ -172,7 +195,10 @@ export function seed() {
     });
   });
   const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
-  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...p }));
+  // Demo products sold to customers carry explicit tax records; components keep only their plain percentage.
+  const untaxedCodes = new Set(['COMP-001', 'COMP-002', 'COMP-003']);
+  const productTaxes = (code) => (untaxedCodes.has(code) ? {} : { tax_id: vatSale, supplier_tax_id: vatPurchase });
+  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...productTaxes(p.default_code), ...p }));
   add('delivery.carrier', { name: 'Standard Delivery', delivery_type: 'fixed', fixed_price: 25, free_over: 2000 });
   add('delivery.carrier', { name: 'Freight by weight', delivery_type: 'rules', rules: [{ max_weight: 50, price: 40 }, { max_weight: 300, price: 120 }, { max_weight: 2000, price: 450 }] });
   add('delivery.carrier', { name: 'Aramex Express', delivery_type: 'api', api_url: '', tracking_url: 'https://www.aramex.com/track/results?ShipmentNumber={ref}' });
@@ -237,9 +263,9 @@ export function seed() {
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
   const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
-  add('account.bank.statement.line', { date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
-  add('account.bank.statement.line', { date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
-  add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
@@ -310,7 +336,10 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1 });
+  const shopJournalId = companyJournals.pos;
+  if (!shopJournalId) throw new Error('Demo setup needs a configured point of sale journal');
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1, journal_id: shopJournalId });
+  db = { ...db, settings: { ...db.settings, default_pos_config_id: shopConfig } };
   add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
@@ -442,8 +471,8 @@ export function seed() {
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
-  add('account.followup.level', { name: 'First reminder', delay: 15, message: 'Friendly reminder: please settle the amount below.' });
-  add('account.followup.level', { name: 'Second reminder', delay: 30, message: 'Your account is overdue; please pay within 7 days.' });
+  add('account.followup.level', { name: 'First reminder', delay: 15, channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
+  add('account.followup.level', { name: 'Second reminder', delay: 30, channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
   (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
@@ -455,8 +484,8 @@ export function seed() {
   add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
   add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

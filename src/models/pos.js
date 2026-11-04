@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, journalId, postEntry } from './ledger.js';
+import { accountId, invoiceLines, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -14,14 +14,25 @@ export const openSession = (db) => search(db, 'pos.session').find((s) => s.state
 /** Open the register with the counted opening cash. */
 export function startSession(db, openingCash = 0, configId = null) {
   if (openSession(db)) throw new Error('A session is already open');
-  const config = configId ? read(db, 'pos.config', configId) : (search(db, 'pos.config')[0] ?? null);
+  const selectedConfigId = configId ?? db.settings?.default_pos_config_id ?? null;
+  if (!selectedConfigId) throw new Error('Select a point of sale configuration or configure a default point of sale');
+  const config = read(db, 'pos.config', selectedConfigId);
+  if (!config) throw new Error('Selected point of sale configuration does not exist');
+  const company_id = config.company_id ?? db.settings?.current_company_id ?? null;
+  if (!company_id) throw new Error('Select a company on the point of sale configuration');
+  const journal = config.journal_id ? read(db, 'account.journal', config.journal_id) : null;
+  if (!journal || journal.type !== 'sale' || (journal.company_id != null && journal.company_id !== company_id)) {
+    throw new Error('Configure a sales journal for this point of sale configuration and company');
+  }
+  const journal_id = journal.id;
   return create(db, 'pos.session', {
     name: nextName(db, 'pos.session', 'POS/S/'),
     state: 'opened',
     start_at: today(),
-    cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, config?.company_id ?? 1)),
-    config_id: config?.id ?? (configId || null),
-    company_id: config?.company_id ?? 1,
+    cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, company_id)),
+    config_id: config.id,
+    journal_id,
+    company_id,
   });
 }
 
@@ -29,10 +40,10 @@ export function startSession(db, openingCash = 0, configId = null) {
  * Lines of a cart priced from the products: sales price and the product's sales tax record
  * (price-included or not), mapped through the customer's fiscal position.
  */
-export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null } = {}) => cart.map((l) => {
+export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1 } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
-  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId);
-  const tax = productTax(db, p, 'sale', fp) ?? { tax: p?.sale_tax ?? 14 };
+  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
@@ -171,8 +182,13 @@ export function resolvePosConfigAndPreset(db, {
   }
 
   const rawConfigId = config_id != null && config_id !== '' ? Number(config_id) : null;
-  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? (search(db, 'pos.config')[0]?.id ?? null);
+  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? db.settings?.default_pos_config_id ?? null;
   const config = resolvedConfigId ? read(db, 'pos.config', resolvedConfigId) : null;
+  if (!config) {
+    throw new Error(resolvedConfigId
+      ? 'Selected point of sale configuration does not exist'
+      : 'Select a point of sale configuration or configure a default point of sale');
+  }
 
   if (sess.config_id && resolvedConfigId !== sess.config_id) {
     throw new Error('POS configuration does not match the session');
@@ -209,7 +225,7 @@ export function resolvePosConfigAndPreset(db, {
     is_return: isReturn,
     identification: preset?.identification ?? 'none',
     pricelist_id: preset?.pricelist_id ?? null,
-    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId) ?? null,
+    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId, config?.company_id ?? sess?.company_id ?? 1) ?? null,
   };
 
   return {
@@ -564,12 +580,18 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
 }
 
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
-  const posJournalId = journalId(stocked, 'POSS', session.company_id);
-  if (!posJournalId) throw new Error('Configure a point of sale journal for this company');
-  const sale = invoiceLines(stocked, {
+  const posJournal = resolveDocumentJournal(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
     company_id: session.company_id,
+    session_id: session.id,
+    config_id: session.config_id,
+    journal_id: session.journal_id,
+  }, { required: true });
+  const posJournalId = posJournal.id;
+  const sale = invoiceLines(stocked, {
+    move_type: refund_of ? 'out_refund' : 'out_invoice',
     journal_id: posJournalId,
+    company_id: session.company_id,
     partner_id,
     fiscal_position_id: presetSnapshot.fiscal_position_id,
     name,
@@ -594,7 +616,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {
@@ -699,6 +721,7 @@ export function payCart(db, { cart = [], lines: inputLines = null, method, payme
   const lines = original ? original.lines : priceLines(db, normalized, resolved.effectivePartnerId, {
     pricelistId: resolved.presetSnapshot.pricelist_id,
     fiscalPositionId: resolved.presetSnapshot.fiscal_position_id,
+    companyId: resolved.config?.company_id ?? resolved.session?.company_id ?? 1,
   });
   const out = payOrder(db, {
     lines,

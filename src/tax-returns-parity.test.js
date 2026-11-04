@@ -8,7 +8,7 @@ import { payMove, postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { postBatch } from './models/payments.js';
 import { accountId, journalId, postEntry } from './models/ledger.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import {
   generateReturns,
@@ -24,11 +24,21 @@ import { models } from './models/index.js';
 import { createCompany, ensureMainCompany } from './models/company.js';
 
 const taxNamed = (db, name, use = 'sale') => search(db, 'account.tax').find((t) => t.name === name && t.type_tax_use === use);
+const configureReturnType = (db, typeId, companyId, partnerId) => write(db, 'account.return.type', typeId, {
+  tax_payable_account_id: accountId(db, '251000', companyId),
+  tax_receivable_account_id: accountId(db, '131000', companyId),
+  payment_partner_id: partnerId,
+});
 const invoiceLine = (db, taxName, use, vals = {}) => ({
   product_id: 1, qty: 1, price_unit: 100, discount: 0,
   ...taxSnapshot(taxNamed(db, taxName, use)),
   ...vals,
 });
+const defaultPaymentJournal = (db) => {
+  const candidates = search(db, 'account.journal').filter((journal) => journal.default_for_payments === true);
+  assert.equal(candidates.length, 1);
+  return candidates[0].id;
+};
 
 test('invoice account onchange preserves a manually entered unit price', () => {
   const db = seed();
@@ -127,9 +137,11 @@ test('a forged tax closing reference cannot bypass a period lock', () => {
 
 test('a return closing cannot post into a globally locked period', () => {
   let db = updateSettings(seed(), { lock_date: '2025-03-31' });
+  const manualJournal = create(db, 'account.journal', { name: 'Lock test journal', code: 'LOCKTEST', type: 'general', company_id: 1 });
+  db = manualJournal.db;
   const bank = search(db, 'account.account').find((a) => a.code === '101401');
   const payable = search(db, 'account.account').find((a) => a.code === '211000');
-  const forged = { name: 'MISC/2025/99999', move_type: 'entry', company_id: 1, date: '2025-03-31', invoice_date: '2025-03-31',
+  const forged = { name: 'LOCKTEST/2025/99999', move_type: 'entry', company_id: 1, journal_id: manualJournal.id, date: '2025-03-31', invoice_date: '2025-03-31',
     ref: 'Tax Closing: impersonated', line_ids: [{ account_id: bank.id, debit: 100 }, { account_id: payable.id, credit: 100 }] };
   assert.throws(() => create(db, 'account.move', { ...forged, state: 'posted' }), /locked/i);
   const draft = create(db, 'account.move', { ...forged, state: 'draft' });
@@ -180,6 +192,10 @@ test('tax return locks and resets are isolated by company through synced actions
   let db = seed();
   const company = createCompany(db, { name: 'Second company' });
   db = company.db;
+  const authority = create(db, 'res.partner', { name: 'Second company tax authority' });
+  db = authority.db;
+  const memberType = search(db, 'account.return.type').find((t) => (t.company_id ?? 1) === company.id && t.name === 'VAT Return');
+  db = configureReturnType(db, memberType.id, company.id, authority.id);
   const buttons = models['account.return'].form.buttons;
   const run = (label, id) => {
     const next = buttons.find((button) => button.label === label).run(db, read(db, 'account.return', id)).db;
@@ -238,10 +254,10 @@ test('invoice confirmation only uses journals and accounts available to its comp
   assert.equal(accountId(db, 'FOREIGN', company.id), null);
   assert.equal(accountId(db, 'FOREIGN'), foreignAccount.id);
   const companyJournalDefaults = {};
-  for (const [code, type] of [['INV', 'sale'], ['BILL', 'purchase']]) {
+  for (const [code, type, acc] of [['INV', 'sale', '400000'], ['BILL', 'purchase', '600000']]) {
     const journal = create(db, 'account.journal', {
       name: `Company ${code}`, code, type, company_id: company.id,
-      default_account_id: accountId(db, type === 'sale' ? '400000' : '600000', company.id),
+      default_account_id: accountId(db, acc, company.id),
       invoice_sequence_prefix: `PARITY-${code}/`, invoice_sequence_next_number: 1,
       refund_sequence_prefix: `PARITY-R${code}/`, refund_sequence_next_number: 1,
     });
@@ -622,9 +638,11 @@ test('company isolation: tax report, journal items, and closing entries isolate 
   assert.equal(ret1Record.total_amount_to_pay, 100);
 
   // Company 2's tax items are untouched
-  const co2Type = search(submittedDb, 'account.return.type').find((t) => t.company_id === co2.id);
+  const authority = create(submittedDb, 'res.partner', { name: 'Company Two tax authority' });
+  const co2Type = search(authority.db, 'account.return.type').find((t) => t.company_id === co2.id);
   assert.ok(co2Type, 'Return type for Company 2 exists');
-  const co2ReturnRes = create(submittedDb, 'account.return', {
+  const configuredCo2 = configureReturnType(authority.db, co2Type.id, co2.id, authority.id);
+  const co2ReturnRes = create(configuredCo2, 'account.return', {
     name: 'Co2 VAT Return',
     type_id: co2Type.id,
     date_from: from,
@@ -832,6 +850,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
 
 test('states workflow transitions and immutability of submitted/paid returns', () => {
   let db = seed();
+  const vatType = search(db, 'account.return.type').find((type) => type.name === 'VAT Return' && (type.company_id ?? 1) === 1);
 
   // Workflow: generic_state_review_submit
   const typeReview = create(db, 'account.return.type', {
@@ -851,7 +870,8 @@ test('states workflow transitions and immutability of submitted/paid returns', (
     category: 'account_return',
     states_workflow: 'generic_state_tax_report',
   });
-  const rReport = create(typeReport.db, 'account.return', {
+  const configuredReportType = configureReturnType(typeReport.db, typeReport.id, 1, vatType.payment_partner_id);
+  const rReport = create(configuredReportType, 'account.return', {
     name: 'R Report', type_id: typeReport.id, date_from: '2026-06-01', date_to: '2026-06-30', state: 'new',
   });
   const subReport = submitReturn(rReport.db, rReport.id);
@@ -862,9 +882,9 @@ test('states workflow transitions and immutability of submitted/paid returns', (
     name: 'Type Only Pay',
     category: 'account_return',
     states_workflow: 'generic_state_only_pay',
-    payment_partner_id: 1,
   });
-  const rPay = create(typePay.db, 'account.return', {
+  const configuredPayType = configureReturnType(typePay.db, typePay.id, 1, vatType.payment_partner_id);
+  const rPay = create(configuredPayType, 'account.return', {
     name: 'R Pay', type_id: typePay.id, date_from: '2026-07-01', date_to: '2026-07-31', state: 'new', total_amount_to_pay: 50,
   });
   const paidOnly = payReturn(rPay.db, rPay.id);
@@ -1083,17 +1103,13 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
 
   const direct = makeBill(standalonePaid, null);
   const register = models['account.move'].form.buttons.find((b) => b.label === 'Register Payment');
-  const oldPrompt = globalThis.prompt;
-  try {
-    globalThis.prompt = () => '100';
-    const result = register.run(direct.db, read(direct.db, 'account.move', direct.id)).db;
-    const payment = search(result, 'account.payment').find((p) => p.invoice_id === direct.id);
-    assert.equal(read(result, 'account.move', direct.id).amount_paid, 100);
-    assert.equal(payment.state, 'posted');
-    assert.ok(!payment.partner_bank_id);
-  } finally {
-    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
-  }
+  const result = register.run(direct.db, read(direct.db, 'account.move', direct.id), {
+    amount: 100, date: today(), journal_id: defaultPaymentJournal(direct.db),
+  }).db;
+  const payment = search(result, 'account.payment').find((p) => p.invoice_id === direct.id);
+  assert.equal(read(result, 'account.move', direct.id).amount_paid, 100);
+  assert.equal(payment.state, 'posted');
+  assert.ok(!payment.partner_bank_id);
 });
 
 test('outbound payment actions reject another company’s recipient bank and allow own or shared banks', () => {
@@ -1125,13 +1141,9 @@ test('outbound payment actions reject another company’s recipient bank and all
     partner_bank_id: foreign.id, invoice_date: today(), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const posted = confirmBill.run(bill.db, read(bill.db, 'account.move', bill.id)).db;
   const register = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment');
-  const oldPrompt = globalThis.prompt;
-  try {
-    globalThis.prompt = () => '100';
-    assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id)), /bank account.*company/i);
-  } finally {
-    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
-  }
+  assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id), {
+    amount: 100, date: today(), journal_id: defaultPaymentJournal(posted),
+  }), /bank account.*company/i);
   assert.throws(() => confirm(makePayment(posted, null, 1, bill.id)), /bank account.*company/i);
   const noBank = write(posted, 'account.move', bill.id, { partner_bank_id: null });
   assert.throws(() => confirm(makePayment(noBank, foreign.id, 1, bill.id)), /bank account.*company/i);
@@ -1196,7 +1208,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 22);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');
@@ -1355,7 +1367,7 @@ test('invoice writes preserve manual analytics without a model and apply matchin
   const partner = create(position.db, 'res.partner', { name: 'Original vendor' });
   const target = create(partner.db, 'res.partner', { name: 'Matching vendor' });
   const unmatched = create(target.db, 'res.partner', { name: 'Unmatched vendor' });
-  const company = create(unmatched.db, 'res.company', { name: 'Analytic company' });
+  const company = createCompanyWithDefaultInvoiceJournals(unmatched.db, { name: 'Analytic company', currency_id: unmatched.db.settings.base_currency_id });
   const product = create(company.db, 'product', { name: 'Analytic service', type: 'service', property_account_expense_id: source.id });
   db = create(product.db, 'account.analytic.distribution.model', { partner_id: target.id, company_id: 1, analytic_distribution: { [automatic]: 100 } }).db;
   db = create(db, 'account.analytic.distribution.model', { partner_id: partner.id, company_id: 1, account_prefix: '623211', analytic_distribution: { [automatic]: 100 } }).db;

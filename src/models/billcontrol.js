@@ -1,12 +1,13 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
-import { accountId, journalId } from './ledger.js';
+import { accountId, resolveDocumentJournal } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
 import { round } from '../money.js';
+import { sameCommercialPartner } from './reconcile.js';
 
 const number = (n) => Number(n) || 0;
 // Services never get a receipt, so they are always billed on ordered quantities.
@@ -15,8 +16,12 @@ const quantities = (l, policy) => {
   const ordered = number(l.qty), received = number(l.qty_delivered), billed = number(l.qty_invoiced);
   return { product_id: l.product_id, ordered, received, billed, toBill: Math.max(0, (policy === 'receive' ? received : ordered) - billed) };
 };
-const orderFor = (db, bill) => bill.purchase_id ? read(db, 'purchase.order', bill.purchase_id)
-  : search(db, 'purchase.order').find((p) => p.name === (bill.origin || bill.invoice_origin));
+const orderFor = (db, bill) => {
+  if (!bill.purchase_id) return null;
+  const po = read(db, 'purchase.order', bill.purchase_id);
+  if (!po || !sameCommercialPartner(db, po.partner_id, bill.partner_id) || (po.company_id ?? 1) !== (bill.company_id ?? 1)) throw new Error('The purchase order must exist and belong to the bill vendor and company');
+  return po;
+};
 const previousBills = (db, bill, po) => (db.records['account.move'] ?? []).filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
   && m.state === 'posted' && orderFor(db, m)?.id === po.id);
 const totalQty = (lines, id) => lines.filter((l) => l.product_id === id).reduce((s, l) => s + number(l.qty), 0);
@@ -37,14 +42,18 @@ const status = (r, db) => {
 const policyLines = (db, r) => (r.order_line ?? []).map((l) => ({ ...l, purchase_method: method(read(db, 'product', l.product_id)) }));
 
 function createBill(db, r) {
-  const po = read(db, 'purchase.order', r.id);
+  let po = read(db, 'purchase.order', r.id);
   if (po?.state !== 'purchase') throw new Error('Confirm the purchase order before creating a bill');
+  const companyId = po.company_id ?? 1;
+  const journal = resolveDocumentJournal(db, { move_type: 'in_invoice', company_id: companyId }, { required: true }).id;
   const eligible = billableLines(db, po.id);
+  if (!eligible.some((l) => l.toBill > 0)) throw new Error('Nothing is eligible for billing');
+  const keyed = po.order_line.map((l) => ({ ...l, purchase_line_key: l.purchase_line_key || crypto.randomUUID() }));
+  db = write(db, 'purchase.order', po.id, { order_line: keyed });
+  po = read(db, 'purchase.order', po.id);
   const lines = po.order_line.map(({ qty_delivered, qty_invoiced, purchase_method, ...l }, i) => ({ ...l, qty: eligible[i].toBill })).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('Nothing is eligible for billing');
   const term = read(db, 'account.payment.term', po.payment_term_id);
-  const companyId = po.company_id ?? 1;
-  const journal = journalId(db, 'BILL', companyId);
   const out = create(db, 'account.move', {
     company_id: companyId,
     journal_id: journal ?? null,
@@ -66,11 +75,12 @@ function matches(db, bill) {
   const used = new Map();
   const prior = previousBills(db, bill, po).flatMap((m) => m.invoice_line_ids ?? []);
   return (bill.invoice_line_ids ?? []).map((l) => {
-    const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id);
+    const source = (po.order_line ?? []).filter((p) => p.product_id === l.product_id && (!l.purchase_line_key || p.purchase_line_key === l.purchase_line_key));
     const billedQty = number(l.qty);
     const receivedQty = source.reduce((s, p) => s + number(p.qty_delivered), 0);
     const orderedQty = totalQty(source, l.product_id);
-    const offset = (used.get(l.product_id) ?? 0) + totalQty(prior, l.product_id);
+    const key = l.purchase_line_key || l.product_id;
+    const offset = (used.get(key) ?? 0) + totalQty(l.purchase_line_key ? prior.filter((p) => p.purchase_line_key === l.purchase_line_key) : prior, l.product_id);
     let skip = offset, left = billedQty, expected = 0;
     for (const p of source) {
       const available = Math.max(0, number(p.qty) - skip);
@@ -80,7 +90,7 @@ function matches(db, bill) {
       left -= take;
     }
     const priceDifference = round(subtotal(l) - expected);
-    used.set(l.product_id, (used.get(l.product_id) ?? 0) + billedQty);
+    used.set(key, (used.get(key) ?? 0) + billedQty);
     return { product_id: l.product_id, billedQty, receivedQty, orderedQty, priceDifference,
       status: offset + billedQty > receivedQty + 1e-8 ? 'qty_exceeds_received' : Math.abs(priceDifference) >= 0.01 ? 'price_differs' : 'ok' };
   });
@@ -159,7 +169,7 @@ export const billControlModels = {
     return { ...purchase,
       fields: { ...purchase.fields,
         invoice_status: { ...purchase.fields.invoice_status, compute: status },
-        order_line: { ...purchase.fields.order_line, fields: { ...purchase.fields.order_line.fields, purchase_method: { ...BILL_POLICY, readonly: true, hidden: true } } },
+        order_line: { ...purchase.fields.order_line, fields: { ...purchase.fields.order_line.fields, purchase_method: { ...BILL_POLICY, readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true } } },
       },
       onchange: (r, key, db) => ({ ...purchase.onchange?.(r, key, db), ...(['order_line', 'state'].includes(key) ? { order_line: policyLines(db, r) } : {}) }),
       form: { ...purchase.form, buttons: purchase.form.buttons.map((b) => b.label === 'Create Bill'

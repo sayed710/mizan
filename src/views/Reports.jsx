@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -14,6 +14,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { downloadCsv, tableToRows } from '../csv.js';
 import { balanceAnalyticColumns, balanceColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -59,7 +60,7 @@ function Section({ title, total, rows, sign = 1, totals, variance, showVariance 
       </tr>
       {open && rows?.map((r) => (
         <tr key={r.account.id} className="rep-detail">
-          <td>{r.account.code} {r.account.name}</td>
+          <td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>
           {totals ? <ComparisonCells values={r.values} showVariance={showVariance} /> : <td className="num">{money(r.balance)}</td>}
         </tr>
       ))}
@@ -89,8 +90,8 @@ function Pnl({ db, period }) {
       <Total label="Gross Profit" value={p.gross} />
       <Section title="Expenses" total={p.expense} rows={p.detail.expense} />
       <Total label="Net Operating Income" value={p.operating} />
-      <Section title="Other Income" total={p.otherIncome} />
-      <Section title="Other Expenses" total={p.otherExpense} />
+      <Section title="Other Income" total={p.otherIncome} rows={p.detail.otherIncome} />
+      <Section title="Other Expenses" total={p.otherExpense} rows={p.detail.otherExpense} />
       <Total label="Net Income" value={p.net} strong />
     </tbody>
   );
@@ -104,7 +105,7 @@ function Balance({ db, period }) {
       <Total label="Total Assets" value={b.totalAssets} strong />
       <Section title="Liabilities" total={b.totalLiabilities} rows={b.liabilities} />
       <Section title="Equity" total={b.totalEquity - b.earnings} rows={b.equity} />
-      <Section title="Current Year Earnings" total={b.earnings} />
+      <Section title="Current Year Earnings" total={b.earnings} rows={[{ account: b.earningsAccount, balance: b.earnings }]} />
       <Total label="Liabilities + Equity" value={b.totalLiabilities + b.totalEquity} strong />
     </tbody>
   );
@@ -197,7 +198,7 @@ function Tax({ db, period }) {
 }
 
 const Aged = (kind) => function AgedBody({ db, period }) {
-  const { buckets, rows } = agedBalance(db, kind, period.to || today());
+  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to));
   const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (
@@ -214,6 +215,19 @@ const Aged = (kind) => function AgedBody({ db, period }) {
     </tbody>
   );
 };
+
+function FollowUpActions({ db, reminder, companyId }) {
+  const email = read(db, 'res.partner', reminder.partner_id)?.email?.trim();
+  const channel = followUpLevel(db, reminder)?.channel;
+  const manualChannel = ['phone', 'letter'].includes(channel) ? channel : 'email';
+  const options = { scope: db, reminder, companyId };
+  return <>
+    {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
+      onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, today(), options))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
+    {(manualChannel !== 'email' || email) &&
+      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: manualChannel }))}>{t('Confirm Sent')}</button>}
+  </>;
+}
 
 export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   const settingsAllowed = (sourceDb ?? db).settings?.allowed_company_ids ?? [currentCompany(sourceDb ?? db)];
@@ -248,20 +262,12 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
               <td colSpan={3}><strong>{company.name}</strong></td>
             </tr>
             {items.map((f) => {
-              const email = read(db, 'res.partner', f.partner_id)?.email;
-              const body = followUpText(db, f);
               return (
                 <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
                   <td>
                     <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
                     <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-                    {email && (
-                      <>
-                        <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                          onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Open Reminder in Mail App')}</a>{' '}
-                        <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Confirm Sent')}</button>
-                      </>
-                    )}
+                    <FollowUpActions db={db} reminder={f} companyId={company.id} />
                   </td>
                   <td className="num">{f.oldest}</td>
                   <td className="num">{money(f.total)}</td>
@@ -280,20 +286,12 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   return (
     <tbody>
       {singleItems.map((f) => {
-        const email = read(db, 'res.partner', f.partner_id)?.email;
-        const body = followUpText(db, f);
         return (
           <tr key={f.partner_id} className="rep-detail">
             <td>
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              {email && (
-                <>
-                  <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                    onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Open Reminder in Mail App')}</a>{' '}
-                  <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Confirm Sent')}</button>
-                </>
-              )}
+              <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
             </td>
             <td className="num">{f.oldest}</td>
             <td className="num">{money(f.total)}</td>
@@ -342,7 +340,7 @@ function Analytic({ db, period }) {
   const lines = analyticActualLines(db, period);
   return (
     <tbody>
-      {search(db, 'account.analytic.account').map((a) => <Fragment key={a.id}>
+      {search(db, 'account.analytic.account', { includeArchived: true }).filter((a) => a.active !== false || actual.has(a.id)).map((a) => <Fragment key={a.id}>
         <Total label={a.name} value={actual.get(a.id) ?? 0} />
         {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
           <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
@@ -418,7 +416,7 @@ function Valuation({ db }) {
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
 function Depreciation({ db, period }) {
-  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft').map((a) => {
+  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft' && (!a.acquisition_date || !period.to || a.acquisition_date <= period.to) && (!a.disposal_date || !period.to || a.disposal_date > period.to)).map((a) => {
     const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
     const sum = (list) => list.reduce((s, l) => s + (Number(l.amount) || 0), 0);
     const accumulated = (Number(a.already_depreciated) || 0) + sum(posted.filter((l) => l.date <= period.to));
@@ -453,7 +451,7 @@ function JournalAudit({ db, period, companyId }) {
       return <tr key={`${move.id}-${i}`} className="rep-detail"><td>{date}</td><td><a href={`#/open/account.move/${move.id}`}>{move.name}</a></td><td>{read(db, 'res.partner', line.partner_id ?? move.partner_id)?.name ?? ''}</td><td>{account ? `${account.code} ${account.name}` : ''}</td><td>{line.name}</td><td className="num">{line.debit ? money(line.debit) : ''}</td><td className="num">{line.credit ? money(line.credit) : ''}</td></tr>;
     })}
     <tr className="rep-total strong"><td colSpan={5}>{t('Total')} - {journal.name}</td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
-    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.name}><td colSpan={3} /><td>{tax.name}</td><td className="num">{money(tax.base)}</td><td colSpan={2} className="num">{money(tax.tax)}</td></tr>)}</>}
+    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.tax_id ?? 'unidentified-tax'}><td colSpan={3} /><td>{tax.name}</td><td className="num">{money(tax.base)}</td><td colSpan={2} className="num">{money(tax.tax)}</td></tr>)}</>}
   </Fragment>)}</tbody>;
 }
 
@@ -513,7 +511,7 @@ const REPORTS = {
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id }) {
   if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
-  const component = leaf.report === 'journalItems' ? JournalItems
+  const component = ['journalItems', 'unreconciledItems'].includes(leaf.report) ? JournalItems
     : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
     : leaf.report === 'checks' ? Checks
     : leaf.report === 'loansAnalysis' ? LoansAnalysis
@@ -571,6 +569,10 @@ function ReportPage({ leaf }) {
     : periods
       ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods))
       : null;
+  const tableRef = useRef(null);
+  const exportCsv = () => {
+    downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
+  };
   return (
     <main className="action report-page">
       <div className="control-panel">
@@ -582,7 +584,7 @@ function ReportPage({ leaf }) {
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
-            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
@@ -626,9 +628,10 @@ function ReportPage({ leaf }) {
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
+        <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       </div>
       <div className="list-wrap">
-        <table className="list report">
+        <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
           {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
         </table>

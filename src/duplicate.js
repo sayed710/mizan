@@ -1,6 +1,7 @@
 import { models } from './models/index.js';
 
-const editable = (fields, vals) => Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.readonly));
+// Readonly fields are left to the model defaults unless the field is marked `copy: true` (it defines what the record is).
+const editable = (fields, vals) => Object.fromEntries(Object.entries(vals).filter(([k]) => !fields[k]?.readonly || fields[k]?.copy));
 const generated = { 'mrp.production': ['workorders', 'move_raw'], 'maintenance.request': ['stage', 'stage_id', 'kanban_state', 'close_date'] };
 
 /** Values for a copy of `rec`: readonly and workflow fields are left out so the model defaults apply, as on a new record. */

@@ -394,7 +394,8 @@ test('Fiscal Report menu groups period movements by category, drills down and fo
   const { trialBalance } = await import('./models/reports.js');
   const { companyViewDb } = await import('./companyView.js');
   await initStore();
-  const other = createCompany(seed(), { name: 'Fiscal Other Company' });
+  const initial = seed();
+  const other = createCompany(initial, { name: 'Fiscal Other Company', currency_id: initial.records['res.company'][0].currency_id });
   const category = create(other.db, 'account.fiscal.category', { name: 'Fiscal Test Category', company_id: 1 });
   const foreign = create(category.db, 'account.fiscal.category', { name: 'Fiscal Foreign Category', company_id: other.id });
   let db = write(foreign.db, 'account.account', accountId(foreign.db, '121000', 1), { fiscal_category_id: category.id });
@@ -457,7 +458,8 @@ test('Cashflow Analysis menu groups statement amounts by month and pivots by jou
   const { create, updateSettings } = await import('./orm.js');
   const { createCompany } = await import('./models/company.js');
   await initStore();
-  const other = createCompany(seed(), { name: 'Cashflow Other Company' });
+  const initial = seed();
+  const other = createCompany(initial, { name: 'Cashflow Other Company', currency_id: initial.records['res.company'][0].currency_id });
   const bank = create(other.db, 'account.journal', { name: 'Analysis Bank', code: 'CFA', type: 'bank', company_id: 1 });
   const cash = create(bank.db, 'account.journal', { name: 'Analysis Cash', code: 'CFC', type: 'cash', company_id: 1 });
   const foreign = create(cash.db, 'account.journal', { name: 'Analysis Foreign Bank', code: 'CFB', type: 'bank', company_id: other.id });
