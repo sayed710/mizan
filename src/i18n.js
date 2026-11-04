@@ -303,7 +303,7 @@ const ar = {
   'Order Date': 'تاريخ الطلب', Expiration: 'تاريخ الانتهاء', Status: 'الحالة', 'Order Lines': 'بنود الطلب', Product: 'المنتج', Quantity: 'الكمية',
   'Unit Price': 'سعر الوحدة', 'Tax %': 'الضريبة %', 'Untaxed Amount': 'المبلغ قبل الضريبة', Taxes: 'الضرائب', Reference: 'المرجع',
   Vendor: 'المورد', 'Order Deadline': 'آخر موعد للطلب', 'Expected Arrival': 'الوصول المتوقع', Type: 'النوع', Partner: 'الشريك',
-  'Invoice Date': 'تاريخ الفاتورة', 'Due Date': 'تاريخ الاستحقاق', 'Source Document': 'المستند المصدر', 'Payment Reference': 'مرجع الدفع',
+  'Invoice Date': 'تاريخ الفاتورة', 'Due Date': 'تاريخ الاستحقاق', 'Matching': 'المطابقة', 'Source Document': 'المستند المصدر', 'Payment Reference': 'مرجع الدفع',
   'Invoice Lines': 'بنود الفاتورة', 'Tax Excluded': 'بدون ضريبة', 'Amount Due': 'المبلغ المستحق', 'Payment Status': 'حالة الدفع',
   'Paid on': 'تاريخ الدفع', 'Terms and Conditions': 'الشروط والأحكام', 'Other Info': 'معلومات أخرى', 'Department Name': 'اسم القسم',
   Manager: 'المدير', 'Employee Name': 'اسم الموظف', 'Job Title': 'المسمى الوظيفي', Department: 'القسم', 'Work Email': 'البريد الوظيفي',
