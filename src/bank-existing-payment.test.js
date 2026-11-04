@@ -66,3 +66,11 @@ test('outgoing payment uses company and journal outstanding defaults and unmatch
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   assert.ok(search(db, 'account.move').some((m) => m.reversed_entry_id === bankEntry.id));
 });
+
+test('a bank transaction on a general journal is refused, so a match cannot post bank lines there (PR 108 review)', () => {
+  const db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.code === 'MISC' && j.type === 'general');
+  assert.throws(() => create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'misc', amount: 100, journal_id: misc.id }), /bank or cash journal/);
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank');
+  assert.ok(create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'bank', amount: 100, journal_id: bank.id }).id);
+});

@@ -102,6 +102,7 @@ function matchPayment(db, line) {
   if (!line.amount || (payment.payment_type === 'inbound') !== incoming) throw new Error('Statement amount and direction must match the payment');
   const via = paymentJournal(db, line.journal_id ?? payment.journal_id);
   const journal = read(db, 'account.journal', line.journal_id ?? payment.journal_id ?? journalId(db, via.code, company));
+  if (journal && !['bank', 'cash'].includes(journal.type)) throw new Error('Bank transactions need a bank or cash journal');
   if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) throw new Error('Payment entry must be posted in the same company');
   const outstanding = payment.outstanding_account_id;
   const liquidity = entry.line_ids.filter((l) => l.account_id === outstanding && (incoming ? round(l.debit) === round(Math.abs(line.amount)) : round(l.credit) === round(Math.abs(line.amount))));
@@ -203,6 +204,7 @@ function lineGuard(db, before, after) {
   if (after.journal_id) {
     const journal = read(db, 'account.journal', after.journal_id);
     if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
+    if (!['bank', 'cash'].includes(journal.type)) return 'Bank transactions need a bank or cash journal';
   }
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
