@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -183,6 +183,8 @@ function Tax({ db, period }) {
     <tbody>
       {side('sale', 'Sales')}
       {side('purchase', 'Purchases')}
+      <tr className="rep-section"><td>{t('Tax Grids')}</td><td /><td /></tr>
+      {taxesByGrid(db, period).map((x) => <tr key={x.id} className="rep-detail"><td>{x.name}</td><td className="num">{money(x.base)}</td><td className="num">{money(x.tax)}</td></tr>)}
       {line('Output Tax', r.output)}
       {line('Input Tax', r.input)}
       {line('Tax Payable', r.payable, true)}

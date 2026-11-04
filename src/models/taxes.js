@@ -7,8 +7,8 @@ export const TRANSITION = { sale: '251100', purchase: '131100' };
 
 /** What an order/invoice line keeps of its tax, so totals never need the db. */
 export const taxSnapshot = (tax) => (tax
-  ? { tax_id: tax.id, tax: Number(tax.amount) || 0, tax_type: tax.amount_type, tax_include: !!tax.price_include, tax_account_id: tax.account_id ?? null, tax_cash_basis: tax.tax_exigibility === 'on_payment', tax_name: tax.name }
-  : { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_account_id: null, tax_cash_basis: false, tax_name: '' });
+  ? { tax_id: tax.id, tax: Number(tax.amount) || 0, tax_type: tax.amount_type, tax_include: !!tax.price_include, tax_cash_basis: tax.tax_exigibility === 'on_payment', tax_tag_ids: [...(tax.tag_ids ?? [])], tax_account_id: tax.account_id ?? null, tax_name: tax.name }
+  : { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_tag_ids: [], tax_account_id: null, tax_name: '' });
 
 /** The tax a fiscal position substitutes for `taxId` (the same tax when unmapped; null when mapped to no tax). */
 export function mapTax(db, fpId, taxId) {
@@ -53,8 +53,9 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
     if (isSectionOrNote(l)) continue;
     const account_id = accountOf(l);
     const tax_name = taxLabel(l);
-    const key = `${account_id}|${tax_name}`;
-    const g = by.get(key) ?? { account_id, tax_name, document_base: 0, document_amount: 0 };
+    const tax_tag_ids = [...(l.tax_tag_ids ?? [])].sort((a, b) => a - b);
+    const key = `${account_id}|${tax_name}|${tax_tag_ids.join(',')}`;
+    const g = by.get(key) ?? { account_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
     by.set(key, { ...g, document_base: g.document_base + lineUntaxed(l), document_amount: g.document_amount + lineTaxOf(l) });
   }
   return [...by.values()].map(({ document_base, document_amount, ...group }) => {

@@ -1,5 +1,6 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
+import { models } from '../registry.js';
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
@@ -13,17 +14,17 @@ import { exchangeAccount } from './exchange-account.js';
 export { applicationEffectiveDate };
 
 /** Open receivable (posted, unpaid invoices) of a partner. */
-export const receivableOf = (db, partnerId) => round(search(db, 'account.move')
-  .filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId)
-  .reduce((s, m) => s + m.amount_residual, 0));
+export const receivableOf = (db, partnerId) => round((db.records['account.move'] ?? [])
+  .filter((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId)
+  .reduce((s, m) => s + models['account.move'].fields.amount_residual.compute(m, db), 0));
 
-/** Throws when confirming `amount` more would exceed the partner's credit limit (0 = no limit). */
-export function checkCreditLimit(db, partnerId, amount) {
+/** Warning for additional credit exposure (0 = no limit). */
+export function creditWarning(db, partnerId, amount) {
   const p = read(db, 'res.partner', partnerId);
   const limit = Number(p?.credit_limit) || 0;
   if (!limit) return;
   const exposure = receivableOf(db, partnerId) + (Number(amount) || 0);
-  if (exposure > limit) throw new Error(`${p.name} would exceed the credit limit (${round(exposure)} > ${limit})`);
+  return exposure > limit ? `${p.name} would exceed the credit limit (${round(exposure)} > ${limit})` : '';
 }
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
@@ -555,6 +556,32 @@ export function taxesByTax(db, period = {}) {
     rows.set(key, { ...row, base: round(row.base + base), tax: round(row.tax + l.tax) });
   }
   return [...rows.values()].sort((a, b) => a.side.localeCompare(b.side) || a.name.localeCompare(b.name));
+}
+
+/** Tax grid amounts from tags on posted journal items. */
+export function taxesByGrid(db, period = {}) {
+  const rows = new Map();
+  const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+  for (const line of journalItems(db, period)) {
+    if (line.is_closing || line.is_tax_closing || line.is_tax_payment) continue;
+    const move = moves.get(line.move_id);
+    const side = line.tax_side || (['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null);
+    if (!side) continue;
+    const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
+    const value = side === 'sale' ? -balance : balance;
+    for (const id of line.tax_tag_ids ?? []) {
+      const tag = read(db, 'account.account.tag', id);
+      if (!tag) continue;
+      const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };
+      if (line.tax_grid_base) row.base = round(row.base + value);
+      else if (line.tax_name && !line.tax_zero && line.tax_side) {
+        row.tax = round(row.tax + value);
+        if (line.tax_grid_release) row.base = round(row.base + (Number(line.tax_base) || 0));
+      }
+      rows.set(id, row);
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
 }
 
 /** Open installments in company currency, using the schedule recorded when the document was posted. */
