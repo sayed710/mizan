@@ -52,7 +52,7 @@ test('three-way exception blocks payment until explicitly approved', () => {
   assert.throws(() => run(posted, 'account.move', bill.id, 'Register Payment'), /resolve or approve/i);
   const approved = run(posted, 'account.move', bill.id, 'Approve for Payment').db;
   const companyId = read(approved, 'account.move', bill.id).company_id ?? 1;
-  const bank = read(approved, 'account.journal', read(approved, 'res.company', companyId).default_payment_journal_id);
+  const bank = search(approved, 'account.journal').find((journal) => journal.default_for_payments && (!journal.company_id || journal.company_id === companyId));
   const paid = run(approved, 'account.move', bill.id, 'Register Payment', { amount: '40', date: read(approved, 'account.move', bill.id).invoice_date, journal_id: bank.id }).db;
   assert.equal(read(paid, 'account.move', bill.id).amount_paid, 40);
 });

@@ -1,7 +1,7 @@
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
-import { create, search, write } from './orm.js';
+import { create, postNote, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
 import { analyticLinesForMove } from './models/analyticplus.js';
 import { migrateDocumentTags } from './models/signplus.js';
@@ -524,6 +524,44 @@ MIGRATIONS.push({ version: 21, name: 'Fiscal years: retain global closing lock',
 MIGRATIONS.push({ version: 22, name: 'Currency rounding defaults', up: (db) => ({
   ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => currency.rounding == null ? { ...currency, rounding: 0.01 } : currency) },
 }) });
+MIGRATIONS.push({ version: 23, name: 'Explicit base currency and fiscal earnings accounts', up: (db) => {
+  db = MIGRATIONS.find((migration) => migration.version === 22).up(db);
+  const currencies = (db.records['res.currency'] ?? []).filter((currency) => currency.name === db.settings?.currency);
+  const companies = (db.records['res.company'] ?? []).map((company) => {
+    if (company.current_year_earnings_account_id != null) return company;
+    const accounts = (db.records['account.account'] ?? []).filter((account) => account.code === '302000'
+      && ['equity', 'equity_unaffected'].includes(account.account_type) && (!account.company_id || account.company_id === company.id));
+    return accounts.length === 1 ? { ...company, current_year_earnings_account_id: accounts[0].id } : company;
+  });
+  return { ...db, settings: { ...db.settings, ...(db.settings?.base_currency_id == null && currencies.length === 1 ? { base_currency_id: currencies[0].id } : {}) },
+    records: { ...db.records, 'res.company': companies } };
+} });
+
+MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared', up: (db) => ({
+  ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => ({
+    ...currency, rate_ids: (currency.rate_ids ?? []).map((row) => ({ ...row, company_id: row.company_id ?? null })),
+  })) },
+}) });
+
+function migrateCashBasisOrigins(db) {
+  const moves = db.records['account.move'] ?? [];
+  const invoices = moves.filter((move) => ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type));
+  let next = db;
+  for (const move of moves) {
+    if (move.move_type !== 'entry' || move.cash_basis_origin_move_id != null || !move.ref?.startsWith('Cash basis taxes ')) continue;
+    const candidates = invoices.filter((invoice) => (invoice.company_id ?? 1) === (move.company_id ?? 1) && move.ref === `Cash basis taxes ${invoice.name}`);
+    if (candidates.length === 1) {
+      next = { ...next, records: { ...next.records, 'account.move': next.records['account.move'].map((entry) => entry.id === move.id ? { ...entry, cash_basis_origin_move_id: candidates[0].id } : entry) } };
+    } else {
+      next = postNote(next, 'account.move', move.id, 'Cash-basis origin invoice could not be determined; review this entry.');
+    }
+  }
+  const { cash_basis_origins_migrated: ignored, ...settings } = next.settings ?? {};
+  void ignored;
+  return { ...next, settings };
+}
+
+MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

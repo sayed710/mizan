@@ -2,7 +2,7 @@
 // time off, allocations, expenses, timesheets and approval requests then needs that employee to be a manager of the
 // requester (never the requester themselves), checked on the server for every non-admin change.
 import { leaveAuthorization } from './timeoff.js';
-import { paymentJournal, resolveCounterpartAccount } from './ledger.js';
+import { paymentJournal, partnerAccount } from './ledger.js';
 
 let actor = null;
 /** The signed-in user ({ login, name }) on the client; null in local mode. */
@@ -81,7 +81,7 @@ function sheetBookingError(db, r) {
     return r.state === 'done' && close(credit(entry, liquidity), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
   }
   let payable;
-  try { payable = resolveCounterpartAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' }); }
+  try { payable = partnerAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' }); }
   catch (error) { return error.message; }
   if (r.payment_mode !== 'own_account' || !close(credit(entry, payable), total)) return 'Employee expenses need their posted payable accounting entry';
   if (r.state === 'done') {

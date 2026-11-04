@@ -6,10 +6,11 @@ import { models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
 import { saveFormRecord } from './views/formSave.js';
+import { createCompany } from './models/company.js';
 
 function fixture(lockedCompany) {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = createCompany(db, { name: 'Second company', currency_id: db.settings.base_currency_id }); db = company.db;
   const partner = db.records['res.partner'][0].id;
   const entries = {};
   for (const companyId of [1, company.id]) {

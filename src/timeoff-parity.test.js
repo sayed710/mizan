@@ -23,17 +23,7 @@ const press = (db, id, label, login) => {
 };
 const save = (db, next, login) => applyDiff(db, diffDb(db, next), { isAdmin: false, login });
 function createCompanyWithChart(db, vals = {}) {
-  const receivable = create(db, 'account.account', { code: 'TEST-AR', name: 'Test receivable', account_type: 'asset_receivable' });
-  const payable = create(receivable.db, 'account.account', { code: 'TEST-AP', name: 'Test payable', account_type: 'liability_payable' });
-  const liquidity = create(payable.db, 'account.account', { code: 'TEST-BANK', name: 'Test bank', account_type: 'asset_cash' });
-  const journal = create(liquidity.db, 'account.journal', { name: 'Test payment journal', code: 'TEST-BANK', type: 'bank', default_account_id: liquidity.id });
-  return create(journal.db, 'res.company', {
-    name: 'Configured test company',
-    account_receivable_id: receivable.id,
-    account_payable_id: payable.id,
-    default_payment_journal_id: journal.id,
-    ...vals,
-  });
+  return create(db, 'res.company', { name: 'Configured test company', ...vals });
 }
 
 test('half-day boundaries count scheduled halves and enforce the type request unit', () => {

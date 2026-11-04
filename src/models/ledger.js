@@ -7,6 +7,7 @@ import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, roun
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
+import { currentYearEarningsAccount } from './earnings.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
 
@@ -62,18 +63,21 @@ export function assertCompanyAccount(db, id, companyId, accountType, label) {
   return account.id;
 }
 
-/** Resolve one partner counterpart from an explicit partner override or the company's installed chart settings. */
-export function resolveCounterpartAccount(db, { companyId = 1, partnerId = null, accountType, accountOverrideId = null }) {
+/** Resolve a partner override, otherwise the company's configured counterpart account. */
+export function partnerAccount(db, { companyId = 1, partnerId = null, accountType, accountOverrideId = null }) {
   const company = read(db, 'res.company', companyId ?? 1);
   if (!company) throw new Error('The accounting company does not exist');
-  const receivable = accountType === 'asset_receivable';
-  if (!receivable && accountType !== 'liability_payable') throw new Error('Choose a receivable or payable counterpart type');
+  const sale = accountType === 'asset_receivable';
+  if (!sale && accountType !== 'liability_payable') throw new Error('Choose a receivable or payable counterpart type');
   const partner = partnerId == null ? null : read(db, 'res.partner', partnerId);
   if (partnerId != null && !partner) throw new Error('The accounting partner does not exist');
-  const propertyField = receivable ? 'property_account_receivable_id' : 'property_account_payable_id';
-  const companyField = receivable ? 'account_receivable_id' : 'account_payable_id';
-  const id = accountOverrideId ?? partner?.[propertyField] ?? company[companyField];
-  return assertCompanyAccount(db, id, company.id, accountType, receivable ? 'Receivable account' : 'Payable account');
+  const valid = (account) => account?.company_id === company.id && account.account_type === accountType && account.active !== false;
+  if (accountOverrideId != null) return assertCompanyAccount(db, accountOverrideId, company.id, accountType, 'The selected counterpart account');
+  const property = partner?.[sale ? 'property_account_receivable_id' : 'property_account_payable_id'];
+  const candidate = read(db, 'account.account', property);
+  const id = valid(candidate) ? candidate.id : company[sale ? 'account_default_receivable_id' : 'account_default_payable_id'];
+  if (!valid(read(db, 'account.account', id))) throw new Error(`Configure the default ${sale ? 'receivable' : 'payable'} account for ${company.name ?? 'the company'}`);
+  return id;
 }
 
 export function resolveCompanyAccount(db, accountId, companyId) {
@@ -82,9 +86,7 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  const records = db.records['account.account'] ?? [];
-  const match = records.find((a) => a.code === acc.code && a.company_id === comp);
-  return match?.id ?? null;
+  return null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -233,7 +235,7 @@ function invoiceTaxAccountFor(db, move) {
   return (l) => {
     if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
     if (l.tax_account_id) {
-      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
+      const resolved = resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, l.tax_account_id), move.company_id);
       if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
       return resolved;
     }
@@ -269,7 +271,7 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = resolveCounterpartAccount(db, {
+  const counterpart = partnerAccount(db, {
     companyId: move.company_id ?? 1,
     partnerId: move.partner_id,
     accountType: sale ? 'asset_receivable' : 'liability_payable',
@@ -434,21 +436,24 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Resolve a selected or explicitly configured company payment journal by ID. */
-export function paymentJournal(db, selectedJournalId = null, companyContext = 1) {
-  const company = typeof companyContext === 'object' && companyContext !== null
-    ? companyContext
-    : read(db, 'res.company', companyContext ?? 1);
-  if (!company?.id) throw new Error('The payment company does not exist');
-  const id = selectedJournalId ?? company.default_payment_journal_id;
-  if (!id) throw new Error('Configure a default payment journal for this company');
-  const journal = read(db, 'account.journal', id);
-  if (!journal) throw new Error('The selected payment journal does not exist');
+/** Resolve the unique payment default or an explicitly selected liquidity journal. */
+export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
+  let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
+  if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
+  if (!selectedJournalId) {
+    const configured = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true);
+    const own = configured.filter((candidate) => candidate.company_id === companyId);
+    const defaults = own.length ? own : configured.filter((candidate) => !candidate.company_id);
+    if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
+    if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
+    [journal] = defaults;
+  }
   if (journal.active === false) throw new Error('The selected payment journal is archived');
-  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Select a bank or cash payment journal');
-  if (journal.company_id && journal.company_id !== company.id) throw new Error('The selected payment journal belongs to another company');
-  const accountId = assertCompanyAccount(db, journal.default_account_id, company.id, 'asset_cash', 'The selected journal liquidity account');
-  return { id: journal.id, code: journal.code, accountId };
+  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Payment journal must be a bank or cash journal');
+  if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
+  const id = assertCompanyAccount(db, journal.default_account_id, companyId, 'asset_cash', 'The selected journal liquidity account');
+  const account = read(db, 'account.account', id);
+  return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */
@@ -545,9 +550,10 @@ export function balanceSheet(db, at = today(), { weight } = {}) {
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
+  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
-    assets, liabilities, equity, earnings,
+    assets, liabilities, equity, earnings, earningsAccount,
     totalAssets: total(assets), totalLiabilities: total(liabilities), totalEquity: round(total(equity) + earnings),
   };
 }

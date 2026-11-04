@@ -8,21 +8,7 @@ import { lineTaxOf, taxSnapshot } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
-/** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
-export function sameCommercialPartner(db, leftId, rightId) {
-  const commercialId = (id) => {
-    let partner = read(db, 'res.partner', id);
-    const seen = new Set();
-    while (partner?.parent_id) {
-      if (seen.has(partner.id)) return null;
-      seen.add(partner.id);
-      partner = read(db, 'res.partner', partner.parent_id);
-    }
-    return partner?.id ?? null;
-  };
-  const left = commercialId(leftId);
-  return left != null && left === commercialId(rightId);
-}
+export { sameCommercialPartner } from './common.js';
 
 function labelMatches(rule, label) {
   const text = String(label ?? '');

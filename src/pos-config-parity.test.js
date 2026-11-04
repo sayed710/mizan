@@ -11,7 +11,7 @@ import { accountId, journalId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { runPosting } from '../server/posting.js';
 import { deliver, receive } from './models/valuation.js';
-import { configureCompanyChart, setCompanies } from './models/company.js';
+import { createCompany, setCompanies } from './models/company.js';
 import { remapDiff } from './sync.js';
 
 test('migration creates company payment methods and preserves legacy payment values', () => {
@@ -535,7 +535,7 @@ test('foreign rounded invoices and credit notes retain currency amounts and can 
 
 test('POS posts and closes in the session company using that company journals and accounts', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Branch' }); db = company.db;
+  const company = createCompany(db, { name: 'Branch' }); db = company.db;
   const accounts = {};
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     const created = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: company.id });
@@ -548,11 +548,8 @@ test('POS posts and closes in the session company using that company journals an
     db = created.db;
     journals[code] = created.id;
   }
-  db = configureCompanyChart(db, company.id, {
-    account_receivable_id: accounts['121000'],
-    account_payable_id: read(db, 'res.company', company.id).account_payable_id,
-    default_payment_journal_id: journals.CSH1,
-  });
+  db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
+  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true });
   const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'Branch cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   db = startSession(db, 0, cfg.id).db;
@@ -773,7 +770,7 @@ test('return cancellation preserves differently valued stock and rejects consume
 
 test('automatically valued goods sold in a second company scope stock valuation to that company', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Company Two' });
+  const company = createCompany(db, { name: 'Company Two' });
   db = company.db;
   const accounts = {};
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
@@ -787,11 +784,8 @@ test('automatically valued goods sold in a second company scope stock valuation 
     db = created.db;
     journals[code] = created.id;
   }
-  db = configureCompanyChart(db, company.id, {
-    account_receivable_id: accounts['121000'],
-    account_payable_id: read(db, 'res.company', company.id).account_payable_id,
-    default_payment_journal_id: journals.CSH1,
-  });
+  db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
+  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true });
   const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
 
@@ -814,7 +808,7 @@ test('automatically valued goods sold in a second company scope stock valuation 
 
 test('shared product POS valuation opens and consumes only the session company stock', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Independent stock company' }); db = company.db;
+  const company = createCompany(db, { name: 'Independent stock company' }); db = company.db;
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['301000', 'equity']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
@@ -1534,5 +1528,4 @@ test('server checkout returns authoritative payable total with rounding differen
   });
   assert.equal(orderOut.total, 10.00, 'payOrder total must include rounding_difference');
 });
-
 

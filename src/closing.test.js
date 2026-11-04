@@ -89,7 +89,9 @@ test('reopening reverses the close in the same year and permits a balanced reclo
 });
 
 test('loss years debit retained earnings; empty years close with a balanced zero entry', () => {
-  const loss = year(entry(seed(), '2024-02-01', [{ account: '600000', debit: 80 }, { account: '101401', credit: 80 }]));
+  const earnings = create(seed(), 'account.account', { code: '302100', name: 'Loss earnings', account_type: 'equity', company_id: 1 });
+  const configured = write(earnings.db, 'res.company', 1, { current_year_earnings_account_id: earnings.id });
+  const loss = year(entry(configured, '2024-02-01', [{ account: '600000', debit: 80 }, { account: '101401', credit: 80 }]));
   const closed = closeFiscalYear(loss.db, loss.id, { retainedEarningsCode: '302100' });
   assert.equal(balanceSheet(closed, period.to).equity.find((r) => r.account.code === '302100').balance, -80);
   assert.equal(balanceSheet(closed, period.to).earnings, 0);

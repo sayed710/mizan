@@ -1,10 +1,26 @@
 import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
-import { computeLineTaxes, expandTaxIds, lineUntaxed, productTax, replaceTaxSnapshot, taxLabel, taxSnapshot } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, lineUntaxed, mapTax, productTax, replaceTaxSnapshot, taxLabel, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { cashRound, documentCurrency, roundCurrency } from '../money.js';
 import { mixedDiscountFactor } from './terms.js';
 import { invoiceTaxGroups } from './ledger.js';
+
+/** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
+export function sameCommercialPartner(db, leftId, rightId) {
+  const commercialId = (id) => {
+    let partner = read(db, 'res.partner', id);
+    const seen = new Set();
+    while (partner?.parent_id) {
+      if (seen.has(partner.id)) return null;
+      seen.add(partner.id);
+      partner = read(db, 'res.partner', partner.parent_id);
+    }
+    return partner?.id ?? null;
+  };
+  const left = commercialId(leftId);
+  return left != null && left === commercialId(rightId);
+}
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
@@ -104,12 +120,23 @@ export function amounts(lines = [], currency = null, { roundingMethod = null } =
   return { untaxed: finalUntaxed, tax: finalTax, total: rounded(finalUntaxed + finalTax) };
 }
 
-/** Tax amount of an invoice/bill, applying mixed early-payment discount factor when present. */
+/** Tax amount of an invoice/bill, applying mixed early-payment discount factor and cash rounding tax adjustment when present. */
 export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(db, r?.company_id)) {
   const docCurr = documentCurrency(db, r);
   const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
-  if (mixedDiscountFactor(term) !== 1) return roundCurrency(invoiceTaxGroups(db, r, roundingMethod).reduce((s, g) => s + g.document_amount, 0), docCurr);
-  return roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).tax, docCurr);
+  const baseTax = mixedDiscountFactor(term) !== 1
+    ? roundCurrency(invoiceTaxGroups(db, r, roundingMethod).reduce((s, g) => s + g.document_amount, 0), docCurr)
+    : roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).tax, docCurr);
+  const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
+  if (rounding && rounding.strategy === 'biggest_tax' && baseTax !== 0) {
+    const rawTotal = mixedDiscountFactor(term) !== 1
+      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).untaxed + baseTax, docCurr)
+      : amounts(r.invoice_line_ids, docCurr, { roundingMethod }).total;
+    const roundedTotal = roundCurrency(cashRound(rawTotal, rounding.rounding, rounding.rounding_method), docCurr);
+    const diff = roundCurrency(roundedTotal - rawTotal, docCurr);
+    return roundCurrency(baseTax + diff, docCurr);
+  }
+  return baseTax;
 }
 
 /** Total of an account.move (invoice, bill, refund, or manual entry). */
@@ -144,6 +171,7 @@ export const productLines = (label, priceField) => ({
     price_unit: { type: 'monetary', label: 'Unit Price' },
     discount: { type: 'float', label: 'Disc.%' },
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes' },
+    tax_source_id: { type: 'many2one', relation: 'account.tax', label: 'Taxes', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
     tax: { type: 'float', label: 'Tax %', readonly: true },
     // Snapshot of the chosen tax, so totals and postings never need the tax record.
@@ -160,14 +188,27 @@ export const productLines = (label, priceField) => ({
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
-  newLine: () => ({ product_id: null, qty: 1, price_unit: 0, discount: 0, tax: 14 }),
+  newLine: (record, db) => {
+    const isCost = priceField === 'cost';
+    const isPurch = record ? ['in_invoice', 'in_refund'].includes(record.move_type) || isCost : isCost;
+    const companyId = record?.company_id ?? 1;
+    const company = db ? read(db, 'res.company', companyId) : null;
+    const taxId = company ? (isPurch ? company.account_purchase_tax_id : company.account_sale_tax_id) : null;
+    const tax = db && taxId ? read(db, 'account.tax', mapTax(db, record?.fiscal_position_id, taxId)) : null;
+    const snap = tax ? taxSnapshot(tax, db, record?.fiscal_position_id) : taxSnapshot(null);
+    return { product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap };
+  },
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
   onchange: (line, key, db, record) => {
-    if (key === 'tax_id') return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db)) };
+    if (key === 'tax_id') {
+      validateTaxCompany(db, [line.tax_id], record?.company_id);
+      return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db)), tax_source_id: null, tax_ids: [] };
+    }
     if (key === 'tax_ids') {
+      validateTaxCompany(db, line.tax_ids ?? [], record?.company_id);
       const expanded = expandTaxIds(db, line.tax_ids ?? []);
-      return { ...line, ...replaceTaxSnapshot(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
+      return { ...line, ...replaceTaxSnapshot(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_source_id: null, tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
     }
     if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);
@@ -176,8 +217,8 @@ export const productLines = (label, priceField) => ({
     const qty = uom_id && stock ? convert(db, line.qty, uom_id, stock, { round: false }) : line.qty;
     const base = product?.[priceField] ?? 0;
     const price = record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, qty, base) : base;
-    const tax = key === 'product_id' ? (productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id) ?? taxSnapshot(null)) : null;
-    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ? replaceTaxSnapshot(tax) : {}) };
+    const tax = key === 'product_id' ? (productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id, record?.company_id) ?? taxSnapshot(null)) : null;
+    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ? { tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(tax) } : {}) };
   },
 });
 

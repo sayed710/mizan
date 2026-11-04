@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { invoiceLines, journalId, paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
+import { invoiceLines, journalId, paymentJournal, postEntry, partnerAccount } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -32,10 +32,10 @@ export function startSession(db, openingCash = 0, configId = null) {
  * Lines of a cart priced from the products: sales price and the product's sales tax record
  * (price-included or not), mapped through the customer's fiscal position.
  */
-export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null } = {}) => cart.map((l) => {
+export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1 } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
-  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId);
-  const tax = productTax(db, p, 'sale', fp) ?? { tax: p?.sale_tax ?? 14 };
+  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
@@ -212,7 +212,7 @@ export function resolvePosConfigAndPreset(db, {
     is_return: isReturn,
     identification: preset?.identification ?? 'none',
     pricelist_id: preset?.pricelist_id ?? null,
-    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId) ?? null,
+    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId, config?.company_id ?? sess?.company_id ?? 1) ?? null,
   };
 
   return {
@@ -415,7 +415,7 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
       }
     }
   } else if (roundCurrency(expectedTotal, currency) !== 0) {
-    resolveCounterpartAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
+    partnerAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
     for (const p of resolvedPayments) {
       const m = read(db, 'pos.payment.method', p.payment_method_id);
       if (m && m.type !== 'pay_later') {
@@ -579,13 +579,13 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     name,
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
-  const counterpart = resolveCounterpartAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
+  const counterpart = partnerAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
   const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
   const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
-      account_id: resolveCounterpartAccount(db, {
+      account_id: partnerAccount(db, {
         companyId: session.company_id ?? 1,
         partnerId: partner_id,
         accountType: 'asset_receivable',
@@ -610,7 +610,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     if (m.type === 'pay_later') continue;
     const journal = read(booked, 'account.journal', m.journal_id);
     const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).accountId;
-    const receivable = resolveCounterpartAccount(booked, {
+    const receivable = partnerAccount(booked, {
       companyId: session.company_id ?? 1,
       partnerId: partner_id,
       accountType: 'asset_receivable',
@@ -711,6 +711,7 @@ export function payCart(db, { cart = [], lines: inputLines = null, method, payme
   const lines = original ? original.lines : priceLines(db, normalized, resolved.effectivePartnerId, {
     pricelistId: resolved.presetSnapshot.pricelist_id,
     fiscalPositionId: resolved.presetSnapshot.fiscal_position_id,
+    companyId: resolved.config?.company_id ?? resolved.session?.company_id ?? 1,
   });
   const out = payOrder(db, {
     lines,

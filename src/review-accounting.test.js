@@ -1,10 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { remapDiff } from './sync.js';
 import { accountId, invoiceLines } from './models/ledger.js';
-import { configureCompanyChart } from './models/company.js';
 import { lockedSettlementInvariant } from './models/finance.js';
 import { payMove, postMove } from './models/accounting.js';
 import { installments } from './models/terms.js';
@@ -206,21 +205,14 @@ test('review #4: rounded invoice payment-term instalments conserve rounded docum
 test('review #4: second company foreign payment-term instalments conserve company and document currency', () => {
   let db = seed();
   const currency = search(db, 'res.currency').find((c) => c.name === 'SAR');
-  const c2 = create(db, 'res.company', { name: 'Second Co' }); db = c2.db;
-  const accounts = {};
+  const c2 = create(db, 'res.company', { name: 'Second Co', currency_id: db.settings.base_currency_id }); db = c2.db;
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income']]) {
     const created = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: c2.id });
     db = created.db;
-    accounts[code] = created.id;
   }
   const acc = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
+  db = write(db, 'res.company', c2.id, { account_default_receivable_id: acc('121000').id });
   db = create(db, 'account.journal', { name: 'C2 Sale', code: 'INV', type: 'sale', company_id: c2.id, default_account_id: acc('400000').id }).db;
-  const c2Config = read(db, 'res.company', c2.id);
-  db = configureCompanyChart(db, c2.id, {
-    account_receivable_id: accounts['121000'],
-    account_payable_id: c2Config.account_payable_id,
-    default_payment_journal_id: c2Config.default_payment_journal_id,
-  });
 
   const term = create(db, 'account.payment.term', { name: 'Split', line_ids: [
     { value: 50, value_type: 'percent', nb_days: 0 },

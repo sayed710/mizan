@@ -2,13 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { seed } from './seed.js';
-import { configureCompanyChart } from './models/company.js';
 import { today, addDays } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { postBatch } from './models/payments.js';
 import { accountId, journalId, postEntry } from './models/ledger.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import {
   generateReturns,
@@ -35,8 +34,9 @@ const invoiceLine = (db, taxName, use, vals = {}) => ({
   ...vals,
 });
 const defaultPaymentJournal = (db, companyId = 1) => {
-  const configuredJournalId = read(db, 'res.company', companyId)?.default_payment_journal_id;
-  const candidates = search(db, 'account.journal').filter((journal) => journal.id === configuredJournalId);
+  const configured = search(db, 'account.journal').filter((journal) => journal.default_for_payments);
+  const own = configured.filter((journal) => journal.company_id === companyId);
+  const candidates = own.length ? own : configured.filter((journal) => !journal.company_id);
   assert.equal(candidates.length, 1);
   return candidates[0].id;
 };
@@ -323,15 +323,10 @@ test('tax return actions post closing and payment to the company chart when acco
     db = created.db;
     accounts[code] = created.id;
   }
-  const companyChart = read(db, 'res.company', company.id);
   const bankJournal = create(db, 'account.journal', {
-    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'],
+    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'], default_for_payments: true,
   });
-  db = configureCompanyChart(bankJournal.db, company.id, {
-    account_receivable_id: companyChart.account_receivable_id,
-    account_payable_id: companyChart.account_payable_id,
-    default_payment_journal_id: bankJournal.id,
-  });
+  db = bankJournal.db;
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
   db = create(db, 'res.partner.bank', { partner_id: 1, account_number: 'COMPANY TAX BANK' }).db;
   db = write(db, 'account.return.type', type.id, {
@@ -1208,7 +1203,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 22);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');

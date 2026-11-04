@@ -23,6 +23,7 @@ export function setLang(next) {
 }
 
 const ar = {
+  'Download CSV': 'تنزيل CSV',
   'Report not found': 'لم يتم العثور على التقرير',
   'Accounting Reports': 'التقارير المحاسبية', 'Accounting Report': 'التقرير المحاسبي', 'Horizontal Groups': 'المجموعات الأفقية',
   'Report Lines': 'بنود التقرير', 'Parent Code': 'رمز البند الأصلي', 'Open Report': 'فتح التقرير',
@@ -170,6 +171,10 @@ const ar = {
   'Default Receivable Account': 'حساب المدينين الافتراضي',
   'Default Payable Account': 'حساب الدائنين الافتراضي',
   'Default Payment Journal': 'دفتر الدفع الافتراضي',
+  'Inter-company Document': 'مستند بين الشركات',
+  'Inter-company Purchase Journal': 'دفتر مشتريات بين الشركات',
+  'Synchronize invoices/bills': 'مزامنة فواتير المبيعات والمشتريات',
+  'Unmatched Inter-company Items': 'البنود غير المتطابقة بين الشركات',
   'Outstanding Account': 'حساب المبالغ المعلقة',
   'Points of Sale': 'نقاط البيع',
   'PoS Product Categories': 'فئات منتجات نقاط البيع',
@@ -358,7 +363,7 @@ const ar = {
   'Journal Items': 'بنود القيد', Undefined: 'غير محدد', 'Invoice Sources': 'مصادر الفاتورة', 'Journal Entry': 'قيد يومية', Account: 'الحساب', Label: 'البيان', Debit: 'مدين', Credit: 'دائن',
   Balance: 'الرصيد', Revenue: 'الإيرادات', 'Cost of Revenue': 'تكلفة الإيرادات', 'Gross Profit': 'مجمل الربح', 'Net Operating Income': 'صافي الدخل التشغيلي',
   'Other Expenses': 'مصروفات أخرى', 'Net Income': 'صافي الدخل', Assets: 'الأصول', 'Total Assets': 'إجمالي الأصول', Liabilities: 'الخصوم',
-  Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
+  Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Current Year Earnings Account': 'حساب أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
   'Initial Balance': 'الرصيد الافتتاحي', Period: 'الفترة', 'This Quarter': 'هذا الربع', 'All Dates': 'كل التواريخ', Journal: 'اليومية', 'Bank Journal': 'يومية البنك',
   'Account Name': 'اسم الحساب', 'Journal Name': 'اسم اليومية', 'Short Code': 'الكود المختصر', 'Default Account': 'الحساب الافتراضي',
   Receivable: 'المدينون', 'Bank and Cash': 'البنك والنقدية', 'Current Assets': 'الأصول المتداولة', 'Fixed Assets': 'الأصول الثابتة',
@@ -702,7 +707,7 @@ const ar = {
   'Matching Partner': 'الشريك المطابق', 'Partner is Set': 'الشريك محدد', 'Label Parameter': 'قيمة الوصف', 'Amount Min': 'الحد الأدنى', 'Amount Max': 'الحد الأقصى',
   'Button to generate counterpart entry': 'زر لإنشاء قيد مقابل', 'Rule to suggest counterpart entry': 'قاعدة لاقتراح قيد مقابل', 'Rule to match invoices/bills': 'قاعدة لمطابقة الفواتير',
   Refunds: 'المرتجعات', 'Vendor Refund': 'مرتجع مورد', 'Payment Type': 'نوع الدفع', 'Partner Type': 'نوع الشريك', Receive: 'استلام',
-  'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
+  'Outstanding Credit': 'رصيد دائن معلق', 'Apply Outstanding Credit': 'تطبيق الرصيد الدائن المعلق', 'Apply Credit': 'تطبيق الرصيد الدائن', 'Application Date': 'تاريخ التطبيق', 'Amount to Apply': 'المبلغ المراد تطبيقه', 'Apply Credit to Invoice': 'تطبيق الرصيد على الفاتورة', 'Outstanding Payment': 'دفعة معلقة', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   'Depreciation Schedule': 'جدول الإهلاك الدوري',
   Base: 'الأساس',
   'Payment QR Codes': 'رموز QR للدفع', 'ZATCA phase 1 QR (Saudi)': 'رمز QR للمرحلة الأولى من زاتكا (السعودية)', 'Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.': 'يطبع رمز QR للمرحلة الأولى فقط. المرحلة الثانية من زاتكا (XML، الختم التشفيري، الاعتماد) والفوترة الإلكترونية في مصر والإمارات غير مدعومة بعد.', 'SEPA Credit Transfer (EPC)': 'تحويل SEPA (EPC)',
@@ -1265,6 +1270,9 @@ const ar = {
   'Tax Calculation Rounding Method': 'طريقة تقريب حساب الضريبة',
   'Round per Line': 'تقريب لكل سطر',
   'Round Globally': 'تقريب إجمالي',
+  'Supplier Payment Terms': 'شروط دفع المورد',
+  'Default Sales Tax': 'ضريبة المبيعات الافتراضية',
+  'Default Purchase Tax': 'ضريبة المشتريات الافتراضية',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

@@ -1,5 +1,5 @@
-import { create, read } from '../orm.js';
-import { configureCompanyChart, createCompany } from '../models/company.js';
+import { create, read, write } from '../orm.js';
+import { createCompany } from '../models/company.js';
 
 /** A second company with its own copies of selected accounts and journals. */
 export function accountingCompany(db) {
@@ -20,11 +20,8 @@ export function accountingCompany(db) {
     next = copied.db;
     if (code === 'BNK1') bankJournalId = copied.id;
   }
-  next = configureCompanyChart(next, branch.id, {
-    account_receivable_id: accountIds['121000'],
-    account_payable_id: accountIds['211000'],
-    default_payment_journal_id: bankJournalId,
-  });
+  next = write(next, 'res.company', branch.id, { account_default_receivable_id: accountIds['121000'], account_default_payable_id: accountIds['211000'] });
+  next = write(next, 'account.journal', bankJournalId, { default_for_payments: true });
   return { db: next, id: branch.id };
 }
 

@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
-import { paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
+import { paymentJournal, postEntry, partnerAccount } from './ledger.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { toCompany } from './currency.js';
 
@@ -120,7 +120,7 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   if (journal != null && (!journalId || !['bank', 'cash'].includes(read(db, 'account.journal', journalId)?.type))) throw new Error('Select a bank or cash journal');
   const via = paymentJournal(db, journalId, companyId);
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
-  const counterpart = resolveCounterpartAccount(db, { companyId, partnerId: r.partner_id, accountType: 'asset_receivable' });
+  const counterpart = partnerAccount(db, { companyId, partnerId: r.partner_id, accountType: 'asset_receivable' });
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Prepayment ${r.name}`, company: companyId, lines: [
     { account_id: via.accountId, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
     { account_id: counterpart, credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },

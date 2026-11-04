@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -14,6 +14,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { downloadCsv, tableToRows } from '../csv.js';
 import { balanceAnalyticColumns, balanceColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -59,7 +60,7 @@ function Section({ title, total, rows, sign = 1, totals, variance, showVariance 
       </tr>
       {open && rows?.map((r) => (
         <tr key={r.account.id} className="rep-detail">
-          <td>{r.account.code} {r.account.name}</td>
+          <td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>
           {totals ? <ComparisonCells values={r.values} showVariance={showVariance} /> : <td className="num">{money(r.balance)}</td>}
         </tr>
       ))}
@@ -89,8 +90,8 @@ function Pnl({ db, period }) {
       <Total label="Gross Profit" value={p.gross} />
       <Section title="Expenses" total={p.expense} rows={p.detail.expense} />
       <Total label="Net Operating Income" value={p.operating} />
-      <Section title="Other Income" total={p.otherIncome} />
-      <Section title="Other Expenses" total={p.otherExpense} />
+      <Section title="Other Income" total={p.otherIncome} rows={p.detail.otherIncome} />
+      <Section title="Other Expenses" total={p.otherExpense} rows={p.detail.otherExpense} />
       <Total label="Net Income" value={p.net} strong />
     </tbody>
   );
@@ -104,7 +105,7 @@ function Balance({ db, period }) {
       <Total label="Total Assets" value={b.totalAssets} strong />
       <Section title="Liabilities" total={b.totalLiabilities} rows={b.liabilities} />
       <Section title="Equity" total={b.totalEquity - b.earnings} rows={b.equity} />
-      <Section title="Current Year Earnings" total={b.earnings} />
+      <Section title="Current Year Earnings" total={b.earnings} rows={[{ account: b.earningsAccount, balance: b.earnings }]} />
       <Total label="Liabilities + Equity" value={b.totalLiabilities + b.totalEquity} strong />
     </tbody>
   );
@@ -269,7 +270,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
                     <FollowUpActions db={db} reminder={f} companyId={company.id} />
                   </td>
                   <td className="num">{f.oldest}</td>
-                  <td className="num">{money(f.total)}</td>
+                  <td className="num">{formatFollowUpTotals(f)}</td>
                 </tr>
               );
             })}
@@ -293,7 +294,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
               <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
             </td>
             <td className="num">{f.oldest}</td>
-            <td className="num">{money(f.total)}</td>
+            <td className="num">{formatFollowUpTotals(f)}</td>
           </tr>
         );
       })}
@@ -568,6 +569,10 @@ function ReportPage({ leaf }) {
     : periods
       ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods))
       : null;
+  const tableRef = useRef(null);
+  const exportCsv = () => {
+    downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
+  };
   return (
     <main className="action report-page">
       <div className="control-panel">
@@ -623,9 +628,10 @@ function ReportPage({ leaf }) {
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
+        <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       </div>
       <div className="list-wrap">
-        <table className="list report">
+        <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
           {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
         </table>

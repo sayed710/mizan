@@ -11,7 +11,7 @@ const db = { records: {
   'res.partner': [{ id: 1, name: 'Partner' }],
   'account.move': [{ id: 7, name: 'Invoice', state: 'posted', move_type: 'out_invoice', partner_id: 1, invoice_date: '2025-01-01', invoice_date_due: '2025-01-10', line_ids: [{ account_id: 1, partner_id: 1, debit: 100, date_maturity: '2025-01-10' }] }],
   'account.payment': [],
-}, settings: {} };
+}, settings: { base_currency_id: 1 } };
 
 test('aged balances expose invoice bucket details at the cutoff', () => {
   const row = agedBalance(db, 'receivable', '2025-02-15').rows[0];

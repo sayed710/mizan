@@ -2,60 +2,44 @@
 import { read } from '../orm.js';
 import { today } from './common.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
+import { conversionRate } from './currency.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 export const currencyCode = (db, rec) => (rec?.currency_id ? read(db, 'res.currency', rec.currency_id)?.name ?? null : null);
 
 function ownCurrencyId(db, rec) {
-  return read(db, 'res.company', rec.company_id ?? 1)?.currency_id
-    ?? (db.records['res.currency'] ?? []).find((c) => c.name === db.settings?.currency)?.id ?? null;
+  const company = read(db, 'res.company', rec.company_id ?? 1);
+  if (!company?.currency_id || !read(db, 'res.currency', company.currency_id)) throw new Error(`Company ${company?.name ?? rec.company_id ?? 1} requires a configured currency`);
+  return company.currency_id;
 }
 
 const reportingCurrency = (db) => ownCurrencyId(db, { company_id: db.settings?.current_company_id ?? 1 });
-
-/** Missing/future-only rates are unknown, never implicit 1:1; only the configured base currency has a unit rate. */
-function baseRate(db, id, date) {
-  const currency = read(db, 'res.currency', id);
-  if (!currency) return null;
-  if (currency.name === db.settings?.currency) return 1;
-  const rate = (currency.rate_ids ?? []).filter((r) => r.date <= date && Number.isFinite(Number(r.rate)) && Number(r.rate) > 0)
-    .sort((a, b) => b.date.localeCompare(a.date))[0];
-  return rate ? Number(rate.rate) : null;
-}
 
 function reportingValue(db, rec, amount, at) {
   const own = ownCurrencyId(db, rec), target = reportingCurrency(db);
   let booked = amount;
   if (rec.currency_id && rec.currency_id !== own) {
-    const sourceRate = baseRate(db, rec.currency_id, docDate(rec)), ownRate = baseRate(db, own, docDate(rec));
-    if (sourceRate === null || ownRate === null) return null;
-    booked = roundCurrency(amount * ownRate / sourceRate, companyCurrencyRecord(db, rec.company_id));
+    const rate = conversionRate(db, rec.currency_id, own, docDate(rec), rec.company_id ?? 1);
+    if (rate == null) return null;
+    booked = roundCurrency(amount * rate, companyCurrencyRecord(db, rec.company_id));
   }
   if (own === target) return booked;
-  const ownRate = baseRate(db, own, at), targetRate = baseRate(db, target, at);
-  return ownRate === null || targetRate === null ? null : roundCurrency(booked * targetRate / ownRate, companyCurrencyRecord(db, db.settings?.current_company_id));
+  const rate = conversionRate(db, own, target, at, db.settings?.current_company_id ?? 1);
+  return rate == null ? null : roundCurrency(booked * rate, companyCurrencyRecord(db, db.settings?.current_company_id));
 }
 
-export const unrated = (db, rec, at = today()) => reportingValue(db, rec, 1, at) === null;
+export const unrated = (db, rec, at = today()) => reportingValue(db, rec, 1, at) == null;
 /** Translate an amount already booked in its company's currency at its accounting date. */
 export function reportingBookedAmount(db, rec, amount) {
   const date = rec?.date ?? rec?.invoice_date;
   if (!date) throw new Error('An accounting date is required for currency conversion');
   const companyId = rec.company_id ?? 1;
   const reportingId = db.settings?.current_company_id ?? 1;
-  const currencyFor = (id) => {
-    const company = read(db, 'res.company', id);
-    const currency = company?.currency_id && read(db, 'res.currency', company.currency_id);
-    if (!currency) throw new Error(`Company ${company?.name ?? id} requires a valid currency before running reports`);
-    return currency;
-  };
-  const own = currencyFor(companyId), target = currencyFor(reportingId);
+  const own = read(db, 'res.currency', ownCurrencyId(db, { company_id: companyId }));
+  const target = read(db, 'res.currency', ownCurrencyId(db, { company_id: reportingId }));
   if (own.id === target.id) return Number(amount) || 0;
-  const rate = (currency) => {
-    const row = (currency.rate_ids ?? []).filter((r) => r.date <= date && Number.isFinite(Number(r.rate)) && Number(r.rate) > 0).sort((a, b) => b.date.localeCompare(a.date))[0];
-    if (!row) throw new Error(`Configure an exchange rate for ${currency.name} on or before ${date}`);
-    return Number(row.rate);
-  };
-  return roundCurrency((Number(amount) || 0) * rate(target) / rate(own), target);
+  const rate = conversionRate(db, own.id, target.id, date, reportingId);
+  if (rate == null) throw new Error(`Configure an exchange rate for ${own.name} and ${target.name} on or before ${date}`);
+  return roundCurrency((Number(amount) || 0) * rate, target);
 }
 export const companyAmount = (db, rec, field, at = today()) => reportingValue(db, rec, Number(rec?.[field]) || 0, at) ?? 0;
 export const companySum = (db, recs, field, at = today()) => roundCurrency(recs.reduce((s, r) => s + companyAmount(db, r, field, at), 0), companyCurrencyRecord(db, db.settings?.current_company_id));

@@ -1,7 +1,7 @@
 // Procurement routes (make-to-order buy/manufacture, dropship), storage locations and landed costs.
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
-import { postEntry, postedBillLine, resolveCounterpartAccount } from './ledger.js';
+import { postEntry, postedBillLine, partnerAccount } from './ledger.js';
 import { costMethod } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
 import { allocateCents, round } from '../money.js';
@@ -123,7 +123,7 @@ function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expe
   const entryLines = [];
   const partnerId = lc.bill_id ? read(db, 'account.move', lc.bill_id)?.partner_id ?? null : null;
   let payableAccount;
-  const defaultPayableAccount = () => (payableAccount ??= resolveCounterpartAccount(db, {
+  const defaultPayableAccount = () => (payableAccount ??= partnerAccount(db, {
     companyId: lc.company_id ?? 1, partnerId, accountType: 'liability_payable',
   }));
   for (const c of group.costs) {

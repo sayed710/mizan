@@ -13,7 +13,8 @@ const press = (db, model, id, label) => models[model].form.buttons.find((b) => b
 
 test('standalone payment allocations use company-configured exchange accounts and can be synchronized and reversed', () => {
   for (const [paymentRate, field, side] of [[1, 'income_currency_exchange_account_id', 'credit'], [4, 'expense_currency_exchange_account_id', 'debit']]) {
-    const branch = createCompany(seed(), { name: 'FX branch' });
+    const base = seed();
+    const branch = createCompany(base, { name: 'FX branch', currency_id: base.settings.base_currency_id });
     for (const company of [1, branch.id]) {
       const account = create(branch.db, 'account.account', { name: 'Configured exchange', code: `FX${company}`, account_type: side === 'credit' ? 'income_other' : 'expense_other', company_id: company });
       const configured = write(account.db, 'res.company', company, { [field]: account.id });
@@ -35,7 +36,8 @@ test('standalone payment allocations use company-configured exchange accounts an
 });
 
 test('bank match uses each company exchange account for payment and write-off', () => {
-  const branch = createCompany(seed(), { name: 'FX branch' });
+  const base = seed();
+  const branch = createCompany(base, { name: 'FX branch', currency_id: base.settings.base_currency_id });
   let db = branch.db;
   for (const company of [1, branch.id]) {
     const gain = create(db, 'account.account', { name: 'FX gain', code: `FX${company}`, account_type: 'income_other', company_id: company });
@@ -60,8 +62,7 @@ test('discount button uses the posted invoice counterpart account', () => {
   const invoice = create(term.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: today(), invoice_payment_term_id: term.id, invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   const posted = press(invoice.db, 'account.move', invoice.id, 'Confirm');
   const db = { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((move) => move.id === invoice.id ? { ...move, line_ids: move.line_ids.map((line) => read(posted, 'account.account', line.account_id)?.account_type === 'asset_receivable' ? { ...line, account_id: account.id } : line) } : move) } };
-  const configuredJournalId = read(db, 'res.company', 1).default_payment_journal_id;
-  const paymentJournals = Object.values(db.records['account.journal']).filter((journal) => journal.id === configuredJournalId);
+  const paymentJournals = Object.values(db.records['account.journal']).filter (journal => journal.default_for_payments && (!journal.company_id || journal.company_id === 1));
   assert.equal(paymentJournals.length, 1);
   const journal_id = paymentJournals[0].id;
   const paid = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment').run(db, read(db, 'account.move', invoice.id), {
