@@ -61,6 +61,7 @@ function validate(db, asset) {
   if (!(Number(asset.original_value) > 0)) throw new Error('The original value must be positive');
   if (!Number.isInteger(Number(asset.method_number)) || Number(asset.method_number) < 1) throw new Error('The duration must be at least 1 period');
   if (!(Number(asset.salvage_value || 0) < Number(asset.original_value))) throw new Error('The not depreciable value must be lower than the original value');
+  if (!Number.isFinite(Number(asset.already_depreciated ?? 0)) || Number(asset.already_depreciated ?? 0) < 0 || cents(asset.already_depreciated) > cents(asset.original_value) - cents(asset.salvage_value)) throw new Error('Depreciated at import must be between zero and the depreciable value');
   if (!asset.acquisition_date) throw new Error('Set an acquisition date');
 
   const company = asset.company_id ?? 1;
@@ -123,15 +124,11 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (!['open', 'paused', 'close'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be disposed');
   if (!date) throw new Error('Set a disposal date');
   if (saleValue != null && !(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
+  if (Number(saleValue) > 0 && !invoiceId) throw new Error('Select the customer invoice for this sale');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
   if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
   validate(db, asset);
-  const depreciated = postDepreciation(db, asset, date);
-  const current = read(depreciated, 'account.asset', asset.id);
-  const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
-  const original = cents(asset.original_value);
-  const accumulated = postedCents(current) + cents(asset.already_depreciated);
-  const invoice = invoiceId && read(depreciated, 'account.move', invoiceId);
+  const invoice = invoiceId && read(db, 'account.move', invoiceId);
   if (invoiceId && (invoice?.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== (asset.company_id ?? 1))) throw new Error('Select a posted sale invoice in the asset company');
   const saleLine = invoice && (invoice.line_ids ?? []).find((line) => (line.invoice_sources ?? []).some((source) => source.index === Number(invoiceLine)));
   if (invoice && !saleLine) throw new Error('Sale invoice line not found');
@@ -140,6 +137,11 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (sale < 0) throw new Error('The sale price cannot be negative');
   if (invoice && saleValue != null && cents(saleValue) !== sale) throw new Error('Sale price must match the invoice line amount');
   if (invoice && (db.records['account.asset'] ?? []).some((other) => other.id !== asset.id && other.disposal_date && other.sale_invoice_id === invoice.id && other.sale_invoice_line === Number(invoiceLine))) throw new Error('Sale invoice line already used by another asset disposal');
+  const depreciated = postDepreciation(db, asset, date);
+  const current = read(depreciated, 'account.asset', asset.id);
+  const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
+  const original = cents(asset.original_value);
+  const accumulated = postedCents(current) + cents(asset.already_depreciated);
   const loss = original - accumulated - sale;
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
@@ -148,7 +150,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   const lines = [
     { account: assetAcc, credit: original / 100 },
     accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
-    sale > 0 && { account: saleLine?.account_id ?? '101401', debit: sale / 100 },
+    sale > 0 && { account: saleLine.account_id, debit: sale / 100 },
     loss > 0 && { account: asset.account_loss_id ?? '690300', debit: loss / 100, analytic_distribution: asset.analytic_distribution },
     loss < 0 && { account: asset.account_gain_id ?? '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
