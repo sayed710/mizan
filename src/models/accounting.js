@@ -1,5 +1,5 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
-import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry } from './pay.js';
@@ -159,6 +159,18 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
 ]);
+function recurringReversalDate(origin, nextDate) {
+  const start = origin.invoice_date ?? origin.date;
+  const end = origin.reverse_date;
+  if (!validDate(start) || !validDate(end) || end <= start) throw new Error('Reversal date must be after the accounting date');
+  const [sy, sm] = start.split('-').map(Number);
+  const [ey, em] = end.split('-').map(Number);
+  let months = (ey - sy) * 12 + em - sm;
+  if (shiftMonth(start, months) > end) months--;
+  const days = (Date.parse(end) - Date.parse(shiftMonth(start, months))) / 86400000;
+  return addDays(shiftMonth(nextDate, months), days);
+}
+
 function spawnRecurringMove(db, move) {
   const months = RECURRENCE_MONTHS[move.auto_post];
   if (!months) return db;
@@ -182,6 +194,7 @@ function spawnRecurringMove(db, move) {
     invoice_date: nextDate,
     date: nextDate,
     ...(nextDue ? { invoice_date_due: nextDue } : {}),
+    ...(move.auto_reverse ? { reverse_date: recurringReversalDate(read(db, 'account.move', origin), nextDate) } : {}),
     auto_post_origin_id: origin,
     invoice_line_ids: isInvoice(move) ? (raw.invoice_line_ids ?? []).map((l) => ({
       ...l,
@@ -299,7 +312,7 @@ export function postMove(db, id) {
     });
     checkMandatoryPlans(db, { ...r, line_ids });
     const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
-    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id }).db : posted;
+    const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id, scheduled: r.reverse_date > today() }).db : posted;
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');

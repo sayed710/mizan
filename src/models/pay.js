@@ -208,7 +208,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (source.fx_payment_move_id && source.fx_invoice_id && !opts.reconciliation_reversal) {
     throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
   }
-  if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) {
+  if (search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === source.id)) {
     throw new Error('This entry has already been reversed');
   }
   const mode = opts.mode ?? (opts.reverse_and_create ? 'modify' : 'reverse');
@@ -226,7 +226,8 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   const ref = reason ? `Reversal of ${source.name}, ${reason}` : `Reversal of ${source.name}`;
   const created = create(db, 'account.move', {
     move_type: 'entry',
-    state: 'posted',
+    state: opts.scheduled ? 'draft' : 'posted',
+    ...(opts.scheduled ? { auto_post: 'at_date' } : {}),
     journal_id: targetJournalId,
     invoice_date: date,
     date,
@@ -234,7 +235,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     reversed_entry_id: source.id,
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     partner_id: source.partner_id ?? null,
-    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
+    name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
     line_ids: (source.line_ids ?? []).map((l) => ({
       ...l,
@@ -245,12 +246,12 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
       name: `Reversal: ${l.name ?? ''}`.trim(),
     })),
   });
-  let next = postAnalytic(created.db, created.id);
+  let next = opts.scheduled ? created.db : postAnalytic(created.db, created.id);
   const currentSource = read(next, 'account.move', source.id);
   if (currentSource && !currentSource.inalterable_hash) {
     next = write(next, 'account.move', source.id, { reversal_move_id: created.id });
   }
-  next = postNote(next, 'account.move', source.id, `Reversed by ${read(next, 'account.move', created.id).name}`);
+  next = postNote(next, 'account.move', source.id, opts.scheduled ? `Reversal scheduled for ${date}` : `Reversed by ${read(next, 'account.move', created.id).name}`);
   if (mode === 'modify') {
     const draft = create(next, 'account.move', {
       move_type: 'entry',
