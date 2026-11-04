@@ -28,12 +28,12 @@ test('Finding 2: unreleased cash-basis taxes resolve company transition accounts
   const c2 = createCompany(db, { name: 'Company Two' });
   db = c2.db;
   const compId = c2.id;
-  for (const code of ['101401', '121000', '251000', '251100', '400000']) {
+  for (const code of ['101401', '251000', '251100', '400000']) {
     const orig = db.records['account.account'].find((a) => a.code === code);
     db = create(db, 'account.account', { ...orig, company_id: compId }).db;
   }
   const origJournal = db.records['account.journal'].find((j) => j.code === 'INV');
-  const journalRes = create(db, 'account.journal', { ...origJournal, company_id: compId });
+  const journalRes = create(db, 'account.journal', { ...origJournal, company_id: compId, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
   db = journalRes.db;
 
   const taxAccount = search(db, 'account.account').find((a) => a.code === '251000' && a.company_id === compId);
@@ -80,12 +80,12 @@ test('Finding 3: accounting lock dates are scoped to res.company and sister comp
   const c2 = createCompany(db, { name: 'Company Two' });
   db = c2.db;
   const comp2Id = c2.id;
-  for (const code of ['101401', '121000', '400000']) {
+  for (const code of ['101401', '400000']) {
     const orig = db.records['account.account'].find((a) => a.code === code);
     db = create(db, 'account.account', { ...orig, company_id: comp2Id }).db;
   }
   const origJournal = db.records['account.journal'].find((j) => j.code === 'INV');
-  const journal2Res = create(db, 'account.journal', { ...origJournal, company_id: comp2Id });
+  const journal2Res = create(db, 'account.journal', { ...origJournal, company_id: comp2Id, invoice_sequence_prefix: 'C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'C2-RINV/', refund_sequence_next_number: 1 });
   db = journal2Res.db;
 
   // Lock Company 1 via res.company

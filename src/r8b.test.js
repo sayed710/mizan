@@ -187,4 +187,3 @@ test('journal audit and ledger tax lines preserve distinct tax IDs when display 
   assert.equal(rows.length, 2);
   assert.deepEqual(new Set(rows.map((tax) => tax.tax_id)), new Set([firstTax.id, secondTax.id]));
 });
-

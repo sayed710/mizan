@@ -48,9 +48,9 @@ export function postPayment(db, p) {
           && shouldBePaid(db, m) !== 'exception')
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
-  const journal = read(db, 'account.journal', currentPayment.journal_id ?? journalId(db, via.code, currentPayment.company_id ?? 1));
+  const journal = read(db, 'account.journal', via.id);
   const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
-  const liquidity = outstanding ?? via.account;
+  const liquidity = outstanding ?? via.accountId;
   let taxClosing = null;
   if (currentPayment.return_id || currentPayment.is_tax_payment) {
     const ret = read(db, 'account.return', currentPayment.return_id);
@@ -70,14 +70,20 @@ export function postPayment(db, p) {
     if (matches.length !== 1 || (matches[0].move.payments ?? []).some((p) => !p.reversed)) throw new Error('An unsettled tax closing obligation is required');
     taxClosing = matches[0];
   }
-  const counterpart = currentPayment.destination_account_code
-    || (currentPayment.destination_account_id ? read(db, 'account.account', currentPayment.destination_account_id)?.code : null)
-    || partnerAccount(db, currentPayment.partner_id, currentPayment.company_id, currentPayment.partner_type === 'supplier' ? 'payable' : 'receivable');
+  let counterpart;
+  if (currentPayment.destination_account_id) {
+    counterpart = read(db, 'account.account', currentPayment.destination_account_id)?.id;
+    if (!counterpart) throw new Error('The configured destination account does not exist');
+  } else if (currentPayment.destination_account_code) {
+    throw new Error('Select the destination account by record');
+  } else {
+    counterpart = partnerAccount(db, currentPayment.partner_id, currentPayment.company_id, currentPayment.partner_type === 'supplier' ? 'payable' : 'receivable');
+  }
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const amount = companyRound(Number(currentPayment.amount));
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: via.code, journal_id: journal?.id, date, ref: currentPayment.memo || name,
+    journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || name,
     lines: inbound
       ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, { account: counterpart, credit: amount, partner_id: currentPayment.partner_id }]
       : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, { account: liquidity, credit: amount, partner_id: currentPayment.partner_id }],
@@ -86,7 +92,7 @@ export function postPayment(db, p) {
     tax_return_id: currentPayment.return_id ?? null,
   });
   // Register the source before allocations so all callers can derive its currency semantics.
-  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, outstanding_account_id: outstanding, unapplied: amount });
+  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding, unapplied: amount });
   // Apply a company-currency payment against the recorded company balance of each document.
   const { db: applied, left } = open.reduce((acc, m) => {
     if (!(acc.left > 0)) return acc;
@@ -210,7 +216,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (source.fx_payment_move_id && source.fx_invoice_id && !opts.reconciliation_reversal) {
     throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
   }
-  if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) {
+  if (search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === source.id)) {
     throw new Error('This entry has already been reversed');
   }
   const mode = opts.mode ?? (opts.reverse_and_create ? 'modify' : 'reverse');
@@ -220,15 +226,17 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (!targetJournalId && opts.journal) {
     targetJournalId = typeof opts.journal === 'number' ? opts.journal : (journalId(db, opts.journal, companyId) ?? journalId(db, opts.journal));
   }
-  const journalRec = targetJournalId ? read(db, 'account.journal', targetJournalId) : null;
+  if (!targetJournalId) targetJournalId = paymentJournal(db, null, companyId).id;
+  const journalRec = read(db, 'account.journal', targetJournalId);
   if (targetJournalId && !journalRec) throw new Error('Selected journal does not exist');
   if (journalRec?.company_id && journalRec.company_id !== companyId) throw new Error('Journal belongs to another company');
-  const code = journalRec?.code ?? 'BNK1';
+  const code = journalRec.code;
   const reason = String(opts.reason ?? '').trim();
   const ref = reason ? `Reversal of ${source.name}, ${reason}` : `Reversal of ${source.name}`;
   const created = create(db, 'account.move', {
     move_type: 'entry',
-    state: 'posted',
+    state: opts.scheduled ? 'draft' : 'posted',
+    ...(opts.scheduled ? { auto_post: 'at_date' } : {}),
     journal_id: targetJournalId,
     invoice_date: date,
     date,
@@ -236,7 +244,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     reversed_entry_id: source.id,
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     partner_id: source.partner_id ?? null,
-    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
+    name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
     line_ids: (source.line_ids ?? []).map((l) => ({
       ...l,
@@ -247,12 +255,12 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
       name: `Reversal: ${l.name ?? ''}`.trim(),
     })),
   });
-  let next = postAnalytic(created.db, created.id);
+  let next = opts.scheduled ? created.db : postAnalytic(created.db, created.id);
   const currentSource = read(next, 'account.move', source.id);
   if (currentSource && !currentSource.inalterable_hash) {
     next = write(next, 'account.move', source.id, { reversal_move_id: created.id });
   }
-  next = postNote(next, 'account.move', source.id, `Reversed by ${read(next, 'account.move', created.id).name}`);
+  next = postNote(next, 'account.move', source.id, opts.scheduled ? `Reversal scheduled for ${date}` : `Reversed by ${read(next, 'account.move', created.id).name}`);
   if (mode === 'modify') {
     const draft = create(next, 'account.move', {
       move_type: 'entry',

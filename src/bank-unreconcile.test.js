@@ -1,10 +1,10 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -87,7 +87,7 @@ test('unreconciliation reverses linked cash-basis tax releases', () => {
 
 test('unreconcile restores a two-company invoice including an explicit write-off', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const inv = invoice(branch.db, branch.id);
   const account = create(inv.db, 'account.account', { company_id: branch.id, code: '699999', name: 'Adjustment', account_type: 'expense' });
   const line = create(account.db, LINE, { company_id: branch.id, date: '2026-01-03', payment_ref: 'settlement', amount: 90, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Difference', writeoff_amount: 10 });

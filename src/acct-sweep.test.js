@@ -1,4 +1,5 @@
-﻿import './models/index.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
@@ -59,7 +60,7 @@ test('posted foreign analytic lines share the ledger group rounded cent', () => 
 });
 
 test('standalone payment never applies another company invoice for same partner', async () => {
- const { createCompany } = await import('./models/company.js'); let db = seed(); const co = createCompany(db, { name: 'Sweep Company' }); db = co.db;
+ let db = seed(); const co = createCompanyWithDefaultInvoiceJournals(db, { name: 'Sweep Company' }); db = co.db;
  const inv = doc(db, 'out_invoice', '2026-01-01'); db = inv.db;
  const p = create(db, 'account.payment', { partner_id: 1, partner_type: 'customer', payment_type: 'inbound', amount: 25, date: '2026-01-02', company_id: co.id }); db = postPayment(p.db, read(p.db, 'account.payment', p.id));
  assert.equal(read(db, 'account.move', inv.id).amount_residual, 100);
@@ -87,7 +88,7 @@ test('standalone foreign settlement books payment-date conversion and exchange d
 });
 
 test('invoice payment entries belong to the invoice company', async () => {
- const { createCompany } = await import('./models/company.js'); let db = seed(); const co = createCompany(db, { name: 'Invoice Company' });
+ let db = seed(); const co = createCompanyWithDefaultInvoiceJournals(db, { name: 'Invoice Company' });
  const inv = create(co.db, 'account.move', { company_id: co.id, move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
  db = payMove(postMove(inv.db, inv.id), inv.id, 100, '2026-01-02');
  const payment = db.records['account.payment'].find((p) => p.invoice_id === inv.id);

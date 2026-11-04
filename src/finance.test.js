@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
@@ -95,9 +96,8 @@ test('automatic reminders log each reached level once per customer', async () =>
 test('successive scheduled runs track follow-up progress per company and never move backwards', async () => {
   const { runFollowUps, partnerFollowUp } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
-  const { createCompany } = await import('./models/company.js');
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch Two', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch Two', currency_id: base.records['res.company'][0].currency_id });
   let curDb = branch.db;
 
   curDb = invoice(curDb, {
@@ -189,12 +189,11 @@ test('a manual reminder cannot regress the last recorded follow-up level', async
 });
 
 test('manual reminders work per company: two companies with 40-day and 5-day overdue invoices get their own levels and isolated email bodies', async () => {
-  const { createCompany } = await import('./models/company.js');
   const { followUpCompanies, followUpText, logManualFollowUp, partnerFollowUp } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
 
   const base = seed();
-  const branch = createCompany(base, { name: 'Finance Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Finance Branch', currency_id: base.records['res.company'][0].currency_id });
 
   const inv1 = invoice(branch.db, {
     partner_id: 5,

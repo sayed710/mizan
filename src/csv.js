@@ -90,4 +90,3 @@ export function downloadCsv(filename, rows) {
   }
   return text;
 }
-

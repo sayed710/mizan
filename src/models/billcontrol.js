@@ -1,7 +1,7 @@
 import { create, read, search, write } from '../orm.js';
 import { addDays, subtotal, today } from './common.js';
 import { dueDate } from './terms.js';
-import { accountId, journalId } from './ledger.js';
+import { accountId, resolveDocumentJournal } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
@@ -44,6 +44,8 @@ const policyLines = (db, r) => (r.order_line ?? []).map((l) => ({ ...l, purchase
 function createBill(db, r) {
   let po = read(db, 'purchase.order', r.id);
   if (po?.state !== 'purchase') throw new Error('Confirm the purchase order before creating a bill');
+  const companyId = po.company_id ?? 1;
+  const journal = resolveDocumentJournal(db, { move_type: 'in_invoice', company_id: companyId }, { required: true }).id;
   const eligible = billableLines(db, po.id);
   if (!eligible.some((l) => l.toBill > 0)) throw new Error('Nothing is eligible for billing');
   const keyed = po.order_line.map((l) => ({ ...l, purchase_line_key: l.purchase_line_key || crypto.randomUUID() }));
@@ -52,8 +54,6 @@ function createBill(db, r) {
   const lines = po.order_line.map(({ qty_delivered, qty_invoiced, purchase_method, ...l }, i) => ({ ...l, qty: eligible[i].toBill })).filter((l) => l.qty > 0);
   if (!lines.length) throw new Error('Nothing is eligible for billing');
   const term = read(db, 'account.payment.term', po.payment_term_id);
-  const companyId = po.company_id ?? 1;
-  const journal = journalId(db, 'BILL', companyId);
   const out = create(db, 'account.move', {
     company_id: companyId,
     journal_id: journal ?? null,

@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry } from './ledger.js';
+import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -376,13 +376,25 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
-  const invoice = after.invoice_id ? read(db, 'account.move', after.invoice_id) : null;
-  const account = invoice ? invoiceCounterpartAccount(db, invoice) : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
+  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  let account;
+  try {
+    account = invoice
+      ? invoiceCounterpartAccount(db, invoice)
+      : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
+  } catch (error) {
+    return error.message;
+  }
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
-  const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  let bank;
+  try {
+    bank = after.outstanding_account_id ?? paymentJournal(db, after.journal_id, after.company_id ?? 1).accountId;
+  } catch (error) {
+    return error.message;
+  }
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
@@ -851,10 +863,10 @@ export function journalCards(db, at = today()) {
   const moves = search(db, 'account.move');
   const companyByMove = new Map(moves.map((m) => [m.id, m.company_id]));
   const items = journalItems(db);
-  // Draft invoices get their journal on posting, so they count on the default INV/BILL journal meanwhile.
-  const draftJournal = (m) => (m.move_type === 'entry' ? null : ['in_invoice', 'in_refund'].includes(m.move_type) ? 'BILL' : 'INV');
+  // Draft invoices count against the journal explicitly configured for their company.
+  const draftJournal = (m) => (m.move_type === 'entry' ? null : resolveDocumentJournal(db, m)?.id ?? null);
   return search(db, 'account.journal').map((j) => {
-    const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.code));
+    const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.id));
     if (['sale', 'purchase'].includes(j.type)) {
       const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {

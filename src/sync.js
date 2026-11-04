@@ -8,6 +8,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
+import { journalInvoiceSequence } from './models/accounting.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -108,6 +109,63 @@ function danglingLink(records, upserts, stored) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
+/** Rebase one concurrently posted invoice onto the current explicit journal sequence counter. */
+function rebaseConcurrentInvoiceSequence(db, diff) {
+  const existingMoves = byId(db.records['account.move']);
+  const posted = (diff.upserts?.['account.move'] ?? []).filter((move) => {
+    if (!['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move?.move_type) || move.state !== 'posted') return false;
+    return existingMoves.get(move.id)?.state !== 'posted';
+  });
+  if (!posted.length) return diff;
+
+  const nextDiff = {
+    ...diff,
+    upserts: { ...diff.upserts, 'account.move': [...(diff.upserts['account.move'] ?? [])] },
+    bases: { ...diff.bases, 'account.journal': { ...(diff.bases?.['account.journal'] ?? {}) } },
+    sequenceRenamed: [],
+  };
+  const journalUpserts = [...(diff.upserts?.['account.journal'] ?? [])];
+  if (journalUpserts.length) nextDiff.upserts['account.journal'] = journalUpserts;
+  const groups = new Map();
+  for (const move of posted) {
+    const journal = byId(db.records['account.journal']).get(move.journal_id);
+    if (!journal) continue;
+    const sequence = journalInvoiceSequence(journal, move);
+    const key = `${journal.id}:${sequence.numberField}`;
+    if (!groups.has(key)) groups.set(key, { journal, sequence, moves: [] });
+    groups.get(key).moves.push(move);
+  }
+
+  for (const { journal, sequence, moves } of groups.values()) {
+    const journalBase = nextDiff.bases['account.journal'][journal.id];
+    const journalUpdate = journalUpserts.find((record) => record.id === journal.id);
+    if (!journalBase || !journalUpdate || !(sequence.numberField in journalBase)) continue;
+    const baseValue = journalBase[sequence.numberField];
+    const currentValue = journal[sequence.numberField];
+    if (same(baseValue) === same(currentValue)) continue;
+    const sentValue = Number(journalUpdate[sequence.numberField]);
+    const expectedValue = Number(baseValue) + moves.length;
+    if (!Number.isSafeInteger(sentValue) || sentValue !== expectedValue) {
+      throw new ConflictError('Journal sequence changed while this document was being posted; reload and try again');
+    }
+    if (moves.length !== 1) {
+      throw new ConflictError('Post one invoice or refund per journal sequence update, then reload and continue');
+    }
+
+    const currentSequence = journalInvoiceSequence(journal, moves[0]);
+    const incoming = nextDiff.upserts['account.move'].find((record) => record.id === moves[0].id);
+    const previousName = incoming.name;
+    incoming.name = currentSequence.name;
+    if (Array.isArray(incoming.line_ids)) {
+      incoming.line_ids = incoming.line_ids.map((line) => line?.name === previousName ? { ...line, name: currentSequence.name } : line);
+    }
+    if (previousName !== currentSequence.name) nextDiff.sequenceRenamed.push(['account.move', incoming.id, previousName, currentSequence.name]);
+    journalUpdate[sequence.numberField] = currentSequence.nextNumber + 1;
+    journalBase[sequence.numberField] = currentValue;
+  }
+  return nextDiff;
+}
+
 /** A new id this far out is always refused on a fresh database (kept for callers and tests). */
 export const MAX_ID = 2 ** 40;
 /** How far past a model's counter a client may pick a new id (queued offline creates), so one record can't burn the id space. */
@@ -149,7 +207,14 @@ function highWater(numbering = {}, records) {
   const out = {};
   for (const model of SEQUENCED) {
     const marks = { ...numbering[model] };
-    for (const r of records[model] ?? []) {
+    const journalPrefixes = model === 'account.move'
+      ? (records['account.journal'] ?? []).flatMap((journal) => [journal.invoice_sequence_prefix, journal.refund_sequence_prefix].filter(Boolean))
+      : [];
+    if (journalPrefixes.length) {
+      for (const prefix of Object.keys(marks)) if (journalPrefixes.some((configured) => prefix.startsWith(configured))) delete marks[prefix];
+    }
+    const candidates = (records[model] ?? []).filter((record) => model !== 'account.move' || record.move_type === 'entry');
+    for (const r of candidates) {
       const m = sequencedName(model, r.name);
       if (m && Number.isSafeInteger(Number(m[2]))) marks[m[1]] = Math.max(marks[m[1]] ?? 0, Number(m[2]));
     }
@@ -166,10 +231,22 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
   let out = records;
   const renamed = [];
   for (const model of SEQUENCED.filter((m) => Array.isArray(upserts[m]))) {
-    const list = [...out[model] ?? []];
+    const all = [...out[model] ?? []];
+    const storedById = byId(stored[model]);
+    if (model === 'account.move') {
+      const newInvoices = upserts[model].filter((move) => move?.move_type !== 'entry' && move?.state === 'posted'
+        && storedById.get(move.id)?.state !== 'posted');
+      for (const move of newInvoices) {
+        if (all.some((other) => other.id !== move.id && other.move_type !== 'entry' && other.state === 'posted' && other.name === move.name)) {
+          throw new ConflictError('This invoice number is already assigned; reload and post again to use the journal sequence');
+        }
+      }
+    }
+    const list = model === 'account.move' ? all.filter((record) => record.move_type === 'entry') : all;
     const was = new Map((stored[model] ?? []).map((r) => [r.id, r.name]));
     // Only numbers this change set hands out can move; a record keeps the number it already had.
-    const incoming = new Set(upserts[model].map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
+    const genericUpserts = model === 'account.move' ? upserts[model].filter((record) => record.move_type === 'entry') : upserts[model];
+    const incoming = new Set(genericUpserts.map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
     const owner = new Map();
     // Records keeping their number claim it first.
     for (const r of [...list.filter((r) => !incoming.has(r.id)), ...list.filter((r) => incoming.has(r.id))]) {
@@ -188,7 +265,8 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
       renamed.push([model, r.id, r.name, name]);
       owner.set(name, r.id);
     }
-    out = { ...out, [model]: list };
+    const numbered = new Map(list.map((record) => [record.id, record]));
+    out = { ...out, [model]: model === 'account.move' ? all.map((record) => numbered.get(record.id) ?? record) : list };
   }
   return { records: out, renamed };
 }
@@ -345,6 +423,7 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
 export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  d = rebaseConcurrentInvoiceSequence(db, d);
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
@@ -535,7 +614,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   installCustomFields(settings.customFields);
   let next = { ...db, records, seq, settings, numbering: highWater(marks, records), messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
   // The audit trail shows the number the server finally gave, not only the one the browser proposed.
-  for (const [model, id, from, to] of numbered.renamed) {
+  for (const [model, id, from, to] of [...numbered.renamed, ...(d.sequenceRenamed ?? [])]) {
     if (models[model].audited?.(next, read(next, model, id))) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
   }
   growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);

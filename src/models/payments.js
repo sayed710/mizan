@@ -143,7 +143,7 @@ export function postBatch(db, batch) {
   if (paymentIds.length && batch.company_id != null && batch.company_id !== company) throw new Error('Batch and payments must belong to the same company');
   const currency = batchCurrency(db, batch);
   if (currency.error) throw new Error(currency.error);
-  const journalConfig = paymentJournal(db, batch.journal_id, company);
+  const journalConfig = paymentJournal(db, batch.journal_id ?? null, company);
   const journal = read(db, 'account.journal', journalConfig.id);
   // A journal without its own currency accepts any currency; a fixed one only its own.
   if (journal.currency_id && currency.id !== journal.currency_id) throw new Error('Batch currency must match the journal currency');

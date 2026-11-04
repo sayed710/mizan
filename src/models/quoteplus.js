@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
-import { partnerAccount, paymentJournal, postEntry } from './ledger.js';
+import { paymentJournal, postEntry, partnerAccount } from './ledger.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { toCompany } from './currency.js';
 
@@ -118,15 +118,16 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   if (!read(db, 'res.partner', r.partner_id)) throw new Error('Set the customer before registering payment');
   const journalId = typeof journal === 'string' ? search(db, 'account.journal').find((j) => j.code === journal)?.id : journal;
   if (journal != null && (!journalId || !['bank', 'cash'].includes(read(db, 'account.journal', journalId)?.type))) throw new Error('Select a bank or cash journal');
-  const via = paymentJournal(db, journalId);
+  const via = paymentJournal(db, journalId, companyId);
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
-  const booked = postEntry(db, { journal: via.code, journal_id: journalId ?? null, date, ref: `Prepayment ${r.name}`, company: r.company_id ?? 1, lines: [
-    { account: via.account, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
-    { account: partnerAccount(db, r.partner_id, companyId, 'receivable'), credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
+  const counterpart = partnerAccount(db, r.partner_id, companyId, 'receivable');
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Prepayment ${r.name}`, company: companyId, lines: [
+    { account_id: via.accountId, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
+    { account_id: counterpart, credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
   ] });
   const payment = create(booked.db, 'account.payment', {
     name, state: 'posted', partner_type: 'customer', payment_type: 'inbound', partner_id: r.partner_id,
-    sale_id: orderId, currency_id: currency?.id ?? null, amount: value, unapplied: value, date, journal_id: journalId ?? null,
+    sale_id: orderId, currency_id: currency?.id ?? null, amount: value, unapplied: value, date, journal_id: via.id,
     memo: `Prepayment ${r.name}`, move_id: booked.id, company_id: r.company_id ?? 1,
   });
   return confirm(postNote(payment.db, 'sale.order', orderId, `Prepayment ${name}: ${value}`), orderId);

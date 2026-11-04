@@ -7,7 +7,8 @@ import { amortization, confirmLoan, earlyRepayment, loanModels, postDueLines } f
 import { seed } from './seed.js';
 
 const newLoan = (vals) => {
-  const { db, id } = create(seed(), 'account.loan', { name: 'Expansion loan', lender_id: 2, amount: 1200, start_date: '2026-01-10', duration: 6, interest_rate: 5, method: 'annuity', ...vals });
+  const base = seed();
+  const { db, id } = create(base, 'account.loan', { journal_id: search(base, 'account.journal').find((j) => j.code === 'BNK1').id, bank_account_id: accountId(base, '101401'), principal_account_id: accountId(base, '260000'), interest_account_id: accountId(base, '690400'), name: 'Expansion loan', lender_id: 2, amount: 1200, start_date: '2026-01-10', duration: 6, interest_rate: 5, method: 'annuity', ...vals });
   return { db, id };
 };
 

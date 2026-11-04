@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { invoiceLines, journalId, partnerAccount, postEntry } from './ledger.js';
+import { assertCompanyAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -14,15 +14,23 @@ export const openSession = (db) => search(db, 'pos.session').find((s) => s.state
 /** Open the register with the counted opening cash. */
 export function startSession(db, openingCash = 0, configId = null) {
   if (openSession(db)) throw new Error('A session is already open');
-  const config = configId ? read(db, 'pos.config', configId) : (search(db, 'pos.config')[0] ?? null);
-  const company_id = config?.company_id ?? 1;
-  const journal_id = config?.journal_id || journalId(db, 'POSS', company_id);
+  const selectedConfigId = configId ?? db.settings?.default_pos_config_id ?? null;
+  if (!selectedConfigId) throw new Error('Select a point of sale configuration or configure a default point of sale');
+  const config = read(db, 'pos.config', selectedConfigId);
+  if (!config) throw new Error('Selected point of sale configuration does not exist');
+  const company_id = config.company_id ?? db.settings?.current_company_id ?? null;
+  if (!company_id) throw new Error('Select a company on the point of sale configuration');
+  const journal = config.journal_id ? read(db, 'account.journal', config.journal_id) : null;
+  if (!journal || journal.type !== 'sale' || (journal.company_id != null && journal.company_id !== company_id)) {
+    throw new Error('Configure a sales journal for this point of sale configuration and company');
+  }
+  const journal_id = journal.id;
   return create(db, 'pos.session', {
     name: nextName(db, 'pos.session', 'POS/S/'),
     state: 'opened',
     start_at: today(),
     cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, company_id)),
-    config_id: config?.id ?? (configId || null),
+    config_id: config.id,
     journal_id,
     company_id,
   });
@@ -174,8 +182,13 @@ export function resolvePosConfigAndPreset(db, {
   }
 
   const rawConfigId = config_id != null && config_id !== '' ? Number(config_id) : null;
-  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? (search(db, 'pos.config')[0]?.id ?? null);
+  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? db.settings?.default_pos_config_id ?? null;
   const config = resolvedConfigId ? read(db, 'pos.config', resolvedConfigId) : null;
+  if (!config) {
+    throw new Error(resolvedConfigId
+      ? 'Selected point of sale configuration does not exist'
+      : 'Select a point of sale configuration or configure a default point of sale');
+  }
 
   if (sess.config_id && resolvedConfigId !== sess.config_id) {
     throw new Error('POS configuration does not match the session');
@@ -419,9 +432,10 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
     for (const p of resolvedPayments) {
       const m = read(db, 'pos.payment.method', p.payment_method_id);
       if (m && m.type !== 'pay_later') {
-        const journal = read(db, 'account.journal', m.journal_id);
-        const account = read(db, 'account.account', m.outstanding_account_id || journal?.default_account_id)?.code;
-        if (!account) throw new Error('Payment account is required');
+        const journal = paymentJournal(db, m.journal_id, session.company_id ?? 1);
+        const account = m.outstanding_account_id ?? journal.accountId;
+        const configured = read(db, 'account.account', account);
+        if (!configured || (configured.company_id && configured.company_id !== (session.company_id ?? 1))) throw new Error('Payment account must belong to the POS company');
       }
     }
   }
@@ -566,9 +580,14 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
 }
 
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
-  const config = session?.config_id ? read(stocked, 'pos.config', session.config_id) : (search(stocked, 'pos.config')[0] ?? null);
-  const posJournalId = session?.journal_id || config?.journal_id || journalId(stocked, 'POSS', session?.company_id ?? config?.company_id ?? 1);
-  const posJournal = posJournalId ? read(stocked, 'account.journal', posJournalId) : null;
+  const posJournal = resolveDocumentJournal(stocked, {
+    move_type: refund_of ? 'out_refund' : 'out_invoice',
+    company_id: session.company_id,
+    session_id: session.id,
+    config_id: session.config_id,
+    journal_id: session.journal_id,
+  }, { required: true });
+  const posJournalId = posJournal.id;
   const sale = invoiceLines(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
     journal_id: posJournalId,
@@ -584,7 +603,9 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
-      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id || counterpart,
+      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id
+        ? assertCompanyAccount(db, read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account')
+        : counterpart,
       partner_id,
       debit: (refund_of || isReturn || Number(p.amount) < 0) ? 0 : Math.abs(Number(p.amount)),
       credit: (refund_of || isReturn || Number(p.amount) < 0) ? Math.abs(Number(p.amount)) : 0,
@@ -603,9 +624,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     const m = read(booked, 'pos.payment.method', p.payment_method_id);
     if (m.type === 'pay_later') continue;
     const journal = read(booked, 'account.journal', m.journal_id);
-    const account = read(booked, 'account.account', m.outstanding_account_id || journal.default_account_id)?.code;
-    const receivable = m.receivable_account_id || counterpart;
-    if (!account) throw new Error('Payment account is required');
+    const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).accountId;
+    const receivable = m.receivable_account_id ? assertCompanyAccount(booked, m.receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account') : counterpart;
     const amount = Number(p.amount);
     const isOutbound = refund_of || isReturn || amount < 0;
     const tenderEntry = postEntry(booked, {
@@ -614,8 +634,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
       company: session.company_id,
       ref: name,
       lines: isOutbound
-        ? [{ account, credit: Math.abs(amount), partner_id }, { account: receivable, debit: Math.abs(amount), partner_id }]
-        : [{ account, debit: Math.abs(amount), partner_id }, { account: receivable, credit: Math.abs(amount), partner_id }],
+        ? [{ account_id: account, credit: Math.abs(amount), partner_id }, { account_id: receivable, debit: Math.abs(amount), partner_id }]
+        : [{ account_id: account, debit: Math.abs(amount), partner_id }, { account_id: receivable, credit: Math.abs(amount), partner_id }],
     });
     booked = tenderEntry.db;
     moveIds.push(tenderEntry.id);

@@ -5,7 +5,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, accountId, journalId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -98,16 +98,36 @@ export function seed() {
   };
   // The demo chart tags loans payable as financing explicitly; every other account follows its type.
   const chartActivity = { '260000': 'financing' };
-  CHART.forEach(([code, name, account_type]) => add('account.account', {
-    code, name, account_type,
-    reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-    tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
-  }));
-  let demoBankJournal;
-  JOURNALS.forEach(([code, name, type, account, defaultForPayments = false]) => {
-    const id = add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null, default_for_payments: defaultForPayments });
-    if (code === 'BNK1') demoBankJournal = id;
+  const installedAccountIds = {};
+  const installedByCode = {};
+  CHART.forEach(([code, name, account_type, key]) => {
+    const id = add('account.account', {
+      code, name, account_type,
+      reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
+      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
+    });
+    installedByCode[code] = id;
+    if (key) installedAccountIds[key] = id;
   });
+  const companyJournals = {};
+  let demoBankJournal = null;
+  JOURNALS.forEach((journal) => {
+    const id = add('account.journal', {
+      code: journal.code, name: journal.name, type: journal.type,
+      default_account_id: journal.account ? installedByCode[journal.account] : null,
+      default_for_payments: journal.default_for_payments === true,
+      ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
+      ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
+      ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
+      ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
+    });
+    if (journal.company_default) companyJournals[journal.company_default] = id;
+    if (journal.default_for_payments === true) {
+      if (demoBankJournal) throw new Error('Demo setup needs exactly one default payment journal');
+      demoBankJournal = id;
+    }
+  });
+  if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -124,16 +144,19 @@ export function seed() {
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
-    lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
+    lines: [{ account_id: installedAccountIds.liquidity_bank, debit: 150000 }, { account_id: installedAccountIds.liquidity_cash, debit: 5000 }, { account: '301000', credit: 155000 }],
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  const receivable = accountId(db, '121000');
-  const payable = accountId(db, '211000');
-  db = write(db, 'account.account', receivable, { company_id: 1 });
-  db = write(db, 'account.account', payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: receivable, account_default_payable_id: payable });
+  db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
+  db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
+  set('res.company', mainCompanyId, {
+    default_sale_journal_id: companyJournals.sales,
+    default_purchase_journal_id: companyJournals.purchases,
+    default_general_journal_id: companyJournals.general,
+  });
   const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
   db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
   db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
@@ -320,7 +343,10 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1, journal_id: journalId(db, 'POSS', 1) });
+  const shopJournalId = companyJournals.pos;
+  if (!shopJournalId) throw new Error('Demo setup needs a configured point of sale journal');
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1, journal_id: shopJournalId });
+  db = { ...db, settings: { ...db.settings, default_pos_config_id: shopConfig } };
   add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });

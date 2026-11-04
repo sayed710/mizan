@@ -1,9 +1,9 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write, setActiveCompany } from './orm.js';
 import { models, menusFor } from './models/index.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { accountId } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { editableFields } from './models/locks.js';
@@ -26,7 +26,7 @@ function invoice(db, company, amount) {
 // Finding 7: Adding open invoices blocks batch posting
 // ---------------------------------------------------------------------------
 test('Finding 7: Add Open Invoices only adds invoices from the batch company and validates cleanly', () => {
-  const branch = createCompany(seed(), { name: 'Branch' });
+  const branch = createCompanyWithDefaultInvoiceJournals(seed(), { name: 'Branch' });
   let db = branch.db;
   const inv1 = invoice(db, 1, 100);
   const invBranch = invoice(inv1.db, branch.id, 200);
@@ -64,7 +64,7 @@ test('Finding 7: Add Open Invoices only adds invoices from the batch company and
 test('Finding 8: journal-less batch updates company_id to invoice company on post, allowing branch users to find it and match statements', () => {
   try {
     const base = seed();
-    const branch = createCompany(base, { name: 'Branch', currency_id: base.settings.base_currency_id });
+    const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.settings.base_currency_id });
     let db = write(branch.db, 'res.company', branch.id, {
       outstanding_receipts_account_id: accountId(branch.db, '101402', branch.id),
     });

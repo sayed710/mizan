@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { menusFor } from './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -5,7 +6,6 @@ import { create, read, search, updateSettings, write } from './orm.js';
 import { models } from './registry.js';
 import { accountId, journalId, journalItems } from './models/ledger.js';
 import { analyticBalance } from './models/analyticplus.js';
-import { createCompany } from './models/company.js';
 import { generateGroupedEntries, postDueEntries } from './models/deferred.js';
 import { seed } from './seed.js';
 
@@ -223,13 +223,14 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   assert.equal(analyticBalance(db, analytic2.id, { to: '2026-02-28' }).balance, 0);   // 0 because inv 2 was reset and its month 1 recognition was reversed
 
   // Company isolation: create Company 2 with its own accounts and deferred invoice
-  const { db: withCo2, id: co2 } = createCompany(db, { name: 'Branch Co2' });
+  const { db: withCo2, id: co2 } = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co2' });
   db = withCo2;
   const co2Inc = create(db, 'account.account', { code: '410000', name: 'Income Co2', account_type: 'income', company_id: co2 });
   const co2Def = create(co2Inc.db, 'account.account', { code: '212000', name: 'Def Rev Co2', account_type: 'liability_current', company_id: co2 });
-  const co2InvJnl = create(co2Def.db, 'account.journal', { code: 'INV', name: 'Invoices Co2', type: 'sale', company_id: co2 });
+  const co2InvJnl = create(co2Def.db, 'account.journal', { code: 'INV', name: 'Invoices Co2', type: 'sale', company_id: co2, default_account_id: co2Inc.id, invoice_sequence_prefix: 'DEFG-CO2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'DEFG-CO2-RINV/', refund_sequence_next_number: 1 });
   const co2MiscJnl = create(co2InvJnl.db, 'account.journal', { code: 'MISC', name: 'Misc Co2', type: 'general', company_id: co2 });
   db = write(co2MiscJnl.db, 'res.company', co2, {
+    default_sale_journal_id: co2InvJnl.id,
     deferred_generation_method: 'manual_grouped',
     deferred_amount_computation_method: 'full_months',
     deferred_revenue_account_id: co2Def.id,

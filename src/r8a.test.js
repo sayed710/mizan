@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,7 +8,6 @@ import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { accountId, isBalanced, journalItems, profitAndLoss, postEntry } from './models/ledger.js';
 import { closingModels, foreignBalanceReport, revalueForeignBalances } from './models/closing.js';
-import { createCompany } from './models/company.js';
 import { candidates } from './models/bank.js';
 import { taxReport, validateTaxReturnPeriod } from './models/finance.js';
 import { computeAuditChecks } from './models/taxreturn.js';
@@ -40,7 +40,7 @@ test('ledger reports use the accounting date when it differs from the bill date'
 test('a fiscal-year revaluation button posts only for the fiscal-year company', () => {
   const currency = create(seed(), 'res.currency', { name: 'R8A_SCOPE_FX', rate_ids: [{ date: '2030-01-01', rate: 2 }, { date: '2030-02-01', rate: 1 }] });
   const first = invoice(currency.db, { partner: 3, currency: currency.id, date: '2030-01-15', amount: 100 });
-  const secondCompany = createCompany(first.db, { name: 'R8A second company', currency_id: first.db.records['res.company'][0].currency_id });
+  const secondCompany = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'R8A second company', currency_id: first.db.records['res.company'][0].currency_id });
   const second = invoice(secondCompany.db, { partner: 3, company: secondCompany.id, currency: currency.id, date: '2030-01-20', amount: 200 });
   const year = create(second.db, 'account.fiscal.year', {
     name: 'R8A first company 2030', company_id: 1, date_from: '2030-01-01', date_to: '2030-12-31', state: 'open',
