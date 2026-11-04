@@ -159,18 +159,17 @@ export function checkMandatoryPlans(db, move) {
   for (const line of lines) {
     if (isSectionOrNote(line)) continue;
     const distribution = normalizeDistribution(distributionOfLine(line, db, move), db);
-    const allocated = new Set(
-      Object.entries(distribution)
-        .filter(([, n]) => n > 0)
-        .map(([id]) => read(db, 'account.analytic.account', Number(id))?.plan_id)
-        .filter(Boolean)
-    );
+    const allocated = new Map();
+    for (const [id, percent] of Object.entries(distribution)) {
+      const planId = read(db, 'account.analytic.account', Number(id))?.plan_id;
+      if (planId) allocated.set(planId, (allocated.get(planId) ?? 0) + percent);
+    }
     for (const plan of plans) {
       const applicability = planApplicability(db, plan, line, move);
-      if (applicability === 'mandatory' && !allocated.has(plan.id)) {
+      if (applicability === 'mandatory' && Math.abs((allocated.get(plan.id) ?? 0) - 100) > 0.00001) {
         throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
       }
-      if (applicability === 'unavailable' && allocated.has(plan.id)) {
+      if (applicability === 'unavailable' && (allocated.get(plan.id) ?? 0) > 0) {
         throw new Error(`Analytic plan is unavailable: ${plan.name}`);
       }
     }

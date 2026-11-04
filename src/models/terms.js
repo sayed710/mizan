@@ -23,6 +23,11 @@ export function installments(term, total, invoiceDate, currency = null) {
   const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0);
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) throw new Error('Fixed amounts exceed the total');
+  const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : totalCents * (Number(line.value) || 0) / 100), 0);
+  const balanceIndex = lines.findIndex((line) => line.value === 'balance');
+  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) throw new Error('The balance due term must be the last one');
+  // Without a balance line the terms must add up to the total; rounding may shift half a unit per line.
+  if (balanceIndex >= 0 ? requestedTotal > totalCents + lines.length / 2 : Math.abs(requestedTotal - totalCents) > lines.length / 2) throw new Error('Payment terms must allocate 100% of the total');
 
   let remaining = totalCents;
   const amounts = lines.map((line, index) => {

@@ -124,6 +124,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   if (!date) throw new Error('Set a disposal date');
   if (saleValue != null && !(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
+  if (asset.state !== 'open' && (asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before disposing of the asset');
   validate(db, asset);
   const depreciated = postDepreciation(db, asset, date);
   const current = read(depreciated, 'account.asset', asset.id);

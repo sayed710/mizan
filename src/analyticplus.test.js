@@ -144,7 +144,9 @@ test('mandatory plans require positive allocations per product line; unavailable
   const { db: base, a, b } = setup();
   const plan = create(base, 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
   const db = write(plan.db, 'account.analytic.account', a, { plan_id: plan.id });
-  const move = moveValues(a, b);
+  // A mandatory plan needs the full 100% of each product line.
+  const base0 = moveValues(a, b);
+  const move = { ...base0, invoice_line_ids: [{ ...base0.invoice_line_ids[0], analytic_distribution: { [a]: 100 } }] };
   assert.doesNotThrow(() => checkMandatoryPlans(db, move));
   for (const distribution of [{}, { [a]: 0 }, { [b]: 100 }]) {
     assert.throws(() => checkMandatoryPlans(db, { ...move, invoice_line_ids: [{ ...move.invoice_line_ids[0], analytic_distribution: distribution }] }), /mandatory.*Projects/);
