@@ -1,9 +1,9 @@
 // Deferred revenue/expense: an invoiced amount recognised month by month over a period.
 import { create, read, write } from '../orm.js';
-import { today } from './common.js';
+import { addDays, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
-import { allocateCents } from '../money.js';
+import { allocateCents, round } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
@@ -103,8 +103,135 @@ export function postDueEntries(db, d, upTo = today()) {
   return write(next, 'account.deferral', d.id, { board, state: board.every((l) => l.posted) ? 'done' : 'running' });
 }
 
+/**
+ * Post ONE grouped entry per company and kind for a chosen period end date,
+ * moving recognized-to-date amounts from the deferred account to each line's
+ * original recognition account (carrying analytic distributions), plus its exact
+ * next-day reversal.
+ */
+export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
+  const companyId = company_id ?? db.settings?.current_company_id ?? 1;
+
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) {
+    throw new Error('Set a valid period end date');
+  }
+
+  const kindsToProcess = kind ? [kind] : ['revenue', 'expense'];
+  let currentDb = db;
+
+  for (const k of kindsToProcess) {
+    const existing = (currentDb.records['account.move'] ?? []).some((m) =>
+      m.is_deferred_grouped &&
+      m.deferral_kind === k &&
+      m.deferral_date === date &&
+      (m.company_id ?? 1) === companyId
+    );
+    if (existing) continue;
+
+    const schedules = (currentDb.records['account.deferral'] ?? []).filter((d) =>
+      d.state !== 'cancel' &&
+      (d.company_id ?? 1) === companyId &&
+      d.kind === k &&
+      (!d.source_move_id || read(currentDb, 'account.move', d.source_move_id)?.state === 'posted')
+    );
+
+    const recognizedItems = [];
+    for (const s of schedules) {
+      const boardLines = (s.board ?? []).filter((l) => l.date <= date && !l.posted && !l.move_id);
+      const recognized = round(boardLines.reduce((sum, l) => sum + (Number(l.amount) || 0), 0));
+      if (recognized > 0) {
+        const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
+        const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
+        const recognitionAcc = s.recognition_account_id ?? (k === 'expense' ? defaultDebit : defaultCredit);
+        recognizedItems.push({
+          schedule: s,
+          amount: recognized,
+          recognition_account_id: recognitionAcc,
+          deferred_account_id: deferredAcc,
+          analytic_distribution: s.analytic_distribution,
+          partner_id: s.partner_id,
+          name: s.name,
+        });
+      }
+    }
+
+    if (!recognizedItems.length) continue;
+
+    const isRev = k === 'revenue';
+    const deferredTotals = new Map();
+    for (const item of recognizedItems) {
+      deferredTotals.set(item.deferred_account_id, round((deferredTotals.get(item.deferred_account_id) ?? 0) + item.amount));
+    }
+
+    const lines = [
+      ...[...deferredTotals.entries()].map(([defAcc, totalAmt]) => ({
+        account_id: defAcc,
+        debit: isRev ? totalAmt : 0,
+        credit: isRev ? 0 : totalAmt,
+        name: `Deferred ${isRev ? 'Revenues' : 'Expenses'} ${date}`,
+      })),
+      ...recognizedItems.map((item) => ({
+        account_id: item.recognition_account_id,
+        debit: isRev ? 0 : item.amount,
+        credit: isRev ? item.amount : 0,
+        analytic_distribution: item.analytic_distribution,
+        partner_id: item.partner_id ?? null,
+        name: item.name,
+      })),
+    ];
+
+    const ref = `Deferred ${isRev ? 'Revenues' : 'Expenses'}: ${date}`;
+    const entryRes = postEntry(currentDb, {
+      journal: 'MISC',
+      date,
+      ref,
+      lines,
+      company: companyId,
+    });
+    currentDb = postAnalytic(entryRes.db, entryRes.id);
+
+    const revDate = addDays(date, 1);
+    const revRef = `Reversal of ${read(currentDb, 'account.move', entryRes.id).name}`;
+    const revLines = lines.map((l) => ({
+      account_id: l.account_id,
+      debit: l.credit ?? 0,
+      credit: l.debit ?? 0,
+      analytic_distribution: l.analytic_distribution,
+      partner_id: l.partner_id,
+      name: l.name,
+    }));
+    const revRes = postEntry(currentDb, {
+      journal: 'MISC',
+      date: revDate,
+      ref: revRef,
+      lines: revLines,
+      company: companyId,
+    });
+    currentDb = postAnalytic(revRes.db, revRes.id);
+
+    currentDb = write(currentDb, 'account.move', entryRes.id, {
+      reversal_move_id: revRes.id,
+      deferral_date: date,
+      deferral_kind: k,
+      is_deferred_grouped: true,
+    });
+    currentDb = write(currentDb, 'account.move', revRes.id, {
+      reversed_entry_id: entryRes.id,
+      deferral_date: revDate,
+      deferral_kind: k,
+      is_deferred_grouped: true,
+    });
+  }
+
+  return currentDb;
+}
+
 /** Generate all due schedules of one company for a chosen period end. */
 export function postCompanyDeferrals(db, companyId, upTo = today()) {
+  const company = read(db, 'res.company', companyId);
+  if (company?.deferred_generation_method === 'manual_grouped') {
+    return generateGroupedEntries(db, { company_id: companyId, date: upTo });
+  }
   return (db.records['account.deferral'] ?? []).filter((d) => d.state === 'running' && (d.company_id ?? 1) === companyId)
     .reduce((next, schedule) => postDueEntries(next, schedule, upTo), db);
 }
@@ -112,7 +239,19 @@ export function postCompanyDeferrals(db, companyId, upTo = today()) {
 export const deferredModels = {
   'account.deferral': {
     label: 'Deferrals',
-    actions: { postDueEntries, postCompanyDeferrals },
+    actions: {
+      postDueEntries,
+      postCompanyDeferrals,
+      generateGroupedEntries,
+    },
+    listActions: [
+      {
+        label: 'Generate Entries',
+        noSelection: true,
+        ask: { label: 'Period End Date', default: today },
+        run: (db, ids, date) => generateGroupedEntries(db, { date }),
+      },
+    ],
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       kind: { type: 'selection', label: 'Type', options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']] },
