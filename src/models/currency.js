@@ -5,12 +5,14 @@ import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../
 
 
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
+const applicableRate = (currency, date) => (currency.rate_ids ?? []).filter((r) => Number(r.rate) > 0 && r.date && r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
+
 function baseRate(db, currencyId, date) {
   const c = currencyId ? read(db, 'res.currency', currencyId) : null;
   if (!c) throw new Error('Select an existing currency before converting an amount');
   const rates = (c?.rate_ids ?? []).filter((r) => Number(r.rate) > 0 && r.date).sort((a, b) => a.date.localeCompare(b.date));
   if (!rates.length) throw new Error(`No ${c.name} exchange rate is configured`);
-  const rate = [...rates].reverse().find((r) => r.date <= date);
+  const rate = applicableRate(c, date);
   if (!rate) throw new Error(`No ${c.name} rate on or before ${date}`);
   return Number(rate.rate);
 }
@@ -65,7 +67,7 @@ export const currencyModels = {
         fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' } },
         newLine: () => ({ date: today(), rate: 1 }),
       },
-      current_rate: { type: 'float', label: 'Current Rate', compute: (r) => Number([...(r.rate_ids ?? [])].sort((a, b) => b.date.localeCompare(a.date))[0]?.rate) || 1 },
+      current_rate: { type: 'float', label: 'Current Rate', compute: (r) => Number(applicableRate(r, today())?.rate) || 1 },
     },
     defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },
