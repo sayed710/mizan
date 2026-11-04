@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, postEntry } from './ledger.js';
+import { accountId, invoiceLines, journalId, postEntry } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -15,13 +15,16 @@ export const openSession = (db) => search(db, 'pos.session').find((s) => s.state
 export function startSession(db, openingCash = 0, configId = null) {
   if (openSession(db)) throw new Error('A session is already open');
   const config = configId ? read(db, 'pos.config', configId) : (search(db, 'pos.config')[0] ?? null);
+  const company_id = config?.company_id ?? 1;
+  const journal_id = config?.journal_id || journalId(db, 'POSS', company_id);
   return create(db, 'pos.session', {
     name: nextName(db, 'pos.session', 'POS/S/'),
     state: 'opened',
     start_at: today(),
-    cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, config?.company_id ?? 1)),
+    cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, company_id)),
     config_id: config?.id ?? (configId || null),
-    company_id: config?.company_id ?? 1,
+    journal_id,
+    company_id,
   });
 }
 
@@ -564,8 +567,12 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
 }
 
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
+  const config = session?.config_id ? read(stocked, 'pos.config', session.config_id) : (search(stocked, 'pos.config')[0] ?? null);
+  const posJournalId = session?.journal_id || config?.journal_id || journalId(stocked, 'POSS', session?.company_id ?? config?.company_id ?? 1);
+  const posJournal = posJournalId ? read(stocked, 'account.journal', posJournalId) : null;
   const sale = invoiceLines(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
+    journal_id: posJournalId,
     company_id: session.company_id,
     partner_id,
     fiscal_position_id: presetSnapshot.fiscal_position_id,
@@ -591,7 +598,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: 'POSS', company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {

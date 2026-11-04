@@ -250,8 +250,8 @@ test('invoice confirmation only uses journals and accounts available to its comp
   db = foreignAccount.db;
   assert.equal(accountId(db, 'FOREIGN', company.id), null);
   assert.equal(accountId(db, 'FOREIGN'), foreignAccount.id);
-  for (const [code, type] of [['INV', 'sale'], ['BILL', 'purchase']]) {
-    const journal = create(db, 'account.journal', { name: `Company ${code}`, code, type, company_id: company.id });
+  for (const [code, type, acc] of [['INV', 'sale', '400000'], ['BILL', 'purchase', '600000']]) {
+    const journal = create(db, 'account.journal', { name: `Company ${code}`, code, type, company_id: company.id, default_account_id: accountId(db, acc) });
     db = journal.db;
     assert.equal(journalId(db, code, company.id), journal.id);
   }
