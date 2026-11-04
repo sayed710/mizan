@@ -70,8 +70,9 @@ const HASHED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'invoice_date', '
 /** Paid status of a locked entry, which only payments dated after the lock may move. */
 const SETTLEMENT_FIELDS = ['amount_paid', 'payments', 'payment_date'];
 export const moveDate = (m) => (m?.move_type === 'entry' && m?.date ? m.date : m?.invoice_date ?? m?.date ?? today());
-/** Archiving hides a record from every report, so `active` counts as changed only between kept and archived. */
-const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : r?.[k]);
+/** Archiving hides a record from every report, so `active` counts as changed only between kept and archived; `blocked` (dispute flag) may toggle on posted lines. */
+const stripBlocked = (lines) => (lines ?? []).map((l) => Object.fromEntries(Object.entries(l ?? {}).filter(([k]) => k !== 'blocked')));
+const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : k === 'line_ids' ? stripBlocked(r?.line_ids) : r?.[k]);
 const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
 
 /** True when the paid status moved only by appending payments dated after the lock, and by exactly their amount. */
@@ -151,14 +152,7 @@ const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'cu
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after) {
   if (before?.state === 'posted' && after.state === 'posted') {
-    const nonLineFields = POSTED_FIELDS.filter((k) => k !== 'line_ids');
-    if (changedFields(before, after, nonLineFields)) return 'Posted entries cannot be edited; reset them to draft first';
-    if (before.line_ids !== after.line_ids) {
-      const strip = (lines) => (lines ?? []).map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => k !== 'blocked')));
-      if (JSON.stringify(strip(before.line_ids)) !== JSON.stringify(strip(after.line_ids))) {
-        return 'Posted entries cannot be edited; reset them to draft first';
-      }
-    }
+    if (changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
   }
   if (before?.state === 'posted' && after.state !== 'posted') {
     // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.

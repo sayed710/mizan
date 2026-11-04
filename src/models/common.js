@@ -4,6 +4,7 @@ import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { computeLineTaxes, expandTaxIds, lineUntaxed, productTax, taxLabel, taxSnapshot } from './taxes.js';
 import { cashRound, documentCurrency, roundCurrency } from '../money.js';
 import { mixedDiscountFactor } from './terms.js';
+import { invoiceTaxGroups } from './ledger.js';
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
@@ -106,9 +107,9 @@ export function amounts(lines = [], currency = null, { roundingMethod = null } =
 /** Tax amount of an invoice/bill, applying mixed early-payment discount factor when present. */
 export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(db, r?.company_id)) {
   const docCurr = documentCurrency(db, r);
-  const rawTax = amounts(r.invoice_line_ids, docCurr, { roundingMethod }).tax;
   const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return roundCurrency(rawTax * mixedDiscountFactor(term), docCurr);
+  if (mixedDiscountFactor(term) !== 1) return roundCurrency(invoiceTaxGroups(db, r, roundingMethod).reduce((s, g) => s + g.document_amount, 0), docCurr);
+  return roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).tax, docCurr);
 }
 
 /** Total of an account.move (invoice, bill, refund, or manual entry). */

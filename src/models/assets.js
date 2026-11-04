@@ -33,7 +33,8 @@ function firstFraction(asset, y, m, yearly) {
 export function depreciationBoard(asset, { periods: overridePeriods = null, dates = null, startDate = null, remainingBase = null, initialCumulated = null } = {}) {
   const n = overridePeriods != null ? Number(overridePeriods) : Number(asset.method_number);
   const yearly = String(asset.method_period) === '12';
-  const [y, m] = (startDate || asset.acquisition_date || today()).split('-').map(Number);
+  const anchor = dates?.length ? dates.at(-1) : startDate;
+  const [y, m] = (anchor || asset.acquisition_date || today()).split('-').map(Number);
   const base = remainingBase != null ? remainingBase : cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
   const frac = overridePeriods != null ? 1 : firstFraction(asset, y, m, yearly);
   const periods = n + (frac < 1 ? 1 : 0);
@@ -41,7 +42,6 @@ export function depreciationBoard(asset, { periods: overridePeriods = null, date
   const method = asset.method || 'linear';
   let remaining = base;
   let cumulated = initialCumulated != null ? initialCumulated : cents(asset.already_depreciated);
-  const dateOffset = overridePeriods != null ? 1 : 0;
   return Array.from({ length: periods }, (_, i) => {
     const elapsed = i === 0 ? 0 : frac + i - 1;
     const len = Math.min(i === 0 ? frac : 1, n - elapsed);
@@ -51,7 +51,8 @@ export function depreciationBoard(asset, { periods: overridePeriods = null, date
     const amount = i === periods - 1 ? remaining : Math.min(remaining, due);
     remaining -= amount;
     cumulated += amount;
-    const date = dates?.[i] ?? periodEnd(y, m, yearly, i + dateOffset);
+    const offset = dates?.length ? i - dates.length + 1 : anchor ? i + 1 : i;
+    const date = dates?.[i] ?? periodEnd(y, m, yearly, offset);
     return { date, amount: amount / 100, cumulated: cumulated / 100, remaining: (cents(asset.original_value) - cumulated) / 100 };
   });
 }
@@ -162,6 +163,10 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
 
   validate(db, asset);
+  let nextDb = postDepreciation(db, asset, date);
+  asset = read(nextDb, 'account.asset', asset.id) ?? asset;
+  if ((asset.depreciation_ids ?? []).some((line) => !line.posted && line.date <= date)) throw new Error('Post due depreciation before modifying the asset');
+
   const delta = cents(valueChange || 0);
   const currentOriginal = cents(asset.original_value);
   const newOriginal = currentOriginal + delta;
@@ -174,10 +179,9 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   const postedAmount = postedCents(asset) + cents(asset.already_depreciated);
   if (newOriginal < postedAmount + currentSalvage) throw new Error('The new value cannot be lower than the already depreciated amount');
 
-  let nextDb = db;
   const company = asset.company_id ?? 1;
-  const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
-  const model = asset.model_id ? read(db, 'account.asset.model', asset.model_id) : null;
+  const journal = asset.journal_id ?? journalId(nextDb, 'MISC', company) ?? 'MISC';
+  const model = asset.model_id ? read(nextDb, 'account.asset.model', asset.model_id) : null;
   const assetAcc = asset.account_asset_id ?? model?.account_asset_id ?? null;
 
   if (delta !== 0) {
@@ -199,7 +203,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
           { account: counterpartAcc, debit: -delta / 100, analytic_distribution: asset.analytic_distribution },
           { account: assetAcc, credit: -delta / 100 },
         ];
-    const { db: booked, id: moveId } = postEntry(db, { journal, date, ref: `${asset.name} value adjustment`, lines, company });
+    const { db: booked, id: moveId } = postEntry(nextDb, { journal, date, ref: `${asset.name} value adjustment`, lines, company });
     nextDb = postAnalytic(booked, moveId);
   }
 
@@ -207,7 +211,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   const remainingPeriods = methodNumber != null ? Number(methodNumber) : unpostedLines.length;
   if (remainingPeriods < 1 && newOriginal > postedAmount + currentSalvage) throw new Error('Remaining duration must be at least 1 period');
 
-  const lastDate = postedLines.length ? postedLines.at(-1).date : asset.acquisition_date || date;
+  const lastDate = postedLines.length ? postedLines.at(-1).date : null;
   const newUnpostedLines = remainingPeriods > 0
     ? depreciationBoard(
         { ...asset, original_value: newOriginal / 100, salvage_value: currentSalvage / 100 },
@@ -226,6 +230,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
     original_value: newOriginal / 100,
     salvage_value: currentSalvage / 100,
     depreciation_ids: updatedDepreciationIds,
+    state: updatedDepreciationIds.length && updatedDepreciationIds.every((l) => l.posted) ? 'close' : asset.state,
   });
 }
 

@@ -252,10 +252,17 @@ const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invo
 
 /** The order amount not yet invoiced (draft or posted), as Odoo's amount to invoice. */
 function uninvoicedAmount(db, order) {
+  const orderCurr = documentCurrency(db, order);
+  const companyId = order.company_id ?? 1;
   const billed = order.id == null ? 0 : search(db, 'account.move')
     .filter((m) => m.sale_id === order.id && m.state !== 'cancel' && ['out_invoice', 'out_refund'].includes(m.move_type))
-    .reduce((sum, m) => sum + (m.move_type === 'out_refund' ? -1 : 1) * amounts(m.invoice_line_ids ?? []).total, 0);
-  return Math.max(0, roundCurrency(amounts(order.order_line).total - billed, documentCurrency(db, order)));
+    .reduce((sum, m) => {
+      const date = m.invoice_date ?? m.date ?? order.date_order ?? today();
+      const total = amounts(m.invoice_line_ids ?? [], documentCurrency(db, m)).total;
+      const inOrderCurr = total * rateAt(db, order.currency_id, date, companyId) / rateAt(db, m.currency_id, date, companyId);
+      return sum + (m.move_type === 'out_refund' ? -1 : 1) * inOrderCurr;
+    }, 0);
+  return Math.max(0, roundCurrency(amounts(order.order_line, orderCurr).total - billed, orderCurr));
 }
 
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
