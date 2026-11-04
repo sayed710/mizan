@@ -153,6 +153,11 @@ test('clicking a submenu button keeps the mobile panel open, while anchor clicks
   }
 });
 
+// Report views load lazily; wait until the route's content renders (slow CI runners need more than one act tick).
+const rendered = async (React, container, text) => {
+  for (let i = 0; i < 200 && !container.textContent.includes(text); i++) await React.act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+};
+
 test('Unrealized Currencies report date and revaluation button operate through the menu route', async () => {
   const container = setupDom();
   const React = await import('react');
@@ -169,6 +174,7 @@ test('Unrealized Currencies report date and revaluation button operate through t
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Unrealized Currencies');
     const input = find(container, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date');
     assert.ok(input);
     await React.act(async () => props(input).onChange({ target: { value: '2026-02-28' } }));
@@ -212,6 +218,7 @@ test('Customer Statement menu displays the selected customer and period and prin
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Customer Statement');
     assert.ok(container.textContent.includes('Customer Statement'));
     const period = find(container, (n) => n.tagName === 'SELECT' && (props(n)?.children ?? []).some?.((child) => child?.props?.value === 'custom'));
     assert.ok(period);
@@ -261,6 +268,7 @@ test('Review sales menus show individual quantity discrepancies only for selecte
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Invoices To Be Issued');
     assert.ok(container.textContent.includes('Invoices To Be Issued'));
     assert.ok(container.textContent.includes('Delivered line'));
     assert.ok(!container.textContent.includes('Invoiced line'));
@@ -299,6 +307,7 @@ test('Loans Analysis menu reports posted loan activity as of the selected date a
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Loans Analysis');
     assert.ok(container.textContent.includes('Loans Analysis'));
     const date = find(container, (n) => n.tagName === 'INPUT' && props(n)?.type === 'date');
     assert.ok(date);
@@ -336,6 +345,7 @@ test('Accounting exposes tax groups and issued checks through their menus', asyn
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'TEST VAT GROUP');
     assert.ok(container.textContent.includes('TEST VAT GROUP'));
     await React.act(async () => { location.hash = '#/accounting/checks'; window.dispatchEvent(new Event('hashchange')); });
     assert.ok(container.textContent.includes('CHECK BATCH'));
