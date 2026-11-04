@@ -32,10 +32,10 @@ export function startSession(db, openingCash = 0, configId = null) {
  * Lines of a cart priced from the products: sales price and the product's sales tax record
  * (price-included or not), mapped through the customer's fiscal position.
  */
-export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null } = {}) => cart.map((l) => {
+export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1 } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
-  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId);
-  const tax = productTax(db, p, 'sale', fp) ?? { tax: p?.sale_tax ?? 14 };
+  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
@@ -212,7 +212,7 @@ export function resolvePosConfigAndPreset(db, {
     is_return: isReturn,
     identification: preset?.identification ?? 'none',
     pricelist_id: preset?.pricelist_id ?? null,
-    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId) ?? null,
+    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId, config?.company_id ?? sess?.company_id ?? 1) ?? null,
   };
 
   return {
@@ -703,6 +703,7 @@ export function payCart(db, { cart = [], lines: inputLines = null, method, payme
   const lines = original ? original.lines : priceLines(db, normalized, resolved.effectivePartnerId, {
     pricelistId: resolved.presetSnapshot.pricelist_id,
     fiscalPositionId: resolved.presetSnapshot.fiscal_position_id,
+    companyId: resolved.config?.company_id ?? resolved.session?.company_id ?? 1,
   });
   const out = payOrder(db, {
     lines,

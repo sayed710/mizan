@@ -18,12 +18,12 @@ function reportingValue(db, rec, amount, at) {
   const own = ownCurrencyId(db, rec), target = reportingCurrency(db);
   let booked = amount;
   if (rec.currency_id && rec.currency_id !== own) {
-    const rate = conversionRate(db, rec.currency_id, own, docDate(rec));
+    const rate = conversionRate(db, rec.currency_id, own, docDate(rec), rec.company_id ?? 1);
     if (rate == null) return null;
     booked = roundCurrency(amount * rate, companyCurrencyRecord(db, rec.company_id));
   }
   if (own === target) return booked;
-  const rate = conversionRate(db, own, target, at);
+  const rate = conversionRate(db, own, target, at, db.settings?.current_company_id ?? 1);
   return rate == null ? null : roundCurrency(booked * rate, companyCurrencyRecord(db, db.settings?.current_company_id));
 }
 
@@ -37,7 +37,7 @@ export function reportingBookedAmount(db, rec, amount) {
   const own = read(db, 'res.currency', ownCurrencyId(db, { company_id: companyId }));
   const target = read(db, 'res.currency', ownCurrencyId(db, { company_id: reportingId }));
   if (own.id === target.id) return Number(amount) || 0;
-  const rate = conversionRate(db, own.id, target.id, date);
+  const rate = conversionRate(db, own.id, target.id, date, reportingId);
   if (rate == null) throw new Error(`Configure an exchange rate for ${own.name} and ${target.name} on or before ${date}`);
   return roundCurrency((Number(amount) || 0) * rate, target);
 }

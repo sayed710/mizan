@@ -659,16 +659,16 @@ export const salesModels = {
       ...amountFields('order_line'),
     },
     onchange: (r, key, db) => {
-      const p = key === 'partner_id' && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
-      if (key !== 'fiscal_position_id' && !p) return {};
-      const fiscal_position_id = p ? fiscalPositionFor(db, p.id) : r.fiscal_position_id;
+      const p = ['partner_id', 'company_id'].includes(key) && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+      if (key !== 'fiscal_position_id' && key !== 'company_id' && !p) return {};
+      const fiscal_position_id = key === 'company_id' || p ? fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) : r.fiscal_position_id;
       const order_line = (r.order_line ?? []).map((line) => {
         if (!line.product_id || isSectionOrNote(line)) return line;
         const product = read(db, 'product', line.product_id);
         if (!product) throw new Error('Cannot update taxes: a line product no longer exists');
-        return { ...line, ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id) ?? taxSnapshot(null)), tax_ids: [] };
+        return { ...line, tax_source_id: null, ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id, r.company_id ?? 1) ?? taxSnapshot(null)), tax_ids: [] };
       });
-      return { ...(p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id, fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
+      return { ...(key === 'partner_id' && p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {}), ...(p || key === 'company_id' ? { fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [

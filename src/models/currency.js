@@ -5,7 +5,11 @@ import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../
 
 
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
-const applicableRate = (currency, date) => (currency.rate_ids ?? []).filter((r) => Number.isFinite(Number(r.rate)) && Number(r.rate) > 0 && r.date && r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
+const applicableRate = (currency, date, companyId = null) => {
+  const rows = (currency.rate_ids ?? []).filter((r) => Number.isFinite(Number(r.rate)) && Number(r.rate) > 0 && r.date && r.date <= date);
+  const latest = (id) => rows.filter((r) => (r.company_id || null) === id).sort((a, b) => b.date.localeCompare(a.date))[0];
+  return (companyId == null ? null : latest(companyId)) ?? latest(null);
+};
 
 export function baseCurrency(db) {
   const currency = read(db, 'res.currency', db.settings?.base_currency_id);
@@ -13,22 +17,22 @@ export function baseCurrency(db) {
   return currency;
 }
 
-export function conversionRate(db, sourceId, targetId, date) {
+export function conversionRate(db, sourceId, targetId, date, companyId = null) {
   const source = read(db, 'res.currency', sourceId);
   const target = read(db, 'res.currency', targetId);
   if (!source || !target) throw new Error('Configure a valid company and document currency before converting currencies');
   if (source.id === target.id) return 1;
   const base = baseCurrency(db);
-  const targetRate = baseRate(db, target.id, date, base.id);
-  const sourceRate = baseRate(db, source.id, date, base.id);
+  const targetRate = baseRate(db, target.id, date, base.id, companyId);
+  const sourceRate = baseRate(db, source.id, date, base.id, companyId);
   return targetRate == null || sourceRate == null ? null : targetRate / sourceRate;
 }
 
-function baseRate(db, currencyId, date, baseId) {
+function baseRate(db, currencyId, date, baseId, companyId = null) {
   const c = currencyId ? read(db, 'res.currency', currencyId) : null;
   if (!c) throw new Error('Select an existing currency before converting an amount');
   if (currencyId === baseId) return 1;
-  const rate = applicableRate(c, date);
+  const rate = applicableRate(c, date, companyId);
   return rate ? Number(rate.rate) : null;
 }
 
@@ -43,10 +47,10 @@ export function rateAt(db, currencyId, date = today(), companyId = null) {
   if (!currencyId) return 1;
   const own = companyId == null ? baseCurrency(db).id : companyCurrency(db, companyId);
   if (!own) throw new Error('Configure the company currency before converting currencies');
-  const rate = conversionRate(db, own, currencyId, date);
+  const rate = conversionRate(db, own, currencyId, date, companyId);
   if (rate == null) {
     const base = baseCurrency(db);
-    const missing = [currencyId, own].map((id) => read(db, 'res.currency', id)).find((currency) => baseRate(db, currency.id, date, base.id) == null);
+    const missing = [currencyId, own].map((id) => read(db, 'res.currency', id)).find((currency) => baseRate(db, currency.id, date, base.id, companyId) == null);
     const hasRates = (missing.rate_ids ?? []).some((row) => row.date && Number.isFinite(Number(row.rate)) && Number(row.rate) > 0);
     throw new Error(hasRates ? `No ${missing.name} rate on or before ${date}; configure an exchange rate` : `No ${missing.name} exchange rate is configured`);
   }
@@ -82,10 +86,10 @@ export const currencyModels = {
       rate_ids: {
         type: 'one2many',
         label: 'Rates',
-        fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' } },
-        newLine: () => ({ date: today(), rate: 1 }),
+        fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' }, company_id: { type: 'many2one', relation: 'res.company', label: 'Company' } },
+        newLine: () => ({ date: today(), rate: 1, company_id: null }),
       },
-      current_rate: { type: 'float', label: 'Current Rate', compute: (r) => Number(applicableRate(r, today())?.rate) || 1 },
+      current_rate: { type: 'float', label: 'Current Rate', compute: (r, db) => Number(applicableRate(r, today(), db.settings?.current_company_id ?? null)?.rate) || 1 },
     },
     defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },

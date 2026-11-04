@@ -1,11 +1,11 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
-import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, shiftMonth, today, total, validDate } from './common.js';
+import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
-import { reverseEntry } from './pay.js';
+import { applyPaymentCredit, reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
+import { TRANSITION, cashBasisTaxes, fiscalPositionFor, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -19,7 +19,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS } from './assets.js';
 
-export { invoiceTaxAmount, total };
+export { invoiceTaxAmount, total, applyPaymentCredit };
 
 const exchangeLines = (db, companyId, difference) => {
   if (!difference) return [];
@@ -29,12 +29,12 @@ const exchangeLines = (db, companyId, difference) => {
     : [{ account, debit: -difference }];
 };
 
-const isInvoice = (r) => r.move_type !== 'entry';
-const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
-export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_type);
+export const isInvoice = (r) => Boolean(r && r.move_type !== 'entry');
+const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
+export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
-export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
-const residual = (r, db) => (isInvoice(r) ? Math.max(0, db ? roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), documentCurrency(db, r)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)))) : 0);
+export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
+export const residual = (r, db) => (isInvoice(r) ? Math.max(0, db ? roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), documentCurrency(db, r)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)))) : 0);
 const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
   if (residual(r, db) === 0) return 'paid';
@@ -42,8 +42,13 @@ const paymentState = (r, db) => {
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
-/** Ids of the entries that settle invoices (payments and early-payment discounts). */
-const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]).filter(Boolean)));
+/** Ids of the entries that settle invoices (payments, early-payment discounts, and reconciliation exchange entries). */
+export const settlingEntries = (db) => {
+  const moves = db.records['account.move'] ?? [];
+  const fromPayments = moves.flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]));
+  const fromFx = moves.filter((m) => m.move_type === 'entry' && m.fx_payment_move_id && m.fx_invoice_id).map((m) => m.id);
+  return new Set([...fromPayments, ...fromFx].filter(Boolean));
+};
 
 /**
  * The paid amount is the sum of the recorded payments and never above the total; a paid invoice and the
@@ -131,7 +136,7 @@ export function paymentGuard(db, before, after, ctx) {
   const invalidDate = payments.slice(old.length).some((p) => {
     const source = read(db, 'account.move', p.move_id);
     const reversal = p.move_id && (db.records['account.move'] ?? []).find((m) => m.move_type === 'entry' && m.state === 'posted' && m.reversed_entry_id === p.move_id);
-    const validSide = source?.move_type === 'entry' && (source.line_ids ?? []).some((l) => l.partner_id === after.partner_id && ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type));
+    const validSide = source?.move_type === 'entry' && (source.line_ids ?? []).some((l) => (l.partner_id === after.partner_id || sameCommercialPartner(db, l.partner_id, after.partner_id)) && ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type));
     return (validSide && source.state === 'posted' && p.date && p.date < source.invoice_date) || (reversal && p.date > reversal.invoice_date);
   });
   if (invalidDate) return 'Payment application date must be after payment and before reversal';
@@ -235,6 +240,10 @@ export function postMove(db, id) {
   const code = ['out_refund', 'in_refund'].includes(r.move_type) ? `R${journalRecord.code}` : journalRecord.code;
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${code}/${year}/`);
   if (!isInvoice(r)) {
+    if ((r.line_ids ?? []).some((line) => {
+      const account = read(db, 'account.account', line.account_id);
+      return account?.company_id && account.company_id !== (r.company_id ?? 1);
+    })) throw new Error('Journal account belongs to another company');
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     const entryDate = r.invoice_date ?? r.date ?? today();
@@ -278,6 +287,10 @@ export function postMove(db, id) {
   if (r.fiscal_position_id) {
     const fp = read(db, 'account.fiscal.position', r.fiscal_position_id);
     if (fp?.company_id && fp.company_id !== (r.company_id ?? 1)) throw new Error('Fiscal position belongs to another company');
+  }
+  for (const line of r.invoice_line_ids ?? []) {
+    validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
+    validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
   }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
@@ -369,7 +382,8 @@ function offsetCreditNote(db, noteId) {
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const open = clearsDebit ? { account, debit: amount, partner_id: invoice.partner_id } : { account, credit: amount, partner_id: invoice.partner_id };
     const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? amount : -amount);
-    next = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines] }).db;
+    const fx = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines] });
+    next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
   }
   return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
 }
@@ -920,7 +934,7 @@ export const accountingModels = {
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
-        const fiscal = partnerChange ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id) } : {};
+        const fiscal = (partnerChange || key === 'company_id') ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) } : {};
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const partnerBank = selectedBank && selectedBank.partner_id === r.partner_id && selectedBank.allow_out_payment
           && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
@@ -929,7 +943,7 @@ export const accountingModels = {
         const context = { ...r, ...fiscal, journal_id: journal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
-            const remap = (key === 'fiscal_position_id' || partnerChange) && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
+            const remap = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
             const updated = remap ? invoiceLineField.onchange(line, 'product_id', db, context) : line;
             return { ...updated, ...(remap ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
           }) }
@@ -1062,10 +1076,42 @@ export const accountingModels = {
             ],
           }),
           run: (db, r, values = {}) => {
+            if (settlingEntries(db).has(r.id)) throw new Error('A settlement entry cannot be reversed directly');
             if ((db.records['account.asset'] ?? []).some((a) => (a.depreciation_ids ?? []).some((l) => l.posted && l.move_id === r.id))) {
               return { db: reverseDepreciation(db, r, values) };
             }
             return reverseEntry(db, r, values);
+          },
+        },
+        {
+          label: 'Apply Outstanding Credit',
+          when: (r, db) => r.state === 'posted' && isInvoice(r) && residual(r, db) > 0
+            && (db?.records['account.payment'] ?? []).some((p) => p.state === 'posted'
+              && Number(p.unapplied) > 0
+              && (p.company_id ?? 1) === (r.company_id ?? 1)
+              && sameCommercialPartner(db, p.partner_id, r.partner_id)
+              && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound'))),
+          wizard: (db, r) => ({
+            title: 'Apply Outstanding Credit',
+            fields: [
+              {
+                name: 'payment_id',
+                type: 'many2one',
+                relation: 'account.payment',
+                label: 'Outstanding Payment',
+                required: true,
+                domain: (p) => p.state === 'posted'
+                  && Number(p.unapplied) > 0
+                  && (p.company_id ?? 1) === (r.company_id ?? 1)
+                  && sameCommercialPartner(db, p.partner_id, r.partner_id)
+                  && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound')),
+              },
+              { name: 'date', type: 'date', label: 'Application Date', default: today(), required: true },
+            ],
+          }),
+          run: (db, r, values = {}) => {
+            if (!values.payment_id) throw new Error('Select a payment to apply credit from');
+            return { db: applyPaymentCredit(db, values.payment_id, r.id, values.date) };
           },
         },
         { label: 'Create Landed Costs', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted', run: (db, r) => {
