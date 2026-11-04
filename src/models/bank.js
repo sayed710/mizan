@@ -102,7 +102,9 @@ const batchPaymentCompany = (db, batch) => {
   const payments = lines.map((line) => read(db, 'account.payment', line.payment_id));
   if (!payments.length || payments.some((payment) => !payment)) return null;
   const companies = new Set(payments.map((payment) => payment.company_id ?? 1));
-  return companies.size === 1 ? companies.values().next().value : null;
+  if (companies.size !== 1) return null;
+  const common = companies.values().next().value;
+  return (batch.company_id ?? 1) === common ? common : null;
 };
 
 /** Check whether a payment is already matched by an active allocation or a reconciled statement line. */

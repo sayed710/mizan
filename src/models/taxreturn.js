@@ -17,7 +17,7 @@ const syncTaxLockDate = (db, companyId, excludeId = null) => {
 
 /** Determine if a return is an audit working file rather than a standard tax return. */
 /** A working file being created or edited: audit by status, category or type. */
-const isNewAudit = (db, vals) => Boolean(vals?.audit_status || vals?.category === 'audit' || isAuditReturn(vals, db));
+const isNewAudit = (db, vals) => (vals?.type_id ? isAuditReturn(vals, db) : Boolean(vals?.audit_status || vals?.category === 'audit'));
 const returnCompany = (db, vals) => Number(vals?.company_id ?? getActiveCompany() ?? db.settings?.current_company_id ?? 1);
 
 export function isAuditReturn(r, db) {
@@ -557,6 +557,9 @@ export const taxReturnModels = {
     guard: returnGuard,
     prepareCreate: (db, vals) => {
       const companyId = returnCompany(db, vals);
+      if (isAuditReturn(vals, db)) {
+        vals = { ...vals, audit_status: vals?.audit_status || 'ongoing', company_id: companyId };
+      }
       if (!isNewAudit(db, vals)) return { db, vals };
       if (vals.type_id) return { db, vals: { ...vals, company_id: companyId } };
       const ensured = ensureAuditReturnType(db, companyId);
@@ -627,7 +630,7 @@ export const taxReturnModels = {
         }
         return {
           company_id: companyId,
-          audit_status: vals?.audit_status ?? 'ongoing',
+          audit_status: vals?.audit_status || 'ongoing',
           ...(typeId ? { type_id: typeId } : {}),
           checks: (vals?.checks && vals.checks.length > 0) ? vals.checks : computeAuditChecks(db, { ...vals, company_id: companyId }),
         };
@@ -635,7 +638,13 @@ export const taxReturnModels = {
       return { company_id: companyId };
     },
     // Audit checks follow the working file's period and company.
-    onchange: (r, key, db) => (['date_from', 'date_to', 'company_id'].includes(key) && isNewAudit(db, r) ? { checks: computeAuditChecks(db, r) } : {}),
+    onchange: (r, key, db) => {
+      if (key === 'type_id') {
+        const isAudit = isAuditReturn(r, db);
+        return isAudit ? { audit_status: r.audit_status || 'ongoing' } : { audit_status: null };
+      }
+      return (['date_from', 'date_to', 'company_id'].includes(key) && isNewAudit(db, r) ? { checks: computeAuditChecks(db, r) } : {});
+    },
     groupBys: ['type_id', 'state', 'company_id'],
     filters: [
       [

@@ -146,7 +146,7 @@ export function ActionView({ leaf, base, params }) {
             if (duration == null) return;
             options = duration;
           }
-          const res = action.run(getDb(), ids, options);
+          const res = action.run(getDb(), ids, options, { defaults: leaf?.defaults ?? {} });
           if (res?.go) {
             if (res.db) commit(res.db);
             location.hash = res.go;
