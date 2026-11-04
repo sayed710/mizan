@@ -294,8 +294,8 @@ const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some
 const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 
 /** A closed fiscal year locks its period whoever closed it. */
-export function closedYearLock(db) {
-  return (db.records?.['account.fiscal.year'] ?? []).filter((y) => y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
+export function closedYearLock(db, companyId = 1) {
+  return (db.records?.['account.fiscal.year'] ?? []).filter((y) => (y.company_id ?? 1) === companyId && y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
 }
 
 function securedMoveRule(before, after) {
@@ -315,8 +315,8 @@ function lockRule(db, before, after, ctx) {
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
   // A year's own closing or reopening entry is booked into it once, as it is created.
-  const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db);
   const companyId = before?.company_id ?? after.company_id ?? 1;
+  const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
   const proposed = companyTaxLock(ctx?.settings, companyId);
   const current = companyTaxLock(db.settings, companyId);
   const remaining = returnTaxLock(db, companyId);
@@ -340,7 +340,7 @@ function lockRule(db, before, after, ctx) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [companyLockDate(db, before), taxLockFor(db, before), closedYearLock(db)].sort().at(-1);
+  const lock = before && [companyLockDate(db, before), taxLockFor(db, before), closedYearLock(db, before.company_id ?? 1)].sort().at(-1);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -358,7 +358,7 @@ export function lockedSettlementInvariant(db, after, before) {
  */
 export const datedLockGuard = (fields, booked) => (db, before, after) => {
   const locks = [before, after].filter((r) => r && booked(r))
-    .map((r) => ({ record: r, lock: companyLockDate(db, r) }))
+    .map((r) => ({ record: r, lock: [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1) }))
     .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
     .map(({ lock }) => lock);
   if (!locks.length) return null;
@@ -368,7 +368,7 @@ export const datedLockGuard = (fields, booked) => (db, before, after) => {
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
 export const datedLockDelete = (booked) => (db, r) => {
-  const lock = companyLockDate(db, r);
+  const lock = [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
@@ -379,7 +379,7 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db)].sort().at(-1);
+  const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';

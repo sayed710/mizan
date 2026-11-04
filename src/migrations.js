@@ -517,6 +517,9 @@ export const MIGRATIONS = [
     return migrateCashFlowActivities(analytic);
   } },
 ];
+MIGRATIONS.push({ version: 20, name: 'Fiscal years: assign legacy years to company 1', up: (db) => ({
+  ...db, records: { ...db.records, 'account.fiscal.year': (db.records['account.fiscal.year'] ?? []).map((year) => ({ ...year, company_id: year.company_id ?? 1 })) },
+}) });
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

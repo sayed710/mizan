@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { accountId, balances, balanceSheet, isBalanced, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { closeFiscalYear, closingModels, reopenFiscalYear, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
+import { closedYearLock } from './models/finance.js';
 
 const period = { from: '2024-01-01', to: '2024-12-31' };
 const year = (db) => create(db, 'account.fiscal.year', { name: 'FY 2024', date_from: period.from, date_to: period.to });
@@ -49,7 +50,7 @@ test('closing clears all five P&L types into retained earnings, balances, and pr
   assert.equal(sheet.earnings, 0);
   assert.equal(sheet.totalAssets, sheet.totalLiabilities + sheet.totalEquity);
   assert.equal(sheet.equity.find((r) => r.account.code === '302000').balance, 750);
-  assert.equal(closed.settings.lock_date, period.to);
+  assert.equal(closedYearLock(closed, 1), period.to);
   assert.throws(() => entry(closed, '2024-03-01', [{ account: '101401', debit: 1 }, { account: '301000', credit: 1 }]), /locked/);
   assert.throws(() => write(closed, 'account.fiscal.year', id, { date_to: '2025-12-31' }), /Reopen/);
 });
@@ -73,7 +74,7 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   const reopened = run(closed, id, 'Reopen');
   const fy = read(reopened, 'account.fiscal.year', id);
   assert.equal(fy.state, 'open');
-  assert.equal(reopened.settings.lock_date, '');
+  assert.equal(closedYearLock(reopened, 1), '');
   assert.equal(profitAndLoss(reopened, period).net, 750);
   assert.equal(balanceSheet(reopened, period.to).totalEquity, 750);
   const reversal = read(reopened, 'account.move', fy.opening_move_id);

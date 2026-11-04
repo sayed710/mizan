@@ -1186,7 +1186,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 19);
+  assert.equal(migrated.schema_version, 20);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');

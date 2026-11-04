@@ -1,5 +1,5 @@
 // Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
-import { create, read, search, updateSettings, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
@@ -23,7 +23,7 @@ const sameLines = (a, b) => a.length === b.length && a.every((l, i) => l.account
 
 /** The genuine closing entry of a year: posted on its end date, named for it, touching only P&L accounts and equity. */
 function isClosingEntry(db, year, move) {
-  if (!move || move.state !== 'posted' || move.move_type !== 'entry' || move.ref !== `Fiscal closing: ${year.name}`) return false;
+  if (!move || (move.company_id ?? 1) !== (year.company_id ?? 1) || move.state !== 'posted' || move.move_type !== 'entry' || move.ref !== `Fiscal closing: ${year.name}`) return false;
   const closable = new Set([...pnlTypes, 'equity']);
   return (move.line_ids ?? []).every((l) => closable.has(read(db, 'account.account', l.account_id)?.account_type));
 }
@@ -31,11 +31,13 @@ function isClosingEntry(db, year, move) {
 /** The genuine reopening entry: posted, named for the year, and the exact mirror of its closing entry. */
 function isReopeningEntry(db, year, move) {
   const closing = read(db, 'account.move', year.closing_move_id);
-  return !!move && !!closing && move.state === 'posted' && move.move_type === 'entry' && move.ref === `Reopen fiscal year: ${year.name}`
+  return !!move && !!closing && (move.company_id ?? 1) === (year.company_id ?? 1) && move.state === 'posted' && move.move_type === 'entry' && move.ref === `Reopen fiscal year: ${year.name}`
     && sameLines(closing.line_ids ?? [], move.line_ids ?? []);
 }
 
 function yearGuard(db, before, after) {
+  if (!read(db, 'res.company', after.company_id)) return 'Select an existing company';
+  if (before && before.company_id !== after.company_id) return 'Fiscal year company cannot be changed';
   if (!validDate(after.date_from) || !validDate(after.date_to) || after.date_from > after.date_to) return 'Enter a valid fiscal year date range';
   if (before?.state === 'closed' && (before.date_from !== after.date_from || before.date_to !== after.date_to)) return 'Reopen the fiscal year before changing its dates';
   // Closing and reopening entries leave the P&L, so a year names them only as it closes or reopens, on its end date.
@@ -49,7 +51,7 @@ function yearGuard(db, before, after) {
   if (closes && !isClosingEntry(db, after, read(db, 'account.move', after.closing_move_id))) return 'The closing entry must be the one made by closing this fiscal year';
   if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && !isReopeningEntry(db, after, read(db, 'account.move', after.opening_move_id))) return 'The reopening entry must be the one made by reopening this fiscal year';
   if (search(db, 'account.fiscal.year').some((y) => y.id !== after.id && [after.closing_move_id, after.opening_move_id].filter(Boolean).some((m) => y.closing_move_id === m || y.opening_move_id === m))) return 'That entry already belongs to another fiscal year';
-  return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && y.date_from <= after.date_to && y.date_to >= after.date_from)
+  return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && (y.company_id ?? 1) === after.company_id && y.date_from <= after.date_to && y.date_to >= after.date_from)
     ? 'Fiscal years must not overlap' : null;
 }
 
@@ -66,21 +68,19 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
   const year = getYear(db, yearId);
   if (year.state === 'closed') throw new Error('This fiscal year is already closed');
   if (date && date !== year.date_to) throw new Error('Close the fiscal year on its end date');
-  if (search(db, 'account.move').some((m) => m.state === 'draft' && (m.invoice_date ?? m.date) >= year.date_from && (m.invoice_date ?? m.date) <= year.date_to)) {
+  if (search(db, 'account.move').some((m) => (m.company_id ?? 1) === year.company_id && m.state === 'draft' && (m.invoice_date ?? m.date) >= year.date_from && (m.invoice_date ?? m.date) <= year.date_to)) {
     throw new Error('Post or cancel draft moves inside this fiscal year before closing');
   }
-  const next = ensureAccount(db, retainedEarningsCode, 'Retained Earnings', 'equity');
-  const rows = balances(next, journalItems(next, { from: year.date_from, to: year.date_to }))
-    .filter((r) => pnlTypes.includes(r.account.account_type) && r.balance);
-  const lines = rows.map((r) => ({ account: r.account.code, ...side(-r.balance) }));
+  const next = ensureAccount(db, retainedEarningsCode, 'Retained Earnings', 'equity', year.company_id);
+  const rows = balances(next, journalItems(next, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
+    .filter((r) => (!r.account.company_id || r.account.company_id === year.company_id) && pnlTypes.includes(r.account.account_type) && r.balance);
+  const lines = rows.map((r) => ({ account_id: r.account.id, ...side(-r.balance) }));
   lines.push({ account: retainedEarningsCode, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
   if (lines.length === 1) lines.push({ account: retainedEarningsCode, debit: 0, credit: 0 });
-  const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, lines });
+  const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines });
   // The year references its closing entry first: only such an entry may carry the closing flag.
   const closed = write(entry.db, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, opening_move_id: null });
-  return updateSettings(write(closed, 'account.move', entry.id, { is_closing: true }), {
-    lock_date: [db.settings?.lock_date, year.date_to].filter(Boolean).sort().at(-1),
-  });
+  return write(closed, 'account.move', entry.id, { is_closing: true });
 }
 
 /** Reverse the closing on the year end, clearing only that year's fiscal lock. */
@@ -89,14 +89,11 @@ export function reopenFiscalYear(db, yearId) {
   if (year.state !== 'closed') throw new Error('This fiscal year is already open');
   const closing = read(db, 'account.move', year.closing_move_id);
   if (!closing || closing.state !== 'posted') throw new Error('The posted closing entry is missing');
-  // Fall back to the latest other closed year rather than unlocking everything.
-  const previous = search(db, 'account.fiscal.year').filter((y) => y.id !== yearId && y.state === 'closed').map((y) => y.date_to).sort().at(-1) ?? '';
-  const unlocked = db.settings?.lock_date === year.date_to ? updateSettings(db, { lock_date: previous }) : db;
   // Open the year before booking into it: a closed year locks its period.
-  const next = write(unlocked, 'account.fiscal.year', yearId, { state: 'open' });
+  const next = write(db, 'account.fiscal.year', yearId, { state: 'open' });
   const entry = postEntry(next, {
-    journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`,
-    lines: closing.line_ids.map((l) => ({ account: read(next, 'account.account', l.account_id).code, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
+    journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`, company: year.company_id,
+    lines: closing.line_ids.map((l) => ({ account_id: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
   });
   return write(write(entry.db, 'account.fiscal.year', yearId, { opening_move_id: entry.id }), 'account.move', entry.id, { is_closing: true });
 }
@@ -242,12 +239,14 @@ export const closingModels = {
     label: 'Fiscal Years',
     fields: {
       name: { type: 'char', label: 'Fiscal Year', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       date_from: { type: 'date', label: 'Start Date', required: true },
       date_to: { type: 'date', label: 'End Date', required: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['open', 'Open'], ['closed', 'Closed']] },
       closing_move_id: { type: 'many2one', relation: 'account.move', label: 'Closing Entry', readonly: true },
       opening_move_id: { type: 'many2one', relation: 'account.move', label: 'Reopening Entry', readonly: true },
     },
+    createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
     defaults: () => ({ state: 'open', date_from: `${today().slice(0, 4)}-01-01`, date_to: `${today().slice(0, 4)}-12-31` }),
     guard: yearGuard,
     protectDelete: (db, r) => r.closing_move_id ? 'Keep fiscal years with closing entries for the audit trail' : null,
@@ -255,7 +254,7 @@ export const closingModels = {
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     form: {
       title: 'name', statusbar: 'state', lockedWhen: (r) => r.state === 'closed',
-      groups: [['date_from', 'date_to'], ['closing_move_id', 'opening_move_id']],
+      groups: [['company_id', 'date_from', 'date_to'], ['closing_move_id', 'opening_move_id']],
       buttons: [
         { label: 'Close Year', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: closeFiscalYear(db, r.id) }) },
         { label: 'Reopen', when: (r) => r.state === 'closed', run: (db, r) => ({ db: reopenFiscalYear(db, r.id) }) },
