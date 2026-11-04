@@ -513,7 +513,7 @@ const REPORTS = {
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id }) {
   if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
-  const component = leaf.report === 'journalItems' ? JournalItems
+  const component = ['journalItems', 'unreconciledItems'].includes(leaf.report) ? JournalItems
     : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
     : leaf.report === 'checks' ? Checks
     : leaf.report === 'loansAnalysis' ? LoansAnalysis

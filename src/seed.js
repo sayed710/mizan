@@ -101,7 +101,7 @@ export function seed() {
     reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
     tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
   }));
-  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  JOURNALS.forEach(([code, name, type, account, defaultForPayments = false]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null, default_for_payments: defaultForPayments }));
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -438,8 +438,8 @@ export function seed() {
   add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
   add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

@@ -57,6 +57,7 @@ export const currencyModels = {
     fields: {
       name: { type: 'char', label: 'Currency', required: true },
       symbol: { type: 'char', label: 'Symbol' },
+      unit_name: { type: 'char', label: 'Whole Unit Name for Amounts in Words' },
       rounding: { type: 'float', label: 'Rounding', required: true, digits: 15 },
       decimal_places: { type: 'integer', label: 'Decimal Places', compute: (r) => currencyDecimalPlaces(r) },
       rate_ids: {
@@ -69,7 +70,7 @@ export const currencyModels = {
     },
     defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },
-    list: ['name', 'symbol', 'rounding', 'decimal_places', 'current_rate'],
-    form: { title: 'name', groups: [['symbol', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
+    list: ['name', 'symbol', 'unit_name', 'rounding', 'decimal_places', 'current_rate'],
+    form: { title: 'name', groups: [['symbol', 'unit_name', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
   },
 };

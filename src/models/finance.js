@@ -61,7 +61,7 @@ export function duplicateBillWarning(db, bill) {
   const labels = dups.map((d) => (d.name && d.name !== '/' ? d.name : `#${d.id}`)).join(', ');
   return ref
     ? `Duplicate bill warning: ${vendor} already has bill ${labels} with reference ${ref}`
-    : `Duplicate bill warning: ${vendor} already has bill ${labels} on ${bill.invoice_date} for the same amount`;
+    : `Duplicate bill warning (amount/date heuristic only; matching details do not establish document identity): ${vendor} already has bill ${labels} on ${bill.invoice_date} for the same amount`;
 }
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
