@@ -402,7 +402,7 @@ test('Item 2b: Early payment discount on a cash-basis customer invoice clears tr
 test('Item 3: Customer Statement scopes to company and defaults to current company', () => {
   let db = seed();
   const c1 = 1;
-  const c2 = createCompany(db, { name: 'Branch 2' });
+  const c2 = createCompany(db, { name: 'Branch 2', currency_id: db.records['res.company'][0].currency_id });
   db = c2.db;
 
   const partner = create(db, 'res.partner', { name: 'Multi-Company Client' });

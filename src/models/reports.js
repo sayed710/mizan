@@ -7,9 +7,10 @@ import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
 import { currentCompany } from './company.js';
+import { reportingBookedAmount } from './money.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
-const accountIds = (db, type) => new Set(search(db, 'account.account').filter((a) => a.account_type === type).map((a) => a.id));
+const accountIds = (db, type) => new Set(search(db, 'account.account', { includeArchived: true }).filter((a) => a.account_type === type).map((a) => a.id));
 
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
 const itemsBefore = (db, from, company_id) => (from ? journalItems(db, { company_id }).filter((l) => l.date < from) : []);
@@ -25,8 +26,8 @@ export function trialBalance(db, { from, to } = {}) {
   for (const id of opening.keys()) row(id);
   for (const l of journalItems(db, { from, to })) {
     const r = row(l.account_id);
-    r.debit += Number(l.debit) || 0;
-    r.credit += Number(l.credit) || 0;
+    r.debit += reportingBookedAmount(db, l, l.debit);
+    r.credit += reportingBookedAmount(db, l, l.credit);
   }
   const list = [...rows.values()]
     .filter((r) => r.account)
@@ -68,7 +69,8 @@ export function cashflowAnalysis(db, { from, to }) {
     if (!months.has(month)) months.set(month, new Map());
     const amounts = months.get(month);
     const sums = amounts.get(journal.id) ?? { inflow: 0, outflow: 0 };
-    const amount = Math.sign(Number(line.amount)) * toCompany(db, journal.currency_id, Math.abs(Number(line.amount)), line.date, line.company_id ?? 1);
+    const booked = Math.sign(Number(line.amount)) * toCompany(db, journal.currency_id, Math.abs(Number(line.amount)), line.date, line.company_id ?? 1);
+    const amount = reportingBookedAmount(db, line, booked);
     sums.inflow += Math.max(amount, 0);
     sums.outflow += Math.max(-amount, 0);
     amounts.set(journal.id, sums);
@@ -92,13 +94,13 @@ export function partnerLedger(db, { from, to } = {}, kind = 'receivable') {
   };
   for (const l of itemsBefore(db, from).filter((x) => accounts.has(x.account_id))) {
     const r = row(l.partner_id);
-    r.initial += netOf(l);
+    r.initial += reportingBookedAmount(db, l, netOf(l));
   }
   const items = journalItems(db, { from, to }).filter((x) => accounts.has(x.account_id)).sort((a, b) => a.date.localeCompare(b.date));
   for (const l of items) {
     const r = row(l.partner_id);
-    const debit = round(Number(l.debit) || 0);
-    const credit = round(Number(l.credit) || 0);
+    const debit = reportingBookedAmount(db, l, l.debit);
+    const credit = reportingBookedAmount(db, l, l.credit);
     r.debit += debit;
     r.credit += credit;
     r.lines.push({ date: l.date, move_id: l.move_id, move_name: l.move_name, debit, credit, currency_id: l.currency_id ?? null, amount_currency: l.amount_currency ?? null });
@@ -116,8 +118,9 @@ export function partnerLedger(db, { from, to } = {}, kind = 'receivable') {
 
 /** Default cash flow activity for an account from its account type (fixed assets invest, equity and long-term debt finance). */
 export function defaultCashFlowActivity(account_type) {
-  if (account_type === 'asset_fixed') return 'investing';
-  if (account_type === 'equity' || account_type === 'liability_non_current') return 'financing';
+  if (['asset_fixed', 'asset_non_current'].includes(account_type)) return 'investing';
+  if (['equity', 'equity_unaffected', 'liability_non_current'].includes(account_type)) return 'financing';
+  if (account_type === 'off_balance') return 'unclassified';
   return 'operating';
 }
 
@@ -157,7 +160,8 @@ export function cashFlow(db, { from, to, company_id } = {}) {
   const documents = search(db, 'account.move').filter((m) => m.state === 'posted'
     && (!targetCompany || (m.company_id ?? 1) === targetCompany)
     && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
-  const add = (account, amount) => {
+  const add = (account, amount, source) => {
+    amount = reportingBookedAmount(db, source, amount);
     const section = accountCashFlowActivity(db, account);
     totals[section] += amount;
     attributed.set(account.id, (attributed.get(account.id) ?? 0) + amount);
@@ -185,12 +189,12 @@ export function cashFlow(db, { from, to, company_id } = {}) {
             const available = Math.max(0, Math.abs(appliedValue(db, doc, settlement)) - (consumed.get(settlement) ?? 0));
             const portion = Math.min(Math.abs(remaining), available) * Math.sign(amount);
             consumed.set(settlement, (consumed.get(settlement) ?? 0) + Math.abs(portion));
-            for (const x of source) add(x.account, portion * netOf(x.line) / denominator);
+            for (const x of source) add(x.account, portion * netOf(x.line) / denominator, l);
             remaining -= portion;
           }
         }
       }
-      if (remaining) add(account, remaining);
+      if (remaining) add(account, remaining, l);
     }
   }
   // Reclassify realized exchange differences on invoice-linked payments with the cash settlement.
@@ -212,8 +216,8 @@ export function cashFlow(db, { from, to, company_id } = {}) {
     const fxItems = items.filter((line) => fxAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
     if (!fxAmount || !delta) continue;
-    for (const x of fxItems) add(x.account, delta * netOf(x.line) / fxAmount);
-    for (const x of source) add(x.account, delta * netOf(x.line) / denominator);
+    for (const x of fxItems) add(x.account, delta * netOf(x.line) / fxAmount, items[0]);
+    for (const x of source) add(x.account, delta * netOf(x.line) / denominator, items[0]);
   }
   // Applying an earlier advance reclassifies the cash already received, without changing net cash.
   for (const doc of documents) for (const payment of doc.payments ?? []) {
@@ -230,8 +234,9 @@ export function cashFlow(db, { from, to, company_id } = {}) {
     const denominator = source.reduce((sum, x) => sum + netOf(x.line), 0);
     if (!counterpart || !denominator) continue;
     const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment));
-    add(counterpart.account, -amount);
-    for (const x of source) add(x.account, amount * netOf(x.line) / denominator);
+    const attribution = { company_id: entry.company_id, date: effDate };
+    add(counterpart.account, -amount, attribution);
+    for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution);
   }
   const ORDER = ['operating', 'investing', 'financing', 'unclassified'];
   const lines = [...attributed]
@@ -256,8 +261,8 @@ export function executiveSummary(db, { from, to } = {}) {
   const cash = sum(bs.assets, ['asset_cash']);
   const receivables = sum(bs.assets, ['asset_receivable']);
   const payables = sum(bs.liabilities, ['liability_payable']);
-  const currentAssets = sum(bs.assets, ['asset_receivable', 'asset_cash', 'asset_current']);
-  const currentLiabilities = sum(bs.liabilities, ['liability_payable', 'liability_current']);
+  const currentAssets = sum(bs.assets, ['asset_receivable', 'asset_cash', 'asset_current', 'asset_prepayments']);
+  const currentLiabilities = sum(bs.liabilities, ['liability_payable', 'liability_current', 'liability_credit_card']);
   const pct = (n) => (pl.revenue ? round((n / pl.revenue) * 100) : null);
   // Days counted inclusive on both ends; an open-ended period falls back to a single day.
   const days = from && to ? Math.round((new Date(to) - new Date(from)) / 864e5) + 1 : 1;
@@ -275,14 +280,16 @@ export function customerStatement(db, partnerId, { from, to, company_id } = {}) 
   const company = Number(company_id ?? currentCompany(db));
   const receivable = accountIds(db, 'asset_receivable');
   const mine = (l) => receivable.has(l.account_id) && l.partner_id === partnerId && (l.company_id ?? 1) === company;
-  const opening = round(itemsBefore(db, from, company).filter(mine).reduce((s, l) => s + netOf(l), 0));
+  const opening = round(itemsBefore(db, from, company).filter(mine).reduce((s, l) => s + reportingBookedAmount(db, l, netOf(l)), 0));
   let run = opening;
   const lines = journalItems(db, { from, to, company_id: company }).filter(mine)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((l) => {
-      run += netOf(l);
+      const debit = reportingBookedAmount(db, l, l.debit);
+      const credit = reportingBookedAmount(db, l, l.credit);
+      run += debit - credit;
       const ref = read(db, 'account.move', l.move_id)?.ref;
-      return { date: l.date, move_name: l.move_name, ...(ref ? { ref } : {}), debit: round(Number(l.debit) || 0), credit: round(Number(l.credit) || 0), balance: round(run) };
+      return { date: l.date, move_name: l.move_name, ...(ref ? { ref } : {}), debit, credit, balance: round(run) };
     });
   return { opening, lines, closing: round(run) };
 }

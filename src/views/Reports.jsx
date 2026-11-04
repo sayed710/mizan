@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -197,7 +197,7 @@ function Tax({ db, period }) {
 }
 
 const Aged = (kind) => function AgedBody({ db, period }) {
-  const { buckets, rows } = agedBalance(db, kind, period.to || today());
+  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to));
   const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (
