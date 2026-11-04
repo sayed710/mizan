@@ -286,7 +286,7 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
   db = c2.db;
   const oldDb = {
     ...db,
-    schema_version: 24,
+    schema_version: 25,
     settings: {
       ...db.settings,
       lock_date: '2026-03-31',
@@ -296,8 +296,8 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
     },
   };
   const migrated = migrate(oldDb);
-  assert.equal(SCHEMA_VERSION, 25);
-  assert.equal(migrated.schema_version, 25);
+  assert.equal(SCHEMA_VERSION, 26);
+  assert.equal(migrated.schema_version, 26);
   assert.equal('lock_date' in migrated.settings, false);
   assert.equal('sale_lock_date' in migrated.settings, false);
   assert.equal('purchase_lock_date' in migrated.settings, false);
@@ -322,7 +322,7 @@ test('Finding 10: migration 25 migrates global QR/VAT/IBAN settings to current c
   db = c2.db;
   const oldDb = {
     ...db,
-    schema_version: 24,
+    schema_version: 25,
     settings: {
       ...db.settings,
       current_company_id: 1,

@@ -542,7 +542,8 @@ MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared
     ...currency, rate_ids: (currency.rate_ids ?? []).map((row) => ({ ...row, company_id: row.company_id ?? null })),
   })) },
 }) });
-MIGRATIONS.push({ version: 25, name: 'Lock dates and payment QR settings live on res.company', up: (db) => {
+MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
+MIGRATIONS.push({ version: 26, name: 'Lock dates and payment QR settings live on res.company', up: (db) => {
   const settings = db.settings ?? {};
   const lockKeys = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date'];
   const currentCompId = settings.current_company_id ?? 1;
@@ -601,7 +602,6 @@ function migrateCashBasisOrigins(db) {
   return { ...next, settings };
 }
 
-MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -33,7 +33,7 @@ export function invoiceQrPayload(settings, company, move, invoiceCurrency = move
 
 /** Resolve QR mode and issuer identity from the document company. */
 export function invoiceQrSettingsForCompany(db, company) {
-  const comp = company ?? db ?? {};
+  const comp = company ?? {};
   return {
     invoice_qr: comp.invoice_qr ?? null,
     company_vat: comp.vat ?? '',
