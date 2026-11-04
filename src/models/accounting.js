@@ -696,7 +696,8 @@ function discountTaxLines(db, invoice, term, discount) {
   return (invoice.line_ids ?? []).filter((line) => line.tax_name && !line.tax_zero).map((line) => ({
     account_id: line.account_id, partner_id: invoice.partner_id, name: line.tax_name,
     debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
-    tax_name: line.tax_name, tax_base: companyRound((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    tax_id: line.tax_id, tax_name: line.tax_name, tax_base: companyRound((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    ...(line.tax_tag_ids?.length ? { tax_tag_ids: line.tax_tag_ids } : {}),
     ...(line.tax_side ? { tax_side: line.tax_side } : {}),
   }));
 }
@@ -719,11 +720,19 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const counterpart = invoiceCounterpartAccount(db, r);
   const taxes = discountTaxLines(db, r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
   const taxValue = companyRound(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
+  const share = discount / (total(r, db) || 1);
+  const bases = read(db, 'account.payment.term', r.invoice_payment_term_id)?.discount_tax_computation === 'included'
+    ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
+      account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
+      tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
+      debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
+    })) : [];
+  const baseValue = companyRound(bases.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const { db: booked, id: discountMove } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`, company: company?.id ?? null,
     lines: sale
-      ? [{ account: discountAccount, debit: value - taxValue, partner_id: r.partner_id }, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
-      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...taxes, { account: discountAccount, credit: value - taxValue, partner_id: r.partner_id }],
+      ? [{ account: discountAccount, debit: value - taxValue - baseValue, partner_id: r.partner_id }, ...bases, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
+      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...bases, ...taxes, { account: discountAccount, credit: value - taxValue - baseValue, partner_id: r.partner_id }],
   });
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
