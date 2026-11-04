@@ -211,7 +211,11 @@ test('review #4: second company foreign payment-term instalments conserve compan
   }
   const acc = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
   const saleJournal = create(db, 'account.journal', { name: 'C2 Sale', code: 'INV', type: 'sale', company_id: c2.id, default_account_id: acc('400000').id, invoice_sequence_prefix: 'REVIEW-C2-INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'REVIEW-C2-RINV/', refund_sequence_next_number: 1 });
-  db = write(saleJournal.db, 'res.company', c2.id, { default_sale_journal_id: saleJournal.id, default_purchase_journal_id: read(saleJournal.db, 'res.company', 1).default_purchase_journal_id });
+  db = write(saleJournal.db, 'res.company', c2.id, {
+    account_default_receivable_id: acc('121000').id,
+    default_sale_journal_id: saleJournal.id,
+    default_purchase_journal_id: read(saleJournal.db, 'res.company', 1).default_purchase_journal_id,
+  });
 
   const term = create(db, 'account.payment.term', { name: 'Split', line_ids: [
     { value: 50, value_type: 'percent', nb_days: 0 },

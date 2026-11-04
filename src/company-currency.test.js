@@ -22,7 +22,10 @@ const invoice = (db, company, currencyId, price) => {
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, company_id: company, currency_id: currencyId, invoice_date: addDays(today(), -30), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: price, tax: 0 }] });
   return { db: confirm(made.db, made.id), id: made.id };
 };
-const receivable = (db, id) => read(db, 'account.move', id).line_ids.find((l) => l.account_id === accountId(db, '121000'));
+const receivable = (db, id) => {
+  const move = read(db, 'account.move', id);
+  return move.line_ids.find((l) => l.account_id === read(db, 'res.company', move.company_id ?? 1).account_default_receivable_id);
+};
 
 test('a EUR company books a EUR invoice in EUR, not converted to the base currency', () => {
   const { db: base, company } = setup();

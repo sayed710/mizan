@@ -25,12 +25,14 @@ test('foreign credit settlement uses the document company and booked counterpart
     db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
     let counterpart;
     for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
-      const account = create(db, 'account.account', { company_id: company.id, code, name: code, account_type: accountType });
-      db = account.db;
+      const existing = (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
+      const account = existing ?? create(db, 'account.account', { company_id: company.id, code, name: code, account_type: accountType });
+      db = account.db ?? db;
       if (accountType === counterpartType) counterpart = account.id;
       if (code === 'FXGAIN') db = write(db, 'res.company', company.id, { income_currency_exchange_account_id: account.id });
       if (code === 'FXLOSS') db = write(db, 'res.company', company.id, { expense_currency_exchange_account_id: account.id });
     }
+    db = write(db, 'res.company', company.id, { [counterpartType === 'asset_receivable' ? 'account_default_receivable_id' : 'account_default_payable_id']: counterpart });
     const currency = create(db, 'res.currency', { name: 'Foreign', rate_ids: [{ date: '2037-01-01', rate: 2 }, { date: '2037-02-01', rate: 1 }] });
     const document = create(currency.db, 'account.move', { move_type: type, company_id: company.id, partner_id: partner, currency_id: currency.id, invoice_date: '2037-01-02', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
     db = postMove(document.db, document.id);

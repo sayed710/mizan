@@ -11,7 +11,7 @@ import { accountId, journalId } from './models/ledger.js';
 import { installments } from './models/terms.js';
 import { deferralBoard } from './models/deferred.js';
 import { unrealizedExchange, revalueForeignBalances } from './models/closing.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 import { postPayment, reversePayment } from './models/pay.js';
 
 test('currency increments round half away from zero and expose display precision', () => {
@@ -213,7 +213,7 @@ for (const rounding of [1, 0.001]) {
 
 test('migration defaults missing currency rounding without inferring from names', () => {
   const db = seed();
-  const old = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records, 'res.currency': [{ id: 1, name: 'JPY' }, { id: 2, name: 'KWD', rounding: 0.001 }] } };
+  const old = { ...db, schema_version: 21, records: { ...db.records, 'res.currency': [{ id: 1, name: 'JPY' }, { id: 2, name: 'KWD', rounding: 0.001 }] } };
   const migrated = migrate(old);
   assert.equal(migrated.records['res.currency'][0].rounding, 0.01);
   assert.equal(migrated.records['res.currency'][1].rounding, 0.001);

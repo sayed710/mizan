@@ -23,6 +23,8 @@ export function accountingCompany(db) {
   const branch = createCompany(db, { name: 'Accounting branch', currency_id: db.records['res.company'][0].currency_id });
   let next = branch.db;
   for (const code of ['101401', '121000', '211000', '131000', '230100', '450000', '600000']) {
+    const existing = next.records['account.account'].find((a) => a.code === code && a.company_id === branch.id);
+    if (existing) continue;
     const original = next.records['account.account'].find((a) => a.code === code);
     next = create(next, 'account.account', { ...original, company_id: branch.id }).db;
   }

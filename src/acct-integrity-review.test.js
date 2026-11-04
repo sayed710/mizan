@@ -19,7 +19,7 @@ test('public application requires a date on or after its payment', () => {
 });
 test('payment and settlement use company-owned receivable and payable accounts', () => {
  let db=seed(); const co=createCompanyWithDefaultInvoiceJournals(db,{name:'Scoped accounts'}); db=co.db;
- for(const [code,name,type] of [['121000','Scoped AR','asset_receivable'],['211000','Scoped AP','liability_payable'],['101401','Scoped Bank','asset_cash']]) db=create(db,'account.account',{company_id:co.id,code,name,account_type:type}).db;
+ for(const [code,name,type] of [['121000','Scoped AR','asset_receivable'],['211000','Scoped AP','liability_payable'],['101401','Scoped Bank','asset_cash']]) if (!db.records['account.account']?.some(a => a.code === code && a.company_id === co.id)) db=create(db,'account.account',{company_id:co.id,code,name,account_type:type}).db;
  for(const [type,side,direction,code] of [['out_invoice','customer','inbound','121000'],['in_invoice','supplier','outbound','211000']]) {
   const m=invoice(db,co.id,type); db=m.db; const account=db.records['account.account'].find(a=>a.company_id===co.id && a.code===code);
   assert.ok(read(db,'account.move',m.id).line_ids.some(l=>l.account_id===account.id));

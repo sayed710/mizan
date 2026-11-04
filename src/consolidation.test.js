@@ -44,7 +44,7 @@ function fixture({ method = 'full', ownership = 100 } = {}) {
 }
 
 function entry(db, company_id, date, lines) {
-  const posted = postEntry(db, { journal: 'MISC', date, lines });
+  const posted = postEntry(db, { journal: 'MISC', date, company: company_id, lines });
   return force(posted.db, 'account.move', posted.id, { company_id });
 }
 
@@ -100,9 +100,12 @@ test('inter-company sale and bill eliminate translated receivable, payable, reve
   let db = entry(f.db, f.parent, '2090-01-01', [
     { account: '121000', debit: 100, partner_id: buyer }, { account: '400000', credit: 100, partner_id: buyer },
   ]);
+  const sellerMove = db.seq['account.move'];
   db = entry(db, f.child, '2090-01-01', [
     { account: '600000', debit: 400, partner_id: seller }, { account: '211000', credit: 400, partner_id: seller },
   ]);
+  const buyerMove = db.seq['account.move'];
+  db = force(force(db, 'account.move', sellerMove, { intercompany_move_id: buyerMove }), 'account.move', buyerMove, { intercompany_move_id: sellerMove });
   db = entry(db, f.parent, '2090-01-01', sale(50));
   const result = consolidate(db, f.id);
   assert.deepEqual(['AR', 'AP', 'SALES', 'COST'].map((code) => row(result, code).eliminations), [-100, 100, 100, -150]);
@@ -226,7 +229,10 @@ test('a matched cross-currency inter-company pair closes; the rate difference is
   const seller = read(f.db, 'res.company', f.parent).partner_id;
   const buyer = read(f.db, 'res.company', f.child).partner_id;
   let db = entry(f.db, f.parent, '2090-01-01', [{ account: '121000', debit: 100, partner_id: buyer }, { account: '400000', credit: 100, partner_id: buyer }]);
+  const sellerMove = db.seq['account.move'];
   db = entry(db, f.child, '2090-01-01', [{ account: '600000', debit: 200, partner_id: seller }, { account: '211000', credit: 200, partner_id: seller }]);
+  const buyerMove = db.seq['account.move'];
+  db = force(force(db, 'account.move', sellerMove, { intercompany_move_id: buyerMove }), 'account.move', buyerMove, { intercompany_move_id: sellerMove });
   const closed = closePeriod(db, f.id);
   const lines = read(closed, 'consolidation.period', f.id).lines;
   assert.ok(lines.find((l) => l.group_code === 'EQUITY:ELIM_FX'));

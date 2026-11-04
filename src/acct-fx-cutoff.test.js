@@ -65,7 +65,7 @@ test('companies revalue only their own invoices using their own journal and acco
   const first = fixture();
   const secondCompany = createCompanyWithDefaultInvoiceJournals(first.db, { name: 'Second company', currency_id: first.db.settings.base_currency_id });
   let db = secondCompany.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) {
+  for (const [code, type] of [['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: code, account_type: type, company_id: secondCompany.id }).db;
   }
   db = create(db, 'account.journal', { code: 'MISC', name: 'Second miscellaneous', type: 'general', company_id: secondCompany.id }).db;

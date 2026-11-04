@@ -55,7 +55,7 @@ test('company selection refreshes action records and counts while retaining doma
   assert.equal(viewRecords(both, 'crm.lead').length, viewRecords(main, 'crm.lead').length + 1);
 });
 
-test('legacy company-stamped configuration is available in list actions and relation choices', () => {
+test('company-stamped accounting configuration stays with its company in list actions and relation choices', () => {
   let db = fixture();
   const cases = [['account.tax', 'Legacy tax'], ['account.payment.term', 'Legacy term'], ['account.fiscal.position', 'Legacy position']];
   const created = [];
@@ -67,9 +67,9 @@ test('legacy company-stamped configuration is available in list actions and rela
   const branch = setCompanies(db, { current: 2, allowed: [2] });
   const snapshot = companyViewDb(branch);
   for (const { model, id } of created) {
-    assert.ok(search(snapshot, model).some((record) => record.id === id));
-    assert.ok(actionRecords(snapshot, { model }, null).some((record) => record.id === id));
-    assert.ok(relationCandidates(snapshot, model, null).some((record) => record.id === id));
+    assert.ok(!search(snapshot, model).some((record) => record.id === id));
+    assert.ok(!actionRecords(snapshot, { model }, null).some((record) => record.id === id));
+    assert.ok(!relationCandidates(snapshot, model, null).some((record) => record.id === id));
   }
   const foreign = search(branch, 'product').find((record) => record.company_id === 1);
   assert.ok(!viewRecords(branch, 'product').some((record) => record.id === foreign.id));
