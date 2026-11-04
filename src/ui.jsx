@@ -265,7 +265,7 @@ function DistributionInput({ value, onChange, ...props }) {
 }
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
-  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
+  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly || field.readonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
       const related = read(db, field.relation, valId);

@@ -259,6 +259,43 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
   padding-inline-start: 24px;
   margin: 0.5em 0;
 }
+.annual-report-body .report-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+}
+.annual-report-body .report-table th,
+.annual-report-body .report-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+}
+.annual-report-body .report-table thead tr {
+  background: var(--bg-soft, #f8fafc);
+}
+.annual-report-body .report-table th.text-left {
+  text-align: left;
+}
+.annual-report-body .report-table th.text-right,
+.annual-report-body .report-table td.text-right {
+  text-align: right;
+}
+.annual-report-body .report-table tr.section-header {
+  background: #f1f5f9;
+  font-weight: 600;
+}
+.annual-report-body .report-table tr.total-row {
+  font-weight: bold;
+  background: #e2e8f0;
+}
+.annual-report-body .report-table tr.grand-total-row {
+  font-weight: bold;
+  background: #cbd5e1;
+}
+.annual-report-body .report-table td.empty-row {
+  color: var(--muted, #666);
+  font-style: italic;
+}
 .lines { width: 100%; border-collapse: collapse; }
 .lines th, .lines td { padding: 6px; border-bottom: 1px solid var(--border); text-align: start; }
 .lines .num { text-align: end; white-space: nowrap; }

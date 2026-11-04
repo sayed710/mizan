@@ -45,18 +45,20 @@ test('fiscal closing and reopening isolate companies and their locks', () => {
   assert.equal(reversal.company_id, 1);
 });
 
-test('migration converts legacy closing locks and permits reopening without locking other companies', () => {
+test('migration retains global closing locks without clearing them for closed fiscal years', () => {
   const company = createCompany(seed(), { name: 'Other company' });
   const year = create(company.db, 'account.fiscal.year', { name: 'Legacy year', ...dates });
   const closed = closeFiscalYear(year.db, year.id);
   const legacy = { ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } };
   assert.throws(() => reopenFiscalYear(legacy, year.id), /locked/);
   const migrated = migrate(legacy);
-  assert.equal(migrated.settings.lock_date, null);
+  assert.equal(migrated.settings.lock_date, dates.date_to);
   assert.equal(legacy.settings.lock_date, dates.date_to);
   assert.equal(closedYearLock(migrated, 1), dates.date_to);
   assert.throws(() => book(migrated, 1, 1), /locked/);
-  const otherBooked = book(migrated, company.id, 1);
+  assert.throws(() => book(migrated, company.id, 1), /locked/);
+  const unlocked = updateSettings(migrated, { lock_date: null });
+  const otherBooked = book(unlocked, company.id, 1);
   const reopened = reopenFiscalYear(otherBooked, year.id);
   assert.equal(read(reopened, 'account.fiscal.year', year.id).state, 'open');
   assert.ok(read(reopened, 'account.move', read(reopened, 'account.fiscal.year', year.id).opening_move_id));

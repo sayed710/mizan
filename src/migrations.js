@@ -520,12 +520,7 @@ export const MIGRATIONS = [
 MIGRATIONS.push({ version: 20, name: 'Fiscal years: assign legacy years to company 1', up: (db) => ({
   ...db, records: { ...db.records, 'account.fiscal.year': (db.records['account.fiscal.year'] ?? []).map((year) => ({ ...year, company_id: year.company_id ?? 1 })) },
 }) });
-MIGRATIONS.push({ version: 21, name: 'Fiscal years: remove legacy global closing lock', up: (db) => {
-  const lock = db.settings?.lock_date;
-  if (!lock || !(db.records['account.fiscal.year'] ?? []).some((year) => year.state === 'closed' && year.date_to === lock)) return db;
-  // Closed years already enforce company-specific locks. The former global lock did not retain its previous value.
-  return { ...db, settings: { ...db.settings, lock_date: null } };
-} });
+MIGRATIONS.push({ version: 21, name: 'Fiscal years: retain global closing lock', up: (db) => db });
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

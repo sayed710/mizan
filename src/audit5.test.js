@@ -95,7 +95,7 @@ test('annual report explains other income and expenses with escaped account name
   assert.match(html, /Other &lt;income&gt;<\/td><td[^>]*>50\.00/);
   assert.match(html, /Interest Expense<\/td><td[^>]*>20\.00/);
   for (const [label, value] of [['Net Operating Income', '100.00'], ['Total Other Income', '50.00'], ['Total Other Expenses', '20.00'], ['Net Income', '130.00']]) {
-    assert.ok(html.includes(`${label}</td><td style="text-align: right;">${value}`));
+    assert.ok(html.includes(`${label}</td><td class="text-right">${value}`));
   }
 });
 

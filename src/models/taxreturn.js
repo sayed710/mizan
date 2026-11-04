@@ -16,6 +16,10 @@ const syncTaxLockDate = (db, companyId, excludeId = null) => {
 };
 
 /** Determine if a return is an audit working file rather than a standard tax return. */
+/** A working file being created or edited: audit by status, category or type. */
+const isNewAudit = (db, vals) => Boolean(vals?.audit_status || vals?.category === 'audit' || isAuditReturn(vals, db));
+const returnCompany = (db, vals) => Number(vals?.company_id ?? getActiveCompany() ?? db.settings?.current_company_id ?? 1);
+
 export function isAuditReturn(r, db) {
   return !!(r?.type_id && db && read(db, 'account.return.type', r.type_id)?.category === 'audit');
 }
@@ -552,10 +556,11 @@ export const taxReturnModels = {
     label: 'Tax Returns',
     guard: returnGuard,
     prepareCreate: (db, vals) => {
-      if (!vals.audit_status || vals.type_id) return { db, vals };
-      const companyId = Number(vals.company_id ?? getActiveCompany() ?? 1);
+      const companyId = returnCompany(db, vals);
+      if (!isNewAudit(db, vals)) return { db, vals };
+      if (vals.type_id) return { db, vals: { ...vals, company_id: companyId } };
       const ensured = ensureAuditReturnType(db, companyId);
-      return { db: ensured.db, vals: { ...vals, type_id: ensured.typeId } };
+      return { db: ensured.db, vals: { ...vals, company_id: companyId, type_id: ensured.typeId } };
     },
     fields: {
       name: { type: 'char', label: 'Return', required: true },
@@ -595,6 +600,7 @@ export const taxReturnModels = {
       checks: {
         type: 'one2many',
         label: 'Checks',
+        readonly: true,
         fields: {
           name: { type: 'char', label: 'Check' },
           status: { type: 'selection', label: 'Status', options: [['passed', 'Passed'], ['failed', 'Failed'], ['warning', 'Warning'], ['pending', 'Pending']] },
@@ -605,16 +611,13 @@ export const taxReturnModels = {
     },
     defaults: () => ({
       state: 'new',
-      company_id: 1,
       is_completed: false,
       closing_move_ids: [],
       attachment_ids: [],
-      checks: [],
     }),
     createDefaults: (db, vals) => {
-      const companyId = vals?.company_id ?? 1;
-      const isAudit = vals?.audit_status || vals?.category === 'audit' || (vals?.type_id && read(db, 'account.return.type', vals.type_id)?.category === 'audit');
-      if (isAudit) {
+      const companyId = returnCompany(db, vals);
+      if (isNewAudit(db, vals)) {
         let typeId = vals?.type_id;
         if (!typeId) {
           const auditType = (db.records?.['account.return.type'] ?? []).find(
@@ -623,13 +626,16 @@ export const taxReturnModels = {
           if (auditType) typeId = auditType.id;
         }
         return {
+          company_id: companyId,
           audit_status: vals?.audit_status ?? 'ongoing',
           ...(typeId ? { type_id: typeId } : {}),
-          checks: vals?.checks ?? computeAuditChecks(db, { ...vals, company_id: companyId }),
+          checks: (vals?.checks && vals.checks.length > 0) ? vals.checks : computeAuditChecks(db, { ...vals, company_id: companyId }),
         };
       }
-      return {};
+      return { company_id: companyId };
     },
+    // Audit checks follow the working file's period and company.
+    onchange: (r, key, db) => (['date_from', 'date_to', 'company_id'].includes(key) && isNewAudit(db, r) ? { checks: computeAuditChecks(db, r) } : {}),
     groupBys: ['type_id', 'state', 'company_id'],
     filters: [
       [
@@ -680,6 +686,11 @@ export const taxReturnModels = {
       ]),
       buttons: [
         {
+          label: 'Refresh Checks',
+          when: (r, db) => isAuditReturn(r, db) && r.audit_status !== 'done',
+          run: (db, r) => ({ db: write(db, 'account.return', r.id, { checks: computeAuditChecks(db, r) }) }),
+        },
+        {
           label: 'Pause',
           when: (r, db) => isAuditReturn(r, db) && r.audit_status === 'ongoing',
           run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'paused' }) }),
@@ -693,7 +704,7 @@ export const taxReturnModels = {
           label: 'Mark as Done',
           primary: true,
           when: (r, db) => isAuditReturn(r, db) && r.audit_status !== 'done',
-          run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'done' }) }),
+          run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'done', checks: computeAuditChecks(db, r) }) }),
         },
         {
           label: 'Review',
