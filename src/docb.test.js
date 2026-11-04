@@ -5,7 +5,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { matchBill } from './models/billcontrol.js';
 
-const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
+const run = (db, model, id, label, values) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id), values);
 
 test('purchase bill retains the received duplicate order line', () => {
   const po = create(seed(), 'purchase.order', { partner_id: 2, state: 'purchase', order_line: [
@@ -51,14 +51,9 @@ test('three-way exception blocks payment until explicitly approved', () => {
   assert.equal(read(posted, 'account.move', bill.id).should_be_paid, 'exception');
   assert.throws(() => run(posted, 'account.move', bill.id, 'Register Payment'), /resolve or approve/i);
   const approved = run(posted, 'account.move', bill.id, 'Approve for Payment').db;
-  const oldPrompt = globalThis.prompt;
-  globalThis.prompt = () => '40';
-  try {
-    const paid = run(approved, 'account.move', bill.id, 'Register Payment').db;
-    assert.equal(read(paid, 'account.move', bill.id).amount_paid, 40);
-  } finally {
-    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
-  }
+  const bank = search(approved, 'account.journal').find((j) => j.default_for_payments);
+  const paid = run(approved, 'account.move', bill.id, 'Register Payment', { amount: '40', date: read(approved, 'account.move', bill.id).invoice_date, journal_id: bank.id }).db;
+  assert.equal(read(paid, 'account.move', bill.id).amount_paid, 40);
 });
 
 test('confirming a price mismatch records the product name in bill chatter', () => {
