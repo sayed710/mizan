@@ -175,7 +175,7 @@ test('P1 finding 1: applyPaymentCredit validates company, commercial partner, do
 
 test('P1 finding 2: foreign credit note exchange difference cannot be independently reversed', () => {
   let db = seed();
-  const company = createCompany(db, { name: 'Exchange Co' });
+  const company = createCompany(db, { name: 'Exchange Co', currency_id: db.settings.base_currency_id });
   db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
 
   for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
