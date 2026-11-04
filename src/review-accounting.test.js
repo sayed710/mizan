@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { remapDiff } from './sync.js';
 import { accountId, invoiceLines } from './models/ledger.js';
@@ -210,6 +210,7 @@ test('review #4: second company foreign payment-term instalments conserve compan
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: c2.id }).db;
   }
   const acc = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
+  db = write(db, 'res.company', c2.id, { account_default_receivable_id: acc('121000').id });
   db = create(db, 'account.journal', { name: 'C2 Sale', code: 'INV', type: 'sale', company_id: c2.id, default_account_id: acc('400000').id }).db;
 
   const term = create(db, 'account.payment.term', { name: 'Split', line_ids: [

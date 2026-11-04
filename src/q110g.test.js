@@ -218,7 +218,7 @@ test('finding 15: taxes with foreign configured account reject posting when comp
 
   // Setup Company 2 journals and base accounts
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
-  db = rec2.db;
+  db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2 = create(db, 'account.account', { name: 'B2 Inc', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2.db;
   const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2.id });
@@ -269,7 +269,7 @@ test('finding 16: fiscal account rules apply to original selected account before
   const company2Id = c2.id;
 
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
-  db = rec2.db;
+  db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
   const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2Base.id });
@@ -344,7 +344,7 @@ test('finding 17: product with foreign configured account rejects posting when c
   const company2Id = c2.id;
 
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
-  db = rec2.db;
+  db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
   const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2Base.id });

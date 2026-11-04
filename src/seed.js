@@ -128,7 +128,11 @@ export function seed() {
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  db = ensureMainCompany(db);
+  const receivable = accountId(db, '121000');
+  const payable = accountId(db, '211000');
+  db = write(db, 'account.account', receivable, { company_id: 1 });
+  db = write(db, 'account.account', payable, { company_id: 1 });
+  db = ensureMainCompany(db, { account_default_receivable_id: receivable, account_default_payable_id: payable });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
   db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
