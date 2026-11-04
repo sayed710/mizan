@@ -477,10 +477,11 @@ export function discountAvailable(db, r, date = today()) {
 function discountTaxLines(invoice, term, discount) {
   if (term?.discount_tax_computation !== 'included') return [];
   const share = discount / (total(invoice) || 1);
-  return (invoice.line_ids ?? []).filter((line) => line.tax_name && line.tax_side).map((line) => ({
+  return (invoice.line_ids ?? []).filter((line) => line.tax_name && !line.tax_zero).map((line) => ({
     account_id: line.account_id, partner_id: invoice.partner_id, name: line.tax_name,
     debit: round2((Number(line.credit) || 0) * share), credit: round2((Number(line.debit) || 0) * share),
-    tax_name: line.tax_name, tax_base: round2((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true, tax_side: line.tax_side,
+    tax_name: line.tax_name, tax_base: round2((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    ...(line.tax_side ? { tax_side: line.tax_side } : {}),
   }));
 }
 

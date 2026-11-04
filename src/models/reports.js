@@ -5,12 +5,13 @@ import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
+import { currentCompany } from './company.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 const accountIds = (db, type) => new Set(search(db, 'account.account').filter((a) => a.account_type === type).map((a) => a.id));
 
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
-const itemsBefore = (db, from) => (from ? journalItems(db).filter((l) => l.date < from) : []);
+const itemsBefore = (db, from, company_id) => (from ? journalItems(db, { company_id }).filter((l) => l.date < from) : []);
 
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
 export function trialBalance(db, { from, to } = {}) {
@@ -258,12 +259,13 @@ export function executiveSummary(db, { from, to } = {}) {
 }
 
 /** Receivable statement of one partner: opening balance, the period's lines with a running balance and the move reference, closing balance. */
-export function customerStatement(db, partnerId, { from, to } = {}) {
+export function customerStatement(db, partnerId, { from, to, company_id } = {}) {
+  const company = Number(company_id ?? currentCompany(db));
   const receivable = accountIds(db, 'asset_receivable');
-  const mine = (l) => receivable.has(l.account_id) && l.partner_id === partnerId;
-  const opening = round(itemsBefore(db, from).filter(mine).reduce((s, l) => s + netOf(l), 0));
+  const mine = (l) => receivable.has(l.account_id) && l.partner_id === partnerId && (l.company_id ?? 1) === company;
+  const opening = round(itemsBefore(db, from, company).filter(mine).reduce((s, l) => s + netOf(l), 0));
   let run = opening;
-  const lines = journalItems(db, { from, to }).filter(mine)
+  const lines = journalItems(db, { from, to, company_id: company }).filter(mine)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((l) => {
       run += netOf(l);

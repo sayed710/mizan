@@ -536,7 +536,7 @@ const ar = {
   Transfers: 'التحويلات', Receipts: 'الاستلامات', Deliveries: 'التسليمات', Delivery: 'التسليم', Receipt: 'الاستلام', 'Internal Transfer': 'تحويل داخلي',
   'Operation Type': 'نوع العملية', 'Effective Date': 'تاريخ التنفيذ', Validate: 'اعتماد', 'Mark as Todo': 'تحديد للتنفيذ', 'Disc.%': 'خصم %',
   'Bank Transactions': 'الحركات البنكية', 'To Reconcile': 'للتسوية', Reconciled: 'تمت التسوية', 'Matched with': 'مطابقة مع',
-  'Outstanding Receipts': 'المقبوضات المعلقة', 'Outstanding Payments': 'المدفوعات المعلقة', 'Existing Payment': 'دفعة موجودة',
+  'Outstanding Receipts': 'المقبوضات المعلقة', 'Outstanding Payments': 'المدفوعات المعلقة', 'Existing Payment': 'دفعة موجودة', 'Existing Payments': 'مدفوعات موجودة', 'Batch Payment': 'دفعة مجمعة',
   'Bank Entry': 'القيد البنكي', 'Open Amount': 'المبلغ المتبقي', 'Matched Documents': 'المستندات المطابقة', 'Match Payment': 'مطابقة الدفعة',
   'Write-off Account': 'حساب الشطب', 'Write-off Label': 'وصف الشطب', 'Write-off Amount': 'مبلغ الشطب', 'Write-off Entry': 'قيد الشطب', 'Unreconcile': 'إلغاء التسوية',
   'Book to Account': 'ترحيل لحساب', Reconcile: 'تسوية', Match: 'مطابقة', 'To reconcile': 'للتسوية', Incoming: 'وارد', Outgoing: 'صادر',

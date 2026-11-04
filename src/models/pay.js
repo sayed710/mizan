@@ -9,6 +9,7 @@ import { rateAt } from './currency.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
+import { isPaymentMatched } from './bank.js';
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
@@ -150,8 +151,7 @@ export function reversePayment(db, p, date = today()) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
   const entry = read(db, 'account.move', p.move_id);
-  const fromBank = search(db, 'account.bank.statement.line')
-    .some((l) => (l.allocations ?? []).some((a) => a.payment_move_id === p.move_id) || (l.state === 'reconciled' && (l.payment_move_id === p.move_id || l.payment_id === p.id)));
+  const fromBank = isPaymentMatched(db, p);
   const missingBankLink = p.invoice_id && search(db, 'account.bank.statement.line').some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && !l.payment_move_id);
   if (missingBankLink) throw new Error('Cannot reverse payment: the reconciled bank transaction is missing its payment link; repair it first');
   if (fromBank) throw new Error('This payment is linked to a reconciled bank transaction; unreconcile the transaction before reversing it');

@@ -90,28 +90,120 @@ export function reconcileWith(db, line, moveId) {
   return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
 }
 
-function matchPayment(db, line) {
-  if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
-  const payment = read(db, 'account.payment', line.payment_id);
+/** A batch payment belongs to the company of its journal. */
+const batchPaymentCompany = (db, batch) => read(db, 'account.journal', batch?.journal_id)?.company_id ?? 1;
+
+/** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
+export function isPaymentMatched(db, payment, excludeLineId = null) {
+  const pId = typeof payment === 'object' && payment ? payment.id : payment;
+  const pMoveId = typeof payment === 'object' && payment ? payment.move_id : (pId ? read(db, 'account.payment', pId)?.move_id : null);
+  return search(db, 'account.bank.statement.line').some((l) => {
+    if (excludeLineId && l.id === excludeLineId) return false;
+    if (pMoveId && (l.allocations ?? []).some((a) => a.payment_move_id === pMoveId)) return true;
+    if (l.state !== 'reconciled') return false;
+    if (pMoveId && l.payment_move_id === pMoveId) return true;
+    if (l.payment_id === pId) return true;
+    if ((l.payment_ids ?? []).includes(pId)) return true;
+    if (l.batch_payment_id) {
+      const batch = read(db, 'account.batch.payment', l.batch_payment_id);
+      if ((batch?.lines ?? []).some((bl) => !bl.cancelled && bl.payment_id === pId)) return true;
+    }
+    return false;
+  });
+}
+
+function resolveAndValidatePayments(db, line) {
   const company = line.company_id ?? 1;
-  if (!payment || payment.state !== 'posted' || !payment.move_id) throw new Error('Select a posted payment');
-  if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
-  if (search(db, 'account.bank.statement.line').some((l) => l.id !== line.id && l.state === 'reconciled' && l.payment_move_id === payment.move_id)) throw new Error('Payment is already matched');
-  const entry = read(db, 'account.move', payment.move_id);
+  let payments = [];
+  if (line.batch_payment_id) {
+    const batch = read(db, 'account.batch.payment', line.batch_payment_id);
+    if (!batch || batch.state !== 'posted') throw new Error('Select a posted batch payment');
+    const batchCompany = batchPaymentCompany(db, batch);
+    if (batchCompany !== company) throw new Error('The payment belongs to another company');
+    payments = (batch.lines ?? []).filter((l) => !l.cancelled && l.payment_id).map((l) => read(db, 'account.payment', l.payment_id));
+  } else if (Array.isArray(line.payment_ids) && line.payment_ids.length > 0) {
+    payments = line.payment_ids.map((id) => read(db, 'account.payment', id));
+  } else if (line.payment_id) {
+    const single = read(db, 'account.payment', line.payment_id);
+    payments = single ? [single] : [];
+  }
+  if (!payments.length) throw new Error('Select a posted payment');
+
   const incoming = line.amount > 0;
-  if (!line.amount || (payment.payment_type === 'inbound') !== incoming) throw new Error('Statement amount and direction must match the payment');
-  const via = paymentJournal(db, line.journal_id ?? payment.journal_id);
-  const journal = read(db, 'account.journal', line.journal_id ?? payment.journal_id ?? journalId(db, via.code, company));
+  if (!line.amount || payments.some((p) => !p || (p.payment_type === 'inbound') !== incoming)) {
+    throw new Error('Statement amount and direction must match the payment');
+  }
+  const lineTarget = round(line.open_amount ?? Math.abs(line.amount));
+  const paymentsTotal = round(payments.reduce((s, p) => s + Number(p?.amount || 0), 0));
+  if (paymentsTotal !== lineTarget) throw new Error('The selected payments must total the bank transaction amount');
+
+  for (const payment of payments) {
+    if (payment.state !== 'posted' || !payment.move_id) throw new Error('Select a posted payment');
+    if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
+    if (isPaymentMatched(db, payment, line.id)) throw new Error('Payment is already matched');
+  }
+
+  const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id);
+  const journal = read(db, 'account.journal', line.journal_id ?? payments[0].journal_id ?? journalId(db, via.code, company));
   if (journal && !['bank', 'cash'].includes(journal.type)) throw new Error('Bank transactions need a bank or cash journal');
-  if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) throw new Error('Payment entry must be posted in the same company');
+  if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
+  const journalCurrency = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id;
+  for (const payment of payments) {
+    if (payment.currency_id && journalCurrency && payment.currency_id !== journalCurrency) {
+      throw new Error('Payment currency must match the bank journal currency');
+    }
+  }
+
+  return { payments, via, journal, journalCurrency };
+}
+
+function paymentOutstandingItem(db, payment, line, via, journalCurrency) {
+  const company = line.company_id ?? 1;
+  const incoming = line.amount > 0;
+  const entry = read(db, 'account.move', payment.move_id);
+  if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
+    throw new Error('Payment entry must be posted in the same company');
+  }
+  if (entry.currency_id && journalCurrency && entry.currency_id !== journalCurrency) {
+    throw new Error('Payment currency must match the bank journal currency');
+  }
   const outstanding = payment.outstanding_account_id;
-  const liquidity = entry.line_ids.filter((l) => l.account_id === outstanding && (incoming ? round(l.debit) === round(Math.abs(line.amount)) : round(l.credit) === round(Math.abs(line.amount))));
+  const paymentAmt = round(Number(payment.amount));
+  const liquidity = entry.line_ids.filter((l) => l.account_id === outstanding && (incoming ? round(l.debit) === paymentAmt : round(l.credit) === paymentAmt));
   if (!outstanding || liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
   if (read(db, 'account.account', outstanding)?.code === via.account) throw new Error('Outstanding and bank accounts must differ');
+  return { account: outstanding, amount: paymentAmt, partner_id: payment.partner_id, name: payment.name || line.payment_ref };
+}
+
+function matchPayment(db, line) {
+  if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
+  const company = line.company_id ?? 1;
+  const { payments, via, journal, journalCurrency } = resolveAndValidatePayments(db, line);
+  const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via, journalCurrency));
+
+  const incoming = line.amount > 0;
   const amount = round(Math.abs(line.amount));
-  const lines = incoming ? [{ account: via.account, debit: amount }, { account: outstanding, credit: amount }] : [{ account: outstanding, debit: amount }, { account: via.account, credit: amount }];
+  const bankLine = incoming ? { account: via.account, debit: amount } : { account: via.account, credit: amount };
+  const paymentLines = outstandingItems.map((item) => (incoming
+    ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name }
+    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name }));
+
+  const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
   const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
-  return { db: write(booked.db, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: booked.id, bank_move_id: booked.id, open_amount: 0, allocations: [{ payment_move_id: booked.id, amount }], payment_move_id: payment.move_id, payment_id: payment.id }) };
+
+  return {
+    db: write(booked.db, 'account.bank.statement.line', line.id, {
+      state: 'reconciled',
+      move_id: booked.id,
+      bank_move_id: booked.id,
+      open_amount: 0,
+      allocations: [{ payment_move_id: booked.id, amount }],
+      payment_move_id: payments.length === 1 ? payments[0].move_id : null,
+      payment_id: line.payment_id ?? (payments.length === 1 ? payments[0].id : null),
+      payment_ids: payments.map((p) => p.id),
+      batch_payment_id: line.batch_payment_id ?? null,
+    }),
+  };
 }
 
 function autoReconcile(db, line) {
@@ -135,8 +227,8 @@ function bookToAccount(db, line) {
 
 /** Validate a release against linked, posted mirror entries rather than trusting a client flag. */
 function unreconcileError(db, before, after) {
-  if (after.state !== 'to_check' || after.move_id || after.payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
-  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'name']);
+  if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
+  const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
@@ -159,6 +251,11 @@ function unreconcileError(db, before, after) {
     if (!payment || payment.state !== 'reversed') return 'Unreconciliation must reverse its generated payment';
   }
   if (before.payment_id && read(db, 'account.payment', before.payment_id)?.state !== 'posted') return 'The matched payment must remain posted';
+  if (before.payment_ids?.length) {
+    for (const pid of before.payment_ids) {
+      if (read(db, 'account.payment', pid)?.state !== 'posted') return 'The matched payment must remain posted';
+    }
+  }
   return null;
 }
 
@@ -170,7 +267,7 @@ function unreconcile(db, line) {
   const date = [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
   // Stage an unlinked line while reversals are generated; the original and complete result are validated below.
   const original = db.records['account.bank.statement.line'].find((l) => l.id === line.id);
-  const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };
+  const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_ids: [], batch_payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };
   let current = { ...db, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => l.id === line.id ? cleared : l) } };
   for (const allocation of allocations) {
     if (allocation.invoice_id) {
@@ -193,7 +290,7 @@ function unreconcile(db, line) {
 function lineGuard(db, before, after) {
   if (before && (before.state === 'reconciled' || before.bank_move_id) && after.state === 'to_check' && !after.move_id) return unreconcileError(db, before, after);
   if (before?.state === 'reconciled') {
-    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
+    const changed = ['state', 'amount', 'date', 'partner_id', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'payment_ref', 'company_id', 'journal_id'].find((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null));
     return changed ? 'A reconciled bank transaction cannot be changed' : null;
   }
   if (before?.bank_move_id) {
@@ -209,6 +306,17 @@ function lineGuard(db, before, after) {
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
     if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
+  }
+  if (after.payment_ids?.length) {
+    for (const pid of after.payment_ids) {
+      const payment = read(db, 'account.payment', pid);
+      if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
+    }
+  }
+  if (after.batch_payment_id) {
+    const batch = read(db, 'account.batch.payment', after.batch_payment_id);
+    const batchCompany = batchPaymentCompany(db, batch);
+    if (!batch || batchCompany !== company) return 'The linked payment belongs to another company or does not exist';
   }
   if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > round(Math.abs(after.amount)))) return 'Invalid open bank transaction amount';
   if (before?.bank_move_id && JSON.stringify((after.allocations ?? []).slice(0, (before.allocations ?? []).length)) !== JSON.stringify(before.allocations ?? [])) return 'Bank transaction allocations cannot be changed';
@@ -261,7 +369,7 @@ function lineGuard(db, before, after) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
+    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
@@ -275,6 +383,8 @@ export const bankModels = {
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal' },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Existing Payment' },
+      payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Existing Payments' },
+      batch_payment_id: { type: 'many2one', relation: 'account.batch.payment', label: 'Batch Payment' },
       payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       writeoff_account_id: { type: 'many2one', relation: 'account.account', label: 'Write-off Account' },
       writeoff_label: { type: 'char', label: 'Write-off Label' },
@@ -311,7 +421,7 @@ export const bankModels = {
       buttons: [
         { label: 'Unreconcile', when: (r) => r.state === 'reconciled' || Boolean(r.bank_move_id), run: unreconcile },
         { label: 'Reconcile', primary: true, when: (r) => r.state === 'to_check' && !r.move_id, run: autoReconcile },
-        { label: 'Match Payment', primary: true, when: (r) => r.state === 'to_check' && r.payment_id, run: matchPayment },
+        { label: 'Match Payment', primary: true, when: (r) => r.state === 'to_check' && (r.payment_id || (r.payment_ids ?? []).length || r.batch_payment_id), run: matchPayment },
         { label: 'Match', primary: true, when: (r) => r.state === 'to_check' && r.move_id, run: (db, r) => ({ db: reconcileWith(db, r, r.move_id) }) },
         {
           label: 'Apply Reconciliation Model', when: (r) => r.state === 'to_check',
