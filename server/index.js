@@ -4,7 +4,7 @@
 import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { closeSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -326,7 +326,8 @@ const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; P
 // Sessions use opaque random tokens, not a signing secret. Persist a separate key in the existing kv store.
 writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)", randomBytes(32).toString('hex'));
 const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
-const pageToken = (p) => createHmac('sha256', PAGE_SECRET).update(`${p.id}:${p.visibility_password}`).digest('hex');
+// Page unlock cookie: a scrypt key bound to the page and its current password, so a password change revokes old cookies.
+const pageToken = (p) => scryptSync(String(p.visibility_password ?? ''), `${PAGE_SECRET}:${p.id}`, 32).toString('hex');
 const pageUnlocked = (req, p) => {
   const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`mizan_page_${p.id}=`))?.split('=')[1] ?? '';
   return /^[a-f0-9]{64}$/.test(given) && timingSafeEqual(Buffer.from(given), Buffer.from(pageToken(p)));
