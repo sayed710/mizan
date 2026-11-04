@@ -44,7 +44,9 @@ const applyContext = () => {
   const company = currentCompany();
   if (db.settings?.current_company_id == null) db = updateSettings(db, { current_company_id: company.id, allowed_company_ids: db.settings?.allowed_company_ids ?? [company.id] });
   setActiveCompany(null);
-  setCurrency(company.currency ?? db?.settings?.currency);
+  const currency = (db.records?.['res.currency'] ?? []).find((c) => c.id === db.records?.['res.company']?.find((c) => c.id === company.id)?.currency_id)
+    ?? (db.records?.['res.currency'] ?? []).find((c) => c.name === company.currency);
+  setCurrency(company.currency ?? db?.settings?.currency, currency);
 };
 
 const notify = () => {

@@ -4,7 +4,7 @@ import { nextName, today } from './common.js';
 import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, settlementFxError } from './finance.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { rateAt } from './currency.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
@@ -65,7 +65,9 @@ export function postPayment(db, p) {
   const counterpart = currentPayment.destination_account_code
     || (currentPayment.destination_account_id ? read(db, 'account.account', currentPayment.destination_account_id)?.code : null)
     || (currentPayment.partner_type === 'supplier' ? '211000' : '121000');
-  const amount = round(Number(currentPayment.amount));
+  const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
+  const companyRound = (n) => roundCurrency(n, companyCurrency);
+  const amount = companyRound(Number(currentPayment.amount));
   const { db: booked, id: moveId } = postEntry(db, {
     journal: via.code, journal_id: journal?.id, date, ref: currentPayment.memo || name,
     lines: inbound
@@ -81,11 +83,13 @@ export function postPayment(db, p) {
   const { db: applied, left } = open.reduce((acc, m) => {
     if (!(acc.left > 0)) return acc;
     const rate = rateAt(acc.db, m.currency_id, date, m.company_id);
-    const take = Math.min(m.amount_residual, Math.floor((acc.left * rate + 1e-9) * 100) / 100);
-    const cashAmount = round(take / rate);
+    const docCurrency = documentCurrency(acc.db, m);
+    const step = Number(docCurrency?.rounding ?? 0.01);
+    const take = Math.min(m.amount_residual, Number((Math.floor((acc.left * rate / step) + 1e-9) * step).toPrecision(15)));
+    const cashAmount = companyRound(take / rate);
     const companyAmount = settlementCompanyAmount(acc.db, m, take);
     if (!(take > 0) || !(cashAmount > 0) || cashAmount > acc.left) return acc;
-    const diff = round((cashAmount - companyAmount) * (inbound ? 1 : -1));
+    const diff = companyRound((cashAmount - companyAmount) * (inbound ? 1 : -1));
     let withFx = acc.db;
     let fxMove = null;
     if (diff) {
@@ -96,8 +100,8 @@ export function postPayment(db, p) {
       withFx = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: moveId, fx_invoice_id: m.id } : entry) } }; fxMove = fx.id;
     }
     const released = releaseCashBasis(withFx, m, take / m.amount_total, date, { final: take >= m.amount_residual });
-    const next = write(released.db, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) + take), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: companyAmount, payment_company_amount: cashAmount, cash_basis_move_id: released.id, ...(fxMove ? { payment_fx_move_id: fxMove } : {}) }], ...(!m.partner_bank_id && currentPayment.partner_bank_id ? { partner_bank_id: currentPayment.partner_bank_id } : {}) });
-    return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: round(acc.left - cashAmount) };
+    const next = write(released.db, 'account.move', m.id, { amount_paid: roundCurrency((Number(m.amount_paid) || 0) + take, docCurrency), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: companyAmount, payment_company_amount: cashAmount, cash_basis_move_id: released.id, ...(fxMove ? { payment_fx_move_id: fxMove } : {}) }], ...(!m.partner_bank_id && currentPayment.partner_bank_id ? { partner_bank_id: currentPayment.partner_bank_id } : {}) });
+    return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: companyRound(acc.left - cashAmount) };
   }, { db: registered, left: amount });
   const settled = taxClosing ? write(applied, 'account.move', taxClosing.move.id, {
     amount_paid: amount, payment_date: date,
@@ -114,7 +118,7 @@ export function reverseEntry(db, source, date) {
   return create(db, 'account.move', {
     move_type: 'entry', state: 'posted', journal_id: source.journal_id, invoice_date: date, ref: `Reversal of ${source.name}`, reversed_entry_id: source.id, partner_id: source.partner_id ?? null,
     name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`), company_id: source.company_id ?? 1,
-    line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, name: `Reversal: ${l.name ?? ''}`.trim() })),
+    line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}), name: `Reversal: ${l.name ?? ''}`.trim() })),
   });
 }
 
@@ -140,7 +144,7 @@ export function reverseWriteoff(db, invoiceId, moveId, date) {
   const reversed = reverseEntry(db, read(db, 'account.move', moveId), date);
   const released = reverseCashBasis(reversed.db, row, invoice, date);
   const payments = invoice.payments.map((p) => p === row ? { ...p, reversed: true, reversal_move_id: reversed.id, reversal_date: date } : p);
-  return write(released, 'account.move', invoiceId, { amount_paid: round((Number(invoice.amount_paid) || 0) - Number(row.amount)), payments, payment_date: payments.filter((p) => !p.reversed).at(-1)?.date ?? null });
+  return write(released, 'account.move', invoiceId, { amount_paid: roundCurrency((Number(invoice.amount_paid) || 0) - Number(row.amount), documentCurrency(db, invoice)), payments, payment_date: payments.filter((p) => !p.reversed).at(-1)?.date ?? null });
 }
 
 /**
@@ -185,7 +189,8 @@ export function reversePayment(db, p, date = today()) {
   const settled = search(booked, 'account.move').filter((m) => (m.payments ?? []).some((x) => sources.has(x.move_id) && !x.reversed));
   const reopened = settled.reduce((acc, m) => {
     const active = (m.payments ?? []).filter((x) => sources.has(x.move_id) && !x.reversed);
-    const amount = round(active.reduce((sum, x) => sum + Number(x.amount), 0));
+    const docCurrency = documentCurrency(acc, m);
+    const amount = roundCurrency(active.reduce((sum, x) => sum + Number(x.amount), 0), docCurrency);
     const payments = m.payments.map((x) => sources.has(x.move_id) && !x.reversed ? { ...x, reversed: true, reversal_move_id: reversals.get(x.move_id), reversal_date: date } : x);
     let released = acc;
     for (const allocation of active) {
@@ -194,11 +199,11 @@ export function reversePayment(db, p, date = today()) {
       }
     }
     const legacy = active.filter((x) => !Object.hasOwn(x, 'cash_basis_move_id') && !x.discount);
-    const legacyAmount = round(legacy.reduce((sum, x) => sum + Number(x.amount), 0));
+    const legacyAmount = roundCurrency(legacy.reduce((sum, x) => sum + Number(x.amount), 0), docCurrency);
     if (legacy.length && m.amount_total) {
       released = releaseCashBasis(released, m, -legacyAmount / m.amount_total, date).db;
     }
-    const next = write(released, 'account.move', m.id, { amount_paid: round((Number(m.amount_paid) || 0) - amount), payments, payment_date: payments.filter((x) => !x.reversed).at(-1)?.date ?? null });
+    const next = write(released, 'account.move', m.id, { amount_paid: roundCurrency((Number(m.amount_paid) || 0) - amount, docCurrency), payments, payment_date: payments.filter((x) => !x.reversed).at(-1)?.date ?? null });
     return postNote(next, 'account.move', m.id, `Payment ${p.name} reversed: ${amount}`);
   }, booked);
   const reversal = read(reopened, 'account.move', reversals.get(entry.id));
@@ -218,7 +223,7 @@ const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'
 export const payModels = {
   'account.payment': {
     label: 'Payments',
-    guard: (db, before, after, ctx) => (before?.check_number != null && (before.check_number !== after.check_number || before.journal_id !== after.journal_id) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
+    guard: (db, before, after, ctx) => (before?.check_number != null && (before.check_number !== after.check_number || before.journal_id !== after.journal_id) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
     protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
     invariant: paymentInvariant,
     fields: {
@@ -228,6 +233,7 @@ export const payModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       amount: { type: 'monetary', label: 'Amount' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
       date: { type: 'date', label: 'Date' },
@@ -240,7 +246,7 @@ export const payModels = {
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
-      unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true },
+      unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true, currency: 'company' },
       state: { type: 'selection', label: 'Status', tracking: true, options: STATES },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0 }),

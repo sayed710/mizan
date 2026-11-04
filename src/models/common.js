@@ -2,6 +2,7 @@ import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { lineTaxOf, lineUntaxed, productTax, taxSnapshot } from './taxes.js';
+import { documentCurrency, roundCurrency } from '../money.js';
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
@@ -64,11 +65,11 @@ export function promptedAmount(input) {
 }
 
 /** @returns {{untaxed:number, tax:number, total:number}} */
-export function amounts(lines = []) {
+export function amounts(lines = [], currency = null) {
   const untaxed = lines.reduce((s, l) => s + subtotal(l), 0);
   const tax = lines.reduce((s, l) => s + lineTaxOf(l), 0);
-  const cents = (n) => Math.round(n * 100) / 100;
-  return { untaxed: cents(untaxed), tax: cents(tax), total: cents(cents(untaxed) + cents(tax)) };
+  const rounded = (n) => roundCurrency(n, currency);
+  return { untaxed: rounded(untaxed), tax: rounded(tax), total: rounded(rounded(untaxed) + rounded(tax)) };
 }
 
 /** One2many product lines; `priceField` is the product field copied into the unit price on product change. */
@@ -110,9 +111,9 @@ export const productLines = (label, priceField) => ({
 });
 
 export const amountFields = (lineField) => ({
-  amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r) => amounts(r[lineField]).untaxed },
-  amount_tax: { type: 'monetary', label: 'Taxes', compute: (r) => amounts(r[lineField]).tax },
-  amount_total: { type: 'monetary', label: 'Total', compute: (r) => amounts(r[lineField]).total },
+  amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).untaxed },
+  amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).tax },
+  amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r)).total },
 });
 
 /**

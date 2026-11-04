@@ -1,7 +1,7 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
 import { read } from '../orm.js';
 import { today } from './common.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../money.js';
 
 
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest rate on or before it (1 without rates). */
@@ -28,14 +28,20 @@ export function rateAt(db, currencyId, date = today(), companyId = null) {
 }
 
 /** Amount in `currencyId` expressed in the company's currency at `date`. */
-export const toCompany = (db, currencyId, amount, date, companyId = null) => round((Number(amount) || 0) / rateAt(db, currencyId, date, companyId));
+export const toCompany = (db, currencyId, amount, date, companyId = null) => roundCurrency(
+  (Number(amount) || 0) / rateAt(db, currencyId, date, companyId),
+  companyId == null ? (db.records['res.currency'] ?? []).find((currency) => currency.name === db.settings?.currency) : companyCurrencyRecord(db, companyId),
+);
 
 export const currencyModels = {
   'res.currency': {
     label: 'Currencies',
+    guard: (db, before, after) => Number.isFinite(Number(after.rounding ?? 0.01)) && Number(after.rounding ?? 0.01) > 0 ? null : 'Currency rounding must be positive',
     fields: {
       name: { type: 'char', label: 'Currency', required: true },
       symbol: { type: 'char', label: 'Symbol' },
+      rounding: { type: 'float', label: 'Rounding', required: true, digits: 15 },
+      decimal_places: { type: 'integer', label: 'Decimal Places', compute: (r) => currencyDecimalPlaces(r) },
       rate_ids: {
         type: 'one2many',
         label: 'Rates',
@@ -44,9 +50,9 @@ export const currencyModels = {
       },
       current_rate: { type: 'float', label: 'Current Rate', compute: (r) => Number([...(r.rate_ids ?? [])].sort((a, b) => b.date.localeCompare(a.date))[0]?.rate) || 1 },
     },
-    defaults: () => ({ rate_ids: [] }),
+    defaults: () => ({ rounding: 0.01, rate_ids: [] }),
     kanban: { title: 'name', lines: ['symbol', 'current_rate'] },
-    list: ['name', 'symbol', 'current_rate'],
-    form: { title: 'name', groups: [['symbol'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
+    list: ['name', 'symbol', 'rounding', 'decimal_places', 'current_rate'],
+    form: { title: 'name', groups: [['symbol', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
   },
 };

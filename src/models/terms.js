@@ -1,5 +1,5 @@
 import { addDays, today } from './common.js';
-import { cents } from '../money.js';
+import { currencyUnits, roundCurrency } from '../money.js';
 
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
@@ -12,14 +12,15 @@ function lineDate(line, invoiceDate) {
 }
 
 /** Split an invoice total into dated installments according to a payment term. */
-export function installments(term, total, invoiceDate) {
+export function installments(term, total, invoiceDate, currency = null) {
   const lines = term.line_ids ?? [];
   if (!lines.length) throw new Error('Add at least one due term');
 
-  const signedTotal = cents(total);
+  const step = Number(currency?.rounding ?? 0.01);
+  const signedTotal = currencyUnits(total, currency);
   const sign = Math.sign(signedTotal);
   const totalCents = Math.abs(signedTotal);
-  const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, cents(line.value)) : 0);
+  const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0);
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) throw new Error('Fixed amounts exceed the total');
 
@@ -37,7 +38,7 @@ export function installments(term, total, invoiceDate) {
 
   return lines.map((line, index) => ({
     date: lineDate(line, invoiceDate),
-    amount: amounts[index] / 100,
+    amount: Number((amounts[index] * step).toPrecision(15)),
   }));
 }
 
@@ -48,10 +49,10 @@ export function dueDate(term, invoiceDate) {
 }
 
 /** Return the early-payment discount when payment falls within its configured window. */
-export function earlyDiscount(term, total, invoiceDate, paymentDate) {
+export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = null) {
   const discountDate = addDays(invoiceDate, Number(term.discount_days) || 0);
   if (!term.early_discount || !paymentDate || paymentDate > discountDate) return 0;
-  return Math.round(cents(total) * (Number(term.discount_percent) || 0) / 100) / 100;
+  return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });

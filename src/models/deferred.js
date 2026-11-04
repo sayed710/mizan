@@ -3,14 +3,14 @@ import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
-import { allocateCents, round } from '../money.js';
+import { allocateCents, companyCurrencyRecord, round } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
 const DAY = 86400000;
 
 /** Allocate company currency over inclusive monthly periods. */
-function datedBoard(amount, start, end, method = 'days') {
+function datedBoard(amount, start, end, method = 'days', currency = null) {
   const valid = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
   if (!valid(start) || !valid(end) || start > end) throw new Error('Set valid deferred start and end dates');
   const rows = [];
@@ -24,7 +24,7 @@ function datedBoard(amount, start, end, method = 'days') {
     rows.push({ date: last, weight: method === 'full_months' ? 1 : method === 'months' ? days / monthDays : days });
     cursor = new Date(Date.parse(through) + DAY).toISOString().slice(0, 10);
   }
-  const amounts = allocateCents(amount, rows.map((row) => row.weight));
+  const amounts = allocateCents(amount, rows.map((row) => row.weight), currency);
   return rows.map((row, index) => ({ date: row.date, amount: amounts[index], posted: false, move_id: null }));
 }
 
@@ -38,7 +38,7 @@ export function createInvoiceDeferrals(db, move) {
     const entryLine = (move.line_ids ?? []).find((l) => (l.invoice_sources ?? []).some((s) => s.index === index));
     const source = entryLine?.invoice_sources.find((s) => s.index === index);
     if (!source?.original_account_id || !(source.amount > 0)) throw new Error('Deferred line needs a positive posted amount and recognition account');
-    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, company?.deferred_amount_computation_method);
+    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, company?.deferred_amount_computation_method, companyCurrencyRecord(db, move.company_id));
     const created = create(next, 'account.deferral', { name: `${move.name} ${index + 1}`, kind: move.move_type === 'out_invoice' ? 'revenue' : 'expense', amount: source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line: index, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
     next = created.db;
     if (company?.deferred_generation_method === 'on_validation') next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
@@ -64,9 +64,9 @@ export function reverseInvoiceDeferrals(db, source) {
 }
 
 /** One line per month, dated at month end from `startDate`'s month. */
-export function deferralBoard(amount, startDate, months) {
+export function deferralBoard(amount, startDate, months, currency = null) {
   const [y, m] = startDate.split('-').map(Number);
-  const shares = allocateCents(amount, Array(months).fill(1));
+  const shares = allocateCents(amount, Array(months).fill(1), currency);
   return Array.from({ length: months }, (_, i) => ({
     date: monthEnd(y + Math.floor((m - 1 + i) / 12), ((m - 1 + i) % 12) + 1),
     amount: shares[i],
@@ -80,7 +80,7 @@ export function computeBoard(db, d) {
   if (!d.start_date) throw new Error('Set a start date');
   const company = read(db, 'res.company', d.company_id ?? 1);
   const end = d.end_date || deferralBoard(d.amount, d.start_date, Number(d.months)).at(-1).date;
-  const board = datedBoard(d.amount, d.start_date, end, company?.deferred_amount_computation_method);
+  const board = datedBoard(d.amount, d.start_date, end, company?.deferred_amount_computation_method, companyCurrencyRecord(db, d.company_id));
   return write(db, 'account.deferral', d.id, { board, state: 'running' });
 }
 

@@ -5,6 +5,7 @@ import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
+import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money.js';
 import { parseAmount } from './models/common.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
@@ -14,17 +15,20 @@ export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
 let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+let activeCurrency = null;
 /** Switch the company currency used by every amount on screen. */
-export function setCurrency(code) {
-  const c = CURRENCIES.includes(code) ? code : 'USD';
-  if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
+export function setCurrency(code, currency = null) {
+  activeCurrency = currency;
+  try { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }); }
 }
 const docFmts = new Map();
 // In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
 // number and the run does not reorder the surrounding right-to-left text.
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
-export const money = (n, code = null) => {
+export const money = (n, code = null, currency = null) => {
+  if (currency) return ltr(formatCurrency(n, currency, code || moneyFmt.resolvedOptions().currency));
+  if (!code && activeCurrency) return ltr(formatCurrency(n, activeCurrency));
   const fmt = code && code !== moneyFmt.resolvedOptions().currency
     ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
     : moneyFmt;
@@ -43,8 +47,12 @@ export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(fi
 export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
-    case 'monetary': return money(value, currencyCode(db, rec));
-    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    case 'monetary': {
+      const context = { ...rec, company_id: rec?.company_id ?? db?.settings?.current_company_id ?? 1 };
+      const currency = field.currency === 'company' ? companyCurrencyRecord(db, context.company_id) : documentCurrency(db, context);
+      return money(value, currency?.name ?? currencyCode(db, rec), currency);
+    }
+    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: field.digits == null ? 2 : 0, maximumFractionDigits: field.digits ?? 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
@@ -197,11 +205,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
               {cols.map(([k, f]) => (
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
-                    ? display(db, f, l[k], record)
-                    : <FieldInput db={db} field={f} value={l[k]} record={l} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    ? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id })
+                    : <FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
-              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
+              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record), documentCurrency(db, record))}</td>}
               {!readonly && (
                 <td>
                   <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>

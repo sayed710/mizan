@@ -8,7 +8,7 @@ import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { cashRound, round as round2 } from '../money.js';
+import { cashRound, companyCurrencyRecord, documentCurrency, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
 import { t } from '../i18n.js';
@@ -31,19 +31,19 @@ export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_typ
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
 const total = (r, db) => {
   if (!isInvoice(r)) return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
-  const base = amounts(r.invoice_line_ids).total;
+  const base = !db && r.amount_total != null ? r.amount_total : amounts(r.invoice_line_ids, documentCurrency(db, r)).total;
   if (r.invoice_cash_rounding_id && r.state === 'posted') {
     const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
     if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
   }
   const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
-  if (rounding) return cashRound(base, rounding.rounding, rounding.rounding_method);
+  if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), documentCurrency(db, r));
   return base;
 };
-const residual = (r, db) => (isInvoice(r) ? Math.max(0, Math.round((total(r, db) - (Number(r.amount_paid) || 0)) * 100) / 100) : 0);
-const paymentState = (r) => {
+const residual = (r, db) => (isInvoice(r) ? Math.max(0, db ? roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), documentCurrency(db, r)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)))) : 0);
+const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
-  if (residual(r) === 0) return 'paid';
+  if (residual(r, db) === 0) return 'paid';
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -57,15 +57,16 @@ const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatM
  * entries that pay it stay posted, so the books and the payment status cannot drift apart.
  */
 export function paymentGuard(db, before, after, ctx) {
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, after));
   if (!before && (after.fx_payment_move_id || after.fx_invoice_id)) return ctx ? fxProvenanceError(db, after) : 'Exchange provenance cannot be supplied on creation';
   if (after.correction_of_id && after.state !== 'cancel') {
     const note = read(db, 'account.move', after.correction_of_id);
     if (!note || note.state !== 'posted' || !isRefund(note) || after.move_type !== (note.move_type === 'out_refund' ? 'out_invoice' : 'in_invoice')
       || after.partner_id !== note.partner_id || after.company_id !== note.company_id || (after.currency_id ?? null) !== (note.currency_id ?? null)) return 'A correction must match its posted credit note';
     if ((db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.correction_of_id === note.id && m.state !== 'cancel')) return 'This credit note already has a correction';
-    if (after.state === 'posted' && round2(total(after)) !== round2(total(note))) return 'A correction must restore the full credit note amount';
+    if (after.state === 'posted' && docRound(total(after, db)) !== docRound(total(note, db))) return 'A correction must restore the full credit note amount';
   }
-  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after)) return 'The total must be positive; use a credit note or refund instead';
+  if (after.state === 'posted' && isInvoice(after) && !validInvoiceTotal(after, db)) return 'The total must be positive; use a credit note or refund instead';
   // Any sales invoice can overcommit an order with advances, not just an advance itself.
   if (after.state === 'posted' && before?.state !== 'posted' && after.move_type === 'out_invoice' && after.sale_id
     && [after, ...(db.records['account.move'] ?? []).filter((m) => m.sale_id === after.sale_id && m.state === 'posted')]
@@ -100,7 +101,7 @@ export function paymentGuard(db, before, after, ctx) {
   const unchanged = before && JSON.stringify(before.payments ?? []) === JSON.stringify(after.payments ?? []) && Number(before.amount_paid || 0) === Number(after.amount_paid || 0);
   // Older data is left alone while its payments are untouched, unless the total moved below what was paid.
   if (unchanged) {
-    const reduced = isInvoice(after) && round2(total(after)) !== round2(total(before)) && (Number(after.amount_paid) || 0) > round2(total(after)) + 0.005;
+    const reduced = isInvoice(after) && docRound(total(after, db)) !== docRound(total(before, db)) && docRound(Number(after.amount_paid) || 0) > docRound(total(after, db));
     return reduced ? 'The paid amount cannot exceed the invoice total' : null;
   }
   const payments = after.payments ?? [];
@@ -114,8 +115,8 @@ export function paymentGuard(db, before, after, ctx) {
   const activeSum = (list) => list.filter((p) => !p?.reversed).reduce((s, p) => s + (Number(p?.amount) || 0), 0);
   const paymentsSum = activeSum(payments);
   const prevPaymentsSum = activeSum(prevPayments);
-  if (round2(paymentsSum - prevPaymentsSum) !== round2(paid - prevPaid)) return 'The change in paid amount must equal the change in recorded payments';
-  if (isInvoice(after) && paid > 0 && paid > round2(total(after)) + 0.005) return 'The paid amount cannot exceed the invoice total';
+  if (docRound(paymentsSum - prevPaymentsSum) !== docRound(paid - prevPaid)) return 'The change in paid amount must equal the change in recorded payments';
+  if (isInvoice(after) && paid > 0 && docRound(paid) > docRound(total(after, db))) return 'The paid amount cannot exceed the invoice total';
   // A recorded payment keeps pointing at its posted settlement entry (so that entry stays protected); new ones must name one.
   const old = before?.payments ?? [];
   if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
@@ -150,7 +151,7 @@ export function paymentGuard(db, before, after, ctx) {
   return null;
 }
 
-const validInvoiceTotal = (r) => total(r) > 0 || (total(r) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
+const validInvoiceTotal = (r, db) => total(r, db) > 0 || (total(r, db) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
 
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
@@ -164,7 +165,7 @@ export function postMove(db, id) {
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
   if (!isInvoice(r)) {
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
-    if (!isBalanced(r.line_ids)) throw new Error('Journal entry is not balanced: total debit must equal total credit');
+    if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     const line_ids = (r.line_ids ?? []).map((line) => {
       const type = read(db, 'account.account', line.account_id)?.account_type;
       const eligible = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(type);
@@ -178,7 +179,7 @@ export function postMove(db, id) {
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
-  if (!validInvoiceTotal(r)) throw new Error('The total must be positive; use a credit note or refund instead');
+  if (!validInvoiceTotal(r, db)) throw new Error('The total must be positive; use a credit note or refund instead');
   if (r.sale_id) {
     const sale = read(db, 'sale.order', r.sale_id);
     if (sale && (sale.company_id ?? 1) !== (r.company_id ?? 1)) throw new Error('Invoice and sales order must belong to the same company');
@@ -246,9 +247,10 @@ function creditCheck(db, note) {
   if (invoice.partner_id !== note.partner_id) throw new Error(`The partner must be the one of ${invoice.name}`);
   if ((invoice.currency_id ?? null) !== (note.currency_id ?? null)) throw new Error(`The currency must be the one of ${invoice.name}`);
   if ((invoice.company_id ?? 1) !== (note.company_id ?? 1)) throw new Error('The credit note must belong to the invoice company');
-  if (!(total(note) > 0)) throw new Error('A credit note must have a positive total');
-  const credited = creditNotesOf(db, invoice.id, note.id).filter((m) => m.state === 'posted').reduce((s, m) => s + total(m), 0);
-  if (round2(credited + total(note)) > round2(total(invoice))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(round2(total(invoice) - credited))} is left to credit`);
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
+  if (!(total(note, db) > 0)) throw new Error('A credit note must have a positive total');
+  const credited = creditNotesOf(db, invoice.id, note.id).filter((m) => m.state === 'posted').reduce((s, m) => s + total(m, db), 0);
+  if (docRound(credited + total(note, db)) > docRound(total(invoice, db))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(docRound(total(invoice, db) - credited))} is left to credit`);
 }
 
 /**
@@ -258,18 +260,18 @@ function creditCheck(db, note) {
 function offsetCreditNote(db, noteId) {
   const note = read(db, 'account.move', noteId);
   const invoice = read(db, 'account.move', note.reversed_entry_id);
-  const value = Math.min(total(note), residual(invoice));
+  const value = Math.min(total(note, db), residual(invoice, db));
   if (!(value > 0)) return db;
   const date = note.invoice_date ?? today();
   const invoicePortion = settlementCompanyAmount(db, invoice, value);
   const notePortion = settlementCompanyAmount(db, note, value);
   const settle = (next, r, other) => write(next, 'account.move', r.id, {
-    amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id, cash_basis_move_id: null }],
+    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id, cash_basis_move_id: null }],
   });
   let next = settle(settle(db, invoice, note), note, invoice);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
-  const gap = round2(invoicePortion - notePortion);
+  const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
   if (gap) {
     const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
@@ -319,7 +321,10 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
-  const value = Math.min(amount, residual(r));
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
+  amount = docRound(amount);
+  const value = Math.min(amount, residual(r, db));
   if (!(value > 0)) return db;
   const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
   if (paymentId && (!payRec || payRec.partner_id !== r.partner_id || payRec.payment_type !== (isInbound(r) ? 'inbound' : 'outbound') || payRec.partner_type !== (isPurchase(r) ? 'supplier' : 'customer'))) {
@@ -329,7 +334,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const statement = statementLineId ? read(db, 'account.bank.statement.line', statementLineId) : null;
   if (statementLineId && (!statement || statement.state !== 'to_check' || (statement.amount > 0) !== isInbound(r)
     || (statement.date ?? today()) !== date || (statement.company_id ?? 1) !== (r.company_id ?? 1)
-    || toCompany(db, r.currency_id, amount, date, r.company_id) > round2(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
+    || toCompany(db, r.currency_id, amount, date, r.company_id) > companyRound(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
     throw new Error('Invalid bank statement settlement');
   }
   if (liquidityAccountId && (!statement?.bank_move_id || directBank)) throw new Error('A bank suspense settlement requires a posted statement entry');
@@ -339,7 +344,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
     if (recipientBankId && !r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
   }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
-  const excess = Math.round((amount - value) * 100) / 100;
+  const excess = docRound(amount - value);
   const sale = isInbound(r);
   const counterpartCode = invoiceCounterpartAccount(db, r);
   const via = paymentJournal(db, payJournal);
@@ -349,28 +354,30 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   const bank = toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
-  const final = value >= residual(r);
+  const final = value >= residual(r, db);
   const open = settlementCompanyAmount(db, r, value);
-  const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
+  const diff = companyRound(sale ? bank - open : open - bank);
   const fx = exchangeLines(db, r.company_id, diff);
   // The bank line converts what was really received once; the credit is whatever remains after the settled part.
-  const extra = excess > 0 ? Math.round((toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) * 100) / 100 : 0;
-  const credit = extra ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit' } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit' }] : [];
+  const extra = excess > 0 ? companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) : 0;
+  const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
+  const foreignAmount = (value) => foreign ? { currency_id: r.currency_id, amount_currency: docRound(value) } : {};
+  const credit = excess > 0 ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(-excess) } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(excess) }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: via.code, journal_id: journal?.id, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
     lines: sale
-      ? [{ account: liquidity, debit: bank + extra, partner_id: r.partner_id }, { account: counterpartCode, credit: open, partner_id: r.partner_id }, ...credit, ...fx]
-      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id }, ...fx],
+      ? [{ account: liquidity, debit: bank + extra, partner_id: r.partner_id, ...foreignAmount(value + excess) }, { account: counterpartCode, credit: open, partner_id: r.partner_id, ...foreignAmount(-value) }, ...credit, ...fx]
+      : [{ account: counterpartCode, debit: open, partner_id: r.partner_id, ...foreignAmount(value) }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id, ...foreignAmount(-value - excess) }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: journal?.id ?? journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: Math.round((value + excess) * 100) / 100, unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: journal?.id ?? journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
-  const release = releaseCashBasis(withPayment, r, value / total(r), date, { final });
+  const release = releaseCashBasis(withPayment, r, value / total(r, db), date, { final });
   const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, cash_basis_move_id: release.id }];
-  const next = write(release.db, 'account.move', id, { amount_paid: round2((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
+  const next = write(release.db, 'account.move', id, { amount_paid: docRound((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
 }
@@ -378,24 +385,27 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
 /** Settle a document with an explicitly chosen company-currency write-off. */
 export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
-  if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice)) throw new Error('Write-off exceeds the remaining invoice');
-  if (!Number.isFinite(Number(companyAmount)) || !(companyAmount > 0) || toCompany(db, invoice.currency_id, amount, date, invoice.company_id) !== round2(companyAmount)) throw new Error('Invalid write-off amount in company currency');
+  if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice, db)) throw new Error('Write-off exceeds the remaining invoice');
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
+  amount = docRound(amount);
+  if (!Number.isFinite(Number(companyAmount)) || !(companyAmount > 0) || toCompany(db, invoice.currency_id, amount, date, invoice.company_id) !== companyRound(companyAmount)) throw new Error('Invalid write-off amount in company currency');
   const account = read(db, 'account.account', writeoffAccount);
   if (!account || (account.company_id && account.company_id !== (invoice.company_id ?? 1))) throw new Error('Write-off account belongs to another company or does not exist');
   if (!String(label ?? '').trim()) throw new Error('Set a write-off label');
   const incoming = isInbound(invoice);
   const counterpart = invoiceCounterpartAccount(db, invoice);
   const open = settlementCompanyAmount(db, invoice, amount);
-  const diff = round2(incoming ? companyAmount - open : open - companyAmount);
+  const diff = companyRound(incoming ? companyAmount - open : open - companyAmount);
   const fx = exchangeLines(db, invoice.company_id, diff);
   const partner_id = invoice.partner_id;
   const booked = postEntry(db, { journal: 'BNK1', journal_id: journal, company: invoice.company_id ?? 1, date, ref: label,
     lines: incoming
       ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
       : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
-  const release = releaseCashBasis(booked.db, invoice, amount / total(invoice), date, { final: amount >= residual(invoice) });
+  const release = releaseCashBasis(booked.db, invoice, amount / total(invoice, db), date, { final: amount >= residual(invoice, db) });
   const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id }];
-  return { db: write(release.db, 'account.move', invoiceId, { amount_paid: round2((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
+  return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
 /** Tax already released for an invoice, per tax account code. */
@@ -427,7 +437,9 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   // A refund carries the tax the other way round: its release reverses the invoice's.
   const refund = isRefund(r);
   const released = final ? releasedTaxes(db, r) : null;
-  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id))
+  const companyCurrency = companyCurrencyRecord(db, r.company_id);
+  const companyRound = (n) => roundCurrency(n, companyCurrency);
+  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency)
     .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
@@ -437,7 +449,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
     const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * legacyShare;
-    return { ...g, amount: round2(final ? g.amount - prior : g.amount * Math.abs(share)), base: round2(final ? g.base - priorBase : g.base * share) };
+    return { ...g, amount: companyRound(final ? g.amount - prior : g.amount * Math.abs(share)), base: companyRound(final ? g.base - priorBase : g.base * share) };
   })
     .filter((g) => g.amount || g.base);
   if (!due.length) return { db, id: null };
@@ -456,8 +468,8 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
 /** Draft credit note (customer) or refund (vendor) reversing a posted invoice or bill, while some of it is left to credit. */
 export function creditNote(db, r) {
   const purchase = isPurchase(r);
-  const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m), 0);
-  if (round2(credited) >= round2(total(r))) throw new Error(`${r.name} is already fully credited`);
+  const credited = creditNotesOf(db, r.id).reduce((s, m) => s + total(m, db), 0);
+  if (roundCurrency(credited, documentCurrency(db, r)) >= roundCurrency(total(r, db), documentCurrency(db, r))) throw new Error(`${r.name} is already fully credited`);
   const { db: next, id } = create(db, 'account.move', {
     move_type: purchase ? 'in_refund' : 'out_refund', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: today(), reversed_entry_id: r.id,
     sale_id: r.sale_id ?? null, purchase_id: r.purchase_id ?? null, company_id: r.company_id,
@@ -483,18 +495,20 @@ export function correctCreditNote(db, note) {
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
 export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
-  const base = term?.discount_tax_computation === 'excluded' ? amounts(r.invoice_line_ids).untaxed : total(r);
-  return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, base, r.invoice_date, date) : 0;
+  const currency = documentCurrency(db, r);
+  const base = term?.discount_tax_computation === 'excluded' ? amounts(r.invoice_line_ids, currency).untaxed : total(r, db);
+  return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, base, r.invoice_date, date, currency) : 0;
 }
 
 /** Reverse the discounted share of invoice-basis taxes using their posted accounts and bases. */
-function discountTaxLines(invoice, term, discount) {
+function discountTaxLines(db, invoice, term, discount) {
   if (term?.discount_tax_computation !== 'included') return [];
-  const share = discount / (total(invoice) || 1);
+  const share = discount / (total(invoice, db) || 1);
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
   return (invoice.line_ids ?? []).filter((line) => line.tax_name && !line.tax_zero).map((line) => ({
     account_id: line.account_id, partner_id: invoice.partner_id, name: line.tax_name,
-    debit: round2((Number(line.credit) || 0) * share), credit: round2((Number(line.debit) || 0) * share),
-    tax_name: line.tax_name, tax_base: round2((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
+    tax_name: line.tax_name, tax_base: companyRound((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
     ...(line.tax_side ? { tax_side: line.tax_side } : {}),
   }));
 }
@@ -502,18 +516,21 @@ function discountTaxLines(invoice, term, discount) {
 /** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
 export function payWithDiscount(db, id, amount, date = today()) {
   const r = read(db, 'account.move', id);
-  const due = residual(r);
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
+  amount = docRound(amount);
+  const due = residual(r, db);
   const paid = payMove(db, id, amount, date);
-  const gap = Math.round((due - amount) * 100) / 100;
+  const gap = docRound(due - amount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
-  if (!(gap > 0) || discount < gap - 0.005) return paid;
+  if (!(gap > 0) || discount < gap) return paid;
   const sale = isInbound(r);
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const company = read(db, 'res.company', r.company_id ?? 1);
   const discountAccount = sale ? company?.expense_early_payment_discount_account_id ?? '690200' : company?.income_early_payment_discount_account_id ?? '450200';
   const counterpart = invoiceCounterpartAccount(db, r);
-  const taxes = discountTaxLines(r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
-  const taxValue = round2(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
+  const taxes = discountTaxLines(db, r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
+  const taxValue = companyRound(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const { db: booked, id: discountMove } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`, company: company?.id ?? null,
     lines: sale
@@ -524,11 +541,11 @@ export function payWithDiscount(db, id, amount, date = today()) {
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
   const paymentMove = after.payments.at(-1).move_id;
   const payments = [...(after.payments ?? []), { date, amount: discount, move_id: discountMove, payment_move_id: paymentMove, company_amount: value, cash_basis_move_id: null, discount: true }];
-  return postNote(write(booked, 'account.move', id, { amount_paid: round2((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
+  return postNote(write(booked, 'account.move', id, { amount_paid: docRound((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
 function registerPayment(db, r) {
-  const due = Math.round((residual(r) - discountAvailable(db, r)) * 100) / 100;
+  const due = roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r));
   const amount = promptedAmount(prompt(`Payment amount (due ${money(due)})`, String(due)));
   if (amount == null) return { db };
   return { db: payWithDiscount(db, r.id, amount) };
@@ -552,8 +569,8 @@ const lineItem = {
     account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
     partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
     name: { type: 'char', label: 'Label' },
-    debit: { type: 'monetary', label: 'Debit' },
-    credit: { type: 'monetary', label: 'Credit' },
+    debit: { type: 'monetary', label: 'Debit', currency: 'company' },
+    credit: { type: 'monetary', label: 'Credit', currency: 'company' },
     currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
     amount_currency: { type: 'monetary', label: 'Amount in Currency' },
     date_maturity: { type: 'date', label: 'Due Date' },
@@ -563,7 +580,7 @@ const lineItem = {
     } },
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
     tax_name: { type: 'char', label: 'Tax', hidden: true },
-    tax_base: { type: 'monetary', label: 'Tax Base', hidden: true },
+    tax_base: { type: 'monetary', label: 'Tax Base', currency: 'company', hidden: true },
     tax_base_signed: { type: 'boolean', label: 'Tax Base', hidden: true },
     tax_zero: { type: 'boolean', label: 'Tax', hidden: true },
     tax_side: { type: 'selection', label: 'Tax', hidden: true, options: [['sale', 'Sales'], ['purchase', 'Purchases']] },
@@ -723,12 +740,12 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
-      amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r) => amounts(r.invoice_line_ids).untaxed },
-      amount_tax: { type: 'monetary', label: 'Taxes', compute: (r) => amounts(r.invoice_line_ids).tax },
+      amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).untaxed },
+      amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).tax },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },

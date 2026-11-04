@@ -1,6 +1,6 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
 import { read, search } from '../orm.js';
-import { round } from '../money.js';
+import { roundCurrency } from '../money.js';
 
 /** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
 export const TRANSITION = { sale: '251100', purchase: '131100' };
@@ -44,21 +44,25 @@ export function productTax(db, product, side, fpId) {
 export const taxLabel = (l) => l.tax_name || `${Number(l.tax) || 0}%`;
 
 /** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
-export function taxGroups(lines, accountOf, rate = 1) {
+export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null) {
   const by = new Map();
   for (const l of lines ?? []) {
     const account_id = accountOf(l);
     const tax_name = taxLabel(l);
     const key = `${account_id}|${tax_name}`;
-    const g = by.get(key) ?? { account_id, tax_name, amount: 0, base: 0, document_amount: 0 };
-    by.set(key, { ...g, amount: g.amount + lineTaxOf(l) / rate, base: g.base + lineUntaxed(l) / rate, document_amount: g.document_amount + lineTaxOf(l) });
+    const g = by.get(key) ?? { account_id, tax_name, document_base: 0, document_amount: 0 };
+    by.set(key, { ...g, document_base: g.document_base + lineUntaxed(l), document_amount: g.document_amount + lineTaxOf(l) });
   }
-  return [...by.values()].map((g) => ({ ...g, amount: round(g.amount), base: round(g.base), document_amount: round(g.document_amount) }));
+  return [...by.values()].map(({ document_base, document_amount, ...group }) => {
+    const tax = roundCurrency(document_amount, documentCurrency);
+    const base = roundCurrency(document_base, documentCurrency);
+    return { ...group, amount: roundCurrency(tax / rate, companyCurrency), base: roundCurrency(base / rate, companyCurrency), document_amount: tax };
+  });
 }
 
 /** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
-export const cashBasisTaxes = (lines, rate = 1) =>
-  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis), (l) => l.tax_account_id, rate).filter((g) => g.amount || g.base);
+export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null) =>
+  taxGroups((lines ?? []).filter((l) => l.tax_cash_basis), (l) => l.tax_account_id, rate, documentCurrency, companyCurrency).filter((g) => g.amount || g.base);
 
 const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (Number(l.discount) || 0) / 100);
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
