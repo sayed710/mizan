@@ -612,15 +612,16 @@ MIGRATIONS.push({ version: 27, name: 'Accounting settings (three-way matching an
 } });
 
 function migrateCashBasisOrigins(db) {
-  const moves = db.records['account.move'] ?? [];
-  const invoices = moves.filter((move) => ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type));
-  let next = db;
-  for (const move of moves) {
-    if (move.move_type !== 'entry' || move.cash_basis_origin_move_id != null || !move.ref?.startsWith('Cash basis taxes ')) continue;
-    const candidates = invoices.filter((invoice) => (invoice.company_id ?? 1) === (move.company_id ?? 1) && move.ref === `Cash basis taxes ${invoice.name}`);
-    if (candidates.length === 1) {
-      next = { ...next, records: { ...next.records, 'account.move': next.records['account.move'].map((entry) => entry.id === move.id ? { ...entry, cash_basis_origin_move_id: candidates[0].id } : entry) } };
-    } else {
+  // Each release is linked through the invoice payment that recorded it; unlinked releases are flagged for review.
+  const origins = new Map();
+  for (const invoice of db.records['account.move'] ?? []) {
+    for (const payment of invoice.payments ?? []) if (payment.cash_basis_move_id) origins.set(payment.cash_basis_move_id, invoice.id);
+  }
+  let next = { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).map((move) => (
+    move.cash_basis_origin_move_id == null && origins.has(move.id) ? { ...move, cash_basis_origin_move_id: origins.get(move.id) } : move
+  )) } };
+  for (const move of next.records['account.move']) {
+    if (move.move_type === 'entry' && move.cash_basis_origin_move_id == null && move.ref?.startsWith('Cash basis taxes ')) {
       next = postNote(next, 'account.move', move.id, 'Cash-basis origin invoice could not be determined; review this entry.');
     }
   }
