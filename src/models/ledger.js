@@ -1,8 +1,8 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
-import { amounts, nextName, subtotal, today, addDays } from './common.js';
+import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, isSectionOrNote, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
+import { TRANSITION, computeLineTaxes, isSectionOrNote, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
@@ -76,7 +76,7 @@ export function invoiceCounterpartAccount(db, invoice) {
 }
 
 /** Invoice base groups, including the source lines used to allocate a posted group. */
-export function invoiceBaseGroups(db, move) {
+export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const base = accountId(db, sale ? '400000' : '600000', move.company_id);
   const byAccount = new Map();
@@ -110,12 +110,15 @@ export function invoiceBaseGroups(db, move) {
     const account = deferred ? (company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] ?? accountId(db, sale ? '212000' : '132000', move.company_id)) : original;
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
-    const zero = !lineTaxOf(l) && !l.tax_cash_basis ? (l.tax_name || taxLabel(l)) : '';
-    const tags = [...(l.tax_tag_ids ?? [])].sort((a, b) => a - b);
-    const key = `${account}:${zero}:${tags.join(',')}:${!!l.tax_cash_basis}`;
-    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis: !!l.tax_cash_basis, amount: 0, lines: [] };
-    group.amount += subtotal(l);
-    group.lines.push({ index, amount: subtotal(l), ...(deferred ? { original_account_id: original } : {}) });
+    const docCurrency = documentCurrency(db, move);
+    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
+    const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
+    const zero = !computed.tax && !cashBasis ? (l.tax_name || taxLabel(l)) : '';
+    const tags = [...new Set([...(l.tax_tag_ids ?? []), ...computed.taxes.flatMap((t) => t.tax_tag_ids ?? [])])].sort((a, b) => a - b);
+    const key = `${account}:${zero}:${tags.join(',')}:${cashBasis}`;
+    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis, amount: 0, lines: [] };
+    group.amount += computed.untaxed;
+    group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
     byAccount.set(key, group);
   }
   return [...byAccount.values()];
@@ -154,9 +157,10 @@ export function invoiceLines(db, move) {
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
+  const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
+  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
   const mixedDiscount = discountFactor !== 1;
@@ -173,7 +177,7 @@ export function invoiceLines(db, move) {
     }
     return taxAcc;
   };
-  let taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate, docCurrency, ownCurrency);
+  let taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate, docCurrency, ownCurrency, { roundingMethod });
   if (mixedDiscount) {
     taxes = taxes.map((g) => {
       const docBase = docRound(g.base * rate * discountFactor);
@@ -189,7 +193,7 @@ export function invoiceLines(db, move) {
 
   const rawTotalDoc = mixedDiscount
     ? docRound(bases.reduce((s, [, , a]) => s + a, 0) + taxes.reduce((s, g) => s + g.document_amount, 0))
-    : amounts(move.invoice_line_ids, docCurrency).total;
+    : amounts(move.invoice_line_ids, docCurrency, { roundingMethod }).total;
   const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
   const diffDoc = docRound(totalDoc - rawTotalDoc);
   const total = companyRound(totalDoc / rate);

@@ -2,7 +2,7 @@
 import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, today, total } from './common.js';
 import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
@@ -27,6 +27,41 @@ export function creditWarning(db, partnerId, amount, document = {}) {
   const companyId = document.company_id ?? 1;
   const exposure = roundCurrency(receivableOf(db, partnerId, companyId) + toCompany(db, document.currency_id, amount, document.invoice_date ?? document.date_order ?? document.date, companyId), companyCurrencyRecord(db, companyId));
   return exposure > limit ? `${p.name} would exceed the credit limit (${exposure} > ${limit})` : '';
+}
+
+/**
+ * Non-blocking warning when another vendor bill for the same vendor has the same reference,
+ * or (when no reference is set) the same amount and bill date.
+ */
+export function duplicateBillWarning(db, bill) {
+  if (!bill || bill.move_type !== 'in_invoice' || bill.state === 'cancel' || !bill.partner_id || !db) return '';
+  const companyId = bill.company_id ?? 1;
+  const ref = String(bill.ref ?? '').trim();
+  const docCurr = documentCurrency(db, bill);
+  const billTotal = roundCurrency(total(bill, db), docCurr);
+  const candidates = (db.records?.['account.move'] ?? []).filter((m) =>
+    m.id !== bill.id
+    && m.active !== false
+    && m.move_type === 'in_invoice'
+    && m.state !== 'cancel'
+    && (m.company_id ?? 1) === companyId
+    && m.partner_id === bill.partner_id
+  );
+  const dups = ref
+    ? candidates.filter((m) => String(m.ref ?? '').trim().toLowerCase() === ref.toLowerCase())
+    : candidates.filter((m) => {
+        if (!bill.invoice_date || m.invoice_date !== bill.invoice_date) return false;
+        if (!(billTotal > 0)) return false;
+        if ((m.currency_id ?? null) !== (bill.currency_id ?? null)) return false;
+        const mTotal = roundCurrency(total(m, db), documentCurrency(db, m));
+        return mTotal === billTotal;
+      });
+  if (!dups.length) return '';
+  const vendor = read(db, 'res.partner', bill.partner_id)?.name ?? 'this vendor';
+  const labels = dups.map((d) => (d.name && d.name !== '/' ? d.name : `#${d.id}`)).join(', ');
+  return ref
+    ? `Duplicate bill warning: ${vendor} already has bill ${labels} with reference ${ref}`
+    : `Duplicate bill warning: ${vendor} already has bill ${labels} on ${bill.invoice_date} for the same amount`;
 }
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];

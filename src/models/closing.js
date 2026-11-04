@@ -8,7 +8,7 @@ import { applicationActiveAt, settlementCompanyAllocations } from './settlement.
 import { companyViewDb } from '../companyView.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
-const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
+export const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
 const side = (amount) => ({ debit: Math.max(0, round(amount)), credit: Math.max(0, round(-amount)) });
 
 function ensureAccount(db, code, name, type, company = null) {

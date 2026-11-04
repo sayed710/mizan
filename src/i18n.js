@@ -1233,6 +1233,17 @@ const ar = {
   'Modify Depreciation': 'تعديل الإهلاك',
   'Reprint Check': 'إعادة طباعة الشيك',
   'Voided Checks': 'شيكات ملغاة',
+  'Affect Base of Subsequent Taxes': 'يؤثر على وعاء الضرائب اللاحقة',
+  'Base Affected by Previous Taxes': 'يتأثر الوعاء بالضرائب السابقة',
+  'Tax Sequence': 'تسلسل الضريبة',
+  'Tax Breakdown': 'تفصيل الضريبة',
+  'Reverse Automatically': 'عكس تلقائي',
+  'Reversal Journal': 'يومية العكس',
+  'Group of Taxes': 'مجموعة ضرائب',
+  'Child Taxes': 'الضرائب الفرعية',
+  'Tax Calculation Rounding Method': 'طريقة تقريب حساب الضريبة',
+  'Round per Line': 'تقريب لكل سطر',
+  'Round Globally': 'تقريب إجمالي',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

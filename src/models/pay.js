@@ -1,9 +1,10 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
-import { nextName, today } from './common.js';
+import { nextName, today, validDate } from './common.js';
 import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, settlementFxError } from './finance.js';
+import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { rateAt } from './currency.js';
 import { settlementCompanyAmount } from './settlement.js';
@@ -110,16 +111,75 @@ export function postPayment(db, p) {
   return write(settled, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: taxClosing ? 0 : left });
 }
 
-/** Post a linked mirror of an existing entry. */
-export function reverseEntry(db, source, date) {
-  if (!source || source.state !== 'posted' || date < (source.invoice_date ?? '')) throw new Error('A posted entry and valid reversal date are required');
-  if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) throw new Error('This entry has already been reversed');
-  const code = read(db, 'account.journal', source.journal_id)?.code ?? 'BNK1';
-  return create(db, 'account.move', {
-    move_type: 'entry', state: 'posted', journal_id: source.journal_id, invoice_date: date, ref: `Reversal of ${source.name}`, reversed_entry_id: source.id, partner_id: source.partner_id ?? null,
-    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`), company_id: source.company_id ?? 1,
-    line_ids: (source.line_ids ?? []).map((l) => ({ ...l, debit: l.credit, credit: l.debit, ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}), name: `Reversal: ${l.name ?? ''}`.trim() })),
+/** Post a linked mirror of an existing entry (optionally in a chosen journal/date, or reverse-and-create a new draft). */
+export function reverseEntry(db, source, dateOrOptions = today(), extraOptions = {}) {
+  const opts = typeof dateOrOptions === 'object' && dateOrOptions !== null && !Array.isArray(dateOrOptions)
+    ? dateOrOptions
+    : { ...(extraOptions ?? {}), ...(typeof dateOrOptions === 'string' ? { date: dateOrOptions } : {}) };
+  const date = opts.date ?? opts.invoice_date ?? today();
+  const sourceDate = source?.invoice_date ?? source?.date ?? '';
+  if (!source || source.state !== 'posted' || source.move_type !== 'entry' || !validDate(date) || date < sourceDate) {
+    throw new Error('A posted entry and valid reversal date are required');
+  }
+  if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) {
+    throw new Error('This entry has already been reversed');
+  }
+  const mode = opts.mode ?? (opts.reverse_and_create ? 'modify' : 'reverse');
+  if (!['reverse', 'modify'].includes(mode)) throw new Error('Choose a valid reversal mode');
+  const companyId = source.company_id ?? 1;
+  let targetJournalId = opts.journal_id ?? source.journal_id ?? null;
+  if (!targetJournalId && opts.journal) {
+    targetJournalId = typeof opts.journal === 'number' ? opts.journal : (journalId(db, opts.journal, companyId) ?? journalId(db, opts.journal));
+  }
+  const journalRec = targetJournalId ? read(db, 'account.journal', targetJournalId) : null;
+  if (targetJournalId && !journalRec) throw new Error('Selected journal does not exist');
+  if (journalRec?.company_id && journalRec.company_id !== companyId) throw new Error('Journal belongs to another company');
+  const code = journalRec?.code ?? 'BNK1';
+  const reason = String(opts.reason ?? '').trim();
+  const ref = reason ? `Reversal of ${source.name}, ${reason}` : `Reversal of ${source.name}`;
+  const created = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'posted',
+    journal_id: targetJournalId,
+    invoice_date: date,
+    date,
+    ref,
+    reversed_entry_id: source.id,
+    partner_id: source.partner_id ?? null,
+    name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
+    company_id: companyId,
+    line_ids: (source.line_ids ?? []).map((l) => ({
+      ...l,
+      debit: l.credit,
+      credit: l.debit,
+      ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}),
+      ...(l.tax_zero ? { tax_base: -(Number(l.tax_base) || 0) } : {}),
+      name: `Reversal: ${l.name ?? ''}`.trim(),
+    })),
   });
+  let next = postAnalytic(created.db, created.id);
+  const currentSource = read(next, 'account.move', source.id);
+  if (currentSource && !currentSource.inalterable_hash) {
+    next = write(next, 'account.move', source.id, { reversal_move_id: created.id });
+  }
+  next = postNote(next, 'account.move', source.id, `Reversed by ${read(next, 'account.move', created.id).name}`);
+  if (mode === 'modify') {
+    const draft = create(next, 'account.move', {
+      move_type: 'entry',
+      state: 'draft',
+      name: '/',
+      journal_id: targetJournalId,
+      invoice_date: date,
+      date,
+      ref: source.ref ?? '',
+      partner_id: source.partner_id ?? null,
+      company_id: companyId,
+      ...(source.currency_id ? { currency_id: source.currency_id } : {}),
+      line_ids: (source.line_ids ?? []).map((l) => ({ ...l })),
+    });
+    return { db: draft.db, id: draft.id, reversal_id: created.id, go: `#/accounting/entries/${draft.id}` };
+  }
+  return { db: next, id: created.id, go: `#/accounting/entries/${created.id}` };
 }
 
 /** Reverse the exact cash-basis entry released by a settlement. */
