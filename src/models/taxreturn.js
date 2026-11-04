@@ -1,17 +1,80 @@
 // Tax Returns and Return Types (Odoo 20 parity).
-import { create, read, updateSettings, write } from '../orm.js';
+import { create, read, search, updateSettings, write } from '../orm.js';
+import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { accountId } from './ledger.js';
 import { postPayment } from './pay.js';
 import { moveDate, postTaxReturnClosing, returnTaxLock, taxClosingMatchesReturn, taxReport, validateTaxReturnPeriod } from './finance.js';
+import { checkInalterability } from './hash_chain.js';
 
 /** The tax lock follows the latest submitted or paid return. */
 const syncTaxLockDate = (db, companyId, excludeId = null) => {
   const date = returnTaxLock(db, companyId, excludeId) || null;
-  return updateSettings(db, companyId === 1 ? { tax_lock_date: date } : {
+  return updateSettings(db, {
     tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: date },
   });
 };
+
+/** Determine if a return is an audit working file rather than a standard tax return. */
+export function isAuditReturn(r, db) {
+  if (!r) return false;
+  if (r.audit_status != null) return true;
+  if (r.type_id && db) {
+    const type = read(db, 'account.return.type', r.type_id);
+    if (type?.category === 'audit') return true;
+  }
+  return false;
+}
+
+/** Compute audit verification checks for an audit return. */
+export function computeAuditChecks(db, ret) {
+  const companyId = ret?.company_id ?? 1;
+  const from = ret?.date_from;
+  const to = ret?.date_to;
+  const checks = [];
+
+  // 1. Draft entries check
+  const drafts = search(db, 'account.move').filter(
+    (m) => m.state === 'draft'
+      && (!from || (m.invoice_date ?? m.date) >= from)
+      && (!to || (m.invoice_date ?? m.date) <= to)
+      && (!companyId || (m.company_id ?? 1) === companyId),
+  );
+  checks.push({
+    name: 'Draft Entries',
+    status: drafts.length === 0 ? 'passed' : 'warning',
+    message: drafts.length === 0 ? 'No draft entries in the period' : `${drafts.length} draft entries found`,
+  });
+
+  // 2. Balanced journal entries check
+  const postedMoves = search(db, 'account.move').filter(
+    (m) => m.state === 'posted'
+      && (!from || (m.invoice_date ?? m.date) >= from)
+      && (!to || (m.invoice_date ?? m.date) <= to)
+      && (!companyId || (m.company_id ?? 1) === companyId),
+  );
+  const unbalanced = postedMoves.filter((m) => {
+    const sumDebit = (m.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
+    const sumCredit = (m.line_ids ?? []).reduce((s, l) => s + (Number(l.credit) || 0), 0);
+    return round(sumDebit - sumCredit) !== 0;
+  });
+  checks.push({
+    name: 'Balanced Entries',
+    status: unbalanced.length === 0 ? 'passed' : 'failed',
+    message: unbalanced.length === 0 ? 'All journal entries are balanced' : `${unbalanced.length} unbalanced entries found`,
+  });
+
+  // 3. Inalterability hash chain check
+  const inalt = checkInalterability(db, { companyId });
+  const corrupted = inalt.filter((r) => r.status !== 'ok');
+  checks.push({
+    name: 'Data Inalterability',
+    status: corrupted.length === 0 ? 'passed' : 'failed',
+    message: corrupted.length === 0 ? 'All journal hash chains are valid' : `Hash chain issues in ${corrupted.map((c) => c.journal_name).join(', ')}`,
+  });
+
+  return checks;
+}
 
 /** Ensure a VAT return type exists for each company, matching its periodicity setting. */
 export function ensureReturnTypes(db) {
@@ -36,27 +99,43 @@ export function ensureReturnTypes(db) {
       if (Object.keys(updates).length > 0) {
         next = write(next, 'account.return.type', existing.id, updates);
       }
-      continue;
+    } else {
+      const made = create(next, 'account.return.type', {
+        name: 'VAT Return',
+        category: 'account_return',
+        states_workflow: 'generic_state_review_submit',
+        deadline_periodicity: periodicity,
+        deadline_start_date: startDate,
+        deadline_days_delay: 20,
+        auto_generate: true,
+        company_id: company.id,
+        tax_payable_account_id: accountId(next, '251000', company.id),
+        tax_receivable_account_id: accountId(next, '131000', company.id),
+        rounding_profit_account_id: accountId(next, '450000', company.id),
+        rounding_loss_account_id: accountId(next, '690000', company.id),
+        payment_partner_id: company.partner_id ?? 1,
+      });
+      next = made.db;
     }
-
-    const made = create(next, 'account.return.type', {
-      name: 'VAT Return',
-      category: 'account_return',
-      states_workflow: 'generic_state_review_submit',
-      deadline_periodicity: periodicity,
-      deadline_start_date: startDate,
-      deadline_days_delay: 20,
-      auto_generate: true,
-      company_id: company.id,
-      tax_payable_account_id: accountId(next, '251000', company.id),
-      tax_receivable_account_id: accountId(next, '131000', company.id),
-      rounding_profit_account_id: accountId(next, '450000', company.id),
-      rounding_loss_account_id: accountId(next, '690000', company.id),
-      payment_partner_id: company.partner_id ?? 1,
-    });
-    next = made.db;
   }
   return next;
+}
+
+/** Ensure an audit return type exists for the given company. */
+export function ensureAuditReturnType(db, companyId = 1) {
+  const currentTypes = db.records?.['account.return.type'] ?? [];
+  const existingAudit = currentTypes.find((t) => (t.company_id ?? 1) === companyId && t.category === 'audit');
+  if (existingAudit) return { db, typeId: existingAudit.id };
+  const made = create(db, 'account.return.type', {
+    name: 'Audit File',
+    category: 'audit',
+    states_workflow: 'generic_state_review_submit',
+    deadline_periodicity: 'year',
+    deadline_days_delay: 0,
+    auto_generate: false,
+    company_id: companyId,
+  });
+  return { db: made.db, typeId: made.id };
 }
 
 /** Calculate inclusive end date of a month (YYYY-MM-DD). */
@@ -156,7 +235,8 @@ export function generateReturns(db, typeId) {
   const created = [];
   for (const p of missing) {
 
-    const rep = taxReport(nextDb, { from: p.from, to: p.to, company_id: companyId });
+    const isAudit = type.category === 'audit';
+    const rep = isAudit ? { payable: 0 } : taxReport(nextDb, { from: p.from, to: p.to, company_id: companyId });
     const toPay = rep.payable;
     const deadline = addDays(p.to, type.deadline_days_delay ?? 0);
     const name = `${type.name} (${p.from} - ${p.to})`;
@@ -168,6 +248,7 @@ export function generateReturns(db, typeId) {
       date_to: p.to,
       company_id: companyId,
       state: 'new',
+      ...(isAudit ? { audit_status: 'ongoing' } : {}),
       date_deadline: deadline,
       date_lock: null,
       date_submission: null,
@@ -175,6 +256,7 @@ export function generateReturns(db, typeId) {
       closing_move_ids: [],
       is_completed: false,
       attachment_ids: [],
+      ...(isAudit ? { checks: computeAuditChecks(nextDb, { date_from: p.from, date_to: p.to, company_id: companyId }) } : {}),
     });
     nextDb = res.db;
     created.push(read(nextDb, 'account.return', res.id));
@@ -345,6 +427,19 @@ export function resetReturnToDraft(db, returnId) {
 }
 
 function returnGuard(db, before, after) {
+  const isAudit = isAuditReturn(after, db) || isAuditReturn(before, db);
+  if (isAudit) {
+    if (before?.audit_status === 'done' && after.audit_status === 'done') {
+      const LOCKED = ['type_id', 'date_from', 'date_to', 'company_id', 'name'];
+      if (LOCKED.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
+        return 'Done audit files cannot be modified';
+      }
+    }
+    if (after.audit_status && !['ongoing', 'paused', 'done'].includes(after.audit_status)) {
+      return 'Invalid audit status';
+    }
+    return null;
+  }
   if (before?.state === 'paid' && after.state !== 'paid') {
     return 'Paid returns cannot be reset to draft';
   }
@@ -480,6 +575,26 @@ export const taxReturnModels = {
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment', readonly: true },
       is_completed: { type: 'boolean', label: 'Completed', readonly: true },
       attachment_ids: { type: 'many2many', relation: 'documents.document', label: 'Attachments' },
+      audit_status: {
+        type: 'selection',
+        label: 'Audit Status',
+        tracking: true,
+        options: [
+          ['ongoing', 'Ongoing'],
+          ['paused', 'Paused'],
+          ['done', 'Done'],
+        ],
+      },
+      checks: {
+        type: 'one2many',
+        label: 'Checks',
+        fields: {
+          name: { type: 'char', label: 'Check' },
+          status: { type: 'selection', label: 'Status', options: [['passed', 'Passed'], ['failed', 'Failed'], ['warning', 'Warning'], ['pending', 'Pending']] },
+          message: { type: 'char', label: 'Details' },
+        },
+        newLine: () => ({ name: '', status: 'pending', message: '' }),
+      },
     },
     defaults: () => ({
       state: 'new',
@@ -487,20 +602,66 @@ export const taxReturnModels = {
       is_completed: false,
       closing_move_ids: [],
       attachment_ids: [],
+      checks: [],
     }),
+    createDefaults: (db, vals) => {
+      const companyId = vals?.company_id ?? 1;
+      const isAudit = vals?.audit_status || vals?.category === 'audit' || (vals?.type_id && read(db, 'account.return.type', vals.type_id)?.category === 'audit');
+      if (isAudit) {
+        let typeId = vals?.type_id;
+        if (!typeId) {
+          const auditType = (db.records?.['account.return.type'] ?? []).find(
+            (t) => (t.company_id ?? 1) === companyId && t.category === 'audit',
+          );
+          if (auditType) typeId = auditType.id;
+        }
+        return {
+          audit_status: vals?.audit_status ?? 'ongoing',
+          ...(typeId ? { type_id: typeId } : {}),
+          checks: vals?.checks ?? computeAuditChecks(db, { ...vals, company_id: companyId }),
+        };
+      }
+      return {};
+    },
     groupBys: ['type_id', 'state', 'company_id'],
-    list: ['name', 'type_id', 'date_from', 'date_to', 'date_deadline', 'total_amount_to_pay', 'state'],
+    filters: [
+      [
+        { id: 'ongoing', label: 'Ongoing', fn: (r) => r.audit_status === 'ongoing' },
+        { id: 'paused', label: 'Paused', fn: (r) => r.audit_status === 'paused' },
+        { id: 'done', label: 'Done', fn: (r) => r.audit_status === 'done' },
+      ],
+      [
+        { id: 'draft', label: 'Draft', fn: (r) => r.state === 'new' },
+        { id: 'reviewed', label: 'Reviewed', fn: (r) => r.state === 'reviewed' },
+        { id: 'submitted', label: 'Submitted', fn: (r) => r.state === 'submitted' },
+        { id: 'paid', label: 'Paid', fn: (r) => r.state === 'paid' },
+      ],
+    ],
+    list: ['name', 'type_id', 'date_from', 'date_to', 'date_deadline', 'total_amount_to_pay', 'state', 'audit_status'],
     kanban: { title: 'name', lines: ['date_from', 'date_to', 'total_amount_to_pay'], badge: 'state' },
     form: {
       statusbar: 'state',
+      statusbarFor: (r, db) => (isAuditReturn(r, db) ? 'audit_status' : 'state'),
       statusbarClickable: false,
-      lockedWhen: (r) => ['submitted', 'paid'].includes(r.state),
+      lockedWhen: (r, db) => (isAuditReturn(r, db) ? r?.audit_status === 'done' : ['submitted', 'paid'].includes(r?.state)),
       title: 'name',
-      groups: [
+      groups: (r, db) => (isAuditReturn(r, db) ? [
+        ['type_id', 'date_from', 'date_to', 'company_id'],
+        ['audit_status', 'date_deadline'],
+      ] : [
         ['type_id', 'date_from', 'date_to', 'company_id'],
         ['date_deadline', 'date_lock', 'date_submission', 'total_amount_to_pay', 'is_completed'],
-      ],
-      tabs: [
+      ]),
+      tabs: (r, db) => (isAuditReturn(r, db) ? [
+        {
+          label: 'Checks',
+          fields: ['checks'],
+        },
+        {
+          label: 'Attachments',
+          fields: ['attachment_ids'],
+        },
+      ] : [
         {
           label: 'Tax Report',
           fields: [],
@@ -509,31 +670,47 @@ export const taxReturnModels = {
           label: 'Closing Moves',
           fields: ['closing_move_ids', 'attachment_ids'],
         },
-      ],
+      ]),
       buttons: [
+        {
+          label: 'Pause',
+          when: (r, db) => isAuditReturn(r, db) && r.audit_status === 'ongoing',
+          run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'paused' }) }),
+        },
+        {
+          label: 'Resume',
+          when: (r, db) => isAuditReturn(r, db) && r.audit_status === 'paused',
+          run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'ongoing' }) }),
+        },
+        {
+          label: 'Mark as Done',
+          primary: true,
+          when: (r, db) => isAuditReturn(r, db) && r.audit_status !== 'done',
+          run: (db, r) => ({ db: write(db, 'account.return', r.id, { audit_status: 'done' }) }),
+        },
         {
           label: 'Review',
           primary: true,
-          when: (r, db) => r.state === 'new' && (read(db, 'account.return.type', r.type_id)?.states_workflow ?? 'generic_state_review_submit') === 'generic_state_review_submit',
+          when: (r, db) => !isAuditReturn(r, db) && r.state === 'new' && (read(db, 'account.return.type', r.type_id)?.states_workflow ?? 'generic_state_review_submit') === 'generic_state_review_submit',
           run: (db, r) => ({ db: reviewReturn(db, r.id) }),
         },
         {
           label: 'Submit',
           primary: true,
           posts: true,
-          when: (r, db) => r.state === 'reviewed' || (r.state === 'new' && (read(db, 'account.return.type', r.type_id)?.states_workflow ?? 'generic_state_review_submit') !== 'generic_state_review_submit'),
+          when: (r, db) => !isAuditReturn(r, db) && (r.state === 'reviewed' || (r.state === 'new' && (read(db, 'account.return.type', r.type_id)?.states_workflow ?? 'generic_state_review_submit') !== 'generic_state_review_submit')),
           run: (db, r) => ({ db: submitReturn(db, r.id) }),
         },
         {
           label: 'Pay',
           primary: true,
           posts: true,
-          when: (r, db) => r.state === 'submitted' || (['new', 'reviewed'].includes(r.state) && read(db, 'account.return.type', r.type_id)?.states_workflow === 'generic_state_only_pay'),
+          when: (r, db) => !isAuditReturn(r, db) && (r.state === 'submitted' || (['new', 'reviewed'].includes(r.state) && read(db, 'account.return.type', r.type_id)?.states_workflow === 'generic_state_only_pay')),
           run: (db, r) => ({ db: payReturn(db, r.id) }),
         },
         {
           label: 'Reset to Draft',
-          when: (r) => ['reviewed', 'submitted'].includes(r.state),
+          when: (r, db) => !isAuditReturn(r, db) && ['reviewed', 'submitted'].includes(r.state),
           run: (db, r) => ({ db: resetReturnToDraft(db, r.id) }),
         },
       ],

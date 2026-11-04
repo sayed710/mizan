@@ -72,7 +72,8 @@ export function ActionView({ leaf, base, params }) {
   const urlFilters = params.getAll('filter').filter((id) => (models[model].filters ?? []).flat().some((f) => f.id === id));
   const [search, setSearch] = useState(() => {
     const initial = emptySearch(model, parseRel(db, model, relRaw));
-    return { ...initial, ...(urlFilters.length ? { filters: urlFilters } : {}), groupBy: leaf.groupBy ?? [] };
+    const defaultFilters = leaf.defaultFilters ?? models[model].defaultFilters ?? [];
+    return { ...initial, filters: urlFilters.length ? urlFilters : defaultFilters, groupBy: leaf.groupBy ?? [] };
   });
   const [selected, setSelected] = useState(() => new Set());
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;

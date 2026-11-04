@@ -237,7 +237,7 @@ export function FormView({ leaf, id, base, params }) {
   const backHash = `${base}${query}`;
 
   // A record outside this menu's domain (e.g. a journal entry id under Invoices) is not shown under the wrong breadcrumb.
-  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec)))) {
+  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec, db)))) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
@@ -394,15 +394,16 @@ export function FormView({ leaf, id, base, params }) {
   const idx = rec ? ids.indexOf(rec.id) : -1;
   const pageTo = (step) => leave(`${base}/${ids[(idx + step + ids.length) % ids.length]}${query}`);
 
-  const statusKey = def.form.statusbar;
+  const resolve = (v) => (typeof v === 'function' ? v(current, db) : v);
+  const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
   const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
-  const resolve = (v) => (typeof v === 'function' ? v(current) : v);
   const tabs = resolve(def.form.tabs);
+  const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   const footer = [].concat(resolve(def.form.footer) ?? []);
-  const locked = !isNew && !!def.form.lockedWhen?.(current);
+  const locked = !isNew && !!def.form.lockedWhen?.(current, db);
 
   return (
     <main className="form-page">
@@ -490,7 +491,7 @@ export function FormView({ leaf, id, base, params }) {
                     value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
             <div className="groups">
-              {def.form.groups.map((g, i) => (
+              {groups.map((g, i) => (
                 <div key={i} className="group">
                   {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
                 </div>
@@ -506,10 +507,10 @@ export function FormView({ leaf, id, base, params }) {
                 <div className="tab-panel" role="tabpanel">
                   {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
                     <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id }} />
-                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
+                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
                     ? (
                       <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
+                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
                     )
                     // Plain fields in a tab get a label, like fields in the header groups.
                     : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}

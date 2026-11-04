@@ -5,6 +5,7 @@ import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { invoiceLines, invoiceLineAccount } from './ledger.js';
 import { round } from '../money.js';
+import { currentCompany } from './company.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
@@ -41,7 +42,7 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
   const code = account_code || (account_id ? read(db, 'account.account', account_id)?.code : '') || '';
 
   const partnerCat = partner_category_id ?? partner?.partner_category_id ?? partner?.category_id;
-  const productCat = product_categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
+  const productCat = product_categ_id ?? product?.categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
 
   const targetCompany = company_id;
   const matched = [];
@@ -61,15 +62,8 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
       if (!code || !code.startsWith(m.account_prefix)) continue;
     }
 
-    let score = 0;
-    if (m.partner_id) score += 1000;
-    if (m.product_id) score += 1000;
-    if (m.partner_category_id) score += 100;
-    if (m.product_categ_id) score += 100;
-    if (m.account_prefix) score += 10 + (m.account_prefix.length ?? 0);
-    if (m.company_id) score += 1;
-
-    matched.push({ model: m, score, seq: Number(m.sequence) || 10 });
+    const score = ['partner_id', 'product_id', 'partner_category_id', 'product_categ_id', 'account_prefix', 'company_id'].filter((field) => m[field]).length;
+    matched.push({ model: m, score, seq: Number(m.sequence ?? 10) });
   }
 
   if (!matched.length) return fallback;
@@ -288,6 +282,7 @@ export const analyticPlusModels = {
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
     },
     defaults: () => ({ sequence: 10, analytic_distribution: {} }),
+    createDefaults: (db) => ({ company_id: currentCompany(db) }),
     list: ['sequence', 'partner_id', 'product_id', 'account_prefix', 'analytic_distribution'],
     kanban: { title: 'sequence', lines: ['partner_id', 'product_id', 'account_prefix'] },
     form: {

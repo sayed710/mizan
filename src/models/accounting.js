@@ -1,6 +1,6 @@
 import { create, postNote, read, search, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
@@ -14,6 +14,20 @@ import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGu
 import { t } from '../i18n.js';
 import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
+
+const exchangeLines = (db, companyId, difference) => {
+  if (!difference) return [];
+  const company = read(db, 'res.company', companyId ?? 1);
+  const field = difference > 0 ? 'income_currency_exchange_account_id' : 'expense_currency_exchange_account_id';
+  const configured = company?.[field];
+  if (configured) {
+    const account = read(db, 'account.account', configured);
+    if (!account || (account.company_id && account.company_id !== (companyId ?? 1))) throw new Error('Exchange account must belong to the document company');
+  }
+  return difference > 0
+    ? [{ account: configured || '450100', credit: difference }]
+    : [{ account: configured || '690100', debit: -difference }];
+};
 
 const isInvoice = (r) => r.move_type !== 'entry';
 const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
@@ -306,7 +320,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
   const excess = Math.round((amount - value) * 100) / 100;
   const sale = isInbound(r);
-  const counterpartCode = isPurchase(r) ? '211000' : '121000';
+  const counterpartCode = invoiceCounterpartAccount(db, r);
   const via = paymentJournal(db, payJournal);
   const journal = read(db, 'account.journal', payJournal ?? journalId(db, via.code, r.company_id));
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
@@ -317,7 +331,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const final = value >= residual(r);
   const open = settlementCompanyAmount(db, r, value);
   const diff = Math.round((sale ? bank - open : open - bank) * 100) / 100;
-  const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
+  const fx = exchangeLines(db, r.company_id, diff);
   // The bank line converts what was really received once; the credit is whatever remains after the settled part.
   const extra = excess > 0 ? Math.round((toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) * 100) / 100 : 0;
   const credit = extra ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit' } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit' }] : [];
@@ -349,10 +363,10 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   if (!account || (account.company_id && account.company_id !== (invoice.company_id ?? 1))) throw new Error('Write-off account belongs to another company or does not exist');
   if (!String(label ?? '').trim()) throw new Error('Set a write-off label');
   const incoming = isInbound(invoice);
-  const counterpart = isPurchase(invoice) ? '211000' : '121000';
+  const counterpart = invoiceCounterpartAccount(db, invoice);
   const open = settlementCompanyAmount(db, invoice, amount);
   const diff = round2(incoming ? companyAmount - open : open - companyAmount);
-  const fx = diff > 0 ? [{ account: '450100', credit: diff }] : diff < 0 ? [{ account: '690100', debit: -diff }] : [];
+  const fx = exchangeLines(db, invoice.company_id, diff);
   const partner_id = invoice.partner_id;
   const booked = postEntry(db, { journal: 'BNK1', journal_id: journal, company: invoice.company_id ?? 1, date, ref: label,
     lines: incoming
@@ -475,7 +489,7 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const company = read(db, 'res.company', r.company_id ?? 1);
   const discountAccount = sale ? company?.expense_early_payment_discount_account_id ?? '690200' : company?.income_early_payment_discount_account_id ?? '450200';
-  const counterpart = isPurchase(r) ? '211000' : '121000';
+  const counterpart = invoiceCounterpartAccount(db, r);
   const taxes = discountTaxLines(r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
   const taxValue = round2(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const { db: booked, id: discountMove } = postEntry(paid, {
@@ -550,9 +564,18 @@ export const accountingModels = {
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category' },
     },
     defaults: () => ({ account_type: 'expense' }),
-    guard: (db, before, after) => (after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'accounts') ? 'Select only account tags' : null,
+    guard: (db, before, after) => {
+      if ((after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'accounts')) return 'Select only account tags';
+      if (after.fiscal_category_id) {
+        const category = read(db, 'account.fiscal.category', after.fiscal_category_id);
+        if (!category) return 'Select an existing fiscal category';
+        if (after.company_id && category.company_id !== after.company_id) return 'Fiscal category must belong to the account company';
+      }
+      return null;
+    },
     protectDelete: accountDeleteGuard,
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
@@ -560,8 +583,27 @@ export const accountingModels = {
     views: ['list', 'kanban'],
     form: {
       title: 'name',
-      groups: [['code', 'account_type', 'asset_model_id'], ['reconcile', 'tag_ids']],
+      groups: [['code', 'account_type', 'asset_model_id', 'fiscal_category_id'], ['reconcile', 'tag_ids']],
     },
+  },
+
+  'account.fiscal.category': {
+    label: 'Fiscal Categories',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      code: { type: 'char', label: 'Code' },
+      active: { type: 'boolean', label: 'Active' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      account_ids: {
+        type: 'one2many', label: 'Accounts', readonly: true,
+        compute: (r, db) => (db.records['account.account'] ?? []).filter((a) => a.fiscal_category_id === r.id && (!a.company_id || a.company_id === r.company_id)),
+        fields: { code: { type: 'char', label: 'Code' }, name: { type: 'char', label: 'Account Name' } },
+      },
+    },
+    defaults: () => ({ active: true }),
+    guard: (db, before, after) => before && before.company_id !== after.company_id && (db.records['account.account'] ?? []).some((a) => a.fiscal_category_id === after.id && a.company_id && a.company_id !== after.company_id) ? 'Fiscal category must belong to the account company' : null,
+    list: ['name', 'code', 'company_id'],
+    form: { title: 'name', groups: [['name', 'code'], ['company_id', 'active']], tabs: [{ label: 'Accounts', fields: ['account_ids'], readonly: true }] },
   },
 
   'account.account.tag': {

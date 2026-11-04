@@ -11,7 +11,7 @@ import { currentCompany } from '../models/company.js';
 import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
 import { auditSummary } from '../audit.js';
 import { valuationReport } from '../models/valuation.js';
-import { CashFlow, CustomerStatement, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
+import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
@@ -21,6 +21,8 @@ import { SalesReview } from './SalesReview.jsx';
 import { JournalItems } from './JournalItems.jsx';
 import { LoansAnalysis } from './LoansAnalysis.jsx';
 import { Checks } from './Checks.jsx';
+import { CashflowAnalysis } from './CashflowAnalysis.jsx';
+import { ConfigurableReportPage } from './ConfigurableReport.jsx';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
@@ -472,6 +474,7 @@ function InalterabilityCheck({ db, companyId }) {
 
 const REPORTS = {
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  fiscal: { title: 'Fiscal Report', Body: FiscalReport, cols: ['Debit', 'Credit', 'Balance'] },
   partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
   partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
@@ -494,11 +497,13 @@ const REPORTS = {
 };
 
 /** Financial reports computed live from posted journal items. */
-export function Reports({ leaf }) {
+export function Reports({ leaf, id }) {
+  if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
   const component = leaf.report === 'journalItems' ? JournalItems
     : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
     : leaf.report === 'checks' ? Checks
     : leaf.report === 'loansAnalysis' ? LoansAnalysis
+    : leaf.report === 'cashflowAnalysis' ? CashflowAnalysis
       : ['invoicesToBeIssued', 'invoicedNotDelivered'].includes(leaf.report) ? SalesReview : ReportPage;
   return reportPage(leaf, component);
 }
@@ -507,11 +512,16 @@ function ReportPage({ leaf }) {
   const sourceDb = useDb();
   const allowed = sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)];
   const allowedSet = new Set(allowed);
-  const db = companyViewDb(sourceDb);
+  const companyDb = companyViewDb(sourceDb);
   const companies = companiesOf(sourceDb).filter((company) => allowedSet.has(company.id));
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
   const [companyId, setCompanyId] = useState('all');
+  const [ledgerId, setLedgerId] = useState('');
+  const ledgerReports = ['pnl', 'balance', 'ledger', 'trial'];
+  const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
+  const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
+  const db = ledger ? { ...companyDb, records: { ...companyDb.records, 'account.move': (companyDb.records['account.move'] ?? []).filter((move) => (move.company_id ?? 1) === ledger.company_id && (ledger.journal_ids ?? []).includes(move.journal_id)) } } : companyDb;
   const selectedCompany = companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all';
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
@@ -530,10 +540,16 @@ function ReportPage({ leaf }) {
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
-            {['journalAudit', 'customerStatement'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+            {['journalAudit', 'customerStatement', 'fiscal'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+        {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
+          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => setLedgerId(e.target.value)}>
+            <option value="">{t('All Journals')}</option>
+            {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+        </label>}
         {['journalAudit', 'inalterability'].includes(leaf.report) && companiesOf(sourceDb).length > 1 && (
           <label className="inline-select">
             {t('Company')}

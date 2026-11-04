@@ -35,6 +35,51 @@ export function trialBalance(db, { from, to } = {}) {
   return { rows: list, totals: { initial: total('initial'), debit: total('debit'), credit: total('credit'), end: total('end') } };
 }
 
+/** Period movements grouped by the explicit fiscal category on each trial-balance account. */
+export function fiscalReport(db, period = {}) {
+  const trial = trialBalance(db, period);
+  const categories = search(db, 'account.fiscal.category', { includeArchived: true });
+  const groups = new Map(categories.map((category) => [category.id, { category, accounts: [], debit: 0, credit: 0 }]));
+  const uncategorized = { category: null, accounts: [], debit: 0, credit: 0 };
+  for (const row of trial.rows) {
+    if (!row.debit && !row.credit) continue;
+    const group = groups.get(row.account.fiscal_category_id) ?? uncategorized;
+    group.accounts.push({ account: row.account, debit: row.debit, credit: row.credit, balance: round(row.debit - row.credit) });
+    group.debit += row.debit;
+    group.credit += row.credit;
+  }
+  const finish = (group) => ({ ...group, debit: round(group.debit), credit: round(group.credit), balance: round(group.debit - group.credit) });
+  const rows = [...groups.values()].sort((a, b) => a.category.name.localeCompare(b.category.name)).map(finish);
+  rows.push(finish(uncategorized));
+  return { rows, totals: { debit: trial.totals.debit, credit: trial.totals.credit, balance: round(trial.totals.debit - trial.totals.credit) } };
+}
+
+/** Aggregate statement-line amounts by month and journal without deriving transactions from the ledger. */
+export function cashflowAnalysis(db, { from, to }) {
+  const months = new Map();
+  const journals = new Map();
+  for (const line of search(db, 'account.bank.statement.line')) {
+    const journal = read(db, 'account.journal', line.journal_id);
+    if (!journal || !['bank', 'cash'].includes(journal.type) || (journal.company_id && journal.company_id !== (line.company_id ?? 1))) continue;
+    if (!line.date || line.date < from || line.date > to || !Number.isFinite(Number(line.amount))) continue;
+    const month = line.date.slice(0, 7);
+    if (!months.has(month)) months.set(month, new Map());
+    const amounts = months.get(month);
+    const sums = amounts.get(journal.id) ?? { inflow: 0, outflow: 0 };
+    const amount = Number(line.amount);
+    sums.inflow += Math.max(amount, 0);
+    sums.outflow += Math.max(-amount, 0);
+    amounts.set(journal.id, sums);
+    journals.set(journal.id, journal);
+  }
+  const finish = ({ inflow, outflow }) => ({ inflow: round(inflow), outflow: round(outflow), net: round(inflow - outflow) });
+  const rows = [...months].sort(([a], [b]) => a.localeCompare(b)).map(([month, amounts]) => {
+    const totals = [...amounts.values()].reduce((sum, current) => ({ inflow: sum.inflow + current.inflow, outflow: sum.outflow + current.outflow }), { inflow: 0, outflow: 0 });
+    return { month, ...finish(totals), journals: new Map([...amounts].map(([id, value]) => [id, finish(value)])) };
+  });
+  return { rows, journals: [...journals.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id) };
+}
+
 /** Receivable or payable ledger per partner: opening balance, the period's lines with a running balance, sorted by partner name. */
 export function partnerLedger(db, { from, to } = {}, kind = 'receivable') {
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');

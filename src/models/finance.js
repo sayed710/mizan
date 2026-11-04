@@ -2,7 +2,7 @@
 import { installments } from './terms.js';
 import { postNote, postNotes, read, search, write, writeMany } from '../orm.js';
 import { addDays, today } from './common.js';
-import { accountId, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
+import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
@@ -61,7 +61,7 @@ export function lockDateFor(settings = {}, move = {}) {
 }
 
 const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
-const companyTaxLock = (settings, companyId) => companyId === 1 ? settings?.tax_lock_date : settings?.tax_lock_dates?.[companyId];
+const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
   .filter((r) => (r.company_id ?? 1) === companyId && r.id !== excludeId && ['submitted', 'paid'].includes(r.state))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
@@ -154,7 +154,7 @@ function settlementCapacity(db, entry, inv) {
     && note.move_type === (original.move_type === 'out_invoice' ? 'out_refund' : original.move_type === 'in_invoice' ? 'in_refund' : null)
     && note.partner_id === original.partner_id && (note.currency_id ?? null) === (original.currency_id ?? null);
   if (entry.move_type !== 'entry' && !creditPair(entry, inv) && !creditPair(inv, entry)) return 0;
-  const account = accountId(db, ['in_invoice', 'in_refund'].includes(inv.move_type) ? '211000' : '121000', inv.company_id);
+  const account = invoiceCounterpartAccount(db, inv);
   return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
     .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
@@ -321,8 +321,7 @@ function lockRule(db, before, after, ctx) {
   const validDate = typeof proposed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(proposed) && !Number.isNaN(Date.parse(proposed)) && new Date(proposed).toISOString().slice(0, 10) === proposed;
   const lowered = current && (proposed === null || validDate) && (proposed ?? '') < current;
   const adjusted = [proposed, remaining].filter(Boolean).sort().at(-1) ?? null;
-  const taxSettings = !lowered ? db.settings : companyId === 1 ? { ...db.settings, tax_lock_date: adjusted }
-    : { ...db.settings, tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: adjusted } };
+  const taxSettings = !lowered ? db.settings : { ...db.settings, tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: adjusted } };
   const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before, taxSettings), yearLock].sort().at(-1) : '';
   const afterLock = [companyLockDate(db, after), taxLockFor(db, after, taxSettings), yearLock].sort().at(-1);
   const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
@@ -858,6 +857,23 @@ export function analyticActuals(db, period = {}) {
 }
 
 export const financeModels = {
+  'account.journal.group': {
+    label: 'Multi-Ledger',
+    fields: {
+      name: { type: 'char', label: 'Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
+    },
+    defaults: () => ({ sequence: 10, journal_ids: [] }),
+    createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
+    guard: (db, before, record) => (record.journal_ids ?? []).some((id) => {
+      const journal = read(db, 'account.journal', id);
+      return !journal || (journal.company_id && journal.company_id !== record.company_id);
+    }) ? 'Select journals belonging to this company or shared journals' : null,
+    list: ['name', 'sequence', 'company_id', 'journal_ids'],
+    form: { title: 'name', groups: [['sequence', 'company_id'], ['journal_ids']] },
+  },
   'account.followup.level': {
     label: 'Follow-up Levels',
     fields: {

@@ -7,7 +7,7 @@ export const viewRecords = (db, model, options) => companyFilter(db, search(db, 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>
   viewRecords(db, leaf.model, { includeArchived: archived })
-    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r)) && (!rel || r[rel.field] === rel.id));
+    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r, db)) && (!rel || r[rel.field] === rel.id));
 
 /** Allowed many2one choices plus the current value, even if foreign or archived. */
 export function relationCandidates(db, model, value) {

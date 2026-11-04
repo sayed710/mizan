@@ -510,7 +510,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
       lock_date: lockValue(s.lock_date, db.settings.lock_date),
-      tax_lock_date: lockValue(s.tax_lock_date, db.settings.tax_lock_date),
       tax_lock_dates: s.tax_lock_dates && typeof s.tax_lock_dates === 'object' && !Array.isArray(s.tax_lock_dates)
         ? { ...db.settings.tax_lock_dates, ...Object.fromEntries(Object.entries(s.tax_lock_dates).filter(([id]) => /^[1-9]\d*$/.test(id))
           .map(([id, value]) => [id, lockValue(value, db.settings.tax_lock_dates?.[id])])) }

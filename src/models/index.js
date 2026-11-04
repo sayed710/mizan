@@ -85,17 +85,19 @@ import { quantModels } from './quant.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
 import { taxReturnModels } from './taxreturn.js';
+import { auditReportModels } from './auditreport.js';
 import { partnerBankModels } from './partnerbank.js';
 import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
 import { appAnalyses } from './analysis.js';
 import { orderpointModels } from './orderpoint.js';
 import { productConfigModels } from './productconfig.js';
+import { configurableReportModels } from './configurableReports.js';
 
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, partnerBankModels };
+export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -209,7 +211,7 @@ const allApps = [
         ] },
                 { label: 'Closing', children: [
           { key: 'reconcile', label: 'Reconcile', model: 'account.bank.statement.line' },
-          { key: 'tax-returns', label: 'Tax Returns', model: 'account.return' },
+          { key: 'tax-returns', label: 'Tax Returns', model: 'account.return', domain: (r, db) => !r.audit_status && (db ? read(db, 'account.return.type', r.type_id)?.category !== 'audit' : true) },
           { key: 'lock-dates', label: 'Lock Dates…', type: 'settings' },
           { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
         ] },
@@ -222,7 +224,15 @@ const allApps = [
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
         ] },
                 { label: 'Audit', children: [
-
+          {
+            key: 'working-files',
+            label: 'Working Files',
+            model: 'account.return',
+            domain: (r, db) => Boolean(r.audit_status || (db && read(db, 'account.return.type', r.type_id)?.category === 'audit')),
+            defaultFilters: ['ongoing', 'paused'],
+            defaults: { audit_status: 'ongoing' },
+          },
+          { key: 'annual-report', label: 'Annual Report', model: 'audit.report' },
         ] },
                 { label: 'Inventory', children: [
           { key: 'inventory-valuation', label: 'Inventory Valuation', type: 'report', report: 'valuation' },
@@ -259,10 +269,12 @@ const allApps = [
         ] },
                 { label: 'Taxes & Fiscal', children: [
           { key: 'tax-report', label: 'Tax Report', type: 'report', report: 'tax' },
+          { key: 'fiscal-report', label: 'Fiscal Report', type: 'report', report: 'fiscal' },
         ] },
                 { label: 'Management', children: [
           { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
           { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
+          { key: 'cashflow-analysis', label: 'Cashflow Analysis', type: 'report', report: 'cashflowAnalysis' },
           { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
           { key: 'executive-summary', label: 'Executive Summary', type: 'report', report: 'executive' },
           { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
@@ -276,12 +288,17 @@ const allApps = [
           { key: 'product-categories', label: 'Product Categories', model: 'product.category' },
         ] },
                 { label: 'Accounting', children: [
+          { key: 'accounting-reports', label: 'Accounting Reports', model: 'account.report' },
+          { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
+          { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
           { key: 'taxes', label: 'Taxes', model: 'account.tax' },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
           { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
+          { key: 'fiscal-categories', label: 'Fiscal Categories', model: 'account.fiscal.category' },
           { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
           { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
           { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
@@ -710,7 +727,7 @@ const PRIVATE_FIELDS = {
 };
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
-export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year',
+export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.category', 'account.fiscal.year',
   'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
@@ -776,4 +793,3 @@ export function targetOf(model, uninstalled = []) {
 }
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
 export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];
-

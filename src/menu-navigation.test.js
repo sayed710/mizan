@@ -353,6 +353,161 @@ test('Accounting exposes tax groups and issued checks through their menus', asyn
   } finally { await React.act(async () => root.unmount()); }
 });
 
+test('Fiscal Categories menu and category form respect selected companies and show linked accounts', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { seed } = await import('./seed.js');
+  const { create, read, updateSettings, write } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  await initStore();
+  const company = createCompany(seed(), { name: 'Second fiscal company' });
+  const first = create(company.db, 'account.fiscal.category', { name: 'VISIBLE CATEGORY', code: 'VIS', company_id: 1 });
+  const second = create(first.db, 'account.fiscal.category', { name: 'HIDDEN CATEGORY', code: 'HID', company_id: company.id });
+  const account = create(second.db, 'account.account', { name: 'FISCAL LINKED ACCOUNT', code: 'FISCAL1', company_id: 1, fiscal_category_id: first.id });
+  assert.throws(() => write(account.db, 'account.account', account.id, { fiscal_category_id: second.id }), /company/i);
+  assert.equal(read(account.db, 'account.fiscal.category', first.id).account_ids[0].name, 'FISCAL LINKED ACCOUNT');
+  await commit(updateSettings(account.db, { current_company_id: 1, allowed_company_ids: [1] }));
+  location.hash = '#/accounting/fiscal-categories';
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'VISIBLE CATEGORY');
+    assert.ok(container.textContent.includes('VISIBLE CATEGORY'));
+    assert.ok(!container.textContent.includes('HIDDEN CATEGORY'));
+    await React.act(async () => { location.hash = `#/accounting/fiscal-categories/${first.id}`; window.dispatchEvent(new Event('hashchange')); });
+    assert.ok(container.textContent.includes('FISCAL LINKED ACCOUNT'));
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('Fiscal Report menu groups period movements by category, drills down and follows selected companies', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { seed } = await import('./seed.js');
+  const { create, updateSettings, write } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  const { accountId, postEntry } = await import('./models/ledger.js');
+  const { trialBalance } = await import('./models/reports.js');
+  const { companyViewDb } = await import('./companyView.js');
+  await initStore();
+  const other = createCompany(seed(), { name: 'Fiscal Other Company' });
+  const category = create(other.db, 'account.fiscal.category', { name: 'Fiscal Test Category', company_id: 1 });
+  const foreign = create(category.db, 'account.fiscal.category', { name: 'Fiscal Foreign Category', company_id: other.id });
+  let db = write(foreign.db, 'account.account', accountId(foreign.db, '121000', 1), { fiscal_category_id: category.id });
+  for (const [code, name, type] of [['121000', 'Foreign Receivable', 'asset_receivable'], ['400000', 'Foreign Income', 'income']]) {
+    db = create(db, 'account.account', { code, name, account_type: type, company_id: other.id, ...(code === '121000' ? { fiscal_category_id: foreign.id } : {}) }).db;
+  }
+  db = create(db, 'account.journal', { code: 'MISC', name: 'Foreign Misc', type: 'general', company_id: other.id }).db;
+  const post = (company, date, amount) => { db = postEntry(db, { journal: 'MISC', company, date, lines: [{ account: '121000', debit: amount }, { account: '400000', credit: amount }] }).db; };
+  post(1, '2026-01-01', 900);
+  post(1, '2026-02-01', 75);
+  post(other.id, '2026-02-02', 250);
+  db = create(db, 'account.move', { move_type: 'entry', state: 'draft', company_id: 1, date: '2026-02-03', line_ids: [{ account_id: accountId(db, '121000', 1), debit: 800 }] }).db;
+  db = updateSettings(db, { current_company_id: 1, allowed_company_ids: [1] });
+  await commit(db);
+  location.hash = '#/accounting/fiscal-report';
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Fiscal Report');
+    assert.ok(container.textContent.includes('Fiscal Report'));
+    const period = find(container, (n) => n.tagName === 'SELECT' && (props(n)?.children ?? []).some?.((child) => child?.props?.value === 'custom'));
+    assert.ok(period);
+    await React.act(async () => props(period).onChange({ target: { value: 'custom' } }));
+    const dates = [];
+    const collect = (n) => { if (n.tagName === 'INPUT' && props(n)?.type === 'date') dates.push(n); (n.childNodes ?? []).forEach(collect); };
+    collect(container);
+    await React.act(async () => props(dates[0]).onChange({ target: { value: '2026-02-01' } }));
+    await React.act(async () => props(dates[1]).onChange({ target: { value: '2026-02-28' } }));
+    const categoryRow = find(container, (n) => n.tagName === 'TR' && n.textContent.includes('Fiscal Test Category'));
+    const uncategorized = find(container, (n) => n.tagName === 'TR' && n.textContent.includes('Uncategorized'));
+    const total = find(container, (n) => n.tagName === 'TR' && n.textContent.startsWith('Total'));
+    assert.ok(categoryRow && uncategorized && total);
+    assert.deepEqual(categoryRow.childNodes.slice(1).map((n) => Number(n.textContent.replace(/[^0-9.-]/g, ''))), [75, 0, 75]);
+    assert.deepEqual(uncategorized.childNodes.slice(1).map((n) => Number(n.textContent.replace(/[^0-9.-]/g, ''))), [0, 75, -75]);
+    assert.ok(!container.textContent.includes('Fiscal Foreign Category'));
+    assert.ok(!container.textContent.includes('900.00'));
+    assert.ok(!container.textContent.includes('800.00'));
+    const trial = trialBalance(companyViewDb(db), { from: '2026-02-01', to: '2026-02-28' });
+    const cells = total.childNodes.map((n) => n.textContent);
+    assert.deepEqual(cells.slice(1).map((value) => Number(value.replace(/[^0-9.-]/g, ''))), [trial.totals.debit, trial.totals.credit, trial.totals.debit - trial.totals.credit]);
+    const expand = find(categoryRow, (n) => n.tagName === 'BUTTON');
+    assert.ok(expand);
+    await React.act(async () => props(expand).onClick());
+    assert.ok(container.textContent.includes('121000 Account Receivable'));
+    await React.act(async () => commit(updateSettings(db, { current_company_id: 1, allowed_company_ids: [1, other.id] })));
+    assert.ok(container.textContent.includes('Fiscal Foreign Category'));
+    assert.ok(container.textContent.includes('250.00'));
+    const bothTotal = find(container, (n) => n.tagName === 'TR' && n.textContent.startsWith('Total'));
+    assert.deepEqual(bothTotal.childNodes.slice(1).map((n) => Number(n.textContent.replace(/[^0-9.-]/g, ''))), [325, 325, 0]);
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('Cashflow Analysis menu groups statement amounts by month and pivots by journal for selected companies', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { seed } = await import('./seed.js');
+  const { create, updateSettings } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  await initStore();
+  const other = createCompany(seed(), { name: 'Cashflow Other Company' });
+  const bank = create(other.db, 'account.journal', { name: 'Analysis Bank', code: 'CFA', type: 'bank', company_id: 1 });
+  const cash = create(bank.db, 'account.journal', { name: 'Analysis Cash', code: 'CFC', type: 'cash', company_id: 1 });
+  const foreign = create(cash.db, 'account.journal', { name: 'Analysis Foreign Bank', code: 'CFB', type: 'bank', company_id: other.id });
+  let db = foreign.db;
+  const line = (journal_id, company_id, date, amount, payment_ref) => { db = create(db, 'account.bank.statement.line', { journal_id, company_id, date, amount, payment_ref }).db; };
+  line(bank.id, 1, '2026-02-01', 100, 'Bank in');
+  line(bank.id, 1, '2026-02-02', -30, 'Bank out');
+  line(cash.id, 1, '2026-03-01', 20, 'Cash in');
+  line(bank.id, 1, '2026-01-31', 900, 'Outside period');
+  line(foreign.id, other.id, '2026-02-03', 250, 'Foreign');
+  db = create(db, 'account.bank.statement.line', { company_id: 1, date: '2026-02-05', amount: 800, payment_ref: 'No journal' }).db;
+  db = updateSettings(db, { current_company_id: 1, allowed_company_ids: [1] });
+  await commit(db);
+  location.hash = '#/accounting/cashflow-analysis';
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Cashflow Analysis');
+    assert.ok(container.textContent.includes('Cashflow Analysis'));
+    const dates = [];
+    const collect = (n) => { if (n.tagName === 'INPUT' && props(n)?.type === 'date') dates.push(n); (n.childNodes ?? []).forEach(collect); };
+    collect(container);
+    assert.equal(dates.length, 2);
+    const now = new Date();
+    const { isoDate } = await import('./models/common.js');
+    assert.equal(props(dates[0]).value, isoDate(new Date(now.getFullYear(), now.getMonth() - 11, 1)));
+    assert.equal(props(dates[1]).value, isoDate(now));
+    await React.act(async () => props(dates[0]).onChange({ target: { value: '2026-02-01' } }));
+    await React.act(async () => props(dates[1]).onChange({ target: { value: '2026-03-31' } }));
+    const feb = find(container, (n) => n.tagName === 'TR' && n.textContent.startsWith('2026-02'));
+    assert.ok(feb);
+    assert.deepEqual(feb.childNodes.slice(1).map((n) => Number(n.textContent.replace(/[^0-9.-]/g, ''))), [100, 30, 70]);
+    assert.ok(!container.textContent.includes('900.00'));
+    assert.ok(!container.textContent.includes('800.00'));
+    assert.ok(!container.textContent.includes('250.00'));
+    const pivot = find(container, (n) => n.tagName === 'BUTTON' && n.textContent === 'Pivot by Journal');
+    assert.ok(pivot);
+    await React.act(async () => props(pivot).onClick());
+    assert.ok(container.textContent.includes('Analysis Bank'));
+    assert.ok(container.textContent.includes('Analysis Cash'));
+    assert.ok(!container.textContent.includes('Analysis Foreign Bank'));
+    const pivotFeb = find(container, (n) => n.tagName === 'TR' && n.textContent.startsWith('2026-02'));
+    assert.ok(pivotFeb.textContent.includes('70.00'));
+    await React.act(async () => commit(updateSettings(db, { current_company_id: 1, allowed_company_ids: [1, other.id] })));
+    assert.ok(container.textContent.includes('Analysis Foreign Bank'));
+    assert.ok(container.textContent.includes('250.00'));
+  } finally { await React.act(async () => root.unmount()); }
+});
+
 test('Journal Items menu lists posted lines, filters, groups and opens entries within selected companies', async () => {
   const container = setupDom();
   const React = await import('react');
@@ -377,6 +532,7 @@ test('Journal Items menu lists posted lines, filters, groups and opens entries w
   const root = createRoot(container);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'VISIBLE JOURNAL LINE');
     assert.ok(container.textContent.includes('VISIBLE JOURNAL LINE'));
     assert.ok(!container.textContent.includes('HIDDEN JOURNAL LINE'));
     assert.ok(!container.textContent.includes('DRAFT JOURNAL LINE'));
@@ -416,4 +572,74 @@ test('Accounting menu follows the Odoo top-level, Closing and Review group order
   assert.equal(regularization.find((menu) => menu.key === 'deferred-revenues').domain({ kind: 'expense' }), false);
   assert.equal(regularization.find((menu) => menu.key === 'deferred-expenses').domain({ kind: 'expense' }), true);
   assert.equal(regularization.find((menu) => menu.key === 'deferred-expenses').domain({ kind: 'revenue' }), false);
+});
+
+test('analytic distribution model menu scopes rules and defaults new forms to the selected company', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { seed } = await import('./seed.js');
+  const { create, updateSettings } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  await initStore();
+  const company = createCompany(seed(), { name: 'Distribution company two' });
+  let db = updateSettings(company.db, { current_company_id: company.id, allowed_company_ids: [company.id] });
+  db = create(db, 'account.analytic.distribution.model', { company_id: 1, account_prefix: 'HIDDEN-FIRST' }).db;
+  db = create(db, 'account.analytic.distribution.model', { company_id: company.id, account_prefix: 'VISIBLE-SECOND' }).db;
+  await commit(db);
+  location.hash = '#/accounting/analytic-distribution-models';
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'VISIBLE-SECOND');
+    assert.ok(container.textContent.includes('VISIBLE-SECOND'));
+    assert.ok(!container.textContent.includes('HIDDEN-FIRST'));
+    await React.act(async () => { location.hash = '#/accounting/analytic-distribution-models/new'; window.dispatchEvent(new Event('hashchange')); });
+    const main = find(container, (n) => n.tagName === 'MAIN');
+    const companySelect = find(main, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id');
+    assert.ok(companySelect, `new rule offers selected company: ${main.textContent}`);
+    assert.equal(Number(props(companySelect).value), company.id);
+  } finally { await React.act(async () => root.unmount()); }
+});
+
+test('Multi-Ledger menu and financial reports filter journals and selected companies', async () => {
+  const container = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const { initStore, commit } = await import('./store.js');
+  const { seed } = await import('./seed.js');
+  const { create, updateSettings } = await import('./orm.js');
+  const { createCompany } = await import('./models/company.js');
+  const { postEntry } = await import('./models/ledger.js');
+  const { today } = await import('./models/common.js');
+  await initStore();
+  const company = createCompany(seed(), { name: 'Other ledger company' });
+  let db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1] });
+  const first = create(db, 'account.journal', { name: 'Ledger Journal A', code: 'LGA', type: 'general', company_id: 1 });
+  const second = create(first.db, 'account.journal', { name: 'Ledger Journal B', code: 'LGB', type: 'general', company_id: 1 });
+  db = postEntry(second.db, { journal_id: first.id, company: 1, date: today(), lines: [{ account: '101401', debit: 111 }, { account: '400000', credit: 111 }] }).db;
+  db = postEntry(db, { journal_id: second.id, company: 1, date: today(), lines: [{ account: '101401', debit: 222 }, { account: '400000', credit: 222 }] }).db;
+  const ledger = create(db, 'account.journal.group', { name: 'Included Journal A', company_id: 1, journal_ids: [first.id] });
+  db = create(ledger.db, 'account.journal.group', { name: 'Hidden Ledger', company_id: company.id, journal_ids: [] }).db;
+  await commit(db);
+  location.hash = '#/accounting/multi-ledger';
+  const { App } = await import('./App.jsx');
+  const root = createRoot(container);
+  try {
+    await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, container, 'Included Journal A');
+    assert.ok(container.textContent.includes('Included Journal A'));
+    assert.ok(!container.textContent.includes('Hidden Ledger'));
+    for (const route of ['balance-sheet', 'pnl', 'general-ledger', 'trial-balance']) {
+      await React.act(async () => { location.hash = `#/accounting/${route}`; window.dispatchEvent(new Event('hashchange')); });
+      const select = find(container, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === 'Ledger');
+      assert.ok(select, `${route} has a ledger selector`);
+      assert.ok(!select.textContent.includes('Hidden Ledger'));
+      await React.act(async () => props(select).onChange({ target: { value: String(ledger.id) } }));
+      assert.ok(container.textContent.includes('111.00'), route);
+      assert.ok(!container.textContent.includes('333.00'), route);
+    }
+  } finally { await React.act(async () => root.unmount()); }
 });

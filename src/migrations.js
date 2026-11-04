@@ -473,6 +473,12 @@ export const MIGRATIONS = [
     return { ...db, settings: { ...db.settings, tax_lock_dates: locks } };
   } },
   { version: 17, name: 'Follow-ups: assign legacy untagged progress to company 1', up: migrateFollowUps },
+  { version: 18, name: 'Tax returns: unify per-company tax locks', up: (db) => {
+    const { tax_lock_date: legacy, ...settings } = db.settings ?? {};
+    const locks = { ...settings.tax_lock_dates };
+    if (legacy !== undefined) locks[1] = legacy;
+    return { ...db, settings: { ...settings, tax_lock_dates: locks } };
+  } },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

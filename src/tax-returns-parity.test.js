@@ -96,7 +96,7 @@ test('sync rejects forged return transitions and accepts linked review, submit, 
   assert.throws(() => applyDiff(db, forged(db, { closing_move_ids: [] }), { isAdmin: true }), /closing links/i);
   run('Reset to Draft');
   assert.equal(read(db, 'account.move', closing).state, 'cancel');
-  assert.equal(db.settings.tax_lock_date, null);
+  assert.equal(db.settings.tax_lock_dates?.[1], null);
   run('Review');
   run('Submit');
   run('Pay');
@@ -158,12 +158,12 @@ test('sync round trips preserve manual locks and reset returns in lock order', (
   run('Review', second.id);
   run('Submit', second.id);
   assert.equal(db.settings.lock_date, '2024-12-31');
-  assert.equal(db.settings.tax_lock_date, '2025-02-28');
+  assert.equal(db.settings.tax_lock_dates?.[1], '2025-02-28');
   const closingId = read(db, 'account.return', first.id).closing_move_ids[0];
   assert.equal(read(db, 'account.move', closingId).tax_return_id, first.id);
   assert.throws(() => actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)), /locked/i);
   run('Reset to Draft', second.id);
-  assert.equal(db.settings.tax_lock_date, '2025-01-31');
+  assert.equal(db.settings.tax_lock_dates?.[1], '2025-01-31');
   const reset = actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)).db;
   const forged = diffDb(db, reset);
   const closing = forged.upserts['account.move'].find((move) => move.id === closingId);
@@ -171,7 +171,7 @@ test('sync round trips preserve manual locks and reset returns in lock order', (
   closing.ref = 'Altered during reset';
   assert.throws(() => applyDiff(db, forged, { isAdmin: true }), /locked|draft/i);
   run('Reset to Draft', first.id);
-  assert.equal(db.settings.tax_lock_date, null);
+  assert.equal(db.settings.tax_lock_dates?.[1], null);
   assert.equal(db.settings.lock_date, '2024-12-31');
 });
 
@@ -808,7 +808,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   });
   const sub2 = submitReturn(r2.db, r2.id);
   assert.equal(sub2.settings?.lock_date, '2025-12-31');
-  assert.equal(sub2.settings?.tax_lock_date, '2026-02-28');
+  assert.equal(sub2.settings?.tax_lock_dates?.[1], '2026-02-28');
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
@@ -1186,7 +1186,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 17);
+  assert.equal(migrated.schema_version, 18);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');
@@ -1664,10 +1664,10 @@ test('submit applies a tax-only lock to taxed invoices and tax account entries',
   const submittedDb = submitReturn(db, retRes.id);
   const ret = read(submittedDb, 'account.return', retRes.id);
   assert.equal(ret.date_lock, pastEnd);
-  assert.equal(submittedDb.settings?.tax_lock_date, pastEnd);
+  assert.equal(submittedDb.settings?.tax_lock_dates?.[1], pastEnd);
   assert.ok(!submittedDb.settings?.lock_date);
   const synced = applyDiff(db, diffDb(db, submittedDb), { isAdmin: true });
-  assert.equal(synced.settings.tax_lock_date, pastEnd);
+  assert.equal(synced.settings.tax_lock_dates?.[1], pastEnd);
 
   const entry = postEntry(synced, { journal: 'MISC', date: '2026-01-15', lines: [
     { account: '101401', debit: 50 }, { account: '400000', credit: 50 },

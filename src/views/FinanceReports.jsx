@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { read, search } from '../orm.js';
-import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from '../models/reports.js';
+import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, trialBalance } from '../models/reports.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 
@@ -17,6 +17,23 @@ export function TrialBalance({ db, period }) {
       <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.initial)}{num(totals.debit)}{num(totals.credit)}{num(totals.end)}</tr>
     </tbody>
   );
+}
+
+function FiscalCategoryRows({ row }) {
+  const [open, setOpen] = useState(false);
+  const name = row.category ? row.category.name : t('Uncategorized');
+  return <>
+    <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{num(row.debit)}{num(row.credit)}{num(row.balance)}</tr>
+    {open && row.accounts.map((line) => <tr key={line.account.id} className="rep-detail"><td>{line.account.code} {line.account.name}</td>{num(line.debit)}{num(line.credit)}{num(line.balance)}</tr>)}
+  </>;
+}
+
+export function FiscalReport({ db, period }) {
+  const { rows, totals } = fiscalReport(db, period);
+  return <tbody>
+    {rows.map((row) => <FiscalCategoryRows key={row.category?.id ?? 'uncategorized'} row={row} />)}
+    <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.debit)}{num(totals.credit)}{num(totals.balance)}</tr>
+  </tbody>;
 }
 
 /** One partner: a clickable summary row that unfolds its entries with the running balance. */

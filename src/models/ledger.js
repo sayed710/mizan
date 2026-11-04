@@ -53,6 +53,14 @@ export const badLineSign = (lines = []) => lines.some((l) => (Number(l.debit) ||
 export const isBalanced = (lines = []) =>
   lines.length >= 2 && round(lines.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0)) === 0;
 
+/** The receivable or payable account actually booked on an invoice. */
+export function invoiceCounterpartAccount(db, invoice) {
+  const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
+  const ids = [...new Set((invoice.line_ids ?? []).filter((line) => read(db, 'account.account', line.account_id)?.account_type === type).map((line) => line.account_id))];
+  if (ids.length !== 1) throw new Error('Invoice must have one receivable or payable account');
+  return ids[0];
+}
+
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
@@ -307,13 +315,14 @@ export function profitAndLoss(db, period, { includeClosing = false } = {}) {
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
 export function balanceSheet(db, at = today()) {
-  const rows = balances(db, journalItems(db, { to: at }));
+  const filter = typeof at === 'object' && at !== null ? at : { to: at };
+  const rows = balances(db, journalItems(db, filter));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current'], -1);
   const equity = pick(['equity'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, { to: at }, { includeClosing: true }).net;
+  const earnings = profitAndLoss(db, filter, { includeClosing: true }).net;
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings,

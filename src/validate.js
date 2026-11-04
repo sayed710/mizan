@@ -23,9 +23,9 @@ export function cleanValue(field, value, where) {
   if (field.type === 'distribution' && value === '') fail(where);
   if (value === null || value === undefined || value === '') return value ?? null;
   switch (field.type) {
-    case 'char': case 'text':
+    case 'char': case 'text': case 'html':
       if (typeof value !== 'string') fail(where);
-      return value.slice(0, field.type === 'char' ? 1000 : MAX_TEXT);
+      return value.slice(0, field.type === 'char' ? 1000 : field.type === 'html' ? 100000 : MAX_TEXT);
     case 'selection':
       if (typeof value !== 'string' || !field.options.some((o) => o[0] === value)) fail(where);
       return value;

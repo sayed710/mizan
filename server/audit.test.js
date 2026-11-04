@@ -262,7 +262,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     assert.equal(result.state, 'submitted');
     assert.equal(read(saved, 'account.move', result.closing_move_ids[0]).state, 'posted');
     assert.equal(saved.settings.lock_date, null);
-    assert.equal(saved.settings.tax_lock_date, '2020-03-31');
+    assert.equal(saved.settings.tax_lock_dates?.[1], '2020-03-31');
   } finally {
     await stop();
   }
