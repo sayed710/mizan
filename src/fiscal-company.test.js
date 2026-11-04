@@ -15,7 +15,8 @@ const book = (db, company, amount) => postEntry(db, { company, journal: 'MISC', 
 ] }).db;
 
 test('fiscal closing and reopening isolate companies and their locks', () => {
-  const company = createCompany(seed(), { name: 'Independent' });
+  const initial = seed();
+  const company = createCompany(initial, { name: 'Independent', currency_id: initial.records['res.company'][0].currency_id });
   let db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1] });
   const expense = create(db, 'account.account', { code: '600000', name: 'Company expense', account_type: 'expense', company_id: company.id });
   db = book(book(expense.db, 1, 100), company.id, 300);

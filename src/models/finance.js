@@ -6,7 +6,7 @@ import { addDays, today, total } from './common.js';
 import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
-import { companySum, unratedCount } from './money.js';
+import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
@@ -750,7 +750,7 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
 /** Add the open installments of posted invoices and refunds. */
 function ageDocumentInstallments(db, kind, at, moves, add) {
   const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
-  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
+  for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && (x.date ?? x.invoice_date) <= at)) {
     for (const due of openInstallments(db, m, kind, at)) add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * due.amount, m);
   }
 }
@@ -762,7 +762,7 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
     if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
     const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
     const reversal = moves.find((m) => m.state === 'posted' && m.reversed_entry_id === payment.move_id && m.move_type === 'entry');
-    if (reversal && reversal.invoice_date <= at) continue;
+    if (reversal && (reversal.date ?? reversal.invoice_date) <= at) continue;
     const entry = read(db, 'account.move', payment.move_id);
     const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
     const bookedCredit = (entry?.line_ids ?? []).filter((l) => l.partner_id === payment.partner_id && read(db, 'account.account', l.account_id)?.account_type === accountType)
@@ -771,14 +771,18 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
       return sum + (m.payments ?? []).filter((p) => p.move_id === payment.move_id && applicationActiveAt(db, p, m, at)).reduce((n, p) => n + appliedValue(db, m, p), 0);
     }, 0);
     const remaining = round(Math.abs(bookedCredit) - applied);
-    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining);
+    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining, null, entry);
   }
 }
+
+/** The reporting cutoff is never later than the day the report is run. */
+export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today()) {
   const rows = new Map();
-  const add = (partner, date, amount, document = null) => {
+  const add = (partner, date, amount, document = null, source = document) => {
+    amount = reportingBookedAmount(db, source, amount);
     const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
     const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
     const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };

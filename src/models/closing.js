@@ -68,7 +68,8 @@ export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', d
     throw new Error('Post or cancel draft moves inside this fiscal year before closing');
   }
   const next = ensureAccount(db, retainedEarningsCode, 'Retained Earnings', 'equity', year.company_id);
-  const rows = balances(next, journalItems(next, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
+  const companyView = { ...next, settings: { ...next.settings, current_company_id: year.company_id } };
+  const rows = balances(companyView, journalItems(next, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
     .filter((r) => (!r.account.company_id || r.account.company_id === year.company_id) && pnlTypes.includes(r.account.account_type) && r.balance);
   const lines = rows.map((r) => ({ account_id: r.account.id, ...side(-r.balance) }));
   lines.push({ account: retainedEarningsCode, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });

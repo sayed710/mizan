@@ -130,6 +130,8 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = ensureMainCompany(db);
   const mainCompanyId = db.settings?.current_company_id ?? 1;
+  const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
+  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1 }] });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
     (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');

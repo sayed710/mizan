@@ -359,6 +359,7 @@ const ar = {
   'Initial Balance': 'الرصيد الافتتاحي', Period: 'الفترة', 'This Quarter': 'هذا الربع', 'All Dates': 'كل التواريخ', Journal: 'اليومية', 'Bank Journal': 'يومية البنك',
   'Account Name': 'اسم الحساب', 'Journal Name': 'اسم اليومية', 'Short Code': 'الكود المختصر', 'Default Account': 'الحساب الافتراضي',
   Receivable: 'المدينون', 'Bank and Cash': 'البنك والنقدية', 'Current Assets': 'الأصول المتداولة', 'Fixed Assets': 'الأصول الثابتة',
+  'Non-current Assets': 'الأصول غير المتداولة', Prepayments: 'المدفوعات المقدمة', 'Non-current Liabilities': 'الالتزامات غير المتداولة', 'Credit Card': 'بطاقة ائتمان', 'Off-Balance Sheet': 'خارج الميزانية',
   'Current Liabilities': 'الخصوم المتداولة', Income: 'الإيرادات', Entries: 'القيود',
   'Email Marketing': 'التسويق بالبريد', Sign: 'التوقيع', Documents: 'المستندات', Planning: 'التخطيط', Rental: 'التأجير',
   Appointments: 'المواعيد', Website: 'الموقع', Barcode: 'الباركود', 'Shop Floor': 'خط الإنتاج', Dashboards: 'لوحات المعلومات',

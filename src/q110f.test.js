@@ -145,7 +145,7 @@ test('customer statement selects an allowed company independently of the active 
   const { createRoot } = await import('react-dom/client');
   const { initStore, getDb, commit } = await import('./store.js');
   await initStore();
-  const branch = createCompany(getDb(), { name: 'Allowed branch' });
+  const branch = createCompany(getDb(), { name: 'Allowed branch', currency_id: getDb().records['res.company'][0].currency_id });
   const other = createCompany(branch.db, { name: 'Restricted branch' });
   const first = invoice(other.db, 1, 120);
   const second = invoice(first.db, branch.id, 240);

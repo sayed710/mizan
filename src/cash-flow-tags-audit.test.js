@@ -10,7 +10,7 @@ import { migrate } from './migrations.js';
 
 test('cash flow classifies loan movements by stored tag activity and reconciles cash per company', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = create(db, 'res.company', { name: 'Second company', currency_id: db.records['res.company'][0].currency_id }); db = company.db;
   const tag = create(db, 'account.account.tag', { name: 'Operating label', cash_flow_activity: 'financing' }); db = tag.db;
   const legacyTag = create(db, 'account.account.tag', { name: 'Operating legacy' }); db = legacyTag.db;
   const liability = create(db, 'account.account', { code: '271000', name: 'Borrowing', account_type: 'liability_current', tag_ids: [legacyTag.id, tag.id] }); db = liability.db;
