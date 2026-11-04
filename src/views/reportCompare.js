@@ -49,8 +49,8 @@ const PNL_SECTIONS = [
   ['Revenue', (p) => p.revenue, (p) => p.detail.revenue],
   ['Cost of Revenue', (p) => p.cost, (p) => p.detail.cost],
   ['Expenses', (p) => p.expense, (p) => p.detail.expense],
-  ['Other Income', (p) => p.otherIncome],
-  ['Other Expenses', (p) => p.otherExpense],
+  ['Other Income', (p) => p.otherIncome, (p) => p.detail.otherIncome],
+  ['Other Expenses', (p) => p.otherExpense, (p) => p.detail.otherExpense],
 ];
 
 const PNL_TOTALS = [
