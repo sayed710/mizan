@@ -11,8 +11,9 @@ const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' 
 
 /** Replace the batch lines with every posted, still-open invoice of the matching type, at its residual. */
 export function fillOpenInvoices(db, batch) {
+  const company = (batch.journal_id ? read(db, 'account.journal', batch.journal_id)?.company_id : null) ?? batch.company_id ?? 1;
   const open = search(db, 'account.move').filter(
-    (m) => m.state === 'posted' && m.move_type === MOVE_TYPE[batch.batch_type] && (Number(m.amount_residual) || 0) > 0,
+    (m) => (m.company_id ?? 1) === company && m.state === 'posted' && m.move_type === MOVE_TYPE[batch.batch_type] && (Number(m.amount_residual) || 0) > 0,
   );
   return write(db, 'account.batch.payment', batch.id, { lines: open.map((m) => ({ move_id: m.id, amount: m.amount_residual })) });
 }
@@ -63,6 +64,7 @@ export function postBatch(db, batch) {
   return write(next, 'account.batch.payment', batch.id, {
     name,
     state: 'posted',
+    ...(!batch.journal_id ? { company_id: company } : {}),
     lines: linked.map((line, index) => ({
       ...line,
       check_number: batch.batch_type === 'outbound' ? start + index : line.check_number ?? null,

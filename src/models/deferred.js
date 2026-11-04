@@ -300,7 +300,8 @@ export const deferredModels = {
         label: 'Generate Entries',
         noSelection: true,
         ask: { label: 'Period End Date', default: today },
-        run: (db, ids, date) => generateGroupedEntries(db, { date }),
+        // A kind-filtered menu (Deferred Revenues/Expenses) generates only its own kind.
+        run: (db, ids, date, { defaults = {} } = {}) => generateGroupedEntries(db, { date, kind: defaults.kind }),
       },
     ],
     fields: {
