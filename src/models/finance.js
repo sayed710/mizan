@@ -721,15 +721,14 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
   const allItems = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
-  const items = includeBlocked ? allItems : allItems.filter((l) => !l.blocked);
-  if (!items.length && allItems.length > 0) return [];
+  const items = allItems;
   const counterpart = items.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
   const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
   const allocations = settlementCompanyAllocations(db, m);
   let paid = (m.payment_date && m.payment_date <= at ? companyRound(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
-  let dues = items.map((l) => ({ date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date, amount: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)) }));
+  let dues = items.map((l) => ({ date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date, amount: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)), blocked: l.blocked }));
   if (!items.length) {
     const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
     const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date, documentCurrency(db, m)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
@@ -744,8 +743,8 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   return dues.map((due) => {
     const applied = Math.min(paid, due.amount);
     paid -= applied;
-    return { date: due.date, amount: companyRound(due.amount - applied) };
-  }).filter((due) => due.amount > 0);
+    return { date: due.date, amount: companyRound(due.amount - applied), blocked: due.blocked };
+  }).filter((due) => due.amount > 0 && (includeBlocked || !due.blocked));
 }
 
 /** Add the open installments of posted invoices and refunds. */
@@ -941,8 +940,7 @@ export function runFollowUps(db, at = today()) {
 
   for (const f of overdueGroups) {
     const companyId = f.invoices[0].company_id ?? 1;
-    const days = Math.floor((new Date(at) - new Date(f.oldest)) / 864e5);
-    const level = [...levels].reverse().find((l) => days >= (Number(l.delay) || 0));
+    const level = followUpLevel(nextDb, f, at);
     const partner = partners.get(f.partner_id);
     if (!level || !partner) continue;
 
@@ -979,6 +977,12 @@ export function runFollowUps(db, at = today()) {
   }
 
   return nextDb;
+}
+
+export function followUpLevel(db, reminder, at = today()) {
+  const days = Math.floor((new Date(at) - new Date(reminder.oldest)) / 864e5);
+  return search(db, 'account.followup.level').filter((level) => days >= (Number(level.delay) || 0))
+    .sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0))[0];
 }
 
 const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.name ?? db.settings?.currency ?? '';
@@ -1018,8 +1022,7 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
 
   for (const part of groups) {
     const cId = part.company_id;
-    const late = Math.floor((new Date(at) - new Date(part.oldest)) / 864e5);
-    const level = levels.find((l) => late >= (Number(l.delay) || 0));
+    const level = followUpLevel(scope, part, at);
 
     const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
     const detail = `${level?.name ?? 'Payment reminder'}: ${round(part.total)} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
