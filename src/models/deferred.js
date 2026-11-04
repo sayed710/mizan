@@ -28,10 +28,13 @@ function datedBoard(amount, start, end, method = 'days', currency = null) {
   return rows.map((row, index) => ({ date: row.date, amount: amounts[index], posted: false, move_id: null }));
 }
 
+const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
+
 /** Make schedules from the protected posted company amounts, once per source line. */
 export function createInvoiceDeferrals(db, move) {
-  if (!['out_invoice', 'in_invoice'].includes(move.move_type)) return db;
+  if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return db;
   const company = read(db, 'res.company', move.company_id ?? 1);
+  const refund = isRefund(move);
   let next = db;
   for (const [index, line] of (move.invoice_line_ids ?? []).entries()) {
     if (!line.deferred_start_date && !line.deferred_end_date) continue;
@@ -39,7 +42,7 @@ export function createInvoiceDeferrals(db, move) {
     const source = entryLine?.invoice_sources.find((s) => s.index === index);
     if (!source?.original_account_id || !(source.amount > 0)) throw new Error('Deferred line needs a positive posted amount and recognition account');
     const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, company?.deferred_amount_computation_method, companyCurrencyRecord(db, move.company_id));
-    const created = create(next, 'account.deferral', { name: `${move.name} ${index + 1}`, kind: move.move_type === 'out_invoice' ? 'revenue' : 'expense', amount: source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line: index, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
+    const created = create(next, 'account.deferral', { name: `${move.name} ${index + 1}`, kind: move.move_type.startsWith('out') ? 'revenue' : 'expense', amount: refund ? -source.amount : source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board: refund ? board.map((r) => ({ ...r, amount: -r.amount })) : board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line: index, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
     next = created.db;
     if (company?.deferred_generation_method === 'on_validation') next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
   }
@@ -52,21 +55,22 @@ export function reverseInvoiceDeferrals(db, source) {
   const scheduleIds = new Set(schedules.map((schedule) => schedule.id));
   const corrections = [];
   for (const original of db.records['account.move'] ?? []) {
-    if (!original.is_deferred_grouped || original.reversed_entry_id || original.state !== 'posted' || original.deferral_date < today()) continue;
+    if (!original.is_deferred_grouped || original.reversed_entry_id || original.state !== 'posted') continue;
     const contributions = original.deferred_contributions ?? [];
     for (const contribution of contributions) {
       if (!scheduleIds.has(contribution.schedule_id)) continue;
       const reversal = read(db, 'account.move', original.reversal_move_id);
       const amount = roundCurrency((contribution.board_lines ?? []).reduce((sum, line) => sum + line.amount, 0), companyCurrencyRecord(db, original.company_id));
+      const absAmount = Math.abs(amount);
       const deferred = original.line_ids?.[contribution.deferred_line_index];
       const recognized = original.line_ids?.[contribution.recognition_line_index];
-      if (!reversal || reversal.state !== 'posted' || reversal.reversed_entry_id !== original.id || !deferred || !recognized || !(amount > 0)
-        || Math.max(deferred.debit, deferred.credit) < amount || Math.max(recognized.debit, recognized.credit) !== amount
+      if (!reversal || reversal.state !== 'posted' || reversal.reversed_entry_id !== original.id || !deferred || !recognized || !absAmount
+        || Math.max(deferred.debit, deferred.credit) < absAmount || Math.max(recognized.debit, recognized.credit) !== absAmount
         || (deferred.debit > 0) === (recognized.debit > 0)) {
         throw new Error('Cannot safely reverse grouped deferral contribution');
       }
       const lines = [deferred, recognized].map((line) => ({
-        account_id: line.account_id, debit: line.credit > 0 ? amount : 0, credit: line.debit > 0 ? amount : 0,
+        account_id: line.account_id, debit: line.credit > 0 ? absAmount : 0, credit: line.debit > 0 ? absAmount : 0,
         partner_id: line.partner_id, analytic_distribution: line.analytic_distribution,
       }));
       corrections.push({ original, reversal, lines });
@@ -88,7 +92,7 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const line of schedule.board ?? []) {
       if (!line.move_id || line.reversal_move_id) { board.push(line); continue; }
       const original = read(next, 'account.move', line.move_id);
-      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: today(), ref: `Reversal of ${original.name}`, lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: original.invoice_date ?? original.date ?? today(), ref: `Reversal of ${original.name}`, lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
     }
@@ -182,7 +186,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
       const boardLines = (s.board ?? []).map((line, index) => ({ line, index }))
         .filter(({ line }) => line.date <= date && !line.posted && !line.move_id);
       const recognized = roundCurrency(boardLines.reduce((sum, { line }) => sum + (Number(line.amount) || 0), 0), currency);
-      if (recognized > 0) {
+      if (recognized !== 0) {
         const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
         const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
         const recognitionAcc = s.recognition_account_id ?? (k === 'expense' ? defaultDebit : defaultCredit);

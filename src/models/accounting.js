@@ -1,5 +1,5 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
-import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
+import { amounts, nextName, productLines, promptedAmount, shiftMonth, today, validDate } from './common.js';
 import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
@@ -168,6 +168,77 @@ export function paymentGuard(db, before, after, ctx) {
 }
 
 const validInvoiceTotal = (r, db) => total(r, db) > 0 || (total(r, db) === 0 && r.move_type === 'out_invoice' && r.sale_id && (r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) < 0));
+const RECURRENCE_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
+const RECURRING_EXCLUDED_FIELDS = new Set([
+  'id', 'name', 'ref', 'payment_reference', 'state', 'line_ids', 'payments', 'amount_paid', 'payment_date',
+  'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id',
+  'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
+  'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
+  'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
+]);
+function spawnRecurringMove(db, move) {
+  const months = RECURRENCE_MONTHS[move.auto_post];
+  if (!months) return db;
+  const current = move.move_type === 'entry' && move.date ? move.date : move.invoice_date ?? move.date ?? today();
+  if (!validDate(current)) throw new Error('Enter a valid date');
+  if (move.auto_post_until && !validDate(move.auto_post_until)) throw new Error('Enter a valid recurring end date');
+  const nextDate = shiftMonth(current, months);
+  if (move.auto_post_until && nextDate > move.auto_post_until) return db;
+  const origin = move.auto_post_origin_id ?? move.id;
+  if ((db.records['account.move'] ?? []).some((m) => m.id !== move.id && (m.auto_post_origin_id ?? m.id) === origin && (m.invoice_date ?? m.date) === nextDate && m.state !== 'cancel')) return db;
+  const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
+  const nextDue = isInvoice(move) ? (term ? dueDate(term, nextDate) : move.invoice_date_due ? shiftMonth(move.invoice_date_due, months) : nextDate) : undefined;
+  const raw = (db.records['account.move'] ?? []).find((m) => m.id === move.id) ?? move;
+  const base = Object.fromEntries(Object.entries(raw).filter(([k]) => !RECURRING_EXCLUDED_FIELDS.has(k)));
+  return create(db, 'account.move', {
+    ...base,
+    name: '/',
+    state: 'draft',
+    amount_paid: 0,
+    payments: [],
+    invoice_date: nextDate,
+    date: nextDate,
+    ...(nextDue ? { invoice_date_due: nextDue } : {}),
+    auto_post_origin_id: origin,
+    invoice_line_ids: isInvoice(move) ? (raw.invoice_line_ids ?? []).map((l) => ({
+      ...l,
+      ...(l.deferred_start_date ? { deferred_start_date: shiftMonth(l.deferred_start_date, months) } : {}),
+      ...(l.deferred_end_date ? { deferred_end_date: shiftMonth(l.deferred_end_date, months) } : {}),
+    })) : [],
+    line_ids: !isInvoice(move) ? (raw.line_ids ?? []).map((l) => ({
+      ...l,
+      ...(l.date_maturity ? { date_maturity: shiftMonth(l.date_maturity, months) } : {}),
+    })) : [],
+  }).db;
+}
+
+/** Auto-post draft entries scheduled on or before `at`, generating each next recurring entry once up to its end date. */
+export function postAutoPostMoves(db, at = today()) {
+  if (!validDate(at)) throw new Error('Enter a valid date');
+  let next = db;
+  const attempted = new Set();
+  while (true) {
+    const due = (next.records['account.move'] ?? [])
+      .filter((m) => m.active !== false && m.state === 'draft' && m.auto_post && m.auto_post !== 'no' && !attempted.has(m.id))
+      .map((m) => ({ move: m, date: m.move_type === 'entry' && m.date ? m.date : m.invoice_date ?? m.date ?? today() }))
+      .filter(({ move, date }) => date <= at && (!move.auto_post_until || date <= move.auto_post_until))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.move.id - b.move.id);
+    if (!due.length) break;
+    for (const { move } of due) {
+      attempted.add(move.id);
+      const before = next;
+      try {
+        next = postMove(next, move.id);
+      } catch (e) {
+        const body = `Auto-post failed: ${e.message}`;
+        next = (before.messages ?? []).some((m) => m.model === 'account.move' && m.res_id === move.id && m.body === body)
+          ? before
+          : postNote(before, 'account.move', move.id, body);
+      }
+    }
+  }
+  return next;
+}
 
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
@@ -192,7 +263,8 @@ export function postMove(db, id) {
       return { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
     });
     checkMandatoryPlans(db, { ...r, line_ids });
-    return postAnalytic(write(db, 'account.move', id, { state: 'posted', name, line_ids }), id);
+    const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, line_ids }), id);
+    return spawnRecurringMove(posted, read(posted, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
@@ -232,9 +304,10 @@ export function postMove(db, id) {
   })) throw new Error('Journal account belongs to another company');
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
-  if (isRefund(r) && r.reversed_entry_id) return offsetCreditNote(posted, id);
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
-  return r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
+  if (isRefund(r) && r.reversed_entry_id) return spawnRecurringMove(offsetCreditNote(deferred, id), read(deferred, 'account.move', id));
+  const withAssets = r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
+  return spawnRecurringMove(withAssets, read(withAssets, 'account.move', id));
 }
 
 /** Reverse an asset depreciation entry and make its board line available again. */
@@ -737,6 +810,7 @@ export const accountingModels = {
 
   'account.move': {
     label: 'Invoices',
+    actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
@@ -832,9 +906,22 @@ export const accountingModels = {
       incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
+      auto_post: {
+        type: 'selection',
+        label: 'Auto-post',
+        options: [
+          ['no', 'No'],
+          ['at_date', 'At Date'],
+          ['monthly', 'Monthly'],
+          ['quarterly', 'Quarterly'],
+          ['yearly', 'Yearly'],
+        ],
+      },
+      auto_post_until: { type: 'date', label: 'Repeat Until' },
+      auto_post_origin_id: { type: 'many2one', relation: 'account.move', label: 'Recurring Origin', readonly: true },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
-    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
+    defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     filters: [
       [{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
       [
@@ -898,7 +985,7 @@ export const accountingModels = {
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables.
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : ''),
-      groups: [['partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
+      groups: [['partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

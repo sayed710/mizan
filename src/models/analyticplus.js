@@ -3,7 +3,7 @@ import { create, read, search, unlink, write } from '../orm.js';
 import { today } from './common.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { invoiceLines, invoiceLineAccount } from './ledger.js';
+import { invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
 import { round } from '../money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
@@ -262,7 +262,28 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
     const from = [budget.date_from, line.date_from, period.from].filter(Boolean).sort().at(-1);
     const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
     const companyId = budget.company_id ?? 1;
-    const analytic_lines = analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account });
+    const targetAccount = line.account_id ? read(db, 'account.account', line.account_id) : null;
+    if (line.account_id && !targetAccount) throw new Error('Budget account not found');
+    const analytic_lines = line.analytic_account_id
+      ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account })
+          .filter((item) => !targetAccount || item.general_account === targetAccount.code)
+      : (line.account_id || line.general_account)
+        ? journalItems(db, { from, to, company_id: companyId })
+            .filter((item) => !item.is_closing
+              && (!line.account_id || item.account_id === line.account_id)
+              && (!line.general_account || (read(db, 'account.account', item.account_id)?.code ?? '').startsWith(line.general_account)))
+            .map((item, idx) => ({
+              id: `${item.move_id}-${idx}`,
+              name: item.name || item.move_name,
+              date: item.date,
+              move_id: item.move_id,
+              account_id: null,
+              general_account: read(db, 'account.account', item.account_id)?.code || '',
+              amount: round((Number(item.credit) || 0) - (Number(item.debit) || 0)),
+              company_id: companyId,
+            }))
+            .filter((item) => item.amount !== 0)
+        : [];
     const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
     const theoretical = round(planned * fraction);
     return { ...line, planned, practical, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines };
@@ -347,7 +368,7 @@ export const analyticPlusModels = {
     ...budgetModel,
     fields: {
       ...budgetModel.fields,
-      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
+      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
       state: { ...budgetModel.fields.state, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['validated', 'Validated'], ['done', 'Done'], ['cancel', 'Cancelled']] },
     },
     form: {

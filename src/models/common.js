@@ -34,6 +34,18 @@ export const addDays = (date, n) => {
   d.setDate(d.getDate() + n);
   return isoDate(d);
 };
+export const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
+  && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date;
+/** Shift a YYYY-MM-DD date by `months`, preserving month-end dates and clamping shorter target months. */
+export function shiftMonth(date, months) {
+  if (!validDate(date)) return date;
+  const source = new Date(`${date}T00:00:00Z`);
+  const target = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + months, 1));
+  const end = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  const sourceEnd = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(source.getUTCDate() === sourceEnd ? end : Math.min(source.getUTCDate(), end));
+  return target.toISOString().slice(0, 10);
+}
 export const pad = (n, size = 5) => String(n).padStart(size, '0');
 
 /** Line subtotal before tax, after the line discount (%); a price-included tax is taken out. */

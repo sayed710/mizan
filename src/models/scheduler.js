@@ -6,6 +6,7 @@ import { schedulePreventive } from './maintplus.js';
 import { replenish } from './routes.js';
 import { runFollowUps } from './finance.js';
 import { postDepreciation } from './assets.js';
+import { postAutoPostMoves } from './accounting.js';
 import { autoReconcile } from './reconcile.js';
 import { processDue } from './automation.js';
 import { publishDue } from './social.js';
@@ -46,6 +47,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
     ['timeoff', (db, at) => (db.records['hr.leave.allocation'] ?? []).filter((a) => a.state === 'validate' && a.allocation_type === 'accrual').reduce((acc, a) => accrue(acc, a, at), db)],
     ['accounting', (db, at) => (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
       .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
+    ['accounting', tolerant(postAutoPostMoves)],
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
     ['inventory', (db, at) => replenish(db, at)],
