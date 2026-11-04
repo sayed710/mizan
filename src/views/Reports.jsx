@@ -40,38 +40,41 @@ export const PERIODS = {
   all: () => ({ from: '', to: '9999-12-31' }),
 };
 
-function ComparisonCells({ values, variance }) {
+function ComparisonCells({ values, variance, showVariance = true }) {
+  const cells = values.map((value, i) => <td key={i} className="num">{money(value)}</td>);
+  if (!showVariance) return <>{cells}</>;
   const previous = values.at(-2);
   const amount = variance?.amount ?? Math.round((values.at(-1) - previous) * 100) / 100;
   const pct = variance ? variance.pct : previous ? Math.round(amount / Math.abs(previous) * 10000) / 100 : null;
-  return <>{values.map((value, i) => <td key={i} className="num">{money(value)}</td>)}<td className="num">{money(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
+  return <>{cells}<td className="num">{money(amount)}</td><td className="num">{pct == null ? t('n/a') : `${pct}${t('%')}`}</td></>;
 }
 
-function Section({ title, total, rows, sign = 1, totals, variance }) {
+function Section({ title, total, rows, sign = 1, totals, variance, showVariance = true }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{rows?.length ? (open ? '▾' : '▸') : ''}</span> {t(title)}</td>
-        {totals ? <ComparisonCells values={totals} variance={variance} /> : <td className="num">{money(sign * total)}</td>}
+        {totals ? <ComparisonCells values={totals} variance={variance} showVariance={showVariance} /> : <td className="num">{money(sign * total)}</td>}
       </tr>
       {open && rows?.map((r) => (
         <tr key={r.account.id} className="rep-detail">
           <td>{r.account.code} {r.account.name}</td>
-          {totals ? <ComparisonCells values={r.values} /> : <td className="num">{money(r.balance)}</td>}
+          {totals ? <ComparisonCells values={r.values} showVariance={showVariance} /> : <td className="num">{money(r.balance)}</td>}
         </tr>
       ))}
     </>
   );
 }
 
-const Total = ({ label, value, strong, values, variance }) => (
-  <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{values ? <ComparisonCells values={values} variance={variance} /> : <td className="num">{money(value)}</td>}</tr>
+const Total = ({ label, value, strong, values, variance, showVariance = true }) => (
+  <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{values ? <ComparisonCells values={values} variance={variance} showVariance={showVariance} /> : <td className="num">{money(value)}</td>}</tr>
 );
 
 function Comparison({ data, report }) {
-  const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance[i]} />;
-  const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance[data.sections.length + i]} />;
+  const showVariance = Boolean(data.variance);
+  const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance?.[i]} showVariance={showVariance} />;
+  const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance?.[data.sections.length + i]} showVariance={showVariance} />;
   return <tbody>{report === 'pnl'
     ? [section(0), section(1), total(0), section(2), total(1), section(3), section(4), total(2)]
     : [section(0), total(0), section(1), section(2), section(3), total(1)]}</tbody>;
@@ -624,7 +627,7 @@ function ReportPage({ leaf }) {
       </div>
       <div className="list-wrap">
         <table className="list report">
-          <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, 'Variance', '%'] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
+          <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
           {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
         </table>
       </div>

@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, today, validDate } from './common.js';
 import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
-import { datedLockDelete, datedLockGuard, paymentInvariant, settlementFxError } from './finance.js';
+import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { rateAt } from './currency.js';
@@ -50,12 +50,15 @@ export function postPayment(db, p) {
   let taxClosing = null;
   if (currentPayment.return_id || currentPayment.is_tax_payment) {
     const ret = read(db, 'account.return', currentPayment.return_id);
-    if (!ret || ret.state !== 'submitted' || (ret.company_id ?? 1) !== (currentPayment.company_id ?? 1)) throw new Error('A submitted tax return is required for settlement');
-    const expected = round(Number(ret.total_amount_to_pay) || 0);
+    const payCompanyId = currentPayment.company_id ?? 1;
+    let companies = [];
+    try { if (ret) companies = returnCompanies(db, ret); } catch { companies = []; }
+    if (!ret || ret.state !== 'submitted' || !companies.includes(payCompanyId)) throw new Error('A submitted tax return is required for settlement');
+    const expected = taxClosingSpec(db, ret, payCompanyId).payable;
     if (!expected || inbound !== (expected < 0) || amountMismatch(currentPayment.amount, Math.abs(expected))) throw new Error('Payment must match the tax return obligation');
     const matches = (ret.closing_move_ids ?? []).flatMap((id) => {
       const move = read(db, 'account.move', id);
-      if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== (ret.company_id ?? 1)) return [];
+      if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== payCompanyId) return [];
       return (move.line_ids ?? []).map((line, index) => ({ move, line, index })).filter(({ line }) =>
         line.account_id === currentPayment.destination_account_id && line.partner_id === currentPayment.partner_id
         && round((Number(line.credit) || 0) - (Number(line.debit) || 0)) === expected);

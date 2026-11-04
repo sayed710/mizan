@@ -3,6 +3,7 @@ import { viewRecords } from '../companyView.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { round } from '../money.js';
+import { lineUntaxed } from '../models/taxes.js';
 import { money } from '../ui.jsx';
 
 /** Compare the recorded delivery and invoice quantities on each sales line. */
@@ -18,7 +19,7 @@ export function SalesReview({ leaf }) {
       const difference = deliveredFirst ? delivered - invoiced : invoiced - delivered;
       if (difference <= 0) return [];
       const unitPrice = Number(line.price_unit) || 0;
-      const amount = round(difference * unitPrice);
+      const amount = round(lineUntaxed({ ...line, qty: difference }));
       return [{ order, line, index, delivered, invoiced, difference, unitPrice, amount }];
     });
   });

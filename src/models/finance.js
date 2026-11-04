@@ -196,15 +196,21 @@ function settlementCapacity(db, entry, inv) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, inv.company_id));
   const taxReturn = (db.records['account.return'] ?? []).find((r) => (r.closing_move_ids ?? []).includes(inv.id) && ['submitted', 'paid'].includes(r.state));
   if (taxReturn) {
+    const invCompanyId = inv.company_id ?? 1;
+    let expected;
+    try {
+      if (!returnCompanies(db, taxReturn).includes(invCompanyId)) return 0;
+      expected = taxClosingSpec(db, taxReturn, invCompanyId).payable;
+    } catch { return 0; }
     const payment = (db.records['account.payment'] ?? []).find((p) => p.state === 'posted' && p.is_tax_payment && p.return_id === taxReturn.id && p.move_id === entry.id);
     const settlement = (inv.payments ?? []).find((p) => p.move_id === entry.id && !p.reversed);
     const closingLine = Number.isInteger(settlement?.line_index) ? inv.line_ids?.[settlement.line_index] : null;
     if (!payment || !closingLine || closingLine.account_id !== payment.destination_account_id || closingLine.partner_id !== payment.partner_id
-      || (taxReturn.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+      || (payment.company_id ?? 1) !== invCompanyId) return 0;
     const signed = round((Number(closingLine.credit) || 0) - (Number(closingLine.debit) || 0));
     const paid = round((entry.line_ids ?? []).filter((line) => line.account_id === closingLine.account_id && line.partner_id === payment.partner_id)
       .reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0));
-    if (!signed || Math.sign(signed) !== Math.sign(paid) || Math.sign(signed) !== Math.sign(Number(taxReturn.total_amount_to_pay))) return 0;
+    if (!signed || signed !== expected || Math.sign(signed) !== Math.sign(paid)) return 0;
     return Math.min(Math.abs(signed), Math.abs(paid));
   }
   // A credit note and its original invoice settle each other through their opposite receivable/payable lines.
@@ -529,10 +535,57 @@ export function validateTaxReturnPeriod(db, ret) {
 }
 
 
+function resolveCompanyTaxAccount(db, configuredId, fallbackCode, companyId, isMember) {
+  if (configuredId) {
+    const acc = read(db, 'account.account', configuredId);
+    if (!acc || (acc.company_id && acc.company_id !== companyId)) return null;
+    const resolvedId = accountId(db, acc.code, companyId) ?? acc.id;
+    return read(db, 'account.account', resolvedId) ?? acc;
+  }
+  if (isMember) return null;
+  const fallbackId = accountId(db, fallbackCode, companyId);
+  return fallbackId ? read(db, 'account.account', fallbackId) : null;
+}
+
+/** Validate explicit return-type mappings configured on a tax unit. */
+export function taxUnitMemberTypeValidation(db, unit, mainTypes = [], requiredCompanyId = null) {
+  const companyIds = unit?.company_ids ?? [];
+  const types = new Map();
+  for (const line of unit?.member_return_type_ids ?? []) {
+    const companyId = line?.company_id;
+    const company = read(db, 'res.company', companyId);
+    if (!Number.isInteger(companyId) || !company || companyId === (unit.main_company_id ?? 1) || !companyIds.includes(companyId)) {
+      return { error: 'Tax return type lines must use member companies in the tax unit', types };
+    }
+    if (types.has(companyId)) return { error: 'Set only one tax return type for each member company', types };
+    const type = read(db, 'account.return.type', line.type_id);
+    if (!type || (type.company_id ?? 1) !== companyId) {
+      return { error: `Tax return type must belong to ${company.name}`, types };
+    }
+    if (mainTypes.some((mainType) => mainType && type.category !== mainType.category)) {
+      return { error: `Tax return type for ${company.name} must match the main return type category`, types };
+    }
+    types.set(companyId, type);
+  }
+  if (requiredCompanyId != null && !types.has(requiredCompanyId)) {
+    const companyName = read(db, 'res.company', requiredCompanyId)?.name ?? String(requiredCompanyId);
+    return { error: `Set the tax return type for ${companyName} on the tax unit`, types };
+  }
+  return { error: null, types };
+}
+
 /** Calculate the closing from posted tax accounts and the return's payment configuration. */
-function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
-  const type = read(db, 'account.return.type', ret.type_id);
-  if (!type || (type.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
+export function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
+  const mainType = read(db, 'account.return.type', ret.type_id);
+  if (!mainType || (mainType.company_id ?? 1) !== (ret.company_id ?? 1)) throw new Error('Invalid tax return type or company');
+  const isMember = companyId !== (ret.company_id ?? 1);
+  let type = mainType;
+  if (isMember) {
+    const unit = read(db, 'account.tax.unit', ret.tax_unit_id);
+    const { error, types } = taxUnitMemberTypeValidation(db, unit, [mainType], companyId);
+    if (error) throw new Error(error);
+    type = types.get(companyId);
+  }
   ret = { ...ret, company_id: companyId, tax_unit_id: null };
   const report = validateTaxReturnPeriod(db, ret);
   const accounts = taxAccounts(db, ret.company_id);
@@ -552,13 +605,21 @@ function taxClosingSpec(db, ret, companyId = ret.company_id ?? 1) {
     netClosed = round(netClosed - balance);
   }
   if (round(netClosed - report.payable)) throw new Error('Unbalanced tax account: ledger balance does not match tax report');
-  const payable = (type.tax_payable_account_id && read(db, 'account.account', type.tax_payable_account_id)?.code) || '251000';
-  const receivable = (type.tax_receivable_account_id && read(db, 'account.account', type.tax_receivable_account_id)?.code) || '131000';
-  const partner = type.payment_partner_id || ret.payment_partner_id;
-  if (report.payable > 0) lines.push({ account: payable, credit: report.payable, partner_id: partner });
-  else if (report.payable < 0) lines.push({ account: receivable, debit: -report.payable, partner_id: partner });
-  if (!lines.length) lines.push({ account: payable, debit: 0, credit: 0 }, { account: receivable, debit: 0, credit: 0 });
-  return { lines, payable: report.payable };
+  const payableAccount = resolveCompanyTaxAccount(db, type?.tax_payable_account_id, '251000', companyId, isMember);
+  const receivableAccount = resolveCompanyTaxAccount(db, type?.tax_receivable_account_id, '131000', companyId, isMember);
+  const partner = type?.payment_partner_id || mainType.payment_partner_id || ret.payment_partner_id;
+  if (report.payable > 0) {
+    if (!payableAccount) throw new Error(`Missing tax payable account configuration for company ${companyId}`);
+    lines.push({ account: payableAccount.code, credit: report.payable, partner_id: partner });
+  } else if (report.payable < 0) {
+    if (!receivableAccount) throw new Error(`Missing tax receivable account configuration for company ${companyId}`);
+    lines.push({ account: receivableAccount.code, debit: -report.payable, partner_id: partner });
+  }
+  if (!lines.length) {
+    if (!payableAccount || !receivableAccount) throw new Error(`Missing tax account configuration for company ${companyId}`);
+    lines.push({ account: payableAccount.code, debit: 0, credit: 0 }, { account: receivableAccount.code, debit: 0, credit: 0 });
+  }
+  return { lines, payable: report.payable, payableAccount, receivableAccount, partner };
 }
 
 /** Validate a submitted closing against its linked return and the posted ledger. */
