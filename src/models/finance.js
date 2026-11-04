@@ -96,12 +96,13 @@ function settlesAfterLock(db, before, after, lock) {
  * The latest lock date that applies to a move: the global and hard locks always, the sales or purchase lock
  * by journal type. Empty when nothing is locked.
  */
-export function lockDateFor(settings = {}, move = {}) {
-  const side = String(move.move_type ?? '').startsWith('out_') ? settings.sale_lock_date : String(move.move_type ?? '').startsWith('in_') ? settings.purchase_lock_date : null;
-  return [settings.lock_date, settings.hard_lock_date, side].filter(Boolean).sort().at(-1) ?? '';
+export function lockDateFor(settings = {}, move = {}, journal = null) {
+  const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
+  const purchases = String(move.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
+  return [settings.lock_date, settings.hard_lock_date, sales && settings.sale_lock_date, purchases && settings.purchase_lock_date].filter(Boolean).sort().at(-1) ?? '';
 }
 
-const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
+const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move, (db.records['account.journal'] ?? []).find((journal) => journal.id === move.journal_id)), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
 const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
 export function returnCompanies(db, ret) {
   if (!ret.tax_unit_id) return [ret.company_id ?? 1];
