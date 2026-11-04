@@ -107,7 +107,7 @@ export function checkMandatoryPlans(db, move) {
 }
 
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
-export function analyticLinesForMove(db, move) {
+export function analyticLinesForMove(db, move, { historical = false } = {}) {
   if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
     const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
@@ -118,7 +118,7 @@ export function analyticLinesForMove(db, move) {
     }));
   });
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
-  checkMandatoryPlans(db, move);
+  if (!historical) checkMandatoryPlans(db, move);
   const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   const journalLines = move.line_ids?.length ? move.line_ids : invoiceLines(db, move);

@@ -8,6 +8,7 @@ import { round } from '../money.js';
 import { rateAt } from './currency.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
+import { exchangeAccount } from './exchange-account.js';
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
@@ -89,8 +90,8 @@ export function postPayment(db, p) {
     if (diff) {
       const fx = postEntry(withFx, { journal: 'MISC', company: p.company_id ?? 1, date, ref: `Exchange difference ${name}`,
         lines: diff > 0
-          ? [{ account: counterpart, debit: diff, partner_id: p.partner_id }, { account: '450100', credit: diff }]
-          : [{ account: counterpart, credit: -diff, partner_id: p.partner_id }, { account: '690100', debit: -diff }] });
+          ? [{ account: counterpart, debit: diff, partner_id: p.partner_id }, { account: exchangeAccount(withFx, p.company_id, diff), credit: diff }]
+          : [{ account: counterpart, credit: -diff, partner_id: p.partner_id }, { account: exchangeAccount(withFx, p.company_id, diff), debit: -diff }] });
       withFx = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: moveId, fx_invoice_id: m.id } : entry) } }; fxMove = fx.id;
     }
     const released = releaseCashBasis(withFx, m, take / m.amount_total, date, { final: take >= m.amount_residual });

@@ -3,6 +3,7 @@
 import { models } from './models/index.js';
 import { create, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
+import { analyticLinesForMove } from './models/analyticplus.js';
 import { migrateDocumentTags } from './models/signplus.js';
 import { migrateWorkorderTimes } from './models/workorder.js';
 import { ensureQuants } from './models/quant.js';
@@ -448,6 +449,27 @@ export function migratePartnerBankAccounts(db) {
   };
 }
 
+function migrateCashFlowActivities(db) {
+  let next = db;
+  const activities = ['operating', 'investing', 'financing'];
+  const tagFor = (activity) => {
+    const existing = (next.records['account.account.tag'] ?? []).find((tag) => tag.cash_flow_activity === activity);
+    if (existing) return existing.id;
+    const made = create(next, 'account.account.tag', { name: `Legacy ${activity} activities`, cash_flow_activity: activity });
+    next = made.db;
+    return made.id;
+  };
+  for (const account of db.records['account.account'] ?? []) {
+    const tags = account.tag_ids ?? [];
+    if (tags.some((tag) => activities.includes((typeof tag === 'object' ? tag : (next.records['account.account.tag'] ?? []).find((item) => item.id === tag))?.cash_flow_activity))) continue;
+    const activity = account.account_type === 'asset_fixed' ? 'investing'
+      : ['equity', 'liability_non_current'].includes(account.account_type) ? 'financing' : 'operating';
+    const id = tagFor(activity);
+    next = write(next, 'account.account', account.id, { tag_ids: [...tags, id] });
+  }
+  return next;
+}
+
 export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
@@ -478,6 +500,21 @@ export const MIGRATIONS = [
     const locks = { ...settings.tax_lock_dates };
     if (legacy !== undefined) locks[1] = legacy;
     return { ...db, settings: { ...settings, tax_lock_dates: locks } };
+  } },
+  { version: 19, name: 'Analytics and cash flow: restore historical reporting', up: (db) => {
+    const generated = new Set((db.records['account.analytic.line'] ?? [])
+      .filter((line) => ['invoice', 'vendor_bill', 'journal_entry'].includes(line.category))
+      .map((line) => line.move_id));
+    const analytic = (db.records['account.move'] ?? []).reduce((next, move) => {
+      if (move.state !== 'posted' || generated.has(move.id)
+        || !['entry', 'out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return next;
+      // Do not apply current distribution defaults to historically unassigned lines.
+      const historical = { ...move, invoice_line_ids: (move.invoice_line_ids ?? []).map((line) =>
+        line.analytic_distribution == null && !line.analytic_account_id ? { ...line, analytic_distribution: {} } : line) };
+      return analyticLinesForMove(next, historical, { historical: true })
+        .reduce((acc, values) => create(acc, 'account.analytic.line', values).db, next);
+    }, db);
+    return migrateCashFlowActivities(analytic);
   } },
 ];
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

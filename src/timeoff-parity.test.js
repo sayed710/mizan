@@ -74,6 +74,36 @@ test('time off for a new hire follows the company calendar schedule and hours', 
   assert.equal(workedDays(db, { employee_id: employee.id, date_from: '2030-01-03', date_to: '2030-01-07' }).working_days, 2);
 });
 
+test('time off does not follow foreign company calendar references on employee, contract or company', () => {
+  const other = create(emptyDb(), 'res.company', { name: 'Other company' });
+  const calendar = create(other.db, 'resource.calendar', { name: 'Short schedule', company_id: other.id, hours_per_day: 6,
+    attendance_ids: [{ dayofweek: '0', hour_from: 10, hour_to: 16, duration_hours: 6 }] });
+  const company = create(calendar.db, 'res.company', { name: 'Employee company', resource_calendar_id: calendar.id });
+  const employee = create(company.db, 'hr.employee', { name: 'Worker', company_id: company.id, resource_calendar_id: calendar.id });
+  const contract = create(employee.db, 'hr.contract', { name: 'Contract', employee_id: employee.id, company_id: company.id, state: 'running', date_start: '2020-01-01', work_days: null, resource_calendar_id: calendar.id });
+  const type = create(contract.db, 'hr.work.entry.type', { name: 'Day leave', company_id: company.id, request_unit: 'day', requires_allocation: false });
+  const leave = create(type.db, 'hr.leave', { name: 'Friday', employee_id: employee.id, company_id: company.id, work_entry_type_id: type.id, request_unit: 'day', request_date_from: '2030-01-04', request_date_to: '2030-01-04' });
+  assert.equal(read(leave.db, 'hr.leave', leave.id).number_of_days, 1);
+  assert.equal(read(leave.db, 'hr.leave', leave.id).number_of_hours, 8);
+});
+
+test('time off uses a company-scoped standard schedule when another company has the only calendar', () => {
+  let db = emptyDb();
+  const other = create(db, 'res.company', { name: 'Other company' });
+  const own = create(other.db, 'res.company', { name: 'Employee company' });
+  const calendar = create(own.db, 'resource.calendar', { name: 'Other schedule', company_id: other.id, hours_per_day: 6,
+    attendance_ids: [0, 1, 2, 3].map((day) => ({ dayofweek: String(day), hour_from: 10, hour_to: 16, duration_hours: 6 })) });
+  const employee = create(calendar.db, 'hr.employee', { name: 'New hire', company_id: own.id });
+  const type = create(employee.db, 'hr.work.entry.type', { name: 'Day leave', company_id: own.id, request_unit: 'day', requires_allocation: false });
+  const holiday = create(type.db, 'resource.calendar.leaves', { name: 'Company holiday', company_id: own.id, date_from: '2030-01-03', date_to: '2030-01-03', count_as: 'absence' });
+  const otherHoliday = create(holiday.db, 'resource.calendar.leaves', { name: 'Other schedule closure', company_id: other.id, calendar_id: calendar.id, date_from: '2030-01-07', date_to: '2030-01-07', count_as: 'absence' });
+  const leave = create(otherHoliday.db, 'hr.leave', { name: 'Long weekend', employee_id: employee.id, company_id: own.id, work_entry_type_id: type.id, request_unit: 'day', request_date_from: '2030-01-03', request_date_to: '2030-01-07' });
+  db = leave.db;
+  assert.equal(read(db, 'hr.leave', leave.id).number_of_days, 2);
+  assert.equal(read(db, 'hr.leave', leave.id).number_of_hours, 16);
+  assert.equal(workedDays(db, { employee_id: employee.id, date_from: '2030-01-03', date_to: '2030-01-07' }).working_days, 2);
+});
+
 test('two-step approval requires manager then officer and disallows skipped steps and self approval', () => {
   const a = ask(fixture());
   assert.throws(() => press(a.db, a.id, 'Approve', 'worker'), /available|own request/i);
