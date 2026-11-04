@@ -1,15 +1,15 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create } from './orm.js';
 import { seed } from './seed.js';
 import { postMove, payMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 import { agedBalance } from './models/finance.js';
 
 test('partial payments consume oldest-due installments first for customer and vendor in separate companies', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Settlement branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Settlement branch', currency_id: base.records['res.company'][0].currency_id });
   const term = create(branch.db, 'account.payment.term', { name: 'Later first', line_ids: [
     { value_type: 'percent', value: 70, nb_days: 30, delay_type: 'days_after' },
     { value_type: 'percent', value: 30, nb_days: 0, delay_type: 'days_after' },

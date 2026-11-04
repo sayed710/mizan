@@ -22,6 +22,9 @@ const press = (db, id, label, login) => {
   return models['hr.leave'].form.buttons.find((b) => b.label === label).run(db, read(db, 'hr.leave', id)).db;
 };
 const save = (db, next, login) => applyDiff(db, diffDb(db, next), { isAdmin: false, login });
+function createCompanyWithChart(db, vals = {}) {
+  return create(db, 'res.company', { name: 'Configured test company', ...vals });
+}
 
 test('half-day boundaries count scheduled halves and enforce the type request unit', () => {
   const f = fixture();
@@ -63,7 +66,7 @@ test('contract schedule ignores another calendar holiday but respects company-wi
 test('time off for a new hire follows the company calendar schedule and hours', () => {
   let db = emptyDb();
   const calendar = create(db, 'resource.calendar', { name: 'Company schedule', company_id: 1, hours_per_day: 6, attendance_ids: [0, 1, 2, 3].map((day) => ({ dayofweek: String(day), hour_from: 10, hour_to: 16, duration_hours: 6 })) });
-  const company = create(calendar.db, 'res.company', { name: 'Company', resource_calendar_id: calendar.id });
+  const company = createCompanyWithChart(calendar.db, { name: 'Company', resource_calendar_id: calendar.id });
   const employee = create(company.db, 'hr.employee', { name: 'New hire', company_id: company.id });
   const type = create(employee.db, 'hr.work.entry.type', { name: 'Day leave', company_id: company.id, request_unit: 'day', requires_allocation: false });
   const leave = create(type.db, 'hr.leave', { name: 'Long weekend', employee_id: employee.id, company_id: company.id, work_entry_type_id: type.id, request_unit: 'day', request_date_from: '2030-01-03', request_date_to: '2030-01-07' });
@@ -75,7 +78,7 @@ test('time off for a new hire follows the company calendar schedule and hours', 
 });
 
 test('time off does not follow foreign company calendar references on employee, contract or company', () => {
-  const other = create(emptyDb(), 'res.company', { name: 'Other company' });
+  const other = createCompanyWithChart(emptyDb(), { name: 'Other company' });
   const calendar = create(other.db, 'resource.calendar', { name: 'Short schedule', company_id: other.id, hours_per_day: 6,
     attendance_ids: [{ dayofweek: '0', hour_from: 10, hour_to: 16, duration_hours: 6 }] });
   const company = create(calendar.db, 'res.company', { name: 'Employee company', resource_calendar_id: calendar.id });
@@ -89,7 +92,7 @@ test('time off does not follow foreign company calendar references on employee, 
 
 test('time off uses a company-scoped standard schedule when another company has the only calendar', () => {
   let db = emptyDb();
-  const other = create(db, 'res.company', { name: 'Other company' });
+  const other = createCompanyWithChart(db, { name: 'Other company' });
   const own = create(other.db, 'res.company', { name: 'Employee company' });
   const calendar = create(own.db, 'resource.calendar', { name: 'Other schedule', company_id: other.id, hours_per_day: 6,
     attendance_ids: [0, 1, 2, 3].map((day) => ({ dayofweek: String(day), hour_from: 10, hour_to: 16, duration_hours: 6 })) });

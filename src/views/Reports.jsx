@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
+import { depreciationReport } from '../models/assets.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
@@ -415,28 +416,21 @@ function Valuation({ db }) {
 }
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
-function Depreciation({ db, period }) {
-  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft' && (!a.acquisition_date || !period.to || a.acquisition_date <= period.to) && (!a.disposal_date || !period.to || a.disposal_date > period.to)).map((a) => {
-    const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
-    const sum = (list) => list.reduce((s, l) => s + (Number(l.amount) || 0), 0);
-    const accumulated = (Number(a.already_depreciated) || 0) + sum(posted.filter((l) => l.date <= period.to));
-    const inPeriod = sum(posted.filter((l) => (!period.from || l.date >= period.from) && l.date <= period.to));
-    return { a, inPeriod, accumulated, book: (Number(a.original_value) || 0) - accumulated };
-  });
-  const total = (k) => rows.reduce((s, r) => s + (k === 'original' ? Number(r.a.original_value) || 0 : r[k]), 0);
+function Depreciation({ db, period, companyId }) {
+  const { rows, totals } = depreciationReport(db, period, companyId);
   return (
     <tbody>
-      {rows.map(({ a, inPeriod, accumulated, book }) => (
+      {rows.map(({ a, original, inPeriod, accumulated, book }) => (
         <tr key={a.id} className="rep-detail">
           <td><a href={`#/open/account.asset/${a.id}`}>{a.name}</a></td>
           <td>{a.acquisition_date}</td>
-          <td className="num">{money(a.original_value)}</td>
+          <td className="num">{money(original)}</td>
           <td className="num">{money(inPeriod)}</td>
           <td className="num">{money(accumulated)}</td>
           <td className="num">{money(book)}</td>
         </tr>
       ))}
-      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{money(total('original'))}</td><td className="num">{money(total('inPeriod'))}</td><td className="num">{money(total('accumulated'))}</td><td className="num">{money(total('book'))}</td></tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td><td /><td className="num">{money(totals.original)}</td><td className="num">{money(totals.inPeriod)}</td><td className="num">{money(totals.accumulated)}</td><td className="num">{money(totals.book)}</td></tr>
     </tbody>
   );
 }
@@ -600,7 +594,7 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <label className="inline-select">
             {t('Company')}
             <select aria-label={t('Company')} value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>

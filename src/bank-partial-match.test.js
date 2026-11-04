@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -6,7 +7,6 @@ import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { agedBalance } from './models/finance.js';
 import { journalItems } from './models/ledger.js';
-import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -29,7 +29,7 @@ test('partial statement match settles the oldest installment and leaves the rema
 });
 test('oversized company transaction can match another document without another bank item', () => {
   const base = seed();
-  const company = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const company = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const journal = create(company.db, 'account.journal', { company_id: company.id, name: 'Branch bank', code: 'BRB', type: 'bank', default_account_id: search(company.db, 'account.account').find((a) => a.code === '101401').id });
   const first = invoice(journal.db, company.id, 100);
   const second = invoice(first.db, company.id, 50);

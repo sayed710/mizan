@@ -8,7 +8,7 @@ export function newDefaults(db, model, leaf, params, rel) {
     [...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k, v]) => [k.slice(8), v]),
   );
   const context = { ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
-  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...(def.createDefaults?.(db, context) ?? {}), ...context };
+  return { ...(def.defaults?.(nextId(db, model), db) ?? {}), ...(def.createDefaults?.(db, context) ?? {}), ...context };
 }
 
 /** Apply the same field onchange used by the form before saving. */

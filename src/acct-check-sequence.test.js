@@ -1,16 +1,16 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, messagesOf, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { postMove } from './models/accounting.js';
 import { postBatch } from './models/payments.js';
 import { reversePayment } from './models/pay.js';
 
 test('outbound checks keep journal-specific sequential numbers on payments after reversal', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Check branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Check branch', currency_id: base.records['res.company'][0].currency_id });
   let db = branch.db;
   for (const companyId of [1, branch.id]) {
     const bank = search(db, 'account.account').find((account) => account.code === '101401');

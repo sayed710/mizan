@@ -14,19 +14,18 @@ export function LoansAnalysis() {
     const move = read(db, 'account.move', id);
     return move?.state === 'posted' && move.company_id === loan.company_id && (move.date || move.invoice_date) <= date ? move : null;
   };
-  const amount = (move, code) => (move?.line_ids ?? []).reduce((sum, line) => {
-    const account = read(db, 'account.account', line.account_id);
-    return account?.code === code ? sum + (Number(line.debit) || 0) - (Number(line.credit) || 0) : sum;
-  }, 0);
+  const amount = (move, accountId) => (move?.line_ids ?? []).reduce((sum, line) => (
+    line.account_id === accountId ? sum + (Number(line.debit) || 0) - (Number(line.credit) || 0) : sum
+  ), 0);
   const rows = loans.flatMap((loan) => {
     const receipt = posted(loan.receipt_move_id, loan);
     if (!loan.receipt_move_id) return loan.state === 'draft' || loan.state === 'cancel' ? [] : [{ loan, unavailable: true }];
     if (!receipt) return [];
     const moves = [...(loan.line_ids ?? []).map((line) => line.move_id), ...(loan.early_moves ?? []).map((line) => line.move_id)]
       .map((id) => posted(id, loan)).filter(Boolean);
-    const principal = -amount(receipt, '260000');
-    const repaid = moves.reduce((sum, move) => sum + amount(move, '260000'), 0);
-    const interest = moves.reduce((sum, move) => sum + amount(move, '690400'), 0);
+    const principal = -amount(receipt, loan.principal_account_id);
+    const repaid = moves.reduce((sum, move) => sum + amount(move, loan.principal_account_id), 0);
+    const interest = moves.reduce((sum, move) => sum + amount(move, loan.interest_account_id), 0);
     return [{ loan, principal, repaid, interest, balance: principal - repaid }];
   });
   return <main className="action report-page">

@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
+import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -96,13 +96,19 @@ function settlesAfterLock(db, before, after, lock) {
  * The latest lock date that applies to a move: the global and hard locks always, the sales or purchase lock
  * by journal type. Empty when nothing is locked.
  */
-export function lockDateFor(settings = {}, move = {}, journal = null) {
+export function lockDateFor(company = {}, move = {}, journal = null) {
   const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
   const purchases = String(move.move_type ?? '').startsWith('in_') || journal?.type === 'purchase';
-  return [settings.lock_date, settings.hard_lock_date, sales && settings.sale_lock_date, purchases && settings.purchase_lock_date].filter(Boolean).sort().at(-1) ?? '';
+  return [company.lock_date, company.hard_lock_date, sales && company.sale_lock_date, purchases && company.purchase_lock_date].filter(Boolean).sort().at(-1) ?? '';
 }
 
-const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move, (db.records['account.journal'] ?? []).find((journal) => journal.id === move.journal_id)), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
+const companyLockDate = (db, move) => {
+  if (!move) return '';
+  const compId = move.company_id ?? 1;
+  const comp = (db.records['res.company'] ?? []).find((c) => c.id === compId) ?? {};
+  const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
+  return lockDateFor(comp, move, journal);
+};
 const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
 export function returnCompanies(db, ret) {
   if (!ret.tax_unit_id) return [ret.company_id ?? 1];
@@ -308,7 +314,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const fx = read(db, 'account.move', p.payment_fx_move_id);
   const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
   if (uses > 1) return 'Exchange entry is already used by another settlement';
-  const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+  const account = invoiceCounterpartAccount(db, invoice);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && (l.partner_id === invoice.partner_id || sameCommercialPartner(db, l.partner_id, invoice.partner_id))).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const configured = exchangeAccount(db, invoice.company_id, difference);
   const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
@@ -342,7 +348,7 @@ export function fxProvenanceError(db, entry) {
     if (!gap) return 'An exchange entry is not required for this settlement';
     const sale = !['in_invoice', 'in_refund'].includes(invoice.move_type);
     const clearsDebit = sale ? gap < 0 : gap > 0;
-    const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+    const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
     const lines = entry.line_ids ?? [];
     const openLine = lines.find((l) => l.account_id === account && l.partner_id === invoice.partner_id);
@@ -370,13 +376,25 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
-  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
+  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  let account;
+  try {
+    account = invoice
+      ? invoiceCounterpartAccount(db, invoice)
+      : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
+  } catch (error) {
+    return error.message;
+  }
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
-  const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  let bank;
+  try {
+    bank = after.outstanding_account_id ?? paymentJournal(db, after.journal_id, after.company_id ?? 1).accountId;
+  } catch (error) {
+    return error.message;
+  }
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
@@ -502,9 +520,10 @@ export function taxAccounts(db, companyId) {
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
-  const accounts = taxAccounts(db, period?.company_id ?? period?.company);
+  const companyId = period?.company_id ?? period?.company;
+  const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  const transitions = new Set([accountId(db, TRANSITION.sale), accountId(db, TRANSITION.purchase)]);
+  const transitions = new Set([accountId(db, TRANSITION.sale, companyId), accountId(db, TRANSITION.purchase, companyId)].filter(Boolean));
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
     const move = l.tax_name && moves.get(l.move_id);
@@ -842,10 +861,10 @@ export function journalCards(db, at = today()) {
   const moves = search(db, 'account.move');
   const companyByMove = new Map(moves.map((m) => [m.id, m.company_id]));
   const items = journalItems(db);
-  // Draft invoices get their journal on posting, so they count on the default INV/BILL journal meanwhile.
-  const draftJournal = (m) => (m.move_type === 'entry' ? null : ['in_invoice', 'in_refund'].includes(m.move_type) ? 'BILL' : 'INV');
+  // Draft invoices count against the journal explicitly configured for their company.
+  const draftJournal = (m) => (m.move_type === 'entry' ? null : resolveDocumentJournal(db, m)?.id ?? null);
   return search(db, 'account.journal').map((j) => {
-    const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.code));
+    const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.id));
     if (['sale', 'purchase'].includes(j.type)) {
       const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
