@@ -699,6 +699,7 @@ const ar = {
   'Based on Payment': 'حسب الدفع', 'Tax Account': 'حساب الضريبة', 'Tax Group': 'مجموعة الضريبة', 'Fiscal Positions': 'الأوضاع المالية', 'Fiscal Position': 'الوضع المالي',
   'Detect Automatically': 'اكتشاف تلقائي', 'VAT Required': 'الرقم الضريبي مطلوب', 'Legal Notes': 'ملاحظات قانونية', 'Tax Mapping': 'ربط الضرائب', 'Account Mapping': 'ربط الحسابات', 'Tax on Product': 'ضريبة المنتج',
   'Tax to Apply': 'الضريبة المطبقة', 'Account on Product': 'حساب المنتج', 'Account to Use Instead': 'الحساب البديل', 'Sales Taxes': 'ضرائب المبيعات', 'Purchase Taxes': 'ضرائب المشتريات',
+  'Value Adjustments': 'تعديلات القيمة', 'Value Change': 'تغير القيمة', 'Pause Date': 'تاريخ الإيقاف', 'Bank Account': 'الحساب البنكي', 'Principal Liability Account': 'حساب أصل القرض', 'Interest Expense Account': 'حساب مصروف الفائدة',
   'Asset Name': 'اسم الأصل', 'Acquisition Date': 'تاريخ الاقتناء', 'Original Value': 'القيمة الأصلية', 'Not Depreciable Value': 'القيمة غير القابلة للإهلاك',
   'Depreciated at Import': 'مُهلك عند الاستيراد', 'Book Value': 'القيمة الدفترية', 'Depreciation Board': 'جدول الإهلاك', Depreciation: 'الإهلاك', 'Cumulative Depreciation': 'الإهلاك المتراكم',
   'Declining Factor': 'معامل التناقص', 'Prorata Temporis': 'تناسب زمني', 'Disposal Date': 'تاريخ الاستبعاد', 'Sale Price': 'سعر البيع', 'Compute Depreciation': 'احتساب الإهلاك',

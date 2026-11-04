@@ -439,7 +439,7 @@ function draftAssetsFromBill(db, bill) {
     const values = {
       name: line.name || product?.name || bill.name, original_value: booked.amount, acquisition_date: bill.invoice_date ?? today(),
       partner_id: bill.partner_id, bill_id: bill.id, bill_line: index, company_id: bill.company_id ?? 1,
-      account_asset_id: model?.account_asset_id ?? booked.account,
+      account_asset_id: booked.account,
       ...(model ? {
         model_id: model.id,
         method: model.method ?? 'linear',
