@@ -237,11 +237,12 @@ export function createCompany(db, vals) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
-    const res = create(next, 'res.company', { ...values, partner_id: partner.id });
-    return { ...res, db: ensureReturnTypes(res.db) };
+    values.partner_id = partner.id;
   }
   const res = create(next, 'res.company', values);
-  return { ...res, db: ensureReturnTypes(res.db) };
+  if (values.current_year_earnings_account_id) return { ...res, db: ensureReturnTypes(res.db) };
+  const account = create(res.db, 'account.account', { code: '302000', name: 'Retained Earnings', account_type: 'equity', company_id: res.id });
+  return { ...res, db: ensureReturnTypes(write(account.db, 'res.company', res.id, { current_year_earnings_account_id: account.id })) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -260,7 +261,8 @@ export function ensureMainCompany(db) {
   const base = currency
     ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
     : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
-  const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  const configured = updateSettings(base.db, { base_currency_id: base.id });
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: base.id }).db;
   return ensureReturnTypes(created);
 }
 
@@ -332,6 +334,7 @@ export const companyModels = {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
@@ -370,7 +373,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'current_year_earnings_account_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

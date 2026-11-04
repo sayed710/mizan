@@ -105,7 +105,7 @@ function Balance({ db, period }) {
       <Total label="Total Assets" value={b.totalAssets} strong />
       <Section title="Liabilities" total={b.totalLiabilities} rows={b.liabilities} />
       <Section title="Equity" total={b.totalEquity - b.earnings} rows={b.equity} />
-      <Section title="Current Year Earnings" total={b.earnings} />
+      <Section title="Current Year Earnings" total={b.earnings} rows={[{ account: b.earningsAccount, balance: b.earnings }]} />
       <Total label="Liabilities + Equity" value={b.totalLiabilities + b.totalEquity} strong />
     </tbody>
   );

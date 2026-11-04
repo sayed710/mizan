@@ -13,7 +13,8 @@ const press = (db, model, id, label) => models[model].form.buttons.find((b) => b
 
 test('standalone payment allocations use company-configured exchange accounts and can be synchronized and reversed', () => {
   for (const [paymentRate, field, side] of [[1, 'income_currency_exchange_account_id', 'credit'], [4, 'expense_currency_exchange_account_id', 'debit']]) {
-    const branch = createCompany(seed(), { name: 'FX branch' });
+    const base = seed();
+    const branch = createCompany(base, { name: 'FX branch', currency_id: base.settings.base_currency_id });
     for (const company of [1, branch.id]) {
       const account = create(branch.db, 'account.account', { name: 'Configured exchange', code: `FX${company}`, account_type: side === 'credit' ? 'income_other' : 'expense_other', company_id: company });
       const configured = write(account.db, 'res.company', company, { [field]: account.id });
@@ -35,7 +36,8 @@ test('standalone payment allocations use company-configured exchange accounts an
 });
 
 test('bank match uses each company exchange account for payment and write-off', () => {
-  const branch = createCompany(seed(), { name: 'FX branch' });
+  const base = seed();
+  const branch = createCompany(base, { name: 'FX branch', currency_id: base.settings.base_currency_id });
   let db = branch.db;
   for (const company of [1, branch.id]) {
     const gain = create(db, 'account.account', { name: 'FX gain', code: `FX${company}`, account_type: 'income_other', company_id: company });

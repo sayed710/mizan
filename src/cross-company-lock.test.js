@@ -9,7 +9,7 @@ import { saveFormRecord } from './views/formSave.js';
 
 function fixture(lockedCompany) {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = create(db, 'res.company', { name: 'Second company', currency_id: db.settings.base_currency_id }); db = company.db;
   const partner = db.records['res.partner'][0].id;
   const entries = {};
   for (const companyId of [1, company.id]) {

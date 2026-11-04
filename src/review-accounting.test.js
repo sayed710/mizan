@@ -205,7 +205,7 @@ test('review #4: rounded invoice payment-term instalments conserve rounded docum
 test('review #4: second company foreign payment-term instalments conserve company and document currency', () => {
   let db = seed();
   const currency = search(db, 'res.currency').find((c) => c.name === 'SAR');
-  const c2 = create(db, 'res.company', { name: 'Second Co' }); db = c2.db;
+  const c2 = create(db, 'res.company', { name: 'Second Co', currency_id: db.settings.base_currency_id }); db = c2.db;
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: c2.id }).db;
   }

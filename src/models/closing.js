@@ -6,6 +6,7 @@ import { companyCurrency, toCompany } from './currency.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
 import { companyViewDb } from '../companyView.js';
+import { currentYearEarningsAccount } from './earnings.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 export const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
@@ -60,20 +61,21 @@ function getYear(db, id) {
 }
 
 /** Close P&L balances into retained earnings and lock the fiscal year. */
-export function closeFiscalYear(db, yearId, { retainedEarningsCode = '302000', date } = {}) {
+export function closeFiscalYear(db, yearId, { date } = {}) {
   const year = getYear(db, yearId);
   if (year.state === 'closed') throw new Error('This fiscal year is already closed');
   if (date && date !== year.date_to) throw new Error('Close the fiscal year on its end date');
   if (search(db, 'account.move').some((m) => (m.company_id ?? 1) === year.company_id && m.state === 'draft' && (m.date ?? m.invoice_date) >= year.date_from && (m.date ?? m.invoice_date) <= year.date_to)) {
     throw new Error('Post or cancel draft moves inside this fiscal year before closing');
   }
-  const next = ensureAccount(db, retainedEarningsCode, 'Retained Earnings', 'equity', year.company_id);
+  const earningsAccount = currentYearEarningsAccount(db, year.company_id);
+  const next = db;
   const companyView = { ...next, settings: { ...next.settings, current_company_id: year.company_id } };
   const rows = balances(companyView, journalItems(next, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
     .filter((r) => (!r.account.company_id || r.account.company_id === year.company_id) && pnlTypes.includes(r.account.account_type) && r.balance);
   const lines = rows.map((r) => ({ account_id: r.account.id, ...side(-r.balance) }));
-  lines.push({ account: retainedEarningsCode, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
-  if (lines.length === 1) lines.push({ account: retainedEarningsCode, debit: 0, credit: 0 });
+  lines.push({ account_id: earningsAccount.id, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
+  if (lines.length === 1) lines.push({ account_id: earningsAccount.id, debit: 0, credit: 0 });
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines });
   const marked = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((m) => m.id === entry.id ? { ...m, closing_fiscal_year_id: yearId } : m) } };
   // The year references its closing entry first: only such an entry may carry the closing flag.
@@ -134,14 +136,11 @@ export function comparePeriods(period, { count = 1, unit = 'month' } = {}) {
   return Array.from({ length: count }, (_, i) => ({ from: shiftMonth(period.from, -(count - i) * months), to: shiftMonth(period.to, -(count - i) * months) }));
 }
 
-/** Name of the currency the move's company keeps its books in. */
-const ownCurrency = (db, m) => read(db, 'res.currency', companyCurrency(db, m.company_id))?.name ?? db.settings?.currency;
-
 /** Open foreign invoices/bills/refunds at a date; positive difference increases the absolute balance. */
 export function unrealizedExchange(db, date) {
   checkDate(date);
   return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type)
-    && (m.date ?? m.invoice_date) <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
+    && (m.date ?? m.invoice_date) <= date && m.currency_id && m.currency_id !== companyCurrency(db, m.company_id)).flatMap((m) => {
     const docRound = (n) => roundCurrency(n, documentCurrency(db, m));
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
     const allocations = settlementCompanyAllocations(db, m);
