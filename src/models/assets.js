@@ -30,17 +30,18 @@ function firstFraction(asset, y, m, yearly) {
 }
 
 /** Depreciation lines dated at period ends; the last line absorbs rounding so the total equals the base. */
-export function depreciationBoard(asset) {
-  const n = Number(asset.method_number);
+export function depreciationBoard(asset, { periods: overridePeriods = null, dates = null, startDate = null, remainingBase = null, initialCumulated = null } = {}) {
+  const n = overridePeriods != null ? Number(overridePeriods) : Number(asset.method_number);
   const yearly = String(asset.method_period) === '12';
-  const [y, m] = (asset.acquisition_date || today()).split('-').map(Number);
-  const base = cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
-  const frac = firstFraction(asset, y, m, yearly);
+  const [y, m] = (startDate || asset.acquisition_date || today()).split('-').map(Number);
+  const base = remainingBase != null ? remainingBase : cents(asset.original_value) - cents(asset.salvage_value) - cents(asset.already_depreciated);
+  const frac = overridePeriods != null ? 1 : firstFraction(asset, y, m, yearly);
   const periods = n + (frac < 1 ? 1 : 0);
   const rate = (Number(asset.method_progress_factor) || 0) / (yearly ? 1 : 12);
   const method = asset.method || 'linear';
   let remaining = base;
-  let cumulated = cents(asset.already_depreciated);
+  let cumulated = initialCumulated != null ? initialCumulated : cents(asset.already_depreciated);
+  const dateOffset = overridePeriods != null ? 1 : 0;
   return Array.from({ length: periods }, (_, i) => {
     const elapsed = i === 0 ? 0 : frac + i - 1;
     const len = Math.min(i === 0 ? frac : 1, n - elapsed);
@@ -50,7 +51,8 @@ export function depreciationBoard(asset) {
     const amount = i === periods - 1 ? remaining : Math.min(remaining, due);
     remaining -= amount;
     cumulated += amount;
-    return { date: periodEnd(y, m, yearly, i), amount: amount / 100, cumulated: cumulated / 100, remaining: (cents(asset.original_value) - cumulated) / 100 };
+    const date = dates?.[i] ?? periodEnd(y, m, yearly, i + dateOffset);
+    return { date, amount: amount / 100, cumulated: cumulated / 100, remaining: (cents(asset.original_value) - cumulated) / 100 };
   });
 }
 
@@ -152,10 +154,85 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null });
 }
 
+/** Modify a running or paused asset: apply value increase or decrease (impairment/revaluation), post adjusting entry, and recompute remaining board. */
+export function modifyAsset(db, asset, { date = today(), value_change = 0, valueChange = value_change, accountId = null, methodNumber = null, salvageValue = null } = {}) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
+  if (!['open', 'paused'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be modified');
+  if (!date) throw new Error('Set a modification date');
+  if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
+
+  validate(db, asset);
+  const delta = cents(valueChange || 0);
+  const currentOriginal = cents(asset.original_value);
+  const newOriginal = currentOriginal + delta;
+  if (!(newOriginal > 0)) throw new Error('The original value must remain positive');
+
+  const currentSalvage = salvageValue != null ? cents(salvageValue) : cents(asset.salvage_value || 0);
+  if (!(currentSalvage < newOriginal)) throw new Error('The not depreciable value must be lower than the original value');
+
+  const postedLines = (asset.depreciation_ids ?? []).filter((l) => l.posted);
+  const postedAmount = postedCents(asset) + cents(asset.already_depreciated);
+  if (newOriginal < postedAmount + currentSalvage) throw new Error('The new value cannot be lower than the already depreciated amount');
+
+  let nextDb = db;
+  const company = asset.company_id ?? 1;
+  const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
+  const model = asset.model_id ? read(db, 'account.asset.model', asset.model_id) : null;
+  const assetAcc = asset.account_asset_id ?? model?.account_asset_id ?? null;
+
+  if (delta !== 0) {
+    if (!assetAcc) throw new Error('Configure the fixed asset account on the asset before modifying its value');
+    let counterpartAcc;
+    if (delta > 0) {
+      if (!accountId) throw new Error('Select a counterpart account for the asset value increase');
+      counterpartAcc = accountId;
+    } else {
+      counterpartAcc = accountId ?? asset.account_loss_id ?? asset.account_depreciation_expense_id ?? asset.account_expense_id ?? model?.account_expense_id ?? null;
+      if (!counterpartAcc) throw new Error('Configure a loss or expense account on the asset (or select a counterpart account) for the impairment');
+    }
+    const lines = delta > 0
+      ? [
+          { account: assetAcc, debit: delta / 100 },
+          { account: counterpartAcc, credit: delta / 100, analytic_distribution: asset.analytic_distribution },
+        ]
+      : [
+          { account: counterpartAcc, debit: -delta / 100, analytic_distribution: asset.analytic_distribution },
+          { account: assetAcc, credit: -delta / 100 },
+        ];
+    const { db: booked, id: moveId } = postEntry(db, { journal, date, ref: `${asset.name} value adjustment`, lines, company });
+    nextDb = postAnalytic(booked, moveId);
+  }
+
+  const unpostedLines = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
+  const remainingPeriods = methodNumber != null ? Number(methodNumber) : unpostedLines.length;
+  if (remainingPeriods < 1 && newOriginal > postedAmount + currentSalvage) throw new Error('Remaining duration must be at least 1 period');
+
+  const lastDate = postedLines.length ? postedLines.at(-1).date : asset.acquisition_date || date;
+  const newUnpostedLines = remainingPeriods > 0
+    ? depreciationBoard(
+        { ...asset, original_value: newOriginal / 100, salvage_value: currentSalvage / 100 },
+        {
+          periods: remainingPeriods,
+          dates: unpostedLines.map((l) => l.date),
+          startDate: lastDate,
+          remainingBase: newOriginal - currentSalvage - postedAmount,
+          initialCumulated: postedAmount,
+        },
+      ).map((l) => ({ ...l, posted: false, move_id: null }))
+    : [];
+
+  const updatedDepreciationIds = [...postedLines, ...newUnpostedLines];
+  return write(nextDb, 'account.asset', asset.id, {
+    original_value: newOriginal / 100,
+    salvage_value: currentSalvage / 100,
+    depreciation_ids: updatedDepreciationIds,
+  });
+}
+
 export const assetModels = {
   'account.asset': {
     label: 'Assets',
-    actions: { dispose: disposeAsset },
+    actions: { dispose: disposeAsset, modify: modifyAsset },
     fields: {
       name: { type: 'char', label: 'Asset Name', required: true },
       acquisition_date: { type: 'date', label: 'Acquisition Date' },
@@ -242,6 +319,23 @@ export const assetModels = {
         { label: 'Post Depreciation', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: postDepreciation(db, read(db, 'account.asset', r.id)) }) },
         { label: 'Pause', when: (r) => r.state === 'open', vals: { state: 'paused' } },
         { label: 'Resume', primary: true, when: (r) => r.state === 'paused', vals: { state: 'open' } },
+        { label: 'Modify Depreciation', when: (r) => ['open', 'paused'].includes(r.state) && !r.disposal_date,
+          wizard: () => ({ title: 'Modify Depreciation', fields: [
+            { name: 'date', type: 'date', label: 'Modification Date', required: true, default: today() },
+            { name: 'value_change', type: 'monetary', label: 'Value Change' },
+            { name: 'account_id', type: 'many2one', relation: 'account.account', label: 'Counterpart Account' },
+            { name: 'method_number', type: 'integer', label: 'Remaining Duration' },
+            { name: 'salvage_value', type: 'monetary', label: 'Not Depreciable Value' },
+          ] }),
+          run: (db, r, values = {}) => ({
+            db: modifyAsset(db, r, {
+              date: values.date ?? today(),
+              value_change: values.value_change == null || values.value_change === '' ? 0 : Number(values.value_change),
+              accountId: values.account_id || null,
+              methodNumber: values.method_number == null || values.method_number === '' ? null : Number(values.method_number),
+              salvageValue: values.salvage_value == null || values.salvage_value === '' ? null : Number(values.salvage_value),
+            }),
+          }) },
         { label: 'Sell or Dispose', when: (r) => ['open', 'paused', 'close'].includes(r.state) && !r.disposal_date,
           wizard: (db, r) => ({ title: 'Sell or Dispose', fields: [
             { name: 'date', type: 'date', label: 'Disposal Date', required: true, default: today() },

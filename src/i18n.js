@@ -1214,6 +1214,21 @@ const ar = {
   'Secure chain has no independent head': '\u0633\u0644\u0633\u0644\u0629 \u0627\u0644\u062a\u0623\u0645\u064a\u0646 \u0628\u0644\u0627 \u0631\u0623\u0633 \u0645\u0633\u062a\u0642\u0644',
   'No secured entries': 'لا توجد قيود مؤمنة',
   'Cannot secure entries while draft entries exist on or before the secured date': 'لا يمكن تأمين القيود أثناء وجود قيود مسودة في تاريخ التأمين أو قبله',
+  'In need of action': 'بحاجة إلى إجراء',
+  'With overdue invoices': 'لديه فواتير متأخرة',
+  'No action needed': 'لا يلزم إجراء',
+  'Exclude from Follow-ups': 'استبعاد من المتابعات',
+  'Exclude from Follow-up': 'استبعاد من المتابعة',
+  'Follow-up Status': 'حالة المتابعة',
+  'Discount Date': 'تاريخ الخصم',
+  'Discount Amount Currency': 'مبلغ الخصم بالعملة',
+  'Discount Balance': 'رصيد الخصم',
+  'Discount Percentage': 'نسبة الخصم',
+  'Blocked / In Dispute': 'محظور / متنازع عليه',
+  'Always (tax reduction on invoice)': 'دائماً (تخفيض الضريبة في الفاتورة)',
+  'Modify Depreciation': 'تعديل الإهلاك',
+  'Reprint Check': 'إعادة طباعة الشيك',
+  'Voided Checks': 'شيكات ملغاة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

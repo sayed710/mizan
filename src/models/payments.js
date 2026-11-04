@@ -5,6 +5,7 @@ import { payMove } from './accounting.js';
 import { cents, round } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { journalId } from './ledger.js';
+import { nextCheckNumber } from './pay.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -42,14 +43,9 @@ export function postBatch(db, batch) {
   if (batch.batch_type === 'inbound' && lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch invoices must belong to the same company');
   const journal = batch.batch_type === 'outbound' ? read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company)) : null;
   if (batch.batch_type === 'outbound' && (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company))) throw new Error('Checks require a bank journal and invoices in the same company');
-  const payments = search(db, 'account.payment');
-  const used = journal ? payments.filter((payment) => payment.journal_id === journal.id && Number.isSafeInteger(payment.check_number) && payment.check_number > 0).map((payment) => payment.check_number) : [];
-  if (journal) for (const prior of search(db, 'account.batch.payment')) for (const line of prior.lines ?? []) {
-    if (payments.some((payment) => payment.id === line.payment_id && payment.journal_id === journal.id) && Number.isSafeInteger(line.check_number) && line.check_number > 0) used.push(line.check_number);
-  }
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
   if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
-  const start = used.reduce((next, number) => Math.max(next, number + 1), requested);
+  const start = journal ? nextCheckNumber(db, journal.id, requested) : requested;
   if (batch.batch_type === 'outbound' && !Number.isSafeInteger(start + lines.length)) throw new Error('Check number is too large');
 
   let next = db;

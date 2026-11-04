@@ -132,6 +132,8 @@ export const crmModels = {
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
           followup_next_action_date: { type: 'date', label: 'Next Action Date', hidden: true },
+          followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']], hidden: true },
+          no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
       tag_ids: { type: 'tags', label: 'Tags' },

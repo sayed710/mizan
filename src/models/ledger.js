@@ -1,11 +1,11 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
-import { amounts, nextName, subtotal, today } from './common.js';
+import { amounts, nextName, subtotal, today, addDays } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
 import { TRANSITION, isSectionOrNote, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
-import { installments } from './terms.js';
+import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
@@ -157,12 +157,10 @@ export function invoiceLines(db, move) {
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
   const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
+  const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
+  const discountFactor = mixedDiscountFactor(term);
+  const mixedDiscount = discountFactor !== 1;
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
-  const rawTotalDoc = amounts(move.invoice_line_ids, docCurrency).total;
-  const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
-  const diffDoc = docRound(totalDoc - rawTotalDoc);
-  const total = companyRound(totalDoc / rate);
-  const diff = companyRound(diffDoc / rate);
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
@@ -175,7 +173,28 @@ export function invoiceLines(db, move) {
     }
     return taxAcc;
   };
-  const taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate, docCurrency, ownCurrency);
+  let taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate, docCurrency, ownCurrency);
+  if (mixedDiscount) {
+    taxes = taxes.map((g) => {
+      const docBase = docRound(g.base * rate * discountFactor);
+      const docAmt = docRound(g.document_amount * discountFactor);
+      return {
+        ...g,
+        document_amount: docAmt,
+        amount: companyRound(docAmt / rate),
+        base: companyRound(docBase / rate),
+      };
+    });
+  }
+
+  const rawTotalDoc = mixedDiscount
+    ? docRound(bases.reduce((s, [, , a]) => s + a, 0) + taxes.reduce((s, g) => s + g.document_amount, 0))
+    : amounts(move.invoice_line_ids, docCurrency).total;
+  const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
+  const diffDoc = docRound(totalDoc - rawTotalDoc);
+  const total = companyRound(totalDoc / rate);
+  const diff = companyRound(diffDoc / rate);
+
   const actualTaxes = taxes.filter((g) => g.amount !== 0 || g.document_amount !== 0);
   const adjustTax = Boolean(rounding && rounding.strategy === 'biggest_tax' && actualTaxes.length && diffDoc !== 0);
   if (adjustTax) {
@@ -218,16 +237,33 @@ export function invoiceLines(db, move) {
     });
   }
 
-  const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const schedule = term ? installments(term, totalDoc, move.invoice_date ?? today(), docCurrency) : [{ date: move.invoice_date_due, amount: totalDoc }];
   let allocated = 0;
   let cumDoc = 0;
+  const discountDate = term?.early_discount && (move.invoice_date || today()) ? addDays(move.invoice_date ?? today(), Number(term.discount_days) || 0) : null;
+  const discountPercent = term?.early_discount ? Number(term.discount_percent) || 0 : 0;
   const counterparts = schedule.map((item, index) => {
     cumDoc = docRound(cumDoc + item.amount);
     const targetCompany = index === schedule.length - 1 ? total : (totalDoc !== 0 ? companyRound(total * (cumDoc / totalDoc)) : 0);
     const amount = companyRound(targetCompany - allocated);
     allocated = companyRound(allocated + amount);
-    return { account_id: counterpart, partner_id: move.partner_id, name: move.name, ...side(amount, sale, item.amount), ...(item.date ? { date_maturity: item.date } : {}) };
+    const discountDoc = term?.early_discount && index === 0
+      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(term.discount_tax_computation) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
+      : 0;
+    const discountCompany = discountDoc ? companyRound(discountDoc / rate) : 0;
+    return {
+      account_id: counterpart,
+      partner_id: move.partner_id,
+      name: move.name,
+      ...side(amount, sale, item.amount),
+      ...(item.date ? { date_maturity: item.date } : {}),
+      ...(discountDate ? {
+        discount_date: discountDate,
+        discount_amount_currency: discountDoc,
+        discount_balance: discountCompany,
+        discount_percentage: discountPercent,
+      } : {}),
+    };
   });
   return [
     ...counterparts,
