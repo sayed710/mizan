@@ -3,6 +3,7 @@ import { amounts, nextName, productLines, promptedAmount, today } from './common
 import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
+import { bookedStatementAmount } from './bank.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
@@ -355,9 +356,12 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   }
   // Matching an existing bank statement records money already sent, rather than authorizing a new payout.
   const statement = statementLineId ? read(db, 'account.bank.statement.line', statementLineId) : null;
+  // A booked statement in the invoice currency settles its share of the booked company amount, not a fresh conversion.
+  const bookedShare = statement?.bank_move_id && statement.amount && read(db, 'account.journal', statement.journal_id)?.currency_id === r.currency_id
+    ? companyRound(Math.abs(bookedStatementAmount(db, statement) * value / statement.amount)) : null;
   if (statementLineId && (!statement || statement.state !== 'to_check' || (statement.amount > 0) !== isInbound(r)
     || (statement.date ?? today()) !== date || (statement.company_id ?? 1) !== (r.company_id ?? 1)
-    || toCompany(db, r.currency_id, amount, date, r.company_id) > companyRound(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
+    || (bookedShare ?? toCompany(db, r.currency_id, amount, date, r.company_id)) > companyRound(statement.open_amount ?? Math.abs(Number(statement.amount))))) {
     throw new Error('Invalid bank statement settlement');
   }
   if (liquidityAccountId && (!statement?.bank_move_id || directBank)) throw new Error('A bank suspense settlement requires a posted statement entry');
@@ -375,7 +379,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
   const liquidity = liquidityAccountId ?? outstanding ?? via.account;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
-  const bank = toCompany(db, r.currency_id, value, date, r.company_id);
+  const bank = bookedShare ?? toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
   const final = value >= residual(r, db);
   const open = settlementCompanyAmount(db, r, value);

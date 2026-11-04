@@ -67,7 +67,7 @@ export function cashflowAnalysis(db, { from, to }) {
     if (!months.has(month)) months.set(month, new Map());
     const amounts = months.get(month);
     const sums = amounts.get(journal.id) ?? { inflow: 0, outflow: 0 };
-    const amount = Number(line.amount);
+    const amount = Math.sign(Number(line.amount)) * toCompany(db, journal.currency_id, Math.abs(Number(line.amount)), line.date, line.company_id ?? 1);
     sums.inflow += Math.max(amount, 0);
     sums.outflow += Math.max(-amount, 0);
     amounts.set(journal.id, sums);
