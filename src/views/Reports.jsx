@@ -522,7 +522,9 @@ function ReportPage({ leaf }) {
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
   const db = ledger ? { ...companyDb, records: { ...companyDb.records, 'account.move': (companyDb.records['account.move'] ?? []).filter((move) => (move.company_id ?? 1) === ledger.company_id && (ledger.journal_ids ?? []).includes(move.journal_id)) } } : companyDb;
-  const selectedCompany = companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all';
+  const selectedCompany = leaf.report === 'customerStatement' && (companyId === 'all' || !allowedSet.has(Number(companyId)))
+    ? String(currentCompany(sourceDb))
+    : (companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all');
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
@@ -550,11 +552,11 @@ function ReportPage({ leaf }) {
             {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>}
-        {['journalAudit', 'inalterability'].includes(leaf.report) && companiesOf(sourceDb).length > 1 && (
+        {(['journalAudit', 'inalterability'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <label className="inline-select">
             {t('Company')}
-            <select value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
-              <option value="all">{t('All Companies')}</option>
+            <select aria-label={t('Company')} value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
+              {leaf.report !== 'customerStatement' && <option value="all">{t('All Companies')}</option>}
               {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </label>
