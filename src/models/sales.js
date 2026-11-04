@@ -14,6 +14,7 @@ import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
 import { journalId } from './ledger.js';
+import { documentCurrency, roundCurrency } from '../money.js';
 
 const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 
@@ -248,6 +249,14 @@ export function refreshAdvanceDeductions(db, order, lines, exceptId = null) {
 }
 
 const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invoice_policy === 'delivery' ? Number(line.qty_delivered) || 0 : Number(line.qty) || 0);
+
+/** The order amount not yet invoiced (draft or posted), as Odoo's amount to invoice. */
+function uninvoicedAmount(db, order) {
+  const billed = order.id == null ? 0 : search(db, 'account.move')
+    .filter((m) => m.sale_id === order.id && m.state !== 'cancel' && ['out_invoice', 'out_refund'].includes(m.move_type))
+    .reduce((sum, m) => sum + (m.move_type === 'out_refund' ? -1 : 1) * amounts(m.invoice_line_ids ?? []).total, 0);
+  return Math.max(0, roundCurrency(amounts(order.order_line).total - billed, documentCurrency(db, order)));
+}
 
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField, options = {}) {
@@ -738,7 +747,7 @@ export const salesModels = {
       ],
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables.
-      warning: (r, db) => creditWarning(db, r.partner_id, amounts(r.order_line).total),
+      warning: (r, db) => creditWarning(db, r.partner_invoice_id ?? r.partner_id, uninvoicedAmount(db, r), r),
       groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id', 'incoterm_id', 'incoterm_location'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }, { label: 'Notes', fields: ['note'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],

@@ -14,17 +14,19 @@ import { exchangeAccount } from './exchange-account.js';
 export { applicationEffectiveDate };
 
 /** Open receivable (posted, unpaid invoices) of a partner. */
-export const receivableOf = (db, partnerId) => round((db.records['account.move'] ?? [])
-  .filter((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId)
-  .reduce((s, m) => s + models['account.move'].fields.amount_residual.compute(m, db), 0));
+export const receivableOf = (db, partnerId, companyId = 1) => roundCurrency((db.records['account.move'] ?? [])
+  .filter((m) => m.active !== false && m.state === 'posted' && m.move_type === 'out_invoice' && m.partner_id === partnerId && (m.company_id ?? 1) === companyId)
+  .reduce((s, m) => s + toCompany(db, m.currency_id, models['account.move'].fields.amount_residual.compute(m, db), m.invoice_date ?? m.date, companyId), 0), companyCurrencyRecord(db, companyId));
 
 /** Warning for additional credit exposure (0 = no limit). */
-export function creditWarning(db, partnerId, amount) {
+export function creditWarning(db, partnerId, amount, document = {}) {
+  if (document.state === 'cancel') return '';
   const p = read(db, 'res.partner', partnerId);
   const limit = Number(p?.credit_limit) || 0;
   if (!limit) return;
-  const exposure = receivableOf(db, partnerId) + (Number(amount) || 0);
-  return exposure > limit ? `${p.name} would exceed the credit limit (${round(exposure)} > ${limit})` : '';
+  const companyId = document.company_id ?? 1;
+  const exposure = roundCurrency(receivableOf(db, partnerId, companyId) + toCompany(db, document.currency_id, amount, document.invoice_date ?? document.date_order ?? document.date, companyId), companyCurrencyRecord(db, companyId));
+  return exposure > limit ? `${p.name} would exceed the credit limit (${exposure} > ${limit})` : '';
 }
 
 const LOCKED_FIELDS = ['name', 'invoice_line_ids', 'line_ids', 'invoice_date', 'date', 'state', 'partner_id', 'currency_id', 'move_type', 'journal_id', 'company_id', 'fiscal_position_id', 'tax_return_id', 'active'];
