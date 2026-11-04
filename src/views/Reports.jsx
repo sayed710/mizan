@@ -300,22 +300,28 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 }
 
 function Budget({ db, period }) {
+  const lineLabel = (l) => {
+    const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
+    const acc = read(db, 'account.account', l.account_id);
+    const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
+    return [analytic, general].filter(Boolean).join(' · ') || '—';
+  };
   return (
     <tbody>
-      {search(db, 'account.budget').filter((b) => b.state !== 'draft' && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
+      {search(db, 'account.budget').filter((b) => !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
         return [
           <tr key={b.id} className="rep-section"><td colSpan={5}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
           ...(b.lines?.length ? budgetReport(db, b.id, today(), { period }) : []).map((l, i) => (
             <Fragment key={`${b.id}-${i}`}>
               <tr className="rep-detail">
-                <td>{read(db, 'account.analytic.account', l.analytic_account_id)?.name ?? '—'}</td>
+                <td>{lineLabel(l)}</td>
                 <td className="num">{money(l.planned)}</td>
                 <td className="num">{money(l.practical)}</td>
                 <td className="num">{money(l.variance)}</td>
                 <td className="num">{l.planned ? `${l.achievement}%` : ''}</td>
               </tr>
               {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
-                <td><a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a>{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
+                <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
                 <td /><td className="num">{money(item.amount)}</td><td /><td />
               </tr>)}
             </Fragment>

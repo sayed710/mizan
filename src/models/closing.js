@@ -1,6 +1,6 @@
 // Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
 import { create, read, search, write } from '../orm.js';
-import { addDays, today } from './common.js';
+import { addDays, shiftMonth, today, validDate } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -8,8 +8,6 @@ import { applicationActiveAt, settlementCompanyAllocations } from './settlement.
 import { companyViewDb } from '../companyView.js';
 
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
-const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date)
-  && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
 const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
 const side = (amount) => ({ debit: Math.max(0, round(amount)), credit: Math.max(0, round(-amount)) });
 
@@ -127,15 +125,6 @@ export function compareBalanceSheet(db, dates) {
   }), sheetRows);
 }
 
-function shiftMonth(date, months) {
-  const source = new Date(`${date}T00:00:00Z`);
-  const target = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + months, 1));
-  const end = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
-  const sourceEnd = new Date(Date.UTC(source.getUTCFullYear(), source.getUTCMonth() + 1, 0)).getUTCDate();
-  target.setUTCDate(source.getUTCDate() === sourceEnd ? end : Math.min(source.getUTCDate(), end));
-  return target.toISOString().slice(0, 10);
-}
-
 /** Previous periods, oldest first, excluding the supplied period and preserving month ends. */
 export function comparePeriods(period, { count = 1, unit = 'month' } = {}) {
   checkDate(period.from);
@@ -148,10 +137,10 @@ export function comparePeriods(period, { count = 1, unit = 'month' } = {}) {
 /** Name of the currency the move's company keeps its books in. */
 const ownCurrency = (db, m) => read(db, 'res.currency', companyCurrency(db, m.company_id))?.name ?? db.settings?.currency;
 
-/** Open foreign invoices/bills at a date; positive difference increases the absolute balance. */
+/** Open foreign invoices/bills/refunds at a date; positive difference increases the absolute balance. */
 export function unrealizedExchange(db, date) {
   checkDate(date);
-  return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice'].includes(m.move_type)
+  return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type)
     && m.invoice_date <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
     const docRound = (n) => roundCurrency(n, documentCurrency(db, m));
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
@@ -162,19 +151,20 @@ export function unrealizedExchange(db, date) {
     const paidForeign = docRound(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
     const residual = docRound(m.amount_total - paidForeign);
     if (residual <= 0) return [];
-    const accountType = m.move_type === 'out_invoice' ? 'asset_receivable' : 'liability_payable';
+    const accountType = ['out_invoice', 'out_refund'].includes(m.move_type) ? 'asset_receivable' : 'liability_payable';
+    const refundSign = ['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1;
     const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
     const ids = [...new Set(counterpart.map((l) => l.account_id))];
     if (ids.length !== 1) throw new Error(`Invoice ${m.name || m.id} must have one ${accountType} account`);
     const account_id = ids[0];
     const account = read(db, 'account.account', account_id).code;
-    const sign = accountType === 'liability_payable' ? -1 : 1;
+    const sign = (accountType === 'liability_payable' ? -1 : 1) * refundSign;
     const original = counterpart
       .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
     const paidBooked = companyRound(paid.reduce((s, a) => s + a.value, 0));
-    const booked = companyRound(original - paidBooked);
-    const value = toCompany(db, m.currency_id, residual, date, m.company_id);
-    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, account_id, residual, booked, value, difference: companyRound(value - booked) }];
+    const booked = companyRound(refundSign * (original - paidBooked));
+    const value = companyRound(refundSign * toCompany(db, m.currency_id, residual, date, m.company_id));
+    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, account_id, residual: docRound(refundSign * residual), booked, value, difference: companyRound(value - booked) }];
   });
 }
 
@@ -183,7 +173,7 @@ export function foreignBankBalances(db, date) {
   checkDate(date);
   const groups = new Map();
   for (const move of search(db, 'account.move')) {
-    if (move.state !== 'posted' || move.invoice_date > date) continue;
+    if (move.state !== 'posted' || (move.invoice_date ?? move.date ?? '') > date) continue;
     const company = move.company_id ?? 1;
     for (const line of move.line_ids ?? []) {
       if (!line.currency_id || line.currency_id === companyCurrency(db, company)
@@ -232,7 +222,7 @@ export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode
       journal: 'MISC', date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
       lines: lines.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
     });
-    next = write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id });
+    next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
   return next;
 }
