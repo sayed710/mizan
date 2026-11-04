@@ -67,6 +67,12 @@ export function renderAnnualReportHtml(db, { start_date, end_date, company_id })
       ${renderRows(pnl.detail.expense)}
       <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Expenses</td><td style="text-align: right;">${formatMoney(pnl.expense)}</td></tr>
       <tr style="font-weight: bold; background: #e2e8f0;"><td>Net Operating Income</td><td style="text-align: right;">${formatMoney(pnl.operating)}</td></tr>
+      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Other Income</strong></td></tr>
+      ${renderRows(pnl.detail.otherIncome)}
+      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Other Income</td><td style="text-align: right;">${formatMoney(pnl.otherIncome)}</td></tr>
+      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Other Expenses</strong></td></tr>
+      ${renderRows(pnl.detail.otherExpense)}
+      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Other Expenses</td><td style="text-align: right;">${formatMoney(pnl.otherExpense)}</td></tr>
       <tr style="font-weight: bold; background: #cbd5e1;"><td>Net Income</td><td style="text-align: right;">${formatMoney(pnl.net)}</td></tr>
     </tbody>
   </table>

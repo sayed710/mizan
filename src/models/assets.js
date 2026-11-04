@@ -112,11 +112,11 @@ export function postDepreciation(db, asset, upTo = today()) {
 }
 
 /** Post due depreciation, drop the rest of the board and book the sale or scrapping of the asset. */
-export function disposeAsset(db, asset, { date, saleValue = 0, invoiceId = null, invoiceLine = 0 }) {
+export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, invoiceLine = 0 }) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
   if (!['open', 'paused', 'close'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be disposed');
   if (!date) throw new Error('Set a disposal date');
-  if (!(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
+  if (saleValue != null && !(Number(saleValue) >= 0)) throw new Error('The sale price cannot be negative');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Disposal date cannot precede posted depreciation');
   validate(db, asset);
   const depreciated = postDepreciation(db, asset, date);
@@ -124,11 +124,15 @@ export function disposeAsset(db, asset, { date, saleValue = 0, invoiceId = null,
   const kept = (current.depreciation_ids ?? []).filter((l) => l.posted);
   const original = cents(asset.original_value);
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
-  const sale = cents(saleValue);
   const invoice = invoiceId && read(depreciated, 'account.move', invoiceId);
   if (invoiceId && (invoice?.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== (asset.company_id ?? 1))) throw new Error('Select a posted sale invoice in the asset company');
   const saleLine = invoice && (invoice.line_ids ?? []).find((line) => (line.invoice_sources ?? []).some((source) => source.index === Number(invoiceLine)));
   if (invoice && !saleLine) throw new Error('Sale invoice line not found');
+  const source = saleLine?.invoice_sources.find((item) => item.index === Number(invoiceLine));
+  const sale = invoice ? cents(source.amount) : cents(saleValue ?? 0);
+  if (sale < 0) throw new Error('The sale price cannot be negative');
+  if (invoice && saleValue != null && cents(saleValue) !== sale) throw new Error('Sale price must match the invoice line amount');
+  if (invoice && (db.records['account.asset'] ?? []).some((other) => other.id !== asset.id && other.disposal_date && other.sale_invoice_id === invoice.id && other.sale_invoice_line === Number(invoiceLine))) throw new Error('Sale invoice line already used by another asset disposal');
   const loss = original - accumulated - sale;
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
@@ -142,7 +146,7 @@ export function disposeAsset(db, asset, { date, saleValue = 0, invoiceId = null,
     loss < 0 && { account: asset.account_gain_id ?? '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
-  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100 });
+  return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null });
 }
 
 export const assetModels = {
@@ -189,6 +193,8 @@ export const assetModels = {
       } },
       disposal_date: { type: 'date', label: 'Disposal Date' },
       sale_value: { type: 'monetary', label: 'Sale Price' },
+      sale_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Sale Invoice', readonly: true },
+      sale_invoice_line: { type: 'integer', label: 'Sale Invoice Line', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)' },
       account_gain_id: { type: 'many2one', relation: 'account.account', label: 'Gain Account' },
@@ -236,14 +242,20 @@ export const assetModels = {
         { label: 'Sell or Dispose', when: (r) => ['open', 'paused', 'close'].includes(r.state) && !r.disposal_date,
           wizard: (db, r) => ({ title: 'Sell or Dispose', fields: [
             { name: 'date', type: 'date', label: 'Disposal Date', required: true, default: today() },
-            { name: 'sale_value', type: 'monetary', label: 'Sale Price', required: true, default: 0 },
+            { name: 'sale_value', type: 'monetary', label: 'Sale Price' },
             { name: 'invoice_id', type: 'many2one', relation: 'account.move', label: 'Customer Invoice', domain: (invoice) => invoice.state === 'posted' && invoice.move_type === 'out_invoice' && (invoice.company_id ?? 1) === (r.company_id ?? 1) },
             { name: 'invoice_line', type: 'selection', label: 'Invoice Line', dependsOn: 'invoice_id', options: (currentDb, values) => (read(currentDb, 'account.move', values.invoice_id)?.invoice_line_ids ?? []).map((line, index) => [String(index), line.name || read(currentDb, 'product', line.product_id)?.name || `#${index + 1}`]) },
-          ] }),
+          ], onchange: (values, key, currentDb) => {
+            if (!['invoice_id', 'invoice_line'].includes(key)) return {};
+            const invoice = values.invoice_id && read(currentDb, 'account.move', values.invoice_id);
+            const index = key === 'invoice_id' && invoice?.invoice_line_ids?.length ? '0' : values.invoice_line;
+            const source = index == null || index === '' ? null : (invoice?.line_ids ?? []).flatMap((line) => line.invoice_sources ?? []).find((item) => item.index === Number(index));
+            return { ...(key === 'invoice_id' ? { invoice_line: index } : {}), sale_value: source?.amount ?? null };
+          } }),
           run: (db, r, values = {}) => {
             if (values.invoice_id && (values.invoice_line == null || values.invoice_line === '')) throw new Error('Select a sale invoice line');
-            if (values.sale_value != null && (!Number.isFinite(Number(values.sale_value)) || Number(values.sale_value) < 0)) throw new Error('The sale price cannot be negative');
-            return { db: disposeAsset(db, r, { date: values.date ?? today(), saleValue: Number(values.sale_value ?? 0), invoiceId: values.invoice_id || null, invoiceLine: Number(values.invoice_line ?? 0) }) };
+            if (values.sale_value != null && values.sale_value !== '' && (!Number.isFinite(Number(values.sale_value)) || Number(values.sale_value) < 0)) throw new Error('The sale price cannot be negative');
+            return { db: disposeAsset(db, r, { date: values.date ?? today(), saleValue: values.sale_value == null || values.sale_value === '' ? undefined : Number(values.sale_value), invoiceId: values.invoice_id || null, invoiceLine: Number(values.invoice_line ?? 0) }) };
           } },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],

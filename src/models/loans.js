@@ -24,7 +24,8 @@ function instalments(opening, months, rate, method) {
   let outstanding = opening;
   return Array.from({ length: months }, (_, i) => {
     const interest = Math.round(outstanding * rate);
-    const principal = i === months - 1 ? outstanding : method === 'linear' ? Math.round(opening / months) : annuity - interest;
+    const scheduled = method === 'linear' ? Math.floor(opening / months) + (i < opening % months ? 1 : 0) : annuity - interest;
+    const principal = i === months - 1 ? outstanding : Math.min(outstanding, Math.max(0, scheduled));
     outstanding -= principal;
     return { principal, interest, payment: principal + interest, outstanding };
   });

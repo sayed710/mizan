@@ -82,7 +82,10 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="field" key={f.name}>
             <label htmlFor={`w-${f.name}`}>{t(f.label)}{f.required && <span className="req" aria-hidden="true">*</span>}</label>
             <div className="field-value">
-              <WizardField db={db} field={f} id={`w-${f.name}`} value={values[f.name]} values={values} onChange={(v) => setValues((s) => ({ ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) }))} />
+              <WizardField db={db} field={f} id={`w-${f.name}`} value={values[f.name]} values={values} onChange={(v) => setValues((s) => {
+                const next = { ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) };
+                return { ...next, ...spec.onchange?.(next, f.name, db) };
+              })} />
             </div>
           </div>
         ))}
