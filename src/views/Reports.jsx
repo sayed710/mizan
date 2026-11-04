@@ -196,18 +196,20 @@ function Tax({ db, period }) {
   );
 }
 
-const Aged = (kind) => function AgedBody({ db }) {
-  const { buckets, rows } = agedBalance(db, kind);
+const Aged = (kind) => function AgedBody({ db, period }) {
+  const { buckets, rows } = agedBalance(db, kind, period.to || today());
+  const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (
     <tbody>
-      {rows.map((r) => (
-        <tr key={r.partner_id} className="rep-detail">
-          <td><a href={`#/open/res.partner/${r.partner_id}`}>{partnerName(db, r.partner_id)}</a></td>
+      {rows.map((r) => <Fragment key={r.partner_id}>
+        <tr className="rep-detail">
+          <td><button type="button" className="btn sm" aria-expanded={open.has(r.partner_id)} onClick={() => setOpen((prev) => { const next = new Set(prev); if (next.has(r.partner_id)) next.delete(r.partner_id); else next.add(r.partner_id); return next; })}>{open.has(r.partner_id) ? '▾' : '▸'}</button> <a href={`#/open/res.partner/${r.partner_id}`}>{partnerName(db, r.partner_id)}</a></td>
           {buckets.map(([k]) => <td key={k} className="num">{r[k] ? money(r[k]) : ''}</td>)}
           <td className="num">{money(r.total)}</td>
         </tr>
-      ))}
+        {open.has(r.partner_id) && r.invoices.map((invoice) => <tr key={invoice.move_id} className="rep-detail"><td><a href={`#/open/account.move/${invoice.move_id}`}>{invoice.name}</a></td>{buckets.map(([k]) => <td key={k} className="num">{invoice[k] ? money(invoice[k]) : ''}</td>)}<td className="num">{money(invoice.total)}</td></tr>)}
+      </Fragment>)}
       <tr className="rep-total strong"><td>{t('Total')}</td>{buckets.map(([k]) => <td key={k} className="num">{money(sum(k))}</td>)}<td className="num">{money(sum('total'))}</td></tr>
     </tbody>
   );
@@ -558,7 +560,7 @@ function ReportPage({ leaf }) {
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
-  const comparable = ['pnl', 'balance'].includes(leaf.report) && periodKey !== 'all';
+  const comparable = ['pnl', 'balance'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const horizontalGroups = comparable ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
     (g.company_id ?? 1) === (selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany))
   ) : [];
@@ -580,7 +582,7 @@ function ReportPage({ leaf }) {
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
-            {['journalAudit', 'customerStatement', 'fiscal'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}

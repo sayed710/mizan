@@ -21,7 +21,7 @@ function JournalCard({ card }) {
     cash: [['Balance', money(card.balance)]],
     general: [['Posted Entries', card.entries], ['Drafts', card.draft]],
   }[card.kind];
-  const action = { INV: ['New Invoice', '#/accounting/invoices/new'], BILL: ['New Bill', '#/accounting/bills/new'], BNK1: ['Reconcile', '#/accounting/bank'] }[card.journal.code];
+  const action = { sale: ['New Invoice', '#/accounting/invoices/new'], purchase: ['New Bill', '#/accounting/bills/new'], bank: ['Reconcile', '#/accounting/bank'], cash: ['Reconcile', '#/accounting/bank'] }[card.kind];
   return (
     <section className="panel journal-card">
       <h2><a href={list}>{card.journal.name}</a></h2>

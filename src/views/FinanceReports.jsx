@@ -48,7 +48,7 @@ function PartnerRows({ db, p }) {
         {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}<td />
       </tr>
       {open && p.lines.map((l, i) => (
-        <tr key={i} className="rep-detail"><td>{l.date} · {l.move_name}</td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}<td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td></tr>
+        <tr key={i} className="rep-detail"><td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}<td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td></tr>
       ))}
     </>
   );

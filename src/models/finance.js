@@ -749,7 +749,7 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
 function ageDocumentInstallments(db, kind, at, moves, add) {
   const types = kind === 'receivable' ? ['out_invoice', 'out_refund'] : ['in_invoice', 'in_refund'];
   for (const m of moves.filter((x) => x.state === 'posted' && types.includes(x.move_type) && x.invoice_date <= at)) {
-    for (const due of openInstallments(db, m, kind, at)) add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * due.amount);
+    for (const due of openInstallments(db, m, kind, at)) add(m.partner_id, due.date, (m.move_type.endsWith('refund') ? -1 : 1) * due.amount, m);
   }
 }
 
@@ -776,12 +776,21 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
 /** Aged receivable/payable per partner, bucketed by days past due. */
 export function agedBalance(db, kind = 'receivable', at = today()) {
   const rows = new Map();
-  const add = (partner, date, amount) => {
+  const add = (partner, date, amount, document = null) => {
     const days = Math.floor((new Date(at) - new Date(date)) / 864e5);
     const bucket = BUCKETS.find(([, , from, to]) => days >= from && days <= to)[0];
-    const row = rows.get(partner) ?? { partner_id: partner, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+    const row = rows.get(partner) ?? { partner_id: partner, total: 0, invoices: [], ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
     row[bucket] = round(row[bucket] + amount);
     row.total = round(row.total + amount);
+    if (document) {
+      let detail = row.invoices.find((item) => item.move_id === document.id);
+      if (!detail) {
+        detail = { move_id: document.id, name: document.name, total: 0, ...Object.fromEntries(BUCKETS.map(([k]) => [k, 0])) };
+        row.invoices.push(detail);
+      }
+      detail[bucket] = round(detail[bucket] + amount);
+      detail.total = round(detail.total + amount);
+    }
     rows.set(partner, row);
   };
   const moves = search(db, 'account.move');

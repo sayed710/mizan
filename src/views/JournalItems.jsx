@@ -5,6 +5,7 @@ import { read } from '../orm.js';
 import { useDb } from '../store.js';
 import { money } from '../ui.jsx';
 import { t } from '../i18n.js';
+import { formatCurrency } from '../money.js';
 
 export function JournalItems() {
   const db = companyViewDb(useDb());
@@ -35,13 +36,13 @@ export function JournalItems() {
         <option value="">{t('None')}</option>{['account', 'partner', 'journal'].map((key) => <option key={key} value={key}>{t(key[0].toUpperCase() + key.slice(1))}</option>)}
       </select></label>
     </div>
-    <div className="list-wrap"><table className="list report"><thead><tr>{['Date', 'Entry', 'Account', 'Partner', 'Label', 'Debit', 'Credit', 'Company'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
+    <div className="list-wrap"><table className="list report"><thead><tr>{['Date', 'Due Date', 'Entry', 'Account', 'Partner', 'Label', 'Debit', 'Credit', 'Amount in Currency', 'Matching', 'Company'].map((label) => <th key={label}>{t(label)}</th>)}</tr></thead>
       <tbody>{[...groups.entries()].map(([key, lines]) => <Fragment key={key ?? 'none'}>
-        {group && <tr><th colSpan={8}>{lines[0][group] || t('Undefined')}</th></tr>}
+        {group && <tr><th colSpan={8}>{lines[0][group] || t('Undefined')}</th><th colSpan={3} /></tr>}
         {lines.map((line) => <tr key={`${line.move_id}-${line.index}`}>
-          <td>{line.date}</td><td><a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a></td>
+          <td>{line.date}</td><td>{line.date_maturity ?? ''}</td><td><a href={`#/accounting/entries/${line.move_id}`}>{line.move_name}</a></td>
           <td>{line.account}</td><td>{line.partner}</td><td>{line.name}</td>
-          <td className="num">{money(line.debit || 0)}</td><td className="num">{money(line.credit || 0)}</td><td>{line.company}</td>
+          <td className="num">{money(line.debit || 0)}</td><td className="num">{money(line.credit || 0)}</td><td className="num">{line.currency_id && line.amount_currency != null ? formatCurrency(line.amount_currency, read(db, 'res.currency', line.currency_id)) : ''}</td><td>{line.matching_number ?? (line.reconciled ? t('Reconciled') : '')}</td><td>{line.company}</td>
         </tr>)}
       </Fragment>)}</tbody>
     </table></div>
