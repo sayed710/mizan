@@ -1,7 +1,7 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
-import { accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
+import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
@@ -431,6 +431,8 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
+const releasedTaxKey = (account, name, tags = []) => `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
+
 /** Tax already released for an invoice, per tax account code. */
 const releasedTaxes = (db, r) => {
   const released = new Map();
@@ -438,7 +440,7 @@ const releasedTaxes = (db, r) => {
     if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
-      const key = `${code}:${l.tax_name ?? ''}`;
+      const key = releasedTaxKey(code, l.tax_name, l.tax_tag_ids);
       const previous = released.get(key) ?? { amount: 0, base: 0 };
       const zeroTax = !(Number(l.debit) || Number(l.credit));
       // Signed bases (and older zero-amount bases) include the refund direction.
@@ -467,7 +469,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const tagged = final ? released.get(`${g.account}:${g.tax_name}`) : null;
+    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_name, g.tax_tag_ids)) : null;
     const legacy = final ? released.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
@@ -478,9 +480,9 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   if (!due.length) return { db, id: null };
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
-  const lines = due.flatMap(({ account, amount, base, tax_name }) => {
+  const lines = due.flatMap(({ account, amount, base, tax_name, tax_tag_ids }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
@@ -610,6 +612,8 @@ const lineItem = {
     tax_id: { type: 'many2one', relation: 'account.tax', label: 'Tax', hidden: true },
     tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', hidden: true },
     tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
+    tax_grid_base: { type: 'boolean', label: 'Tax Grid Base', hidden: true },
+    tax_grid_release: { type: 'boolean', label: 'Tax Grid Release', hidden: true },
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
@@ -772,6 +776,7 @@ export const accountingModels = {
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
+      credit_warning: { type: 'text', label: 'Credit Warning', readonly: true, compute: (r, db) => r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db)) : '' },
       amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).untaxed },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).tax },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
@@ -867,7 +872,7 @@ export const accountingModels = {
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
-      groups: [['partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
+      groups: [['credit_warning', 'partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

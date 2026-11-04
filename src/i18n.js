@@ -1206,6 +1206,7 @@ const ar = {
   'Hash': 'التجزئة',
   'Last Entry': 'آخر قيد',
   'Last Entry Number': 'رقم آخر قيد',
+  'Credit Warning': 'تحذير الائتمان', 'Tax Grid Base': 'وعاء الضريبة', 'Tax Grid Release': 'تسوية الضريبة', 'Tax Grids': 'الشبكات الضريبية',
   'Tax Tags': 'وسوم الضريبة',
   'Hash Version': 'إصدار التجزئة',
   'No entries were secured; the hard lock date was not changed.': '\u0644\u0645 \u062a\u064f\u0624\u0645\u0651\u064e\u0646 \u0623\u064a \u0642\u064a\u0648\u062f\u061b \u0644\u0645 \u064a\u062a\u063a\u064a\u0631 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0625\u0642\u0641\u0627\u0644.',

@@ -110,8 +110,9 @@ export function invoiceBaseGroups(db, move) {
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
     const zero = !lineTaxOf(l) && !l.tax_cash_basis ? (l.tax_name || taxLabel(l)) : '';
-    const key = `${account}:${zero}`;
-    const group = byAccount.get(key) ?? { account, zero, amount: 0, lines: [] };
+    const tags = [...(l.tax_tag_ids ?? [])].sort((a, b) => a - b);
+    const key = `${account}:${zero}:${tags.join(',')}:${!!l.tax_cash_basis}`;
+    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis: !!l.tax_cash_basis, amount: 0, lines: [] };
     group.amount += subtotal(l);
     group.lines.push({ index, amount: subtotal(l), ...(deferred ? { original_account_id: original } : {}) });
     byAccount.set(key, group);
@@ -154,7 +155,7 @@ export function invoiceLines(db, move) {
   const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero, lines }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines]);
+  const bases = invoiceBaseGroups(db, move).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
   const rawTotalDoc = amounts(move.invoice_line_ids, docCurrency).total;
   const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
@@ -229,8 +230,8 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, cashBasis]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: !cashBasis } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
@@ -275,7 +276,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
     if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
-    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}) };
+    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   const journalCode = j?.code ?? journal;
