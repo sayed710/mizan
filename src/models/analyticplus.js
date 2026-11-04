@@ -124,11 +124,12 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
   const journalLines = move.line_ids?.length ? move.line_ids : invoiceLines(db, move);
   const allocations = new Map();
   for (const journalLine of journalLines) {
-    for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id });
+    for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id, deferred: Boolean(source.original_account_id) });
   }
   return (move.invoice_line_ids ?? []).flatMap((line, index) => {
     const product = read(db, 'product', line.product_id);
     const allocation = allocations.get(index);
+    if (allocation?.deferred) return [];
     const account = move.line_ids?.length ? allocation?.account : invoiceLineAccount(db, move, line);
     const lineAmount = allocation?.amount ?? 0;
     return allocatedShares(db, distributionOfLine(line, db, move), lineAmount).map(([id, amount]) => {
