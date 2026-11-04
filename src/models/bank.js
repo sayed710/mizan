@@ -90,8 +90,16 @@ export function reconcileWith(db, line, moveId) {
   return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
 }
 
-/** A batch payment belongs to the company of its journal. */
-const batchPaymentCompany = (db, batch) => read(db, 'account.journal', batch?.journal_id)?.company_id ?? 1;
+/** A journal-less batch belongs to the common company of its active payments. */
+const batchPaymentCompany = (db, batch) => {
+  if (!batch) return null;
+  if (batch.journal_id) return read(db, 'account.journal', batch.journal_id)?.company_id ?? 1;
+  const lines = (batch.lines ?? []).filter((line) => !line.cancelled && line.payment_id);
+  const payments = lines.map((line) => read(db, 'account.payment', line.payment_id));
+  if (!payments.length || payments.some((payment) => !payment)) return null;
+  const companies = new Set(payments.map((payment) => payment.company_id ?? 1));
+  return companies.size === 1 ? companies.values().next().value : null;
+};
 
 /** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
 export function isPaymentMatched(db, payment, excludeLineId = null) {
@@ -133,10 +141,7 @@ function resolveAndValidatePayments(db, line) {
   if (!line.amount || payments.some((p) => !p || (p.payment_type === 'inbound') !== incoming)) {
     throw new Error('Statement amount and direction must match the payment');
   }
-  const lineTarget = round(line.open_amount ?? Math.abs(line.amount));
-  const paymentsTotal = round(payments.reduce((s, p) => s + Number(p?.amount || 0), 0));
-  if (paymentsTotal !== lineTarget) throw new Error('The selected payments must total the bank transaction amount');
-
+  if (new Set(payments.map((payment) => payment.id)).size !== payments.length) throw new Error('A payment can only be selected once');
   for (const payment of payments) {
     if (payment.state !== 'posted' || !payment.move_id) throw new Error('Select a posted payment');
     if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
@@ -168,11 +173,10 @@ function paymentOutstandingItem(db, payment, line, via, journalCurrency) {
     throw new Error('Payment currency must match the bank journal currency');
   }
   const outstanding = payment.outstanding_account_id;
-  const paymentAmt = round(Number(payment.amount));
-  const liquidity = entry.line_ids.filter((l) => l.account_id === outstanding && (incoming ? round(l.debit) === paymentAmt : round(l.credit) === paymentAmt));
+  const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === outstanding && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
   if (!outstanding || liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
   if (read(db, 'account.account', outstanding)?.code === via.account) throw new Error('Outstanding and bank accounts must differ');
-  return { account: outstanding, amount: paymentAmt, partner_id: payment.partner_id, name: payment.name || line.payment_ref };
+  return { account: outstanding, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref };
 }
 
 function matchPayment(db, line) {
@@ -180,9 +184,11 @@ function matchPayment(db, line) {
   const company = line.company_id ?? 1;
   const { payments, via, journal, journalCurrency } = resolveAndValidatePayments(db, line);
   const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via, journalCurrency));
+  const amount = round(Math.abs(line.amount));
+  const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
+  if (paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
 
   const incoming = line.amount > 0;
-  const amount = round(Math.abs(line.amount));
   const bankLine = incoming ? { account: via.account, debit: amount } : { account: via.account, credit: amount };
   const paymentLines = outstandingItems.map((item) => (incoming
     ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name }
@@ -199,7 +205,7 @@ function matchPayment(db, line) {
       open_amount: 0,
       allocations: [{ payment_move_id: booked.id, amount }],
       payment_move_id: payments.length === 1 ? payments[0].move_id : null,
-      payment_id: line.payment_id ?? (payments.length === 1 ? payments[0].id : null),
+      payment_id: payments.length === 1 ? payments[0].id : null,
       payment_ids: payments.map((p) => p.id),
       batch_payment_id: line.batch_payment_id ?? null,
     }),

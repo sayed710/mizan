@@ -38,6 +38,7 @@ export function postBatch(db, batch) {
     }
   }
   const company = read(db, 'account.move', lines[0].move_id)?.company_id ?? 1;
+  if (batch.batch_type === 'inbound' && lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch invoices must belong to the same company');
   const journal = batch.batch_type === 'outbound' ? read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company)) : null;
   if (batch.batch_type === 'outbound' && (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company))) throw new Error('Checks require a bank journal and invoices in the same company');
   const payments = search(db, 'account.payment');
