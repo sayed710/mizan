@@ -102,7 +102,18 @@ export function lockDateFor(settings = {}, move = {}, journal = null) {
   return [settings.lock_date, settings.hard_lock_date, sales && settings.sale_lock_date, purchases && settings.purchase_lock_date].filter(Boolean).sort().at(-1) ?? '';
 }
 
-const companyLockDate = (db, move) => move ? [lockDateFor(db.settings, move, (db.records['account.journal'] ?? []).find((journal) => journal.id === move.journal_id)), (db.records['res.company'] ?? []).find((c) => c.id === (move.company_id ?? 1))?.hard_lock_date].filter(Boolean).sort().at(-1) ?? '' : '';
+const companyLockDate = (db, move) => {
+  if (!move) return '';
+  const compId = move.company_id ?? 1;
+  const comp = (db.records['res.company'] ?? []).find((c) => c.id === compId) ?? {};
+  const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
+  if (db.settings && 'lock_date' in db.settings && db.settings.lock_date === null && compId === (db.settings.current_company_id ?? 1)) {
+    return '';
+  }
+  const compLock = lockDateFor(comp, move, journal);
+  const globalLock = lockDateFor(db.settings ?? {}, move, journal);
+  return [compLock, globalLock].filter(Boolean).sort().at(-1) ?? '';
+};
 const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
 export function returnCompanies(db, ret) {
   if (!ret.tax_unit_id) return [ret.company_id ?? 1];
@@ -473,9 +484,10 @@ export function taxAccounts(db, companyId) {
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
 function taxItems(db, period) {
   if (period?.tax_unit_id) return returnCompanies(db, period).flatMap((company_id) => taxItems(db, { ...period, tax_unit_id: null, company_id }));
-  const accounts = taxAccounts(db, period?.company_id ?? period?.company);
+  const companyId = period?.company_id ?? period?.company;
+  const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  const transitions = new Set([accountId(db, TRANSITION.sale), accountId(db, TRANSITION.purchase)]);
+  const transitions = new Set([accountId(db, TRANSITION.sale, companyId), accountId(db, TRANSITION.purchase, companyId)].filter(Boolean));
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
     const move = l.tax_name && moves.get(l.move_id);

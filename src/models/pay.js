@@ -11,6 +11,7 @@ import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched } from './bank.js';
+import { shouldBePaid } from './billcontrol.js';
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
@@ -34,14 +35,15 @@ export function postPayment(db, p) {
   }
   const date = currentPayment.date ?? today();
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
-  const via = paymentJournal(db, currentPayment.journal_id);
+  const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const name = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
   const open = isTaxOrDirect
     ? []
     : search(db, 'account.move')
         .filter((m) => m.state === 'posted' && m.partner_id === currentPayment.partner_id && (m.company_id ?? 1) === (currentPayment.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[currentPayment.partner_type]?.[currentPayment.payment_type]?.includes(m.move_type)
-          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id))
+          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id)
+          && shouldBePaid(db, m) !== 'exception')
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', currentPayment.journal_id ?? journalId(db, via.code, currentPayment.company_id ?? 1));

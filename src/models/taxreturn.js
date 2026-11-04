@@ -80,21 +80,20 @@ export function computeAuditChecks(db, ret) {
 export function ensureReturnTypes(db) {
   let next = db;
   const companies = next.records?.['res.company'] ?? [];
-  const existingTypes = next.records?.['account.return.type'] ?? [];
 
   for (const company of companies) {
     const rawPer = company.tax_periodicity || company.account_tax_periodicity || next.settings?.tax_periodicity;
     const periodicity = ['quarterly', 'trimester'].includes(rawPer) ? 'trimester' : ['semester', 'year'].includes(rawPer) ? rawPer : 'monthly';
     const startDate = company.tax_start_date || company.fiscalyear_start_date || null;
 
-    const existing = existingTypes.find((t) => (t.company_id ?? 1) === company.id && t.name === 'VAT Return');
+    const existing = (next.records?.['account.return.type'] ?? []).find((t) => (t.company_id ?? 1) === company.id && t.name === 'VAT Return');
     if (existing) {
       const updates = {};
       if (existing.deadline_periodicity !== periodicity) {
         updates.deadline_periodicity = periodicity;
       }
-      if (company.tax_start_date && existing.deadline_start_date !== company.tax_start_date) {
-        updates.deadline_start_date = company.tax_start_date;
+      if (existing.deadline_start_date !== startDate) {
+        updates.deadline_start_date = startDate;
       }
       if (Object.keys(updates).length > 0) {
         next = write(next, 'account.return.type', existing.id, updates);
@@ -213,21 +212,21 @@ function uncoveredPeriods(period, covered) {
 
 /** Create missing returns for each period up to today for return type `typeId`. */
 export function generateReturns(db, typeId) {
-  const type = read(db, 'account.return.type', typeId);
+  let nextDb = ensureReturnTypes(db);
+  const type = read(nextDb, 'account.return.type', typeId);
   if (!type) throw new Error('Return type not found');
   const companyId = type.company_id ?? 1;
   const periodicity = type.deadline_periodicity || 'monthly';
   const atDate = today();
-  const start = type.deadline_start_date || historicalStart(db, companyId, periodicity, atDate);
+  const start = type.deadline_start_date || historicalStart(nextDb, companyId, periodicity, atDate);
   const periods = periodsUpTo(periodicity, start, atDate);
 
   // Archived and submitted returns still cover their dates; never recreate or overlap them.
-  const existing = (db.records['account.return'] ?? [])
+  const existing = (nextDb.records['account.return'] ?? [])
     .filter((r) => r.type_id === typeId && (r.company_id ?? 1) === companyId && r.date_from && r.date_to)
     .sort((a, b) => a.date_from.localeCompare(b.date_from));
   const missing = periods.flatMap((period) => uncoveredPeriods(period, existing)).filter((period) => period.from <= atDate);
 
-  let nextDb = db;
   const created = [];
   for (const p of missing) {
 

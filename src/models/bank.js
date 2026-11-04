@@ -10,6 +10,7 @@ import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
+import { shouldBePaid } from './billcontrol.js';
 
 /** Statement amounts use the journal currency; open allocations use company currency. */
 export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
@@ -54,6 +55,7 @@ export function reconcileWith(db, line, moveId) {
   const move = read(db, 'account.move', moveId);
   const err = matchError(db, line, move);
   if (err) throw new Error(err);
+  if (shouldBePaid(db, move) === 'exception') throw new Error('Resolve or approve the three-way matching exception before paying this bill');
   if (line.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
   const date = line.date ?? today();
   const company = line.company_id ?? 1;

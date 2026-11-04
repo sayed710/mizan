@@ -537,6 +537,27 @@ MIGRATIONS.push({ version: 23, name: 'Explicit base currency and fiscal earnings
     records: { ...db.records, 'res.company': companies } };
 } });
 
+function migrateCompanyLockDates(db) {
+  if (!db?.settings || (!db.settings.lock_date && !db.settings.sale_lock_date && !db.settings.purchase_lock_date && !db.settings.hard_lock_date)) return db;
+  const currentCompId = db.settings.current_company_id ?? 1;
+  let changed = false;
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    if (c.id !== currentCompId) return c;
+    const updates = {};
+    if (db.settings.lock_date != null && c.lock_date == null) updates.lock_date = db.settings.lock_date;
+    if (db.settings.sale_lock_date != null && c.sale_lock_date == null) updates.sale_lock_date = db.settings.sale_lock_date;
+    if (db.settings.purchase_lock_date != null && c.purchase_lock_date == null) updates.purchase_lock_date = db.settings.purchase_lock_date;
+    if (db.settings.hard_lock_date != null && c.hard_lock_date == null) updates.hard_lock_date = db.settings.hard_lock_date;
+    if (Object.keys(updates).length > 0) {
+      changed = true;
+      return { ...c, ...updates };
+    }
+    return c;
+  });
+  if (!changed) return db;
+  return { ...db, records: { ...db.records, 'res.company': companies } };
+}
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
@@ -545,6 +566,6 @@ export function migrate(db) {
   const from = db.schema_version ?? 0;
   if (from > SCHEMA_VERSION) throw new Error(`Database schema ${from} is newer than this version of Mizan (${SCHEMA_VERSION})`);
   const pending = MIGRATIONS.filter((m) => m.version > from);
-  if (!pending.length) return db;
-  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: SCHEMA_VERSION };
+  const next = pending.length ? { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: SCHEMA_VERSION } : db;
+  return migrateCompanyLockDates(next);
 }

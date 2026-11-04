@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { updateSettings } from '../orm.js';
+import { updateSettings, write } from '../orm.js';
 import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
@@ -263,45 +263,45 @@ export function Settings() {
         <div className="field">
           <label htmlFor="lock_date">{t('Lock Date')}</label>
           <div className="field-value">
-            <input id="lock_date" type="date" disabled={readOnly} value={db.settings?.lock_date ?? ''} onChange={(e) => commit(updateSettings(getDb(), { lock_date: e.target.value || null }))} />
+            <input id="lock_date" type="date" disabled={readOnly} value={company?.lock_date ?? db.settings?.lock_date ?? ''} onChange={(e) => commit(company ? write(getDb(), 'res.company', company.id, { lock_date: e.target.value || null }) : updateSettings(getDb(), { lock_date: e.target.value || null }))} />
           </div>
         </div>
         {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date']].map(([key, label]) => (
           <div className="field" key={key}>
             <label htmlFor={key}>{t(label)}</label>
             <div className="field-value">
-              <input id={key} type="date" disabled={readOnly} value={db.settings?.[key] ?? ''} onChange={(e) => commit(updateSettings(getDb(), { [key]: e.target.value || null }))} />
+              <input id={key} type="date" disabled={readOnly} value={company?.[key] ?? db.settings?.[key] ?? ''} onChange={(e) => commit(company ? write(getDb(), 'res.company', company.id, { [key]: e.target.value || null }) : updateSettings(getDb(), { [key]: e.target.value || null }))} />
             </div>
           </div>
         ))}
         <div className="field">
           <label htmlFor="hard_lock_date">{t('Hard Lock Date')}</label>
           <div className="field-value">
-            <input id="hard_lock_date" type="date" disabled={readOnly} min={db.settings?.hard_lock_date ?? undefined} value={db.settings?.hard_lock_date ?? ''}
-              onChange={(e) => e.target.value && e.target.value > (db.settings?.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && commit(updateSettings(getDb(), { hard_lock_date: e.target.value }))} />
+            <input id="hard_lock_date" type="date" disabled={readOnly} min={(company?.hard_lock_date ?? db.settings?.hard_lock_date) ?? undefined} value={company?.hard_lock_date ?? db.settings?.hard_lock_date ?? ''}
+              onChange={(e) => e.target.value && e.target.value > (company?.hard_lock_date ?? db.settings?.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && commit(company ? write(getDb(), 'res.company', company.id, { hard_lock_date: e.target.value }) : updateSettings(getDb(), { hard_lock_date: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="invoice_qr">{t('Payment QR Codes')}</label>
           <div className="field-value">
-            <select id="invoice_qr" disabled={readOnly} value={db.settings?.invoice_qr ?? ''} onChange={(e) => commit(updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
+            <select id="invoice_qr" disabled={readOnly} value={company?.invoice_qr ?? db.settings?.invoice_qr ?? ''} onChange={(e) => commit(company ? write(getDb(), 'res.company', company.id, { invoice_qr: e.target.value || null }) : updateSettings(getDb(), { invoice_qr: e.target.value || null }))}>
               <option value="">{t('None')}</option>
               <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
               <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
             </select>
-            {db.settings?.invoice_qr === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
+            {(company?.invoice_qr ?? db.settings?.invoice_qr) === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
           </div>
         </div>
         <div className="field">
           <label htmlFor="company_vat">{t('Company Tax ID')}</label>
           <div className="field-value">
-            <input id="company_vat" disabled={readOnly} value={db.settings?.company_vat ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_vat: e.target.value }))} />
+            <input id="company_vat" disabled={readOnly} value={company?.vat ?? db.settings?.company_vat ?? ''} onChange={(e) => commit(company ? write(getDb(), 'res.company', company.id, { vat: e.target.value }) : updateSettings(getDb(), { company_vat: e.target.value }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="company_iban">{t('Bank Account (IBAN)')}</label>
           <div className="field-value">
-            <input id="company_iban" disabled={readOnly} value={db.settings?.company_iban ?? ''} onChange={(e) => commit(updateSettings(getDb(), { company_iban: e.target.value }))} />
+            <input id="company_iban" disabled={readOnly} value={company?.company_iban ?? db.settings?.company_iban ?? ''} onChange={(e) => commit(company ? write(getDb(), 'res.company', company.id, { company_iban: e.target.value }) : updateSettings(getDb(), { company_iban: e.target.value }))} />
           </div>
         </div>
         <div className="field">
