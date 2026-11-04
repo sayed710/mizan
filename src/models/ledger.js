@@ -349,11 +349,14 @@ export function balances(db, items) {
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
+/** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
+const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
+
 const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + sign * r.balance, 0));
 
 /** Profit & loss figures (income shown positive); year-end closing entries are left out unless asked for. */
-export function profitAndLoss(db, period, { includeClosing = false } = {}) {
-  const rows = balances(db, journalItems(db, period).filter((l) => includeClosing || !l.is_closing));
+export function profitAndLoss(db, period, { includeClosing = false, weight } = {}) {
+  const rows = balances(db, weighted(journalItems(db, period).filter((l) => includeClosing || !l.is_closing), weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
   const expense = sumTypes(rows, ['expense']);
@@ -368,15 +371,15 @@ export function profitAndLoss(db, period, { includeClosing = false } = {}) {
 }
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
-export function balanceSheet(db, at = today()) {
+export function balanceSheet(db, at = today(), { weight } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const rows = balances(db, journalItems(db, filter));
+  const rows = balances(db, weighted(journalItems(db, filter), weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current'], -1);
   const equity = pick(['equity'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, filter, { includeClosing: true }).net;
+  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings,

@@ -1,5 +1,6 @@
-import { balanceSheet, profitAndLoss } from '../models/ledger.js';
+import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
 import { round } from '../money.js';
+import { groupBuckets } from '../models/configurableReports.js';
 
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const iso = (date) => date.toISOString().slice(0, 10);
@@ -44,27 +45,48 @@ function columns(periods, reports, sectionDefs, totalDefs) {
   return { headers: periods.map((p) => p.label), sections, totals, variance };
 }
 
+const PNL_SECTIONS = [
+  ['Revenue', (p) => p.revenue, (p) => p.detail.revenue],
+  ['Cost of Revenue', (p) => p.cost, (p) => p.detail.cost],
+  ['Expenses', (p) => p.expense, (p) => p.detail.expense],
+  ['Other Income', (p) => p.otherIncome],
+  ['Other Expenses', (p) => p.otherExpense],
+];
+
+const PNL_TOTALS = [
+  ['Gross Profit', (p) => p.gross], ['Net Operating Income', (p) => p.operating], ['Net Income', (p) => p.net, true],
+];
+
+const BALANCE_SECTIONS = [
+  ['Assets', (b) => b.totalAssets, (b) => b.assets],
+  ['Liabilities', (b) => b.totalLiabilities, (b) => b.liabilities],
+  ['Equity', (b) => round(b.totalEquity - b.earnings), (b) => b.equity],
+  ['Current Year Earnings', (b) => b.earnings],
+];
+
+const BALANCE_TOTALS = [
+  ['Total Assets', (b) => b.totalAssets, true], ['Liabilities + Equity', (b) => round(b.totalLiabilities + b.totalEquity), true],
+];
+
 /** P&L sections and totals with account detail aligned across calendar periods. */
 export function pnlColumns(db, periods) {
-  return columns(periods, periods.map((p) => profitAndLoss(db, p)), [
-    ['Revenue', (p) => p.revenue, (p) => p.detail.revenue],
-    ['Cost of Revenue', (p) => p.cost, (p) => p.detail.cost],
-    ['Expenses', (p) => p.expense, (p) => p.detail.expense],
-    ['Other Income', (p) => p.otherIncome],
-    ['Other Expenses', (p) => p.otherExpense],
-  ], [
-    ['Gross Profit', (p) => p.gross], ['Net Operating Income', (p) => p.operating], ['Net Income', (p) => p.net, true],
-  ]);
+  return columns(periods, periods.map((p) => profitAndLoss(db, p)), PNL_SECTIONS, PNL_TOTALS);
 }
 
 /** Cumulative balance sheets at each period end, retaining the displayed equity split. */
 export function balanceColumns(db, periods) {
-  return columns(periods, periods.map((p) => balanceSheet(db, p.to)), [
-    ['Assets', (b) => b.totalAssets, (b) => b.assets],
-    ['Liabilities', (b) => b.totalLiabilities, (b) => b.liabilities],
-    ['Equity', (b) => round(b.totalEquity - b.earnings), (b) => b.equity],
-    ['Current Year Earnings', (b) => b.earnings],
-  ], [
-    ['Total Assets', (b) => b.totalAssets, true], ['Liabilities + Equity', (b) => round(b.totalLiabilities + b.totalEquity), true],
-  ]);
+  return columns(periods, periods.map((p) => balanceSheet(db, p.to)), BALANCE_SECTIONS, BALANCE_TOTALS);
+}
+
+/** Horizontal comparison columns partitioned by a horizontal group for Profit & Loss. */
+export function pnlAnalyticColumns(db, group, period) {
+  const buckets = groupBuckets(db, group, journalItems(db, period));
+  return columns(buckets, buckets.map((b) => profitAndLoss(db, period, { weight: b.weight })), PNL_SECTIONS, PNL_TOTALS);
+}
+
+/** Horizontal comparison columns partitioned by a horizontal group for the Balance Sheet. */
+export function balanceAnalyticColumns(db, group, period) {
+  const filter = typeof period === 'object' && period !== null ? period : { to: period };
+  const buckets = groupBuckets(db, group, journalItems(db, filter));
+  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight })), BALANCE_SECTIONS, BALANCE_TOTALS);
 }

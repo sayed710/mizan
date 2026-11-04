@@ -60,6 +60,7 @@ const ar = {
   'Unknown Journal': 'يومية غير معروفة',
   'All Accounts': 'جميع الحسابات',
   'All Journals': 'جميع اليوميات',
+  'All Ledgers': 'جميع دفاتر الأستاذ',
   'All Partners': 'جميع الشركاء',
   'No records found.': 'لم يتم العثور على سجلات.',
   'Loans Analysis': 'تحليل القروض',

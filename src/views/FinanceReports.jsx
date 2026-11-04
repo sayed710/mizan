@@ -83,8 +83,9 @@ export function CustomerStatement({ db, period, companyId }) {
   </tbody>;
 }
 
-export function CashFlow({ db, period }) {
-  const r = cashFlow(db, period);
+export function CashFlow({ db, period, companyId }) {
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
+  const r = cashFlow(db, currentCo ? { ...period, company_id: currentCo } : period);
   const section = (key, title) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td>{num(r[key])}</tr>
@@ -99,7 +100,7 @@ export function CashFlow({ db, period }) {
       {section('operating', 'Operating Activities')}
       {section('investing', 'Investing Activities')}
       {section('financing', 'Financing Activities')}
-      {section('unclassified', 'Unclassified')}
+      {(r.unclassified !== 0 || r.lines.some((l) => l.section === 'unclassified')) && section('unclassified', 'Unclassified')}
       <tr className="rep-total"><td>{t('Net Change in Cash')}</td>{num(r.net)}</tr>
       <tr className="rep-total strong"><td>{t('Cash at the end of the period')}</td>{num(r.closing)}</tr>
     </tbody>
