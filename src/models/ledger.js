@@ -143,6 +143,39 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
+/** Tax account for an invoice line; cash-basis taxes wait on a transition account until payment. */
+function invoiceTaxAccountFor(db, move) {
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
+  return (l) => {
+    if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
+    if (l.tax_account_id) {
+      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
+      if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
+      return resolved;
+    }
+    return taxAcc;
+  };
+}
+
+/** Tax groups for an invoice/bill, applying mixed early-payment discount rounding per group when present. */
+export function invoiceTaxGroups(db, move) {
+  const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
+  const docCurrency = documentCurrency(db, move);
+  const ownCurrency = companyCurrencyRecord(db, move.company_id);
+  const docRound = (n) => roundCurrency(n, docCurrency);
+  const companyRound = (n) => roundCurrency(n, ownCurrency);
+  const taxes = taxGroups((move.invoice_line_ids ?? []).filter((l) => lineTaxOf(l) !== 0), invoiceTaxAccountFor(db, move), rate, docCurrency, ownCurrency);
+  const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
+  const discountFactor = mixedDiscountFactor(term);
+  if (discountFactor === 1) return taxes;
+  return taxes.map((g) => {
+    const docBase = docRound(g.base * rate * discountFactor);
+    const docAmt = docRound(g.document_amount * discountFactor);
+    return { ...g, document_amount: docAmt, amount: companyRound(docAmt / rate), base: companyRound(docBase / rate) };
+  });
+}
+
 /** Journal items for a customer invoice / vendor bill in document and company units. */
 export function invoiceLines(db, move) {
   // Customer side for invoices and credit notes; a credit note mirrors the invoice (debits ↔ credits).
@@ -161,34 +194,11 @@ export function invoiceLines(db, move) {
   const discountFactor = mixedDiscountFactor(term);
   const mixedDiscount = discountFactor !== 1;
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
-  // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
-  const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
-  const taxAccountFor = (l) => {
-    if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
-    if (l.tax_account_id) {
-      const resolved = resolveCompanyAccount(db, l.tax_account_id, move.company_id);
-      if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
-      return resolved;
-    }
-    return taxAcc;
-  };
-  let taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate, docCurrency, ownCurrency);
-  if (mixedDiscount) {
-    taxes = taxes.map((g) => {
-      const docBase = docRound(g.base * rate * discountFactor);
-      const docAmt = docRound(g.document_amount * discountFactor);
-      return {
-        ...g,
-        document_amount: docAmt,
-        amount: companyRound(docAmt / rate),
-        base: companyRound(docBase / rate),
-      };
-    });
-  }
+  const taxes = invoiceTaxGroups(db, move);
 
   const rawTotalDoc = mixedDiscount
-    ? docRound(bases.reduce((s, [, , a]) => s + a, 0) + taxes.reduce((s, g) => s + g.document_amount, 0))
+    ? docRound(amounts(move.invoice_line_ids, docCurrency).untaxed + taxes.reduce((s, g) => s + g.document_amount, 0))
     : amounts(move.invoice_line_ids, docCurrency).total;
   const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
   const diffDoc = docRound(totalDoc - rawTotalDoc);

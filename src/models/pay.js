@@ -239,7 +239,8 @@ export function reprintCheck(db, payment) {
   if (p.check_number == null || p.payment_type !== 'outbound') throw new Error('Only issued checks can be reprinted');
   if (p.state !== 'posted') throw new Error('Only posted checks can be reprinted');
   const number = nextCheckNumber(db, p.journal_id);
-  let next = write(db, 'account.payment', p.id, { check_number: number, voided_check_numbers: [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }] });
+  const voided_check_numbers = [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }];
+  let next = writeReprintedCheck(db, p, number, voided_check_numbers);
   for (const batch of (next.records['account.batch.payment'] ?? []).filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
     next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, check_number: number } : l) });
   }
@@ -247,12 +248,47 @@ export function reprintCheck(db, payment) {
   return postNote(next, 'account.payment', p.id, `Check ${p.check_number} voided, reprinted as ${number}`);
 }
 
+const trustedReprints = new WeakMap();
+
+function writeReprintedCheck(db, payment, number, voidedCheckNumbers) {
+  let transitions = trustedReprints.get(db);
+  if (!transitions) {
+    transitions = new Map();
+    trustedReprints.set(db, transitions);
+  }
+  transitions.set(payment.id, { previous: payment.check_number, next: number });
+  try {
+    return write(db, 'account.payment', payment.id, { check_number: number, voided_check_numbers: voidedCheckNumbers });
+  } finally {
+    transitions.delete(payment.id);
+    if (!transitions.size) trustedReprints.delete(db);
+  }
+}
+
 const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'], ['reversed', 'Reversed']];
+
+const validCheckWrite = (db, before, after) => {
+  const priorVoided = before?.voided_check_numbers ?? [];
+  const nextVoided = after.voided_check_numbers ?? [];
+  if (!before) return !nextVoided.length && (after.check_number == null || after.state === 'posted');
+  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (before.state === 'draft' && after.state === 'posted'));
+  if (before.journal_id !== after.journal_id) return false;
+  if (before.check_number === after.check_number) return JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
+  if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;
+  const transition = trustedReprints.get(db)?.get(before.id);
+  if (transition?.previous !== before.check_number || transition?.next !== after.check_number) return false;
+  const restored = { ...db, records: { ...db.records, 'account.payment': (db.records['account.payment'] ?? []).map((p) => p.id === before.id ? before : p) } };
+  return nextVoided.length === priorVoided.length + 1
+    && JSON.stringify(nextVoided.slice(0, priorVoided.length)) === JSON.stringify(priorVoided)
+    && nextVoided.at(-1)?.check_number === before.check_number
+    && Boolean(nextVoided.at(-1)?.date)
+    && after.check_number === nextCheckNumber(restored, before.journal_id);
+};
 
 export const payModels = {
   'account.payment': {
     label: 'Payments',
-    guard: (db, before, after, ctx) => (before?.check_number != null && (before.journal_id !== after.journal_id || (before.check_number !== after.check_number && !(after.voided_check_numbers ?? []).some((v) => v.check_number === before.check_number) )) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
+    guard: (db, before, after, ctx) => (!validCheckWrite(db, before, after) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
     protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
     invariant: paymentInvariant,
     fields: {

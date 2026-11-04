@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, nextName, productLines, promptedAmount, today } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, invoiceTaxGroups, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant } from './finance.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
@@ -33,9 +33,9 @@ export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_typ
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
 export function invoiceTaxAmount(r, db) {
   const docCurr = documentCurrency(db, r);
-  const rawTax = amounts(r.invoice_line_ids, docCurr).tax;
   const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return roundCurrency(rawTax * mixedDiscountFactor(term), docCurr);
+  if (mixedDiscountFactor(term) !== 1) return roundCurrency(invoiceTaxGroups(db, r).reduce((s, g) => s + g.document_amount, 0), docCurr);
+  return roundCurrency(amounts(r.invoice_line_ids, docCurr).tax, docCurr);
 }
 
 const total = (r, db) => {
