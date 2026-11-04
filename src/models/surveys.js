@@ -1,8 +1,8 @@
 // Surveys: question types, conditional questions, scoring with a pass mark, attempt limits and results analysis.
 import { create, search, write } from '../orm.js';
 import { today } from './common.js';
+import { round } from '../money.js';
 
-const round = (n, d = 2) => Math.round(n * 10 ** d) / 10 ** d;
 const list = (s) => String(s ?? '').split(',').map((x) => x.trim()).filter(Boolean);
 // Older surveys used 'choice' (one answer) and 'rating' (1-5).
 const kindOf = (q) => ({ choice: 'single', rating: 'scale' })[q.kind] ?? q.kind ?? 'text';

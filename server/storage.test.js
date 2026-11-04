@@ -1,3 +1,4 @@
+import '../src/models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,5 +36,29 @@ test('the old single-blob format is migrated on load', () => {
   const storage = openStorage(sql);
   assert.deepEqual(storage.load(), db0);
   assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM kv WHERE key = 'db'").get().n, 0);
+  assert.deepEqual(storage.load(), db0);
+});
+
+test('numbering high-water marks survive full, incremental and metadata-only saves', () => {
+  const sql = new DatabaseSync(':memory:');
+  const storage = openStorage(sql);
+  const base = { ...seed(), numbering: { 'account.move': { 'INV/2026/': 100 } } };
+  storage.save(null, base);
+  assert.deepEqual(storage.load().numbering, base.numbering);
+  const next = { ...base, numbering: { 'account.move': { 'INV/2026/': 101 } } };
+  storage.save(base, next);
+  assert.deepEqual(openStorage(sql).load().numbering, next.numbering);
+});
+
+test('a failure in the work saved alongside rolls the records back too, for incremental and full saves', () => {
+  const sql = new DatabaseSync(':memory:');
+  const storage = openStorage(sql);
+  const db0 = seed();
+  storage.save(null, db0);
+  const db1 = write(db0, 'crm.lead', 1, { stage_id: 'won' });
+  const boom = () => { throw new Error('log write failed'); };
+  assert.throws(() => storage.save(db0, db1, boom), /log write failed/);
+  assert.deepEqual(storage.load(), db0);
+  assert.throws(() => storage.save(null, db1, boom), /log write failed/);
   assert.deepEqual(storage.load(), db0);
 });

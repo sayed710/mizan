@@ -1,14 +1,14 @@
 // Quotation templates, optional products, validity, online signature and prepayment.
 import { create, postNote, read, search, write } from '../orm.js';
-import { addDays, amounts, nextName, productLines, today } from './common.js';
+import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
 import { paymentJournal, postEntry } from './ledger.js';
+import { round } from '../money.js';
 
 const order = ecommerceModels['sale.order'];
 const editable = (r) => ['draft', 'sent'].includes(r.state);
 const expired = (r, date) => editable(r) && !!r.validity_date && r.validity_date < date;
-const round = (n) => Math.round(n * 100) / 100;
 const present = (line, r) => (r.order_line ?? []).some((l) => l.product_id === line.product_id);
 const optionsFor = (r) => (r.option_ids ?? []).map((l) => ({ ...l, is_present: present(l, r) }));
 const percent = (r) => {
@@ -25,10 +25,13 @@ function quotation(db, id) {
   return r;
 }
 
-// Confirm also drafts the inter-company purchase; a misconfigured rule must not block the sale itself.
+// Confirm also drafts the inter-company purchase; a misconfigured rule must not block the sale itself,
+// but it is reported on the order instead of being silently dropped.
 const orderButtons = order.form.buttons.map((b) => b.label === 'Confirm' ? { ...b, run: (db, r) => {
   const res = b.run(db, r);
-  try { return { ...res, db: interCompanyRules(res.db, r.id) }; } catch { return res; }
+  try { return { ...res, db: interCompanyRules(res.db, r.id) }; } catch (e) {
+    return { ...res, db: postNote(res.db, 'sale.order', r.id, `Inter-company purchase not created: ${e.message}`) };
+  }
 } } : b);
 const confirm = (db, id) => orderButtons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', id)).db;
 const lineFields = {
@@ -108,14 +111,14 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   if (journal != null && (!journalId || !['bank', 'cash'].includes(read(db, 'account.journal', journalId)?.type))) throw new Error('Select a bank or cash journal');
   const via = paymentJournal(db, journalId);
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
-  const booked = postEntry(db, { journal: via.code, date, ref: `Prepayment ${r.name}`, lines: [
+  const booked = postEntry(db, { journal: via.code, journal_id: journalId ?? null, date, ref: `Prepayment ${r.name}`, company: r.company_id ?? 1, lines: [
     { account: via.account, debit: round(value), partner_id: r.partner_id },
     { account: '121000', credit: round(value), partner_id: r.partner_id },
   ] });
   const payment = create(booked.db, 'account.payment', {
     name, state: 'posted', partner_type: 'customer', payment_type: 'inbound', partner_id: r.partner_id,
     sale_id: orderId, amount: round(value), unapplied: round(value), date, journal_id: journalId ?? null,
-    memo: `Prepayment ${r.name}`, move_id: booked.id,
+    memo: `Prepayment ${r.name}`, move_id: booked.id, company_id: r.company_id ?? 1,
   });
   return confirm(postNote(payment.db, 'sale.order', orderId, `Prepayment ${name}: ${round(value)}`), orderId);
 }
@@ -171,31 +174,47 @@ export const quotePlusModels = {
       is_expired: { type: 'boolean', label: 'Expired', compute: (r) => expired(r, r.expiry_checked_date > today() ? r.expiry_checked_date : today()) },
     },
     defaults: (id) => ({ ...order.defaults(id), option_ids: [], require_signature: false, require_payment: false, prepayment_percent: 0 }),
-    guard: (db, before, r) => order.guard?.(db, before, r) ?? (!Number.isFinite(Number(r.prepayment_percent ?? 0)) || Number(r.prepayment_percent ?? 0) < 0 || Number(r.prepayment_percent ?? 0) > 100 ? 'Prepayment percentage must be between 0 and 100' : null),
+    guard: (db, before, r, ctx) => order.guard?.(db, before, r, ctx) ?? (!Number.isFinite(Number(r.prepayment_percent ?? 0)) || Number(r.prepayment_percent ?? 0) < 0 || Number(r.prepayment_percent ?? 0) > 100 ? 'Prepayment percentage must be between 0 and 100' : null),
     onchange: (r, key, db) => ({ ...order.onchange?.(r, key, db), ...(['order_line', 'option_ids'].includes(key) ? { option_ids: optionsFor(r) } : {}) }),
     form: {
       ...order.form,
       groups: [...order.form.groups, ['sale_order_template_id', 'is_expired', 'require_signature', 'require_payment', 'prepayment_percent']],
       tabs: [...order.form.tabs, { label: 'Optional Products', fields: ['option_ids'] }, { label: 'Signature', fields: ['signed_by', 'signed_on', 'signature'] }],
       buttons: [...orderButtons,
-        { label: 'Apply Template', when: editable, run: (db, r) => {
-          const id = r.sale_order_template_id ?? prompt('Quotation template id');
-          return id == null || id === '' ? { db } : { db: applyTemplate(db, r.id, Number(id)) };
-        } },
-        { label: 'Add Option', when: editable, run: (db, r) => {
-          const index = prompt('Optional product index (starting at 0)');
-          return index == null || index === '' ? { db } : { db: addOption(db, r.id, Number(index)) };
-        } },
-        { label: 'Sign', when: editable, run: (db, r) => {
-          const name = prompt('Signer name');
-          if (name == null) return { db };
-          const signature = r.signature || prompt('Signature');
-          return signature == null ? { db } : { db: signQuote(db, r.id, { name, signature }) };
-        } },
-        { label: 'Register Prepayment', when: (r) => editable(r) && r.require_payment, run: (db, r) => {
-          const amount = prompt('Prepayment amount', String(prepaymentAmount(r)));
-          return amount == null || amount === '' ? { db } : { db: payQuote(db, r.id, Number(amount)) };
-        } },
+        // Inputs come from in-app dialogs (wizard) instead of prompt(); run() receives the entered values.
+        { label: 'Apply Template', when: editable,
+          wizard: (db, r) => (r.sale_order_template_id ? null : { title: 'Apply Template', fields: [
+            { name: 'template_id', type: 'many2one', relation: 'sale.order.template', label: 'Quotation Template', required: true, domain: (x) => x.active !== false },
+          ] }),
+          run: (db, r, v = {}) => {
+            const id = r.sale_order_template_id ?? v.template_id;
+            if (!id) throw new Error('Choose a quotation template');
+            return { db: applyTemplate(db, r.id, Number(id)) };
+          } },
+        { label: 'Add Option', when: editable,
+          wizard: (db, r) => ({ title: 'Add Option', fields: [
+            { name: 'index', type: 'selection', label: 'Optional Product', required: true,
+              options: (r.option_ids ?? []).map((o, i) => [String(i), read(db, 'product', o.product_id)?.name ?? `#${i + 1}`]) },
+          ] }),
+          run: (db, r, v = {}) => {
+            if (v.index == null || v.index === '') throw new Error('Choose an optional product');
+            return { db: addOption(db, r.id, Number(v.index)) };
+          } },
+        { label: 'Sign', when: editable,
+          wizard: (db, r) => ({ title: 'Sign', fields: [
+            { name: 'name', type: 'char', label: 'Signer Name', required: true },
+            ...(r.signature ? [] : [{ name: 'signature', type: 'char', label: 'Signature', required: true }]),
+          ] }),
+          run: (db, r, v = {}) => ({ db: signQuote(db, r.id, { name: v.name, signature: r.signature || v.signature }) }) },
+        { label: 'Register Prepayment', server: '/api/op/sale.prepay', prompt: 'Prepayment amount', promptDefault: (r) => String(prepaymentAmount(r)), when: (r) => editable(r) && r.require_payment,
+          wizard: (db, r) => ({ title: 'Register Prepayment', fields: [
+            { name: 'amount', type: 'char', label: 'Amount', required: true, default: String(prepaymentAmount(r)) },
+          ] }),
+          run: (db, r, v = {}) => {
+            const amount = promptedAmount(v.amount);
+            if (amount == null) throw new Error('Enter the prepayment amount');
+            return { db: payQuote(db, r.id, amount) };
+          } },
       ],
     },
   },

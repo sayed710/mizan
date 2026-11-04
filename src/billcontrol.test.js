@@ -6,6 +6,9 @@ import { models } from './models/index.js';
 import { billableLines, billControlModels, matchBill, checkBillMatch, priceDifferenceLines } from './models/billcontrol.js';
 import { accountId, invoiceLines, isBalanced } from './models/ledger.js';
 
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
+
 const run = (db, model, id, label) => (billControlModels[model] ?? models[model]).form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 const line = (product_id, qty = 10, price_unit = 20) => ({ product_id, qty, price_unit, tax: 0 });
 const order = (lines = [line(1)]) => create(seed(), 'purchase.order', { partner_id: 2, order_line: lines });
@@ -15,6 +18,14 @@ const receipt = (db, po, qty) => {
   const next = qty == null ? db : write(db, 'stock.picking', picking.id, { move_ids: picking.move_ids.map((l) => ({ ...l, quantity: qty })) });
   return run(next, 'stock.picking', picking.id, 'Validate').db;
 };
+
+test('confirmed service orders with a stale receipt policy still offer Create Bill', () => {
+  const service = create(seed(), 'product', { name: 'Consulting', type: 'service', purchase_method: 'receive' });
+  const po = create(service.db, 'purchase.order', { partner_id: 2, state: 'purchase', order_line: [{ product_id: service.id, qty: 1, price_unit: 100, purchase_method: 'receive', qty_delivered: 0 }] });
+  const stored = read(po.db, 'purchase.order', po.id);
+  assert.equal(stored.invoice_status, 'to_invoice');
+  assert.equal(billControlModels['purchase.order'].form.buttons.find((b) => b.label === 'Create Bill').when(stored, po.db), true);
+});
 
 test('bill control: seed loads and overrides retain valuation and purchase agreement definitions', () => {
   const db = seed();
@@ -76,26 +87,40 @@ test('ordered policy bills before receipt and cancelled draft bills release quan
   assert.equal(billableLines(cancelled, out.id)[0].toBill, 10);
 });
 
+test('editing a draft vendor bill releases the uninvoiced quantity on its purchase order', () => {
+  const out = order();
+  const configured = write(out.db, 'product', 1, { purchase_method: 'purchase' });
+  const confirmed = run(configured, 'purchase.order', out.id, 'Confirm Order').db;
+  const billed = run(confirmed, 'purchase.order', out.id, 'Create Bill').db;
+  const move = search(billed, 'account.move').find((m) => m.purchase_id === out.id);
+  const edited = write(billed, 'account.move', move.id, { invoice_line_ids: move.invoice_line_ids.map((l) => ({ ...l, qty: 6 })) });
+  assert.equal(read(edited, 'purchase.order', out.id).order_line[0].qty_invoiced, 6);
+  assert.equal(billableLines(edited, out.id)[0].toBill, 4);
+  const posted = run(edited, 'account.move', move.id, 'Confirm').db;
+  const remainder = run(posted, 'purchase.order', out.id, 'Create Bill').db;
+  assert.deepEqual(search(remainder, 'account.move').filter((m) => m.purchase_id === out.id).map((m) => m.invoice_line_ids[0].qty), [6, 4]);
+});
+
 test('three-way match reports exact, excess quantity and price mismatch, including origin links', () => {
   const out = order([{ ...line(1), qty_delivered: 5 }]);
   const exact = bill(out.db, out.id, [line(1, 3)]);
   assert.deepEqual(matchBill(exact.db, exact.id), [{ product_id: 1, billedQty: 3, receivedQty: 5, orderedQty: 10, priceDifference: 0, status: 'ok' }]);
   const excess = bill(out.db, out.id, [line(1, 6)]);
   assert.equal(matchBill(excess.db, excess.id)[0].status, 'qty_exceeds_received');
-  const price = create(out.db, 'account.move', { move_type: 'in_invoice', origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
+  const price = create(out.db, 'account.move', { move_type: 'in_invoice', invoice_origin: read(out.db, 'purchase.order', out.id).name, invoice_line_ids: [line(1, 3, 22)] });
   assert.equal(matchBill(price.db, price.id)[0].status, 'price_differs');
   assert.equal(checkBillMatch(price.db, read(price.db, 'account.move', price.id))[0].priceDifference, 6);
   assert.throws(() => matchBill(out.db, -1), /not found/);
 });
 
-test('matching guard rejects cumulative excess across duplicate lines and posted bills; force post overrides', () => {
+test('matching reports cumulative excess across duplicate lines and posted bills without blocking', () => {
   const out = order([{ ...line(1), qty_delivered: 5 }]);
   const first = bill(out.db, out.id, [line(1, 3)]);
-  const posted = write(first.db, 'account.move', first.id, { state: 'posted' });
+  const posted = force(first.db, 'account.move', first.id, { state: 'posted' });
   const second = bill(posted, out.id, [line(1, 1), line(1, 2)]);
   const record = read(second.db, 'account.move', second.id);
   assert.equal(matchBill(second.db, second.id)[1].status, 'qty_exceeds_received');
-  assert.throws(() => checkBillMatch(second.db, record), /exceeds received/);
+  assert.doesNotThrow(() => checkBillMatch(second.db, record));
   assert.doesNotThrow(() => checkBillMatch(second.db, { ...record, force_post: true }));
   const ordered = write(second.db, 'product', 1, { purchase_method: 'purchase' });
   assert.doesNotThrow(() => checkBillMatch(ordered, record));
@@ -130,7 +155,7 @@ test('price adjustments consume receipt values once across partial bills and ign
   const received = receipt(run(configured, 'purchase.order', out.id, 'Confirm Order').db, out.id);
   const first = bill(received, out.id, [line(1, 2, 22)]);
   const firstRecord = read(first.db, 'account.move', first.id);
-  const posted = write(first.db, 'account.move', first.id, { state: 'posted' });
+  const posted = force(first.db, 'account.move', first.id, { state: 'posted' });
   const second = bill(posted, out.id, [line(1, 2, 22)]);
   const secondRecord = read(second.db, 'account.move', second.id);
   const balance = (db, record) => [...invoiceLines(db, record), ...priceDifferenceLines(db, record)].filter((l) => l.account_id === accountId(db, '110200')).reduce((s, l) => s + l.debit - l.credit, 0);

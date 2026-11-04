@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { read, search, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 
@@ -31,7 +31,11 @@ test('subscription invoicing creates an invoice and advances the next date', () 
   assert.equal(read(db, 'sale.subscription', 2).recurring_monthly, 82.5);
 });
 
-test('time off duration counts calendar days inclusively', () => {
-  const leave = read(seed(), 'hr.leave', 1);
-  assert.equal(leave.number_of_days, 4);
+test('time off duration counts working days inclusively', () => {
+  const employee = create(seed(), 'hr.employee', { name: 'Time off test employee', resource_calendar_id: 1 });
+  const db = employee.db;
+  const weekdays = create(db, 'hr.leave', { name: 'Weekdays', employee_id: employee.id, leave_type: 'sick', date_from: '2026-11-02', date_to: '2026-11-05' });
+  assert.equal(read(weekdays.db, 'hr.leave', weekdays.id).number_of_days, 4);
+  const weekend = create(db, 'hr.leave', { name: 'Weekend', employee_id: employee.id, leave_type: 'sick', date_from: '2026-11-05', date_to: '2026-11-09' });
+  assert.equal(read(weekend.db, 'hr.leave', weekend.id).number_of_days, 3);
 });

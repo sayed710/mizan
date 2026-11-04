@@ -2,6 +2,7 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { addDays, today } from './common.js';
 import { extraModels, shiftConflict } from './extra.js';
+import { calendarFor, isWorkingDay } from './calendar.js';
 
 const base = extraModels['planning.slot'];
 const day = (value) => value?.slice(0, 10);
@@ -12,7 +13,6 @@ const dates = (from, to) => {
   for (let d = from; d <= to; d = addDays(d, 1)) result.push(d);
   return result;
 };
-const workingDay = (date) => ![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay());
 
 function period(from, to) {
   for (const value of [from, to]) {
@@ -99,6 +99,12 @@ export function autoPlan(db, { from, to }) {
   return next;
 }
 
+/** Monday to Sunday around a date, the period the week buttons act on. */
+const weekOf = (date) => {
+  const from = addDays(date, -((new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7));
+  return { from, to: addDays(from, 6) };
+};
+
 function publishSlots(db, slots, from, to) {
   let next = db;
   for (const slot of slots) next = write(next, 'planning.slot', slot.id, { state: 'published' });
@@ -133,11 +139,14 @@ export function acceptSwap(db, slotId, newEmployeeId) {
 /** Employee-keyed planned hours and weekday capacity, excluding approved leave days. */
 export function planningAnalysis(db, from, to) {
   period(from, to);
-  const workdays = dates(from, to).filter(workingDay);
+  const periodDates = dates(from, to);
   const leaves = search(db, 'hr.leave').filter((l) => l.state === 'validate');
   const slots = search(db, 'planning.slot').filter((s) => inPeriod(s, from, to));
   return Object.fromEntries(search(db, 'hr.employee').map((e) => {
-    const capacity = workdays.filter((d) => !leaves.some((l) => l.employee_id === e.id && l.date_from <= d && l.date_to >= d)).length * dailyHours(e);
+    const calendar = calendarFor(db, e.id);
+    const workdays = periodDates.filter((d) => isWorkingDay(calendar, d, db));
+    const hours = (Number(e.daily_hours) > 0 || Number(e.working_hours) > 0) ? dailyHours(e) : (Number(calendar?.hours_per_day) || dailyHours(e));
+    const capacity = workdays.filter((d) => !leaves.some((l) => l.employee_id === e.id && l.date_from <= d && l.date_to >= d)).length * hours;
     const planned = slots.filter((s) => s.employee_id === e.id).reduce((sum, s) => {
       const allDays = dates(s.start, s.end || s.start);
       const share = allDays.filter((d) => d >= from && d <= to).length / allDays.length;
@@ -192,6 +201,8 @@ export const planningPlusModels = {
           return { ...copied, db: write(copied.db, 'planning.slot', id, { was_copied: true, swap_requested: false }) };
         } }),
         { label: 'Publish', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: publishSlots(db, [r], r.start, r.end || r.start) }) },
+        { label: 'Auto Plan Week', when: (r) => !!r.start, run: (db, r) => ({ db: autoPlan(db, weekOf(r.start)) }) },
+        { label: 'Publish Week', when: (r) => !!r.start, run: (db, r) => { const w = weekOf(r.start); return { db: publishPeriod(db, w.from, w.to) }; } },
         { label: 'Ask to Switch', when: (r) => r.state === 'published' && !!r.employee_id && !r.swap_requested, run: (db, r) => ({ db: requestSwap(db, r.id, r.employee_id) }) },
         { label: 'Accept Switch', when: (r) => r.swap_requested, run: (db, r) => ({ db: acceptSwap(db, r.id, r.swap_employee_id) }) },
         { label: 'Repeat', when: (r) => r.repeat, run: (db, r) => ({ db: generateRecurringSlots(db, r, r.repeat_until || addDays(today(), 90)) }) },

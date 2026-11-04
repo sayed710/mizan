@@ -1,7 +1,7 @@
 import { create, read, write } from '../orm.js';
 import { amounts, today } from './common.js';
+import { round } from '../money.js';
 
-const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const numeric = (value) => Number(value) || 0;
 const linesOf = (order, lines) => lines ?? order?.order_line ?? order?.lines ?? [];
 const dateOf = (value) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? today()).slice(0, 10);
@@ -85,7 +85,7 @@ export function generateCoupons(db, programId, { count, partnerIds = [], points 
 }
 
 /** Return the active programs whose context and at least one rule match this order. */
-export function applicablePrograms(db, order, { lines, partnerId, code, date, channel = 'sale' } = {}) {
+export function applicablePrograms(db, order, { lines, code, date, channel = 'sale' } = {}) {
   const orderLines = linesOf(order, lines);
   const on = date ?? order?.date_order ?? today();
   return programsOf(db).filter((program) => {
@@ -269,9 +269,31 @@ export function confirmProgramUsage(db, programId, { cardCode, pointsSpent = 0, 
 
 /** Consume the codes applied to an order when it is confirmed (coupons used, points and gift balances spent). */
 export function consumeOrderCodes(db, order) {
-  return (order.loyalty_uses ?? []).reduce((next, use) => (use.gift
-    ? giftCardPay(next, use.cardCode, use.spent).db
-    : confirmProgramUsage(next, use.programId, { cardCode: use.cardCode, pointsSpent: use.spent, partnerId: order.partner_id })), db);
+  let next = db;
+  const uses = (order.loyalty_uses ?? []).map((use) => {
+    const card = cardsOf(next).find((c) => c.code === use.cardCode);
+    const before = numeric(read(next, 'loyalty.program', use.programId)?.usage_count);
+    next = use.gift ? giftCardPay(next, use.cardCode, use.spent).db
+      : confirmProgramUsage(next, use.programId, { cardCode: use.cardCode, pointsSpent: use.spent, partnerId: order.partner_id });
+    return { ...use, consumed_card_id: card?.id ?? null, consumed_points: card ? numeric(card.points) - numeric(read(next, 'loyalty.card', card.id).points) : 0,
+      consumed_state: card?.state ?? null, consumed_usage: numeric(read(next, 'loyalty.program', use.programId)?.usage_count) - before };
+  });
+  const hasOrder = order?.id != null && read(next, 'sale.order', order.id);
+  return (uses.length && hasOrder) ? write(next, 'sale.order', order.id, { loyalty_uses: uses }) : next;
+}
+
+/** Undo only what this confirmation consumed, preserving later top-ups and other orders' uses. */
+export function restoreOrderCodes(db, order) {
+  let next = db;
+  for (const use of order.loyalty_uses ?? []) {
+    const card = use.consumed_card_id && read(next, 'loyalty.card', use.consumed_card_id);
+    if (card) next = write(next, 'loyalty.card', card.id, { points: round(numeric(card.points) + numeric(use.consumed_points)), state: use.consumed_state });
+    const program = read(next, 'loyalty.program', use.programId);
+    if (program && use.consumed_usage) next = write(next, 'loyalty.program', program.id, { usage_count: Math.max(0, numeric(program.usage_count) - use.consumed_usage) });
+  }
+  const uses = (order.loyalty_uses ?? []).map(({ consumed_card_id, consumed_points, consumed_state, consumed_usage, ...use }) => use);
+  const hasOrder = order?.id != null && read(next, 'sale.order', order.id);
+  return (uses.length && hasOrder) ? write(next, 'sale.order', order.id, { loyalty_uses: uses }) : next;
 }
 
 /** Spend gift-card balance as currency, returning the amount actually applied. */

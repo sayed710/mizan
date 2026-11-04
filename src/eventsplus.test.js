@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, emptyDb, read, write } from './orm.js';
+import { create, emptyDb, read } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import {
-  agenda, checkIn, eventDashboard, generateBadge, invoiceRegistrations, invoiceSponsor,
+  agenda, checkIn, eventDashboard, invoiceRegistrations, invoiceSponsor,
   reserveBooth, sellBooth, trackConflicts,
 } from './models/eventsplus.js';
 
@@ -12,13 +12,19 @@ const event = (db, vals = {}) => create(db, 'event.event', {
   name: 'Community Expo', date_begin: '2027-04-01', seats_max: 100, ...vals,
 });
 
-test('event badges are deterministic and distinct for registrations in one event', () => {
-  const first = { event_id: 8, id: 1 };
-  const second = { event_id: 8, id: 2 };
-  assert.equal(generateBadge(first), generateBadge(first));
-  assert.notEqual(generateBadge(first), generateBadge(second));
-  assert.notEqual(generateBadge(first), generateBadge({ event_id: 9, id: 1 }));
-  assert.match(generateBadge(first), /^EV8-00001\d$/);
+test('ticket invoicing rejects all missing contacts before creating any invoice', () => {
+  const expo = event(seed(), { ticket_ids: [{ name: 'Paid', price: 100 }] });
+  const valid = create(expo.db, 'event.registration', { name: 'Valid attendee', event_id: expo.id, ticket: 'Paid', partner_id: 1 });
+  const missing = create(valid.db, 'event.registration', { name: 'Missing contact attendee', event_id: expo.id, ticket: 'Paid' });
+  const before = structuredClone(missing.db);
+  assert.throws(() => invoiceRegistrations(missing.db, expo.id), /Missing contact attendee.*contact|contact.*Missing contact attendee/);
+  assert.deepEqual(missing.db, before);
+});
+
+test('invoice registrations distinguishes an event with no priced attendees from already invoiced attendees', () => {
+  const expo = event(seed(), { ticket_ids: [{ name: 'Paid', price: 100 }] });
+  const button = models['event.event'].form.buttons.find((b) => b.label === 'Invoice Registrations');
+  assert.throws(() => button.run(expo.db, read(expo.db, 'event.event', expo.id)), /No.*registrations/);
 });
 
 test('badge check-in accepts one active attendee and rejects unknown, cancelled, and repeat scans', () => {

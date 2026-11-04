@@ -1,17 +1,30 @@
-import { useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActuals, followUps, taxReport, taxesByTax } from '../models/finance.js';
-import { useDb } from '../store.js';
-import { CashFlow, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
+import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax } from '../models/finance.js';
+import { budgetReport } from '../models/analyticplus.js';
+import { checkInalterability } from '../models/hash_chain.js';
+import { journalAudit } from '../models/journal_audit.js';
+import { companyViewDb, scopeAuditRows } from '../companyView.js';
+import { currentCompany } from '../models/company.js';
+import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
+import { auditSummary } from '../audit.js';
+import { valuationReport } from '../models/valuation.js';
+import { CashFlow, CustomerStatement, ExecutiveSummary, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
+import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
+import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
+import { SalesReview } from './SalesReview.jsx';
+import { JournalItems } from './JournalItems.jsx';
+import { LoansAnalysis } from './LoansAnalysis.jsx';
+import { Checks } from './Checks.jsx';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
-const PERIODS = {
+export const PERIODS = {
   month: () => {
     const d = new Date();
     return { from: today().slice(0, 7) + '-01', to: monthEnd(d.getFullYear(), d.getMonth() + 1) };
@@ -135,6 +148,23 @@ function Ledger({ db, period }) {
 
 const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
 
+export function TaxReportTable({ db, period }) {
+  return (
+    <div className="list-wrap">
+      <table className="list report">
+        <thead>
+          <tr>
+            <th />
+            <th className="num">{t('Base')}</th>
+            <th className="num">{t('Tax')}</th>
+          </tr>
+        </thead>
+        <Tax db={db} period={period} />
+      </table>
+    </div>
+  );
+}
+
 function Tax({ db, period }) {
   const r = taxReport(db, period);
   const byTax = taxesByTax(db, period);
@@ -175,18 +205,85 @@ const Aged = (kind) => function AgedBody({ db }) {
   );
 };
 
-function FollowUps({ db }) {
+export function FollowUps({ db, sourceDb, companyId = 'all' }) {
+  const settingsAllowed = (sourceDb ?? db).settings?.allowed_company_ids ?? [currentCompany(sourceDb ?? db)];
+  const allowed = companyId === 'all'
+    ? settingsAllowed
+    : settingsAllowed.filter((id) => id === Number(companyId));
+  const multiCompany = allowed.length > 1;
+
+  const allFollowUps = followUps(db);
+  const companyGroups = new Map();
+  for (const f of allFollowUps) {
+    for (const part of followUpCompanies(f)) {
+      const cId = part.company_id ?? part.invoices[0]?.company_id ?? 1;
+      if (!companyGroups.has(cId)) companyGroups.set(cId, []);
+      companyGroups.get(cId).push(part);
+    }
+  }
+
+  if (multiCompany) {
+    const sections = allowed
+      .map((cId) => ({
+        company: read(sourceDb ?? db, 'res.company', cId) ?? { id: cId, name: `Company ${cId}` },
+        items: companyGroups.get(cId) ?? [],
+      }))
+      .filter((sec) => sec.items.length > 0);
+
+    return (
+      <tbody>
+        {sections.map(({ company, items }) => (
+          <Fragment key={company.id}>
+            <tr className="rep-section">
+              <td colSpan={3}><strong>{company.name}</strong></td>
+            </tr>
+            {items.map((f) => {
+              const email = read(db, 'res.partner', f.partner_id)?.email;
+              const body = followUpText(db, f);
+              return (
+                <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
+                  <td>
+                    <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
+                    <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
+                    {email && (
+                      <>
+                        <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                          onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Open Reminder in Mail App')}</a>{' '}
+                        <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Confirm Sent')}</button>
+                      </>
+                    )}
+                  </td>
+                  <td className="num">{f.oldest}</td>
+                  <td className="num">{money(f.total)}</td>
+                </tr>
+              );
+            })}
+          </Fragment>
+        ))}
+      </tbody>
+    );
+  }
+
+  const singleCompanyId = allowed[0] ?? currentCompany(db);
+  const singleItems = companyGroups.get(singleCompanyId) ?? [];
+
   return (
     <tbody>
-      {followUps(db).map((f) => {
+      {singleItems.map((f) => {
         const email = read(db, 'res.partner', f.partner_id)?.email;
-        const body = f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${Number(m.amount_residual).toFixed(2)}`).join('\n');
+        const body = followUpText(db, f);
         return (
           <tr key={f.partner_id} className="rep-detail">
             <td>
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              {email && <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}>{t('Send Reminder')}</a>}
+              {email && (
+                <>
+                  <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
+                    onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Open Reminder in Mail App')}</a>{' '}
+                  <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Confirm Sent')}</button>
+                </>
+              )}
             </td>
             <td className="num">{f.oldest}</td>
             <td className="num">{money(f.total)}</td>
@@ -197,24 +294,27 @@ function FollowUps({ db }) {
   );
 }
 
-function Budget({ db }) {
+function Budget({ db, period }) {
   return (
     <tbody>
-      {search(db, 'account.budget').filter((b) => b.state !== 'draft').flatMap((b) => {
-        const actual = analyticActuals(db, { from: b.date_from, to: b.date_to });
+      {search(db, 'account.budget').filter((b) => b.state !== 'draft' && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
         return [
-          <tr key={b.id} className="rep-section"><td colSpan={4}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
-          ...(b.lines ?? []).map((l, i) => {
-            const a = actual.get(l.analytic_account_id) ?? 0;
-            return (
-              <tr key={`${b.id}-${i}`} className="rep-detail">
+          <tr key={b.id} className="rep-section"><td colSpan={5}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
+          ...(b.lines?.length ? budgetReport(db, b.id, today(), { period }) : []).map((l, i) => (
+            <Fragment key={`${b.id}-${i}`}>
+              <tr className="rep-detail">
                 <td>{read(db, 'account.analytic.account', l.analytic_account_id)?.name ?? '—'}</td>
                 <td className="num">{money(l.planned)}</td>
-                <td className="num">{money(a)}</td>
-                <td className="num">{l.planned ? `${Math.round((a / l.planned) * 100)}%` : ''}</td>
+                <td className="num">{money(l.practical)}</td>
+                <td className="num">{money(l.variance)}</td>
+                <td className="num">{l.planned ? `${l.achievement}%` : ''}</td>
               </tr>
-            );
-          }),
+              {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
+                <td><a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a>{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
+                <td /><td className="num">{money(item.amount)}</td><td /><td />
+              </tr>)}
+            </Fragment>
+          )),
         ];
       })}
     </tbody>
@@ -223,19 +323,50 @@ function Budget({ db }) {
 
 function Analytic({ db, period }) {
   const actual = analyticActuals(db, period);
+  const lines = analyticActualLines(db, period);
   return (
     <tbody>
-      {search(db, 'account.analytic.account').map((a) => <Total key={a.id} label={a.name} value={actual.get(a.id) ?? 0} />)}
+      {search(db, 'account.analytic.account').map((a) => <Fragment key={a.id}>
+        <Total label={a.name} value={actual.get(a.id) ?? 0} />
+        {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
+          <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
+          <td className="num">{money(line.amount)}</td>
+        </tr>)}
+      </Fragment>)}
     </tbody>
   );
 }
 
 const AUDIT_ROWS = 500;
 
-function AuditTrail({ db, period }) {
+const inPeriod = (date, period) => (!period.from || date.slice(0, 10) >= period.from) && date.slice(0, 10) <= period.to;
+
+function AuditTrail({ db, sourceDb, period }) {
+  // With a server, the trail is the server's change log (its time and user), not messages the browser wrote.
+  const [serverLog, setServerLog] = useState(undefined);
+  const selectedCompanies = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)]);
+  useEffect(() => {
+    let active = true;
+    if (isServer()) {
+      setServerLog(undefined);
+      listAudit('account.move').then((rows) => { if (active) setServerLog(rows); });
+    }
+    return () => { active = false; };
+  }, [selectedCompanies]);
+  if (isServer()) {
+    if (serverLog === undefined) return <tbody><tr><td className="muted">{t('Loading…')}</td></tr></tbody>;
+    if (serverLog === null) return <tbody><tr><td className="muted">{t('Only administrators can read the audit trail')}</td></tr></tbody>;
+    const rows = scopeAuditRows(sourceDb, serverLog).filter((e) => inPeriod(e.at, period)).slice(0, AUDIT_ROWS)
+      .map((e) => ({ id: e.id, res_id: e.res_id, body: auditSummary(e), author: e.actor, date: e.at }));
+    return <AuditRows db={db} rows={rows} />;
+  }
   const rows = db.messages
-    .filter((m) => m.model === 'account.move' && (!period.from || m.date.slice(0, 10) >= period.from) && m.date.slice(0, 10) <= period.to)
+    .filter((m) => m.model === 'account.move' && inPeriod(m.date, period))
     .sort((a, b) => b.date.localeCompare(a.date)).slice(0, AUDIT_ROWS);
+  return <AuditRows db={db} rows={rows} />;
+}
+
+function AuditRows({ db, rows }) {
   return (
     <tbody>
       {rows.map((m) => (
@@ -249,10 +380,11 @@ function AuditTrail({ db, period }) {
   );
 }
 
-/** Current stock value per product (on hand × cost), largest first. */
+/** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
 function Valuation({ db }) {
-  const rows = search(db, 'product').filter((p) => p.type === 'goods' && Number(p.qty_available))
-    .map((p) => ({ p, value: (Number(p.qty_available) || 0) * (Number(p.cost) || 0) })).sort((a, b) => b.value - a.value);
+  const report = valuationReport(db);
+  const rows = Object.entries(report).filter(([, v]) => v.qty)
+    .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => b.value - a.value);
   return (
     <tbody>
       {rows.map(({ p, value }) => (
@@ -295,9 +427,53 @@ function Depreciation({ db, period }) {
   );
 }
 
+function JournalAudit({ db, period, companyId }) {
+  const groups = journalAudit(db, { ...period, companyId: companyId === 'all' ? null : Number(companyId) });
+  if (!groups.length) return <tbody><tr><td colSpan={7} className="muted">{t('No posted entries for this period.')}</td></tr></tbody>;
+  return <tbody>{groups.map(({ journal, items, debit, credit, taxes }) => <Fragment key={journal.id}>
+    <tr className="rep-section"><td colSpan={5}><strong>{journal.name} ({journal.code})</strong></td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
+    {items.map(({ move, line, date }, i) => {
+      const account = read(db, 'account.account', line.account_id);
+      return <tr key={`${move.id}-${i}`} className="rep-detail"><td>{date}</td><td><a href={`#/open/account.move/${move.id}`}>{move.name}</a></td><td>{read(db, 'res.partner', line.partner_id ?? move.partner_id)?.name ?? ''}</td><td>{account ? `${account.code} ${account.name}` : ''}</td><td>{line.name}</td><td className="num">{line.debit ? money(line.debit) : ''}</td><td className="num">{line.credit ? money(line.credit) : ''}</td></tr>;
+    })}
+    <tr className="rep-total strong"><td colSpan={5}>{t('Total')} - {journal.name}</td><td className="num">{money(debit)}</td><td className="num">{money(credit)}</td></tr>
+    {taxes.length > 0 && <><tr className="rep-section"><td colSpan={3}>{t('Tax Summary')} - {journal.name}</td><td>{t('Tax')}</td><td>{t('Base')}</td><td colSpan={2}>{t('Tax Amount')}</td></tr>{taxes.map((tax) => <tr key={tax.name}><td colSpan={3} /><td>{tax.name}</td><td className="num">{money(tax.base)}</td><td colSpan={2} className="num">{money(tax.tax)}</td></tr>)}</>}
+  </Fragment>)}</tbody>;
+}
+
+function InalterabilityCheck({ db, companyId }) {
+  const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const selected = companyId === 'all' ? allowed : allowed.filter((id) => id === Number(companyId));
+  const results = selected.flatMap((id) => checkInalterability(db, { companyId: id }));
+
+  if (!results.length) {
+    return <tbody><tr><td colSpan={4} className="muted">{t('No restricted journals configured.')}</td></tr></tbody>;
+  }
+
+  return (
+    <tbody>
+      {results.map((r) => (
+        <tr key={`${r.journal_id}-${r.company_id}`} className={`rep-detail ${r.status === 'corrupted' ? 'rep-corrupted' : ''}`}>
+          <td><strong>{r.journal_name} ({r.journal_code})</strong>{r.company_id && companiesOf(db).length > 1 ? ` \u2014 ${read(db, 'res.company', r.company_id)?.name ?? r.company_id}` : ''}</td>
+          <td>{r.first_move ?? '—'}</td>
+          <td>{r.last_move ?? '—'}</td>
+          <td>
+            {r.status === 'ok' ? (
+              <span className="badge badge-success" style={{ color: '#16a34a', fontWeight: 600 }}>{t(r.message)}</span>
+            ) : (
+              <span className="badge badge-danger" style={{ color: '#dc2626', fontWeight: 600 }}>{r.status === 'unanchored' ? t('Secure chain has no independent head') : t('Corrupted at entry {name}', { name: r.corrupted_move?.name ?? r.last_move ?? '' })}</span>
+            )}
+          </td>
+        </tr>
+      ))}
+    </tbody>
+  );
+}
+
 const REPORTS = {
   trial: { title: 'Trial Balance', Body: TrialBalance, cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   partnerReceivable: { title: 'Partner Ledger', Body: PartnerLedger('receivable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
+  customerStatement: { title: 'Customer Statement', Body: CustomerStatement, cols: ['Debit', 'Credit', 'Balance'] },
   partnerPayable: { title: 'Partner Ledger (Payable)', Body: PartnerLedger('payable'), cols: ['Initial Balance', 'Debit', 'Credit', 'End Balance'] },
   cashflow: { title: 'Cash Flow Statement', Body: CashFlow, cols: ['Balance'] },
   executive: { title: 'Executive Summary', Body: ExecutiveSummary, cols: ['Value'] },
@@ -308,20 +484,38 @@ const REPORTS = {
   agedReceivable: { title: 'Aged Receivable', Body: Aged('receivable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   agedPayable: { title: 'Aged Payable', Body: Aged('payable'), cols: ['Not due', '1-30', '31-60', '61-90', 'Older', 'Total'] },
   followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
-  budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Achievement'] },
+  budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
   pnl: { title: 'Profit and Loss', Body: Pnl, cols: ['Balance'] },
   balance: { title: 'Balance Sheet', Body: Balance, cols: ['Balance'] },
   ledger: { title: 'General Ledger', Body: Ledger, cols: ['Debit', 'Credit', 'Balance'] },
+  journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
+  inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
 };
 
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf }) {
-  const db = useDb();
-  const [periodKey, setPeriodKey] = useState('year');
+  const component = leaf.report === 'journalItems' ? JournalItems
+    : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
+    : leaf.report === 'checks' ? Checks
+    : leaf.report === 'loansAnalysis' ? LoansAnalysis
+      : ['invoicesToBeIssued', 'invoicedNotDelivered'].includes(leaf.report) ? SalesReview : ReportPage;
+  return reportPage(leaf, component);
+}
+
+function ReportPage({ leaf }) {
+  const sourceDb = useDb();
+  const allowed = sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)];
+  const allowedSet = new Set(allowed);
+  const db = companyViewDb(sourceDb);
+  const companies = companiesOf(sourceDb).filter((company) => allowedSet.has(company.id));
+  const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
-  const { title, Body, cols } = REPORTS[leaf.report];
-  const period = PERIODS[periodKey]();
+  const [companyId, setCompanyId] = useState('all');
+  const selectedCompany = companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all';
+  const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
+  const { title, Body, cols, firstCol } = REPORTS[leaf.report];
+  const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance'].includes(leaf.report) && periodKey !== 'all';
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const data = periods ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods)) : null;
@@ -329,15 +523,26 @@ export function Reports({ leaf }) {
     <main className="action report-page">
       <div className="control-panel">
         <h1 className="cp-title">{t(title)}</h1>
-        <label className="inline-select">
+        {leaf.report !== 'inalterability' && <label className="inline-select">
           {t('Period')}
           <select value={periodKey} onChange={(e) => setPeriodKey(e.target.value)}>
             <option value="month">{t('This Month')}</option>
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
+            {['journalAudit', 'customerStatement'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
-        </label>
+        </label>}
+        {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
+        {['journalAudit', 'inalterability'].includes(leaf.report) && companiesOf(sourceDb).length > 1 && (
+          <label className="inline-select">
+            {t('Company')}
+            <select value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
+              <option value="all">{t('All Companies')}</option>
+              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </label>
+        )}
         {comparable && <label className="inline-select">
           {t('Comparison')}
           <select value={comparison} onChange={(e) => setComparison(e.target.value)}>
@@ -347,14 +552,14 @@ export function Reports({ leaf }) {
             <option value="last3">{t('Last 3 Periods')}</option>
           </select>
         </label>}
-        <span className="muted">{period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`}</span>
+        <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
       </div>
       <div className="list-wrap">
         <table className="list report">
-          <thead><tr><th />{(data ? [...data.headers, 'Variance', '%'] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} period={period} />}
+          <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, 'Variance', '%'] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
         </table>
       </div>
     </main>

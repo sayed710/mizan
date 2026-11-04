@@ -45,5 +45,15 @@ test('an explicit zero consumption is respected when producing', () => {
   const zero = write(confirmed, 'mrp.production', id, { move_raw: mo.move_raw.map((m) => ({ ...m, consumed: 0 })) });
   const comp = mo.move_raw[0].product_id;
   const before = read(zero, 'product', comp).qty_available;
-  assert.equal(read(btn(zero, 'Produce'), 'product', comp).qty_available, before);
+  // Consuming less than the BoM needs the user's confirmation.
+  const confirm = globalThis.confirm;
+  try {
+    globalThis.confirm = () => false;
+    assert.throws(() => btn(zero, 'Produce'), /Less than the bill of materials/);
+    globalThis.confirm = () => true;
+    assert.equal(read(btn(zero, 'Produce'), 'product', comp).qty_available, before);
+  } finally {
+    if (confirm === undefined) delete globalThis.confirm;
+    else globalThis.confirm = confirm;
+  }
 });

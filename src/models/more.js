@@ -1,11 +1,14 @@
 // Manufacturing, Expenses, Time Off, Recruitment, Timesheets, Events, Subscriptions, To-do, Point of Sale.
-import { create, read, write } from '../orm.js';
+import { create, read, search, write } from '../orm.js';
 import { addDays, amountFields, amounts, pad, productLines, today } from './common.js';
 import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
 import { postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
+import { freeQty, reservePicking } from './picking.js';
+import { round as round2 } from '../money.js';
+import { productProperty } from './productconfig-helpers.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -48,32 +51,56 @@ export function explode(db, mo) {
   };
 }
 
-const availability = (db, moves) => (moves.every((m) => {
+// Components count as available only when free: stock reserved by deliveries or other MOs is left alone.
+const availability = (db, moves, moId) => (moves.every((m) => {
   const p = read(db, 'product', m.product_id);
-  return p?.type !== 'goods' || (Number(p.qty_available) || 0) >= m.to_consume;
+  return p?.type !== 'goods' || freeQty(db, p.id, null, moId) >= m.to_consume;
 }) ? 'available' : 'waiting');
 
 /** Confirm: lay out components and work orders and report whether components are in stock. */
 export function confirmMo(db, mo) {
+  if (read(db, 'mrp.production', mo.id)?.state !== 'draft') throw new Error('Only draft manufacturing orders can be confirmed');
   const { move_raw, workorders } = explode(db, mo);
-  return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw) });
+  return write(db, 'mrp.production', mo.id, { state: 'confirmed', move_raw, workorders, components_availability: availability(db, move_raw, mo.id) });
 }
 
 /**
  * Produce: consume what was recorded (to-consume by default, scaled to the quantity producing), stock the finished
  * product (with its lot), close work orders. Producing less than planned leaves a backorder MO for the rest.
  */
-export function produce(db, mo) {
-  if (['done', 'cancel'].includes(mo.state)) throw new Error('This manufacturing order is already processed');
+/** Quantities an MO will consume: what was recorded, else the BoM share for the quantity being produced. */
+function consumption(db, mo) {
   const moves = mo.move_raw?.length ? mo.move_raw : explode(db, mo).move_raw;
   const planned = Number(mo.product_qty) || 0;
   const producing = Number(mo.qty_producing) > 0 ? Math.min(Number(mo.qty_producing), planned) : planned;
   const ratio = planned ? producing / planned : 1;
   const recorded = (m) => m.consumed !== null && m.consumed !== undefined && m.consumed !== '';
-  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : round2((Number(m.to_consume) || 0) * ratio) }));
-  const missing = used.find((c) => {
+  const used = moves.map((m) => ({ product_id: m.product_id, qty: recorded(m) ? Number(m.consumed) || 0 : round2((Number(m.to_consume) || 0) * ratio), expected: round2((Number(m.to_consume) || 0) * ratio) }));
+  return { moves, planned, producing, ratio, used };
+}
+
+/** Components consumed below the bill of materials (goods only), e.g. a 0 typed on a line. */
+export const underConsumed = (db, mo) => consumption(db, mo).used
+  .filter((c) => read(db, 'product', c.product_id)?.type === 'goods' && c.qty < c.expected - 1e-6);
+
+/** Produce button: consuming less than the BoM needs an explicit confirmation. */
+const produceButton = (db, mo) => {
+  const short = underConsumed(db, mo);
+  const allow = short.length > 0 && typeof confirm === 'function'
+    && confirm(`Less than the bill of materials is consumed for ${short.map((c) => read(db, 'product', c.product_id)?.name).join(', ')}. Produce anyway?`);
+  return produce(db, mo, { allowUnderConsumption: allow });
+};
+
+export function produce(db, mo, { allowUnderConsumption = false } = {}) {
+  if (['done', 'cancel'].includes(mo.state)) throw new Error('This manufacturing order is already processed');
+  const { moves, planned, producing, ratio, used } = consumption(db, mo);
+  const short = underConsumed(db, mo);
+  if (short.length && !allowUnderConsumption) throw new Error(`Less than the bill of materials is consumed for ${short.map((c) => read(db, 'product', c.product_id)?.name).join(', ')}; confirm to produce anyway`);
+  const needed = new Map();
+  for (const c of used) needed.set(c.product_id, (needed.get(c.product_id) ?? 0) + c.qty);
+  const missing = [...needed].map(([product_id, qty]) => ({ product_id, qty })).find((c) => {
     const p = read(db, 'product', c.product_id);
-    return p?.type === 'goods' && p.qty_available < c.qty;
+    return p?.type === 'goods' && freeQty(db, p.id, null, mo.id) < c.qty;
   });
   if (missing) throw new Error(`Not enough ${read(db, 'product', missing.product_id).name} in stock`);
   const product = read(db, 'product', mo.product_id);
@@ -94,26 +121,26 @@ export function produce(db, mo) {
       value += out.value;
     }
   }
-  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000', actualCost: true });
+  let stocked = moveValued(applyLots(consumed, { move_ids: finished }, 1), finished.map((l) => ({ ...l, unit_cost: producing ? value / producing : 0 })), 1, { reference: mo.name, counterpart: '600000' });
   if (mo.operation_cost_move_id && product?.valuation !== 'manual_periodic') {
     const operation = read(stocked, 'account.move', mo.operation_cost_move_id);
     const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
     if (cost) stocked = capitalizeStock(stocked, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: operation.id });
   }
-  const closed = write(stocked, 'mrp.production', mo.id, {
+  let closed = write(stocked, 'mrp.production', mo.id, {
     state: 'done', date_finished: today(), product_qty: producing, qty_producing: producing,
     move_raw: moves.map((m, i) => ({ ...m, to_consume: round2((Number(m.to_consume) || 0) * ratio), consumed: used[i].qty })),
     workorders: (mo.workorders ?? []).map((w) => ({ ...w, state: 'done', duration: Number(w.duration) || Number(w.duration_expected) || 0 })),
   });
+  if (mo.sale_id) for (const waiting of search(closed, 'stock.picking').filter((p) => p.sale_id === mo.sale_id && p.state === 'waiting' && !p.move_orig_picking_id)) closed = reservePicking(closed, waiting);
   if (producing >= planned) return { db: closed };
   const rest = create(closed, 'mrp.production', {
-    product_id: mo.product_id, bom_id: mo.bom_id, product_qty: round2(planned - producing), origin: mo.name, backorder_of: mo.id,
+    product_id: mo.product_id, bom_id: mo.bom_id, product_qty: round2(planned - producing), origin: mo.name, backorder_of: mo.id, sale_id: mo.sale_id, so_line: mo.so_line, company_id: mo.company_id,
     user_id: mo.user_id ?? null, date_deadline: mo.date_deadline ?? null, priority: mo.priority ?? 0,
   });
   return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
 }
 
-const round2 = (n) => Math.round(n * 100) / 100;
 const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
 
 /**
@@ -125,13 +152,13 @@ function postExpense(db, r) {
   if (!(total > 0)) throw new Error('The expense total must be positive');
   const tax = round2(total - total / (1 + (Number(r.tax) || 0) / 100));
   const product = read(db, 'product', r.product_id);
-  const accountCode = (product?.property_account_expense_id && read(db, 'account.account', product.property_account_expense_id)?.code) || CATEGORY_ACCOUNT[r.category] || '600000';
+  const accountCode = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'))?.code || CATEGORY_ACCOUNT[r.category] || '600000';
   const own = r.payment_mode !== 'company_account';
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,
     lines: [
       { account: accountCode, debit: round2(total - tax) },
-      ...(tax ? [{ account: '131000', debit: tax }] : []),
+      ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(r.tax) || 0}%`, tax_base: round2(total - tax) }] : []),
       { account: own ? '230100' : '101401', credit: total },
     ],
   });
@@ -179,12 +206,6 @@ function invoiceSubscription(db, sub) {
   const nextDate = nextPeriod(sub.next_invoice_date ?? today(), sub.plan);
   const ended = sub.end_date && nextDate > sub.end_date;
   return { db: write(next, 'sale.subscription', sub.id, { next_invoice_date: nextDate, ...(ended ? { stage: 'closed', close_reason: null } : {}) }), go: `#/accounting/invoices/${id}` };
-}
-
-/** Recurring invoicing: one invoice for every running subscription due on or before `at`. */
-export function runRecurring(db, at = today()) {
-  return (db.records['sale.subscription'] ?? []).filter((s) => s.stage === 'progress' && s.next_invoice_date && s.next_invoice_date <= at)
-    .reduce((acc, s) => invoiceSubscription(acc, s).db, db);
 }
 
 function closeSubscription(db, r) {
@@ -242,6 +263,8 @@ export const moreModels = {
       date_finished: { type: 'date', label: 'Finished on', readonly: true },
       user_id: employee('Responsible'),
       origin: { type: 'char', label: 'Source', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
+      so_line: { type: 'integer', label: 'Order Line', readonly: true, hidden: true },
       priority: { type: 'priority', label: 'Priority' },
       date_start: { type: 'date', label: 'Scheduled Date' },
       lot_name: { type: 'char', label: 'Lot/Serial Number' },
@@ -279,9 +302,9 @@ export const moreModels = {
       lockedWhen: (r) => ['done', 'cancel'].includes(r.state),
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmMo(db, r) }) },
-        { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? []) }) }) },
+        { label: 'Check Availability', when: (r) => r.state === 'confirmed', run: (db, r) => ({ db: write(db, 'mrp.production', r.id, { components_availability: availability(db, r.move_raw ?? [], r.id) }) }) },
         { label: 'Start', when: (r) => r.state === 'confirmed', vals: { state: 'progress' } },
-        { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produce },
+        { label: 'Produce', primary: true, when: (r) => ['confirmed', 'progress'].includes(r.state), run: produceButton },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['draft', 'confirmed', 'progress'].includes(r.state) },
       ],
       title: 'name',
@@ -574,7 +597,8 @@ export const moreModels = {
     pivot: { row: 'plan', col: 'stage', measure: 'recurring_monthly' },
     form: {
       statusbar: 'stage',
-      statusbarClickable: true,
+      // Stage changes go through Start / Close / Reopen so their bookkeeping runs.
+      statusbarClickable: false,
       buttons: [
         { label: 'Start', primary: true, vals: { stage: 'progress' }, when: (r) => r.stage === 'draft' },
         { label: 'Generate Invoice', primary: true, when: (r) => r.stage === 'progress', run: invoiceSubscription },
@@ -612,6 +636,7 @@ export const moreModels = {
     label: 'Orders',
     fields: {
       name: { type: 'char', label: 'Order Ref', readonly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
       date_order: { type: 'date', label: 'Date', readonly: true },
       payment_method: { type: 'selection', label: 'Payment Method', options: [['cash', 'Cash'], ['card', 'Card']] },
@@ -622,7 +647,7 @@ export const moreModels = {
       lines: productLines('Products', 'list_price'),
       ...amountFields('lines'),
     },
-    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', lines: [] }),
+    defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', company_id: 1, lines: [] }),
     groupBys: ['session_id', 'payment_method', 'state', 'partner_id', 'date_order'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total'], badge: 'payment_method' },
     list: ['name', 'date_order', 'session_id', 'partner_id', 'payment_method', 'amount_total', 'state'],
@@ -631,7 +656,7 @@ export const moreModels = {
     pivot: { row: 'date_order', col: 'payment_method', measure: 'amount_total' },
     form: {
       lockedWhen: () => true,
-      buttons: [{ label: 'Refund', when: (r) => r.state === 'paid' && r.session_id, run: (db, r) => { const out = refundOrder(db, r); return { db: out.db, go: `#/pos/orders/${out.id}` }; } }],
+      buttons: [{ label: 'Refund', server: '/api/op/pos.refund', posts: true, when: (r) => r.state === 'paid' && r.session_id, run: (db, r) => { const out = refundOrder(db, r); return { db: out.db, go: `#/pos/orders/${out.id}` }; } }],
       ribbon: (r) => (r.state === 'refunded' ? 'Refunded' : r.state === 'refund' ? 'Refund' : null),
       title: 'name',
       groups: [['partner_id', 'payment_method', 'session_id'], ['date_order', 'state', 'refund_of']],

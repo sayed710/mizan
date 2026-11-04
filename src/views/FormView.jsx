@@ -1,13 +1,23 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
+import { myEmployeeId } from '../access.js';
 import { t } from '../i18n.js';
-import { Avatar, display, FieldInput, money } from '../ui.jsx';
+import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
+import { currencyCode } from '../models/money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
+import { duplicateValues } from '../duplicate.js';
+import { saveFormRecord } from './formSave.js';
+import { RecordAnalysis } from './Analysis.jsx';
+
+/** Integrations whose buttons fall back to only recording a send when not configured. */
+const SENDING = { smtp: 'Email', sms: 'SMS' };
+import { Wizard } from './Wizard.jsx';
+import { TaxReportTable } from './Reports.jsx';
 
 function PortalLink({ model, id }) {
   const [url, setUrl] = useState('');
@@ -32,9 +42,9 @@ function PortalLink({ model, id }) {
   </span>;
 }
 
-function withComputed(model, vals) {
+function withComputed(model, vals, db) {
   const computed = Object.entries(models[model].fields).filter(([, f]) => f.compute);
-  return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals)])) };
+  return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
 /** Defaults for a new record: model defaults < menu defaults < smart-button parent < `default_<field>` URL params. */
@@ -44,16 +54,18 @@ function newDefaults(db, model, leaf, params) {
     [...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k, v]) => [k.slice(8), v]),
   );
   const rel = parseRel(db, model, params.get('rel'));
-  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
+  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...(def.createDefaults?.(db, fromUrl) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
 }
 
-function Field({ db, model, name, value, onChange, readonly }) {
+function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
+  const label = field.custom ? field.label : t(field.label);
+  const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
   return (
     <div className="field">
-      <label htmlFor={id}>{t(field.label)}{field.required && <span className="req" aria-hidden="true">*</span>}</label>
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} /></div>
+      {isLabelable(field, readonly) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
+      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} record={record} /></div>
     </div>
   );
 }
@@ -66,7 +78,7 @@ function SmartButtons({ db, rec, smart }) {
         const value = rec[s.key ?? 'id'];
         const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
         return (
-          <a key={s.label} className="smart" href={`#/${s.target}?view=list&rel=${s.field}:${value}`}>
+          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${value}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>
@@ -103,13 +115,17 @@ function Activities({ db, model, id, name }) {
           </select>
           <input aria-label={t('Summary')} placeholder={t('Summary')} value={form.summary} onChange={(e) => setForm({ ...form, summary: e.target.value })} />
           <input aria-label={t('Due Date')} type="date" value={form.date_deadline} onChange={(e) => setForm({ ...form, date_deadline: e.target.value })} />
+          <select aria-label={t('Assigned to')} value={form.user_id ?? ''} onChange={(e) => setForm({ ...form, user_id: e.target.value ? Number(e.target.value) : null })}>
+            <option value="">—</option>
+            {search(db, 'hr.employee').map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
           <div className="row">
             <button type="button" className="btn primary sm" onClick={save}>{t('Schedule')}</button>
             <button type="button" className="btn sm" onClick={() => setForm(null)}>{t('Discard')}</button>
           </div>
         </div>
       ) : (
-        <button type="button" className="btn sm" onClick={() => setForm({ activity_type: 'todo', summary: '', date_deadline: today(), user_id: 1 })}>
+        <button type="button" className="btn sm" onClick={() => setForm({ activity_type: 'todo', summary: '', date_deadline: today(), user_id: myEmployeeId(db, getUser()) })}>
           🕓 {t('Schedule Activity')}
         </button>
       )}
@@ -121,9 +137,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
   const [open, setOpen] = useState(false);
   const run = (fn) => { setOpen(false); fn(); };
   const duplicate = () => {
-    const { id: _id, name, ...vals } = rec;
-    const copy = { ...vals, ...(models[model].fields.name?.readonly ? {} : { name: `${name ?? ''} (copy)` }) };
-    const res = create(getDb(), model, models[model].fields.name?.readonly ? { ...copy, ...models[model].defaults?.(nextId(getDb(), model)) } : copy);
+    const res = create(getDb(), model, duplicateValues(model, rec));
     commit(res.db);
     location.hash = `${base}/${res.id}${query}`;
   };
@@ -133,7 +147,7 @@ function ActionsMenu({ model, rec, backHash, base, query }) {
       <button type="button" className="btn sm" aria-expanded={open} aria-label={t('Actions')} onClick={() => setOpen(!open)}>⚙</button>
       {open && (
         <div className="nav-dropdown" role="menu">
-          <button type="button" role="menuitem" onClick={() => run(duplicate)}>{t('Duplicate')}</button>
+          <button type="button" role="menuitem" disabled={models[model].duplicate === false} onClick={() => run(duplicate)}>{t('Duplicate')}</button>
           <button type="button" role="menuitem" onClick={() => run(() => commit(write(getDb(), model, rec.id, { active: archived })))}>{t(archived ? 'Unarchive' : 'Archive')}</button>
           <button type="button" role="menuitem" className="danger" onClick={() => run(() => {
             if (!confirm(t('Delete {n} record(s)?', { n: 1 }))) return;
@@ -196,27 +210,39 @@ function Chatter({ db, model, id, name }) {
   );
 }
 
+// A new record the server refused: its values (and the reason) come back to the "new" form instead of being lost.
+let refusedNew = null;
+
 export function FormView({ leaf, id, base, params }) {
   const db = useDb();
   const model = leaf.model;
   const def = models[model];
   const isNew = id === 'new';
   const rec = isNew ? null : read(db, model, Number(id));
-  const [changes, setChanges] = useState({});
-  const [error, setError] = useState(null);
+  const [restored] = useState(() => {
+    const draft = isNew && refusedNew?.base === base ? refusedNew : null;
+    if (draft) refusedNew = null;
+    return draft;
+  });
+  const [changes, setChanges] = useState(() => restored?.values ?? {});
+  const [error, setError] = useState(() => restored?.error ?? null);
+  const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
   const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
+  const revRef = useRef(0);
 
   const view = params.get('view') ?? '';
   const relRaw = params.get('rel');
   const query = `?view=${view}${relRaw ? `&rel=${relRaw}` : ''}`;
   const backHash = `${base}${query}`;
 
-  if (!isNew && !rec) {
+  // A record outside this menu's domain (e.g. a journal entry id under Invoices) is not shown under the wrong breadcrumb.
+  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec)))) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
-  const current = withComputed(model, { ...(isNew ? initial : rec), ...changes });
+  const values = { ...(isNew ? initial : rec), ...changes };
+  const current = withComputed(model, def.form.prepare?.(values, db) ?? values, db);
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
     setChanges((c) => {
@@ -226,20 +252,38 @@ export function FormView({ leaf, id, base, params }) {
     });
     setError(null);
   };
-  const fail = (e) => setError(e instanceof Error ? e.message : t('Could not save'));
+  const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
 
-  /** Persist pending changes (+ extra vals). Returns the record id, or null on validation error. */
+  /**
+   * Persist pending changes (+ extra vals). Returns the record id, or null on validation error. The save is shown
+   * at once; if the server then refuses it, the typed values come back and its reason is shown on the form.
+   */
   const save = (extra = {}) => {
     try {
+      const curRev = ++revRef.current;
       if (isNew) {
-        const res = create(getDb(), model, { ...current, ...extra });
-        commit(res.db);
+        const values = { ...changes, ...extra };
+        const res = saveFormRecord(getDb(), model, null, { ...current, ...extra });
+        const expectedHash = `${base}/${res.id}${query}`;
+        commit(res.db, { quiet: true }).then((r) => {
+          if (r.ok || curRev !== revRef.current) return;
+          if (location.hash === expectedHash) {
+            refusedNew = { base, values, error: r.error };
+            location.hash = `${base}/new${query}`;
+          }
+        });
         setChanges({});
         location.hash = `${base}/${res.id}${query}`;
         return res.id;
       }
       const vals = { ...changes, ...extra };
-      if (Object.keys(vals).length) commit(write(getDb(), model, rec.id, vals));
+      if (Object.keys(vals).length) {
+        commit(saveFormRecord(getDb(), model, rec.id, vals).db, { quiet: true }).then((r) => {
+          if (r.ok || curRev !== revRef.current) return;
+          setChanges((c) => ({ ...vals, ...c }));
+          setError(r.error);
+        });
+      }
       setChanges({});
       return rec.id;
     } catch (e) {
@@ -249,19 +293,43 @@ export function FormView({ leaf, id, base, params }) {
   };
   const leave = (hash) => { if (!dirty || save() != null) location.hash = hash; };
 
-  const runButton = (b) => {
+  const runButton = async (b) => {
     const endpoint = b.server ?? (b.email === 'mailing' ? '/api/mail/mailing' : b.email ? '/api/mail/document' : null);
     const need = b.requires ?? (b.email ? 'smtp' : 'server');
-    if (endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need])) {
+    const live = endpoint && isServer() && (need === 'server' || getUser()?.integrations?.[need]);
+    // Without the integration the button only records the send: say so, ask first and leave a trace.
+    const channel = !live && endpoint && SENDING[need];
+    if (channel && !confirm(t('{channel} is not configured, so nothing will be sent. Mark it as sent anyway?', { channel: t(channel) }))) return;
+    const noteUnsent = (id) => { if (channel) commit(postNote(getDb(), model, id, t('Not sent: {channel} is not configured.', { channel: t(channel) }))); };
+    if (live) {
+      if (b.prompt) {
+        // With a wizard the amount is asked in the in-app dialog and sent as the same text the prompt would have.
+        const spec = b.wizard?.(getDb(), current);
+        if (spec) {
+          setWizard({
+            b, spec, error: null,
+            live: (values) => {
+              const savedId = save();
+              if (savedId == null) return;
+              serverAction(endpoint, { model, id: savedId, text: String(values[spec.fields[0].name] ?? '').trim() })
+                .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
+            },
+          });
+          return;
+        }
+        const savedId = save();
+        if (savedId == null) return;
+        const text = prompt(t(b.prompt), b.promptDefault?.(read(getDb(), model, savedId)) ?? '');
+        if (text != null && text.trim()) {
+          serverAction(endpoint, { model, id: savedId, text })
+            .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
+        }
+        return;
+      }
       const savedId = save();
       if (savedId == null) return;
       const send = (extra = {}) => serverAction(endpoint, { model, id: savedId, ...extra })
-        .then((res) => { setError(null); if (res?.message) alert(res.message); }, (e) => fail(e));
-      if (b.prompt) {
-        const text = prompt(t(b.prompt), '');
-        if (text != null && text.trim()) send({ text });
-        return;
-      }
+        .then((res) => { setError(null); if (res?.message) alert(res.message); if (res?.go) location.hash = res.go; }, (e) => fail(e));
       if (!b.upload) { send(); return; }
       const input = Object.assign(document.createElement('input'), { type: 'file', accept: b.upload });
       input.onchange = () => {
@@ -276,17 +344,49 @@ export function FormView({ leaf, id, base, params }) {
     }
     if (b.upload) { fail(new Error(t('This needs the server with AI enabled'))); return; }
     if (!b.run) {
-      if (save(b.vals) != null && b.vals.active === false) location.hash = backHash;
+      const id = save(b.vals);
+      if (id != null) noteUnsent(id);
+      if (id != null && b.vals.active === false) location.hash = backHash;
       return;
+    }
+    // Buttons that need input open an in-app dialog; the button runs with what was entered.
+    const spec = b.wizard?.(getDb(), current);
+    if (spec) { setWizard({ b, spec, error: null }); return; }
+    const answers = [];
+    for (const q of b.ask ?? []) {
+      const text = prompt(t(q.label), q.default?.(current) ?? '');
+      if (text == null) return;
+      answers.push(q.type === 'number' ? Number(text) : text.trim());
     }
     const savedId = save();
     if (savedId == null) return;
     try {
-      const res = b.run(getDb(), read(getDb(), model, savedId));
+      if (b.posts && isServer()) {
+        const out = await serverAction('/api/button', { model, id: savedId, label: b.label });
+        if (out.go) location.hash = out.go;
+        return;
+      }
+      const res = b.run(getDb(), read(getDb(), model, savedId), answers);
       commit(res.db);
+      noteUnsent(savedId);
+      if (res.message) alert(res.message);
       if (res.go) location.hash = res.go;
     } catch (e) {
       fail(e);
+    }
+  };
+  const confirmWizard = (values) => {
+    if (wizard.live) { setWizard(null); wizard.live(values); return; }
+    try {
+      const savedId = wizard.id ?? save();
+      if (savedId == null) return;
+      const res = wizard.b.run(getDb(), read(getDb(), model, savedId), values);
+      commit(res.db);
+      setWizard(null);
+      setError(null);
+      if (res.go) location.hash = res.go;
+    } catch (e) {
+      setWizard((w) => ({ ...w, error: t(e.message) }));
     }
   };
 
@@ -296,7 +396,7 @@ export function FormView({ leaf, id, base, params }) {
 
   const statusKey = def.form.statusbar;
   const statusField = statusKey && def.fields[statusKey];
-  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current)));
+  const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
   const resolve = (v) => (typeof v === 'function' ? v(current) : v);
@@ -318,7 +418,7 @@ export function FormView({ leaf, id, base, params }) {
           {dirty && (
             <span className="dirty">
               <button type="button" className="btn primary sm" onClick={() => save()}>{t('Save')}</button>
-              <button type="button" className="btn sm" onClick={() => { setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
+              <button type="button" className="btn sm" onClick={() => { revRef.current++; setChanges({}); setError(null); if (isNew) location.hash = backHash; }}>{t('Discard')}</button>
             </span>
           )}
         </div>
@@ -342,23 +442,42 @@ export function FormView({ leaf, id, base, params }) {
                   <button key={b.label} type="button" className={`btn ${b.primary ? 'primary' : ''}`} onClick={() => runButton(b)}>{t(b.label)}</button>
                 ))}
               </div>
-              {statusField && (
-                <ol className="statusbar" aria-label={t(statusField.label)}>
-                  {statusField.options
-                    .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
-                    .map(([k, label]) => (
-                      <li key={k}>
-                        <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
-                          disabled={!def.form.statusbarClickable}
-                          onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
-                      </li>
-                    ))}
-                </ol>
-              )}
+              {statusField && (() => {
+                const rawOptions = statusField.type === 'selection'
+                  ? (statusField.options ?? [])
+                  : (statusField.type === 'many2one' && statusField.relation
+                    ? (() => {
+                        let relRecs = [...(db.records[statusField.relation] ?? [])];
+                        if (model === 'crm.lead' && current.team_id) {
+                          relRecs = relRecs.filter((s) => !s.team_ids?.length || s.team_ids.includes(current.team_id));
+                        } else if (model === 'project.task' && current.project_id) {
+                          relRecs = relRecs.filter((s) => !s.project_ids?.length || s.project_ids.includes(current.project_id));
+                        }
+                        return relRecs
+                          .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)
+                          .map((s) => [s.id, s.name]);
+                      })()
+                    : []);
+                return (
+                  <ol className="statusbar" aria-label={t(statusField.label)}>
+                    {rawOptions
+                      .filter(([k]) => !(def.form.statusbarHide ?? []).includes(k) || current[statusKey] === k)
+                      .map(([k, label]) => (
+                        <li key={k}>
+                          <button type="button" aria-current={current[statusKey] === k ? 'step' : undefined}
+                            disabled={!def.form.statusbarClickable}
+                            onClick={() => save({ [statusKey]: k })}>{t(label)}</button>
+                        </li>
+                      ))}
+                  </ol>
+                );
+              })()}
             </div>
           )}
 
           {error && <div className="alert" role="alert">{error}</div>}
+          <SimulatedNote text={def.simulated} />
+          {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
@@ -373,7 +492,7 @@ export function FormView({ leaf, id, base, params }) {
             <div className="groups">
               {def.form.groups.map((g, i) => (
                 <div key={i} className="group">
-                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} />)}
+                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
                 </div>
               ))}
             </div>
@@ -385,19 +504,21 @@ export function FormView({ leaf, id, base, params }) {
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {(tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
+                  {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
+                    <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id }} />
+                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
                     ? (
-                      <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current}
+                      <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
                         readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
                     )
                     // Plain fields in a tab get a label, like fields in the header groups.
-                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} />))}
+                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}
                   {footer.length > 0 && tab === 0 && (
                     <dl className="totals">
                       {footer.map((f) => (
                         <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
                           <dt>{t(def.fields[f].label)}</dt>
-                          <dd>{display(db, def.fields[f], current[f]) || money(0)}</dd>
+                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
                         </div>
                       ))}
                     </dl>
@@ -406,6 +527,7 @@ export function FormView({ leaf, id, base, params }) {
               </>
             )}
           </section>
+          {!isNew && <RecordAnalysis db={db} model={model} rec={current} />}
         </div>
         {def.form.chatter && !isNew && <Chatter db={db} model={model} id={rec.id} name={rec[def.form.title]} />}
       </div>

@@ -1,11 +1,11 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { seed } from './seed.js';
 import { accountId, balances, balanceSheet, isBalanced, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
-import { closeFiscalYear, closingModels, compareBalanceSheet, comparePeriods, compareProfitAndLoss, fiscalYearOf,
-  reopenFiscalYear, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
+import { closeFiscalYear, closingModels, reopenFiscalYear, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 
 const period = { from: '2024-01-01', to: '2024-12-31' };
 const year = (db) => create(db, 'account.fiscal.year', { name: 'FY 2024', date_from: period.from, date_to: period.to });
@@ -17,19 +17,14 @@ const business = () => entry(seed(), '2024-06-15', [
 ]);
 const run = (db, id, label) => closingModels['account.fiscal.year'].form.buttons.find((b) => b.label === label)
   .run(db, read(db, 'account.fiscal.year', id)).db;
-const row = (report, key) => report.rows.find((r) => r.key === key);
 
-test('fiscal years use inclusive boundaries, fall back to calendar years, and reject overlaps on create/write', () => {
+test('fiscal years reject overlaps and invalid ranges on create/write', () => {
   const { db, id } = year(seed());
-  assert.equal(fiscalYearOf(db, period.from).id, id);
-  assert.equal(fiscalYearOf(db, period.to).id, id);
-  assert.deepEqual(fiscalYearOf(db, '2023-07-01'), { date_from: '2023-01-01', date_to: '2023-12-31' });
   assert.throws(() => year(db), /overlap/);
   const other = create(db, 'account.fiscal.year', { name: 'Next', date_from: '2025-01-01', date_to: '2025-12-31' });
   assert.throws(() => write(other.db, 'account.fiscal.year', other.id, { date_from: period.to }), /overlap/);
   assert.throws(() => write(db, 'account.fiscal.year', id, { date_to: '2024-02-30' }), /valid/);
   assert.throws(() => write(db, 'account.fiscal.year', id, { date_to: '2023-01-01' }), /valid/);
-  assert.throws(() => fiscalYearOf(db, 'invalid'), /valid date/);
 });
 
 test('closing clears all five P&L types into retained earnings, balances, and preserves the original db', () => {
@@ -102,43 +97,6 @@ test('loss years debit retained earnings; empty years close with a balanced zero
   assert.ok(isBalanced(read(done, 'account.move', read(done, 'account.fiscal.year', empty.id).closing_move_id).line_ids));
 });
 
-test('three monthly P&L columns and variance follow caller order with explicit undefined percentages', () => {
-  let db = seed();
-  for (const [date, amount] of [['2024-01-15', 100], ['2024-02-15', 200], ['2024-03-15', 300]]) {
-    db = entry(db, date, [{ account: '101401', debit: amount }, { account: '400000', credit: amount }]);
-  }
-  const current = { from: '2024-03-01', to: '2024-03-31' };
-  const periods = [...comparePeriods(current, { count: 2, unit: 'month' }), current];
-  assert.deepEqual(periods, [{ from: '2024-01-01', to: '2024-01-31' }, { from: '2024-02-01', to: '2024-02-29' }, current]);
-  const report = compareProfitAndLoss(db, periods);
-  assert.deepEqual(report.columns, periods);
-  assert.deepEqual(row(report, 'net').values, [100, 200, 300]);
-  assert.deepEqual(report.variance.find((r) => r.key === 'net'), { key: 'net', amount: 100, percent: 50 });
-  assert.equal(report.variance.find((r) => r.key === 'expense').percent, null);
-  assert.equal(compareProfitAndLoss(db, [current]).variance[0].amount, null);
-  assert.deepEqual(compareProfitAndLoss(db, []).rows[0].values, []);
-});
-
-test('comparison periods preserve leap days, quarter boundaries and year boundaries', () => {
-  assert.deepEqual(comparePeriods({ from: '2024-01-01', to: '2024-03-31' }, { count: 1, unit: 'quarter' }), [{ from: '2023-10-01', to: '2023-12-31' }]);
-  assert.deepEqual(comparePeriods({ from: '2024-02-01', to: '2024-02-29' }, { count: 1, unit: 'year' }), [{ from: '2023-02-01', to: '2023-02-28' }]);
-  assert.deepEqual(comparePeriods(period, { count: 0 }), []);
-  assert.throws(() => comparePeriods(period, { count: -1 }), /valid comparison/);
-  assert.throws(() => comparePeriods(period, { unit: 'week' }), /valid comparison/);
-});
-
-test('balance sheet comparisons expose assets, liabilities, equity and earnings with matching totals', () => {
-  const { db, id } = year(business());
-  const closed = closeFiscalYear(db, id);
-  const dates = ['2024-01-01', '2024-06-30', period.to];
-  const report = compareBalanceSheet(closed, dates);
-  assert.deepEqual(report.columns, dates);
-  assert.deepEqual(row(report, 'earnings').values, [0, 750, 0]);
-  assert.deepEqual(row(report, 'equity').values, [0, 0, 750]);
-  assert.deepEqual(row(report, 'totalAssets').values, row(report, 'liabilitiesEquity').values);
-  assert.deepEqual(report.variance.find((r) => r.key === 'equity'), { key: 'equity', amount: 750, percent: null });
-});
-
 function foreign(moveType = 'out_invoice', amount = 100, db = seed()) {
   const currency = create(db, 'res.currency', { name: 'FX', rate_ids: [{ date: '2024-01-01', rate: 2 }, { date: '2024-02-01', rate: 1 }] });
   const invoice = create(currency.db, 'account.move', { move_type: moveType, partner_id: 1, currency_id: currency.id,
@@ -149,8 +107,8 @@ function foreign(moveType = 'out_invoice', amount = 100, db = seed()) {
 test('foreign invoices revalue residuals after rate changes with a balanced next-day reversal and idempotence', () => {
   const { db, id } = foreign();
   const snapshot = JSON.stringify(db);
-  assert.deepEqual(unrealizedExchange(db, '2024-02-29'), [{ invoice_id: id, partner_id: 1,
-    currency_id: read(db, 'account.move', id).currency_id, account: '121000', residual: 100, booked: 50, value: 100, difference: 50 }]);
+  assert.deepEqual(unrealizedExchange(db, '2024-02-29'), [{ invoice_id: id, company_id: 1, partner_id: 1,
+    currency_id: read(db, 'account.move', id).currency_id, account: '121000', account_id: accountId(db, '121000'), residual: 100, booked: 50, value: 100, difference: 50 }]);
   const done = revalueForeignBalances(db, '2024-02-29');
   assert.equal(JSON.stringify(db), snapshot);
   const adjustment = search(done, 'account.move').find((m) => m.revaluation_date === '2024-02-29');
@@ -163,7 +121,15 @@ test('foreign invoices revalue residuals after rate changes with a balanced next
   assert.deepEqual(reversal.line_ids.map((l) => [l.account_id, l.debit, l.credit]), adjustment.line_ids.map((l) => [l.account_id, l.credit, l.debit]));
   assert.equal(revalueForeignBalances(done, '2024-02-29'), done);
   const withoutMetadata = write(done, 'account.move', adjustment.id, { revaluation_date: null, reversal_move_id: null });
-  assert.equal(revalueForeignBalances(withoutMetadata, '2024-02-29'), withoutMetadata);
+  const repeated = revalueForeignBalances(withoutMetadata, '2024-02-29');
+  const newAdjustment = search(repeated, 'account.move').find((m) => m.revaluation_date === '2024-02-29');
+  assert.ok(newAdjustment);
+  assert.notEqual(newAdjustment.id, adjustment.id);
+  assert.ok(isBalanced(newAdjustment.line_ids));
+  const newReversal = read(repeated, 'account.move', newAdjustment.reversal_move_id);
+  assert.ok(newReversal);
+  assert.equal(newReversal.invoice_date, '2024-03-01');
+  assert.ok(isBalanced(newReversal.line_ids));
   assert.equal(read(done, 'account.move', id).amount_residual, 100);
   assert.equal(revalueForeignBalances(db, '2024-01-31'), db);
 });

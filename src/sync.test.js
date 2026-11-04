@@ -1,3 +1,4 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDiff, diffDb, isEmptyDiff } from './sync.js';
@@ -11,11 +12,11 @@ test('diff of identical snapshots is empty', () => {
 
 test('concurrent edits to different records both survive', () => {
   const base = seed();
-  const alice = write(base, 'crm.lead', 1, { stage_id: 'won' });
+  const alice = write(base, 'crm.lead', 1, { stage_id: 4 });
   const bob = write(base, 'crm.lead', 2, { priority: 3 });
   let server = applyDiff(base, diffDb(base, alice));
   server = applyDiff(server, diffDb(base, bob));
-  assert.equal(read(server, 'crm.lead', 1).stage_id, 'won');
+  assert.equal(read(server, 'crm.lead', 1).stage_id, 4);
   assert.equal(read(server, 'crm.lead', 2).priority, 3);
   assert.equal(server.messages.length, base.messages.length + 1);
 });
@@ -43,8 +44,8 @@ test('untrusted input is validated and stripped', () => {
 test('the hard lock date can only move forward through sync', () => {
   const base = { ...seed(), settings: { ...seed().settings, hard_lock_date: '2026-03-31' } };
   const withSettings = (vals) => ({ ...base, settings: { ...base.settings, ...vals } });
-  assert.equal(applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-01-31' }))).settings.hard_lock_date, '2026-03-31');
-  const forward = applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-06-30', sale_lock_date: '2026-05-31' })));
+  assert.equal(applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-01-31' })), { isAdmin: true }).settings.hard_lock_date, '2026-03-31');
+  const forward = applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-06-30', sale_lock_date: '2026-05-31' })), { isAdmin: true });
   assert.equal(forward.settings.hard_lock_date, '2026-06-30');
   assert.equal(forward.settings.sale_lock_date, '2026-05-31');
 });

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { updateSettings } from '../orm.js';
 import { commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
-import { Icon } from '../ui.jsx';
+import { Icon, useDismiss } from '../ui.jsx';
 
 /** Search state: { terms: string[], filters: string[], groupBy: string[], rel: {field,id,label}|null } */
 export const emptySearch = (model, rel = null) => ({ terms: [], filters: models[model].defaultFilters ?? [], groupBy: [], rel, archived: false });
@@ -91,12 +91,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return undefined;
-    const close = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [open]);
+  useDismiss(open, () => setOpen(false), ref);
 
   const addTerm = () => {
     const term = text.trim();

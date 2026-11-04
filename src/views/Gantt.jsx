@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
 import { groupRecords, write } from '../orm.js';
-import { addDays, isoDate } from '../models/common.js';
+import { addDays, dayOf, isoDate, shiftDay } from '../models/common.js';
 import { commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { formatDate } from '../ui.jsx';
 
 const DAY = 864e5;
-const parse = (s) => new Date(s + 'T00:00');
+const parse = (s) => new Date(dayOf(s) + 'T00:00');
 const diffDays = (a, b) => Math.round((parse(b) - parse(a)) / DAY);
 const weekStart = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return new Date(x.getFullYear(), x.getMonth(), x.getDate()); };
 
@@ -32,7 +32,7 @@ export function Gantt({ db, model, records, open }) {
   const move = (n) => setCursor(scale === 'week' ? new Date(start.getTime() + n * 7 * DAY) : new Date(start.getFullYear(), start.getMonth() + n, 1));
 
   const stopOf = (r) => r[g.stop] ?? r[g.start];
-  const visible = records.filter((r) => r[g.start] && stopOf(r) >= first && r[g.start] <= last);
+  const visible = records.filter((r) => r[g.start] && dayOf(stopOf(r)) >= first && dayOf(r[g.start]) <= last);
   const unplanned = records.filter((r) => !r[g.row] || !r[g.start]);
   const rows = groupRecords(db, model, visible.filter((r) => r[g.row]), g.row).filter((x) => x.records.length);
   const openRow = visible.filter((r) => !r[g.row]);
@@ -49,11 +49,12 @@ export function Gantt({ db, model, records, open }) {
     if (rec[g.start]) {
       const grab = Number(e.dataTransfer.getData('application/x-offset')) || 0; // day of the bar that was grabbed
       const shift = diffDays(rec[g.start], date) - grab;
-      vals[g.start] = addDays(rec[g.start], shift);
-      if (rec[g.stop]) vals[g.stop] = addDays(rec[g.stop], shift);
+      vals[g.start] = shiftDay(rec[g.start], shift);
+      if (rec[g.stop]) vals[g.stop] = shiftDay(rec[g.stop], shift);
     } else {
-      vals[g.start] = date;
-      if (g.stop in models[model].fields) vals[g.stop] = date;
+      const stamp = (field) => (models[model].fields[field].type === 'datetime' ? new Date(date + 'T09:00').toISOString() : date);
+      vals[g.start] = stamp(g.start);
+      if (g.stop in models[model].fields) vals[g.stop] = stamp(g.stop);
     }
     commit(write(getDb(), model, id, vals));
   };

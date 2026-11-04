@@ -1,7 +1,7 @@
 // Website: published pages + an online shop whose checkout creates a customer and a quotation.
 import { useEffect, useState } from 'react';
 import { create, read, search } from '../orm.js';
-import { commit, getDb, useDb } from '../store.js';
+import { commit, currentCompany, getDb, useDb } from '../store.js';
 import { lang, t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { menuTree, pageFor, resolveUrl } from '../models/websiteplus.js';
@@ -108,8 +108,11 @@ function Checkout({ db, cart, onDone }) {
   );
 }
 
+export const websiteCompany = (db) => read(db, 'res.company', 1) ?? currentCompany(db);
+
 export function Website() {
   const db = useDb();
+  const company = websiteCompany(db);
   const pages = search(db, 'website.page').filter((p) => !!resolveUrl(db, p.slug)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
   const [slug, setSlug] = useState(() => location.pathname !== '/' ? decodeURIComponent(location.pathname).replace(/^\/+|\/+$/g, '') : pages[0]?.slug ?? 'shop');
   const [cart, setCart] = useState({});
@@ -124,7 +127,7 @@ export function Website() {
   return (
     <main className="site">
       {page?.header_visible !== false && <header className="site-nav">
-        <b className="site-brand">{db.settings?.company}</b>
+        <b className="site-brand">{company.name}</b>
         <nav aria-label={t('Website')}>
           {menus.length ? <SiteMenu items={menus} onPage={(href) => {
             const target = pages.find((p) => `/${p.slug.replace(/^\/+|\/+$/g, '')}` === href);
@@ -141,7 +144,7 @@ export function Website() {
         {!done && slug === 'shop' && step === 'checkout' && <Checkout db={db} cart={cart} onDone={(name) => { setDone(name); setCart({}); }} />}
         {!done && slug !== 'shop' && (page ? <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article> : <p className="alert">{t('Page not found')}</p>)}
       </div>
-      {page?.footer_visible !== false && <footer className="site-footer">© {new Date().getFullYear()} {db.settings?.company}</footer>}
+      {page?.footer_visible !== false && <footer className="site-footer">© {new Date().getFullYear()} {company.name}</footer>}
     </main>
   );
 }

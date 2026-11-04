@@ -7,6 +7,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { request as httpsRequest } from 'node:https';
 import { createHash, randomBytes } from 'node:crypto';
 import { models } from '../src/models/index.js';
 import { create, messagesOf, postNote, read, search, write } from '../src/orm.js';
@@ -27,20 +28,82 @@ export function integrationStatus(env = process.env) {
 }
 
 // ---- outbound HTTP guard: user-configured URLs must be public https endpoints (no SSRF into the LAN) ----
-const PRIVATE_V4 = [/^10\./, /^127\./, /^169\.254\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./];
-const isPrivate = (ip) => (isIP(ip) === 6 ? /^(::1|fc|fd|fe80|::ffff:(10|127|192\.168|169\.254)\.)/i.test(ip) : PRIVATE_V4.some((r) => r.test(ip)));
+// Every IPv4 block that is not public unicast: this network, private, CGNAT, loopback, link-local, IETF protocol
+// assignments, documentation (TEST-NET 1-3), benchmarking, multicast, reserved and broadcast.
+const BLOCKED_V4 = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24',
+  '192.0.2.0/24', '192.168.0.0/16', '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4']
+  .map((cidr) => { const [ip, bits] = cidr.split('/'); return [v4Number(ip), Number(bits)]; });
+function v4Number(ip) {
+  return ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
+}
+const blockedV4 = (ip) => {
+  const n = v4Number(ip);
+  return BLOCKED_V4.some(([base, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(base / 2 ** (32 - bits)));
+};
+/** True for any address that is not public unicast (IPv4, IPv6 and IPv4 embedded in IPv6). */
+export function isPrivate(ip) {
+  if (isIP(ip) === 4) return blockedV4(ip);
+  const v6 = ip.toLowerCase();
+  const mapped = /^(?:::ffff:|::|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
+  if (mapped) return blockedV4(mapped[1]);
+  // The same, written in hex as URL parsing normalises it (::ffff:a00:1 is 10.0.0.1).
+  const hex = /^(?:::ffff:|::|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6);
+  if (hex) return blockedV4([parseInt(hex[1], 16) >> 8, parseInt(hex[1], 16) & 255, parseInt(hex[2], 16) >> 8, parseInt(hex[2], 16) & 255].join('.'));
+  // Unspecified, loopback, unique local (fc00::/7), link-local (fe80::/10), multicast (ff00::/8), documentation (2001:db8::/32).
+  return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || /^ff/.test(v6) || /^2001:0?db8:/.test(v6);
+}
+
+/** DNS lookup that refuses any non-public answer; used both to check a URL and to connect, so they cannot differ. */
+async function publicAddresses(hostname) {
+  const answers = isIP(hostname) ? [{ address: hostname, family: isIP(hostname) }] : await lookup(hostname, { all: true });
+  if (!answers.length || answers.some((a) => isPrivate(a.address))) throw new Error('URLs pointing to private networks are not allowed');
+  return answers;
+}
 
 export async function assertPublicUrl(raw) {
   let url;
   try { url = new URL(raw); } catch { throw new Error('Invalid URL'); }
   if (url.protocol !== 'https:') throw new Error('Only https URLs are allowed');
-  const { address } = await lookup(url.hostname);
-  if (isPrivate(address)) throw new Error('URLs pointing to private networks are not allowed');
+  await publicAddresses(url.hostname.replace(/^\[|\]$/g, ''));
   return url;
 }
 
+const MAX_RESPONSE = 5 * 1024 * 1024;
+/**
+ * HTTPS request whose connection resolves the host through publicAddresses, so the address checked is the
+ * address connected to (no DNS-rebinding window). Redirects are not followed.
+ */
+export function pinnedFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, {
+      method, headers, signal,
+      lookup: (hostname, options, callback) => {
+        publicAddresses(hostname).then((answers) => {
+          if (options?.all) callback(null, answers);
+          else callback(null, answers[0].address, answers[0].family);
+        }, (e) => callback(e));
+      },
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => { size += c.length; if (size > MAX_RESPONSE) req.destroy(new Error('The response is too large')); else chunks.push(c); });
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, text: async () => text });
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    if (body != null) req.write(body);
+    req.end();
+  });
+}
+
+const NATIVE_FETCH = globalThis.fetch;
 async function fetchJson(url, init = {}) {
-  const res = await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(15000) });
+  // A fetch swapped in after start (tests, a proxy) is used as is; otherwise the pinned request connects.
+  const send = globalThis.fetch === NATIVE_FETCH ? pinnedFetch : (u, i) => globalThis.fetch(u, { ...i, redirect: 'error' });
+  const res = await send(url, { ...init, signal: AbortSignal.timeout(15000) });
   const text = await res.text();
   if (!res.ok) throw new Error(`${new URL(url).hostname} answered ${res.status}: ${text.slice(0, 200)}`);
   try { return JSON.parse(text); } catch { throw new Error('The service did not return JSON'); }
@@ -77,9 +140,9 @@ async function callClaude(params) {
     if (response.stop_reason === 'refusal') throw new Error('The AI declined this request.');
     return response;
   } catch (e) {
-    if (e instanceof Anthropic.AuthenticationError) throw new Error('AI credentials are invalid (ANTHROPIC_API_KEY).');
-    if (e instanceof Anthropic.RateLimitError) throw new Error('The AI is busy, try again in a moment.');
-    if (e instanceof Anthropic.APIError) throw new Error(`AI service error ${e.status}.`);
+    if (e instanceof Anthropic.AuthenticationError) throw new Error('AI credentials are invalid (ANTHROPIC_API_KEY).', { cause: e });
+    if (e instanceof Anthropic.RateLimitError) throw new Error('The AI is busy, try again in a moment.', { cause: e });
+    if (e instanceof Anthropic.APIError) throw new Error(`AI service error ${e.status}.`, { cause: e });
     throw e;
   }
 }
@@ -187,6 +250,7 @@ export async function sendWhatsApp(env, store, user, { model, id, text, template
     ? { type: 'template', template: { name: template.name, language: { code: template.language || 'en' }, components: [{ type: 'body', parameters: renderWhatsApp(queued.db, template, rec).values.map((v) => ({ type: 'text', text: v })) }] } }
     : { type: 'text', text: { body: msg.body } };
   try {
+    store.check?.(); // the lease may have been lost since the message was queued
     const out = await fetchJson(`https://graph.facebook.com/v21.0/${encodeURIComponent(env.MIZAN_WHATSAPP_PHONE_ID)}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${env.MIZAN_WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
@@ -195,7 +259,7 @@ export async function sendWhatsApp(env, store, user, { model, id, text, template
     store.commit(markWhatsApp(store.get(), msg.id, { waMessageId: out?.messages?.[0]?.id ?? '' }));
   } catch (e) {
     store.commit(markWhatsApp(store.get(), msg.id, { error: e.message }));
-    throw new Error(`WhatsApp message failed: ${e.message}`);
+    throw new Error(`WhatsApp message failed: ${e.message}`, { cause: e });
   }
   return { message: 'WhatsApp message sent' };
 }
@@ -210,6 +274,7 @@ export async function sendSms(env, to, body) {
 }
 
 const MAX_SMS = 500;
+const activeSms = new Set();
 
 /**
  * Queue the campaign's traces and commit them first (a second send then sees it sent; concurrent edits survive),
@@ -219,20 +284,31 @@ const MAX_SMS = 500;
 export async function sendSmsCampaign(env, store, { id }) {
   const c = read(store.get(), 'sms.campaign', Number(id));
   if (!c) throw new Error('Campaign not found');
-  const queued = queueSms(store.get(), c);
-  store.commit(queued);
-  const traces = search(queued, 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
-  let sent = 0;
-  for (const trace of traces) {
-    try {
-      await sendSms(env, trace.phone, c.body);
-      store.commit(markSms(store.get(), trace.id, true));
-      sent += 1;
-    } catch (e) {
-      store.commit(markSms(store.get(), trace.id, false, e.message));
+  if (activeSms.has(c.id)) throw new Error('SMS delivery is already in progress');
+  activeSms.add(c.id);
+  try {
+    if (c.stage_id !== 'sent') store.commit(queueSms(store.get(), c));
+    const traces = search(store.get(), 'sms.trace').filter((t) => t.campaign_id === c.id && t.state === 'outgoing').slice(0, MAX_SMS);
+    let sent = 0, uncertain = 0;
+    for (const trace of traces) {
+      // A persisted attempt without a result may already have reached the provider: never send it twice.
+      if (trace.attempted_at || trace.delivery_pending !== true) {
+        store.commit(write(store.get(), 'sms.trace', trace.id, { state: 'uncertain', error: 'Delivery status unknown after interruption; verify with the provider before resending' }));
+        uncertain++;
+        continue;
+      }
+      store.check?.();
+      store.commit(write(store.get(), 'sms.trace', trace.id, { attempted_at: new Date().toISOString(), delivery_pending: false }));
+      try {
+        await sendSms(env, trace.phone, c.body);
+        store.commit(markSms(store.get(), trace.id, true));
+        sent += 1;
+      } catch (e) {
+        store.commit(markSms(store.get(), trace.id, false, e.message));
+      }
     }
-  }
-  return { message: `${sent} SMS sent, ${traces.length - sent} failed` };
+    return { message: `${sent} SMS sent, ${traces.length - sent - uncertain} failed, ${uncertain} uncertain` };
+  } finally { activeSms.delete(c.id); }
 }
 
 // ---- Shipping rate APIs ----

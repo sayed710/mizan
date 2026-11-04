@@ -1,9 +1,13 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { moreModels } from './models/more.js';
 import { analyticPlusModels, normalizeDistribution, distributionOfLine, analyticLinesForMove, postAnalytic, removeAnalytic, analyticBalance, budgetReport, checkMandatoryPlans } from './models/analyticplus.js';
+
+/** Test fixture: set fields directly, as stored data, without the workflow rules. */
+const force = (db, model, id, vals) => ({ ...db, records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? { ...r, ...vals } : r)) } });
 
 const setup = () => {
   const first = create(seed(), 'account.analytic.account', { name: 'Consulting' });
@@ -49,7 +53,7 @@ test('legacy analytic allocation falls back to 100%, while explicit empty distri
 test('invoices and bills allocate discounted untaxed amounts 60/40 with opposite signs and metadata', () => {
   const { db, a, b } = setup();
   const before = JSON.stringify(db);
-  for (const [type, sign, category, code] of [['out_invoice', 1, 'invoice', '400000'], ['in_invoice', -1, 'vendor_bill', '600000']]) {
+  for (const [type, sign, category, code] of [['out_invoice', 1, 'invoice', '400000'], ['in_invoice', -1, 'vendor_bill', '110200']]) {
     const move = { ...moveValues(a, b, type), id: 999 };
     const lines = analyticLinesForMove(db, move);
     assert.deepEqual(lines.map((l) => [l.account_id, l.amount]), [[a, 108 * sign], [b, 72 * sign]]);
@@ -80,7 +84,9 @@ test('analytic allocations respect tax-included prices and explicit general acco
 
 test('analytic posting is immutable, idempotent and removable without deleting linked timesheets', () => {
   const { db: base, a, b } = setup();
-  const { db, id } = create(base, 'account.move', moveValues(a, b));
+  const draft0 = create(base, 'account.move', { ...moveValues(a, b), state: 'draft' });
+  const { id } = draft0;
+  const db = force(draft0.db, 'account.move', id, { state: 'posted' });
   const before = JSON.stringify(db);
   const posted = postAnalytic(db, id);
   assert.equal(search(posted, 'account.analytic.line').filter((r) => r.move_id === id).length, 2);

@@ -1,8 +1,9 @@
 // Mass mailing delivery and tracking: personalised emails with tracked links, an open pixel and an unsubscribe link.
 import { randomUUID } from 'node:crypto';
 import { read, search } from '../src/orm.js';
-import { markBounced, queueMailing, renderTemplate, trackEvent, unsubscribe } from '../src/models/mailing.js';
+import { awaitingDelivery, markBounced, markSent, queueMailing, renderTemplate, trackEvent, unsubscribe } from '../src/models/mailing.js';
 import { sendMail } from './smtp.js';
+import { log } from './log.js';
 
 const TOKEN = /^[\w-]{8,64}$/;
 const LINK = /https?:\/\/[^\s<>"')\]]+/g;
@@ -39,21 +40,43 @@ export function emailFor(db, mailing, trace, baseUrl) {
 export async function deliver(cfg, store, queue, baseUrl, now = today()) {
   const base = store.get();
   const before = new Set(search(base, 'mailing.trace').map((t) => t.id));
-  const queued = queue(base, { now, token: randomUUID });
+  const queued = queue(base, { now, token: randomUUID, queued: true });
   store.commit(queued);
   const fresh = search(queued, 'mailing.trace').filter((t) => !before.has(t.id));
+  return { sent: fresh.length, delivered: await sendTraces(cfg, store, fresh, baseUrl) };
+}
+
+// Tokens being sent right now, so a resume does not send them a second time.
+const inFlight = new Set();
+
+/** Email each queued trace; each success is committed as sent and each failure as a bounce. Returns the delivered count. */
+async function sendTraces(cfg, store, traces, baseUrl) {
   let delivered = 0;
-  for (const trace of fresh) {
+  for (const snapshot of traces) {
+    const db = store.get();
+    const trace = search(db, 'mailing.trace').find((t) => t.token === snapshot.token);
+    if (!awaitingDelivery(trace) || inFlight.has(trace.token)) continue;
+    inFlight.add(trace.token);
     try {
-      await sendMail(cfg, emailFor(queued, read(queued, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
+      try {
+        await sendMail(cfg, emailFor(db, read(db, 'mailing.mailing', trace.mailing_id), trace, baseUrl));
+      } catch (e) {
+        log('warn', 'mailing email failed', { mailingId: trace.mailing_id, traceId: trace.id, error: e.message });
+        store.commit(markBounced(store.get(), trace.token));
+        continue;
+      }
+      // SMTP already accepted the message: persistence errors must remain recoverable, not become bounces.
+      store.commit(markSent(store.get(), trace.token));
       delivered += 1;
-    } catch (e) {
-      console.warn(`Mailing ${trace.mailing_id}: ${trace.email} failed: ${e.message}`);
-      store.commit(markBounced(store.get(), trace.token));
+    } finally {
+      inFlight.delete(trace.token);
     }
   }
-  return { sent: fresh.length, delivered };
+  return delivered;
 }
+
+/** Send traces still queued after a crash or restart (at-least-once: one interrupted mid-send may go out twice). */
+export const resumeQueued = (cfg, store, baseUrl) => sendTraces(cfg, store, search(store.get(), 'mailing.trace').filter(awaitingDelivery), baseUrl);
 
 /**
  * Public tracking endpoints: /api/public/mail/(open|click|unsubscribe)/<token>[/<link index>].

@@ -36,15 +36,16 @@ export const publicBlogSite = (db) => ({
 const idOf = (raw) => (/^\d{1,9}$/.test(String(raw)) ? Number(raw) : null);
 
 /** GET /api/public/blog/<id>: a published post with rendered content; counts the visit. */
-export function publicBlogPost(db, rawId) {
+export function publicBlogPost(db, rawId, { count = true } = {}) {
   const id = idOf(rawId);
   const post = id && publishedPosts(db).find((p) => p.id === id);
   if (!post) return { status: 404, body: { error: 'Post not found' } };
-  const saved = commit(db, write(db, 'blog.post', id, { visits: (post.visits ?? 0) + 1 }));
+  const visits = (post.visits ?? 0) + (count ? 1 : 0);
+  const saved = count ? commit(db, write(db, 'blog.post', id, { visits })) : null;
   return {
     status: 200,
-    body: { ...postSummary(db, post), html: renderMarkdown(post.content), meta_description: post.website_meta_description ?? '', visits: (post.visits ?? 0) + 1 },
-    db: saved,
+    body: { ...postSummary(db, post), html: renderMarkdown(post.content), meta_description: post.website_meta_description ?? '', visits },
+    ...(saved ? { db: saved } : {}),
   };
 }
 
@@ -54,18 +55,18 @@ const publicForumPost = (p) => ({
 });
 
 /** GET /api/public/forum/<id>: a validated question with its active answers; counts the view. */
-export function publicForumThread(db, rawId) {
+export function publicForumThread(db, rawId, { count = true } = {}) {
   const id = idOf(rawId);
   const question = id && read(db, 'forum.post', id);
   if (!question || question.parent_id || question.state === 'pending') return { status: 404, body: { error: 'Post not found' } };
   const forum = read(db, 'forum.forum', question.forum_id);
   const answers = search(db, 'forum.post').filter((p) => p.parent_id === id && p.state === 'active')
     .sort((a, b) => Number(!!b.accepted) - Number(!!a.accepted) || (b.votes ?? 0) - (a.votes ?? 0) || a.id - b.id);
-  const saved = commit(db, write(db, 'forum.post', id, { views: (question.views ?? 0) + 1 }));
+  const saved = count ? commit(db, write(db, 'forum.post', id, { views: (question.views ?? 0) + 1 })) : null;
   return {
     status: 200,
-    body: { ...publicForumPost(question), forum: { id: forum?.id, name: forum?.name ?? '', mode: forum?.mode }, closed: question.state === 'closed', answers: answers.map(publicForumPost) },
-    db: saved,
+    body: { ...publicForumPost(question), ...(count ? { views: (question.views ?? 0) + 1 } : {}), forum: { id: forum?.id, name: forum?.name ?? '', mode: forum?.mode }, closed: question.state === 'closed', answers: answers.map(publicForumPost) },
+    ...(saved ? { db: saved } : {}),
   };
 }
 
@@ -126,4 +127,30 @@ export function publicVote(db, body, ip) {
   } catch (e) {
     return { status: 400, body: { error: e.message } };
   }
+}
+
+const VISIT_WINDOW = 3600 * 1000;
+
+/** One key per client and post; the numeric id is canonical, so /1 and /01 are the same post. */
+export const visitKey = (ip, kind, rawId) => `${ip}:${kind}:${Number(rawId)}`;
+
+/**
+ * Remembers which clients read which post in the last hour. A key is stored only by mark(), after the visit was saved.
+ * Insertion order is time order (a key is removed before it is set again), so the oldest entries sit at the front and
+ * the map never grows past `max`.
+ */
+export function createVisitTracker({ max = 100000, window = VISIT_WINDOW } = {}) {
+  const visits = new Map();
+  return {
+    size: () => visits.size,
+    seen: (key, now = Date.now()) => visits.get(key) > now - window,
+    mark(key, now = Date.now()) {
+      visits.delete(key);
+      for (const [k, at] of visits) {
+        if (visits.size < max && at > now - window) break;
+        visits.delete(k);
+      }
+      visits.set(key, now);
+    },
+  };
 }

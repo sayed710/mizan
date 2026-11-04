@@ -1,5 +1,5 @@
 // Bank statement files (OFX/QFX, CAMT.053) parsed into statement lines; re-importing the same transactions is a no-op.
-import { create, search } from '../orm.js';
+import { create, read, search } from '../orm.js';
 
 const ofxDate = (v) => (/^\d{8}/.test(v ?? '') ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : null);
 // OFX 1.x is SGML: tags may be left unclosed, so a value runs to the next "<".
@@ -33,12 +33,20 @@ export function parseCamt(text) {
 }
 
 /** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
-export function importStatement(db, fileName, text) {
+export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
   const lines = camt ? parseCamt(text) : parseOfx(text);
   if (!lines.length) throw new Error('No transactions found in this file');
   const known = new Set(search(db, 'account.bank.statement.line').map((l) => l.unique_import_id).filter(Boolean));
-  const fresh = lines.filter((l) => !l.unique_import_id || !known.has(l.unique_import_id));
-  const next = fresh.reduce((acc, l) => create(acc, 'account.bank.statement.line', { ...l, payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
+  const journal = defaults.journal_id ? read(db, 'account.journal', defaults.journal_id) : null;
+  if (defaults.journal_id && !journal) throw new Error('The bank journal does not exist');
+  if (journal && defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
+  const fresh = lines.filter((l) => {
+    if (!l.unique_import_id) return true;
+    if (known.has(l.unique_import_id)) return false;
+    known.add(l.unique_import_id);
+    return true;
+  });
+  const next = fresh.reduce((acc, l) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, ...(journal ? { company_id: journal.company_id ?? 1 } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
   return { db: next, count: fresh.length };
 }

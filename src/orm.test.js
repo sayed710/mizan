@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { aggregate, applyFilters, create, groupRecords, matches, messagesOf, read, search, unlink, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
+import { postEntry } from './models/ledger.js';
 
 const runButton = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -28,9 +29,9 @@ test('order totals include tax', () => {
 
 test('stage change writes a tracking message and does not mutate input', () => {
   const db0 = seed();
-  const db1 = write(db0, 'crm.lead', 1, { stage_id: 'qualified' });
-  assert.equal(read(db0, 'crm.lead', 1).stage_id, 'new');
-  assert.equal(read(db1, 'crm.lead', 1).stage_id, 'qualified');
+  const db1 = write(db0, 'crm.lead', 1, { stage_id: 2 });
+  assert.equal(read(db0, 'crm.lead', 1).stage_id, 1);
+  assert.equal(read(db1, 'crm.lead', 1).stage_id, 2);
   assert.match(messagesOf(db1, 'crm.lead', 1)[0].body, /Stage: New → Qualified/);
 });
 
@@ -52,7 +53,8 @@ test('text search matches related partner names and tags', () => {
 test('groupRecords keeps selection order and empty stages', () => {
   const db = seed();
   const groups = groupRecords(db, 'crm.lead', search(db, 'crm.lead'), 'stage_id');
-  assert.deepEqual(groups.map((g) => g.key), ['new', 'qualified', 'proposition', 'won']);
+  assert.deepEqual(groups.map((g) => g.key), [1, 2, 3, 4]);
+  assert.deepEqual(groups.map((g) => g.label), ['New', 'Qualified', 'Proposition', 'Won']);
   assert.equal(aggregate(groups[0].records, '__count'), 2);
   assert.equal(aggregate(groups[0].records, 'expected_revenue'), 50500);
 });
@@ -71,7 +73,7 @@ test('confirming a sale creates a delivery; stock leaves only when it is validat
   db = runButton(db, 'sale.order', 1, 'Confirm').db;
   assert.equal(read(db, 'product', 1).qty_available, before);
   const delivery = search(db, 'stock.picking').find((p) => p.sale_id === 1);
-  assert.deepEqual(delivery.move_ids, [{ product_id: 1, qty: 40 }]); // service line (installation) is not shipped
+  assert.deepEqual(delivery.move_ids, [{ product_id: 1, qty: 40, so_line: 0 }]); // service line (installation) is not shipped
   db = runButton(db, 'stock.picking', delivery.id, 'Validate').db;
   assert.equal(read(db, 'product', 1).qty_available, before - 40);
   const { db: db2, id } = create(db, 'purchase.order', { partner_id: 7, order_line: [{ product_id: 1, qty: 10, price_unit: 120, tax: 14 }] });
@@ -98,9 +100,13 @@ test('invoice from sale order, posting numbers it, payment state follows amount 
   assert.equal(inv.state, 'draft');
   db = runButton(db, 'account.move', inv.id, 'Confirm').db;
   const posted = read(db, 'account.move', inv.id);
-  assert.match(posted.name, /^INV\/\d{4}\/00003$/);
+  // Numbering restarts each year; the seed's invoices may belong to the previous one.
+  const year = posted.invoice_date.slice(0, 4);
+  const numbered = search(db, 'account.move').filter((m) => m.id !== inv.id && m.name?.startsWith(`INV/${year}/`)).length;
+  assert.equal(posted.name, `INV/${year}/${String(numbered + 1).padStart(5, '0')}`);
   assert.equal(posted.payment_state, 'not_paid');
-  db = write(db, 'account.move', inv.id, { amount_paid: posted.amount_total });
+  const settled = postEntry(db, { journal: 'BNK1', ref: 'pay', lines: [{ account: '101401', debit: posted.amount_total }, { account: '121000', credit: posted.amount_total, partner_id: posted.partner_id }] });
+  db = write(settled.db, 'account.move', inv.id, { amount_paid: posted.amount_total, payments: [{ date: read(settled.db, 'account.move', settled.id).invoice_date, amount: posted.amount_total, move_id: settled.id }] });
   assert.equal(read(db, 'account.move', inv.id).payment_state, 'paid');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
 });

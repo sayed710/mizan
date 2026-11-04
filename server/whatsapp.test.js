@@ -79,3 +79,13 @@ test('sending a template commits the queued message, then the API result', async
   await assert.rejects(sendWhatsApp({ MIZAN_WHATSAPP_TOKEN: 't', MIZAN_WHATSAPP_PHONE_ID: '1' }, store, { name: 'Admin' }, { model: 'sale.order', id: 1 }), /failed/);
   assert.equal(search(db, 'whatsapp.message').at(-1).state, 'failed');
 });
+
+test('a server that lost the database lease queues the message but never sends it', async () => {
+  let called = false;
+  globalThis.fetch = async () => { called = true; return new Response('{}', { status: 200 }); };
+  let db = seed();
+  const lost = new Error('Another Mizan server took over this database; this one stops writing');
+  const store = { get: () => db, commit: (next) => { db = next; }, check: () => { throw lost; } };
+  await assert.rejects(sendWhatsApp({ MIZAN_WHATSAPP_TOKEN: 't', MIZAN_WHATSAPP_PHONE_ID: '1' }, store, { name: 'Admin' }, { model: 'sale.order', id: 1 }), /failed|took over/);
+  assert.equal(called, false);
+});

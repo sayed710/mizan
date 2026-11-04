@@ -1,6 +1,7 @@
 // Fleet services, fuel consumption and cost of ownership.
 import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
+import { apps2Models } from './apps2.js';
 
 const day = 86400000;
 const timestamp = (date) => Date.parse(`${date}T00:00:00Z`);
@@ -116,7 +117,19 @@ function changeServiceState(db, record, state) {
   return { db: write(db, 'fleet.service', record.id, { state, stage_id: state }) };
 }
 
+const contract = apps2Models['fleet.contract'];
+
 export const fleetPlusModels = {
+  'fleet.contract': {
+    ...contract,
+    form: {
+      ...contract.form,
+      buttons: [...(contract.form.buttons ?? []), { label: 'Renew', when: (r) => r.stage_id !== 'closed' && !!r.start_date && !!r.expiration_date, run: (db, r) => {
+        const renewed = renewContract(db, r);
+        return { db: renewed.db, go: `#/open/fleet.contract/${renewed.id}` };
+      } }],
+    },
+  },
   'fleet.service': {
     label: 'Services',
     fields: {

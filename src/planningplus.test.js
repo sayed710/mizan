@@ -1,3 +1,4 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -112,7 +113,10 @@ test('switch requests require the owner and published state; acceptance refuses 
 
 test('analysis uses weekdays and employee working hours, counts leave once and prorates boundary shifts', () => {
   const { db: base, a, b } = employees(seed());
-  const withLeave = leave(leave(base, a, '2032-01-06', '2032-01-07'), a, '2032-01-07');
+  const historical = leave(base, a, '2032-01-06', '2032-01-07');
+  // Historical imports can contain overlaps; new requests now reject them. Keep testing deduplication of old data.
+  const original = historical.records['hr.leave'].at(-1);
+  const withLeave = { ...historical, records: { ...historical.records, 'hr.leave': [...historical.records['hr.leave'], { ...original, id: original.id + 1, date_from: '2032-01-07' }] }, seq: { ...historical.seq, 'hr.leave': original.id + 1 } };
   const first = shift(withLeave, { employee_id: a, allocated_hours: 12 });
   const second = shift(first.db, { employee_id: b, start: '2032-01-04', end: '2032-01-05', allocated_hours: 8 });
   const report = planningAnalysis(second.db, from, to);

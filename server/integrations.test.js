@@ -2,7 +2,7 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { read, search, write } from '../src/orm.js';
 import { seed } from '../src/seed.js';
-import { aiDraft, assertPublicUrl, ingestIot, issueIotToken, quoteShipping, sendWhatsApp, syncMarketplace } from './integrations.js';
+import { aiDraft, assertPublicUrl, ingestIot, isPrivate, pinnedFetch, issueIotToken, quoteShipping, sendWhatsApp, syncMarketplace } from './integrations.js';
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -22,6 +22,11 @@ test('outbound URLs must be public https', async () => {
   await assert.rejects(assertPublicUrl('https://127.0.0.1/feed'), /private networks/);
   await assert.rejects(assertPublicUrl('https://192.168.1.10/feed'), /private networks/);
   await assert.rejects(assertPublicUrl('not a url'), /Invalid URL/);
+  // Ranges the first guard missed: benchmarking, multicast, broadcast, documentation, mapped IPv6.
+  for (const ip of ['198.18.0.1', '224.0.0.1', '255.255.255.255', '203.0.113.10', '100.64.0.1', '[::ffff:10.0.0.1]', '[fd00::1]']) {
+    await assert.rejects(assertPublicUrl(`https://${ip}/feed`), /private networks/, ip);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '172.15.0.1']) assert.equal(isPrivate(ip), false, ip);
 });
 
 test('marketplace sync imports new orders once, matching products by SKU', async () => {
@@ -109,4 +114,9 @@ test('bill digitization sends the document to Claude and fills the draft bill', 
   assert.deepEqual([bill.ref, bill.invoice_date, bill.invoice_date_due], ['DT-2041', '2026-10-20', '2026-11-19']);
   assert.deepEqual(bill.invoice_line_ids.map((l) => [l.name, l.qty, l.price_unit, l.tax]), [['Oak planks', 12, 45.5, 14]]);
   await assert.rejects(digitizeBill(db, { id, file: { name: 'x.exe', type: 'application/octet-stream', data: 'AA==' } }), /Upload a PDF or an image/);
+});
+
+test('the outbound connection itself re-checks the address it connects to (no DNS-rebinding window)', async () => {
+  // localhost resolves to loopback at connect time: refused even though no URL check ran before.
+  await assert.rejects(pinnedFetch('https://localhost:9/'), /private networks/);
 });

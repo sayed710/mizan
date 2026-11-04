@@ -6,6 +6,8 @@ import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { companyViewDb } from '../companyView.js';
+import { invoiceKpis } from '../dashboardKpis.js';
+import { RateNote } from './RateNote.jsx';
 
 const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
 
@@ -24,36 +26,31 @@ function JournalCard({ card }) {
     <section className="panel journal-card">
       <h2><a href={list}>{card.journal.name}</a></h2>
       <dl>{figures.map(([label, value]) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>)}</dl>
+      <RateNote count={card.unratedCount} />
       {action && <a className="btn primary sm" href={action[1]}>{t(action[0])}</a>}
     </section>
   );
 }
 
-const sum = (recs, f) => recs.reduce((s, r) => s + (Number(r[f]) || 0), 0);
-
 /** Invoicing overview: KPI tiles (each links to the matching list) + monthly invoiced chart. */
 export function Dashboard() {
   const db = companyViewDb(useDb());
-  const posted = search(db, 'account.move').filter((m) => m.state === 'posted');
-  const invoices = posted.filter((m) => m.move_type === 'out_invoice');
-  const bills = posted.filter((m) => m.move_type === 'in_invoice');
-  const month = today().slice(0, 7);
-  const overdue = invoices.filter((m) => m.payment_state !== 'paid' && m.invoice_date_due < today());
-  const byPartner = Object.entries(
-    invoices.reduce((acc, m) => ({ ...acc, [m.partner_id]: (acc[m.partner_id] ?? 0) + m.amount_total }), {}),
-  ).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const invoices = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice');
+  const kpi = invoiceKpis(db, today().slice(0, 7));
+  const byPartner = kpi.topCustomers;
 
   const tiles = [
-    ['Invoiced this month', money(sum(invoices.filter((m) => m.invoice_date?.startsWith(month)), 'amount_total')), '#/accounting/invoices?view=list'],
-    ['Receivable', money(sum(invoices, 'amount_residual')), '#/accounting/invoices?view=list'],
-    ['Payable', money(sum(bills, 'amount_residual')), '#/accounting/bills?view=list'],
-    ['Overdue invoices', String(overdue.length), '#/accounting/invoices?view=list'],
+    ['Invoiced this month', money(kpi.invoicedThisMonth), '#/accounting/invoices?view=list&filter=posted'],
+    ['Receivable', money(kpi.receivable), '#/accounting/invoices?view=list&filter=unpaid'],
+    ['Payable', money(kpi.payable), '#/accounting/bills?view=list&filter=unpaid'],
+    ['Overdue invoices', String(kpi.overdue), '#/accounting/invoices?view=list&filter=overdue'],
     ['To reconcile', String(search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length), '#/accounting/bank'],
   ];
 
   return (
     <main className="action dashboard">
       <div className="control-panel"><h1 className="cp-title">{t('Dashboard')}</h1></div>
+      <RateNote count={kpi.unratedCount} />
       <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
       <div className="kpis">
         {tiles.map(([label, value, href]) => (

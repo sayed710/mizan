@@ -1,42 +1,54 @@
 // Sales teams with lead assignment rules, and predictive lead scoring learned from won and lost leads.
-import { search, write } from '../orm.js';
+import { search, write, writeMany } from '../orm.js';
 import { addDays, today } from './common.js';
+import { isWonLead } from './crm.js';
 
 /** Minimum closed leads before scores are trusted; below it the stage probability is kept. */
 export const MIN_CLOSED_LEADS = 5;
 const FEATURES = ['country', 'medium', 'source', 'stage_id'];
 
-const isWon = (l) => l.stage_id === 'won';
-const isLost = (l) => l.active === false && l.stage_id !== 'won';
 const featuresOf = (l) => [
   ...FEATURES.filter((f) => l[f]).map((f) => `${f}=${String(l[f]).toLowerCase()}`),
   ...(l.tag_ids ?? []).map((t) => `tag=${String(t).toLowerCase()}`),
 ];
 
 /**
- * Probability (%) that an open lead is won: naive Bayes over its country, medium, source, stage and tags, with
- * Laplace smoothing, learned from closed leads. Null when there is not enough history.
+ * Scorer for open leads: naive Bayes over country, medium, source, stage and tags, with Laplace smoothing,
+ * learned once from closed leads. Null when there is not enough history.
  */
-export function predictiveProbability(db, lead) {
+function scorer(db) {
   const all = db.records['crm.lead'] ?? [];
-  const won = all.filter(isWon);
-  const lost = all.filter(isLost);
+  const won = all.filter((lead) => isWonLead(db, lead));
+  const lost = all.filter((lead) => lead.active === false && !isWonLead(db, lead));
   if (won.length + lost.length < MIN_CLOSED_LEADS || !won.length || !lost.length) return null;
-  const count = (list, f) => list.filter((l) => featuresOf(l).includes(f)).length;
-  // Work in log-odds so many features do not underflow.
-  const logOdds = featuresOf({ ...lead, stage_id: lead.stage_id === 'won' ? null : lead.stage_id }).reduce(
-    (s, f) => s + Math.log((count(won, f) + 1) / (won.length + 2)) - Math.log((count(lost, f) + 1) / (lost.length + 2)),
-    Math.log(won.length / lost.length),
-  );
-  return Math.round((100 / (1 + Math.exp(-logOdds))) * 100) / 100;
+  const tally = (list) => list.reduce((m, l) => { for (const f of new Set(featuresOf(l))) m.set(f, (m.get(f) ?? 0) + 1); return m; }, new Map());
+  const wonCounts = tally(won);
+  const lostCounts = tally(lost);
+  return (lead) => {
+    // Work in log-odds so many features do not underflow.
+    const logOdds = featuresOf({ ...lead, stage_id: isWonLead(db, lead) ? null : lead.stage_id }).reduce(
+      (s, f) => s + Math.log(((wonCounts.get(f) ?? 0) + 1) / (won.length + 2)) - Math.log(((lostCounts.get(f) ?? 0) + 1) / (lost.length + 2)),
+      Math.log(won.length / lost.length),
+    );
+    return Math.round((100 / (1 + Math.exp(-logOdds))) * 100) / 100;
+  };
 }
 
-/** Refresh the automated probability of every open lead (kept in step by the scheduler). */
+/** Probability (%) that an open lead is won, or null when there is not enough history. */
+export function predictiveProbability(db, lead) {
+  return scorer(db)?.(lead) ?? null;
+}
+
+/** Refresh the automated probability of every open lead (kept in step by the scheduler), in one batch. */
 export function refreshProbabilities(db) {
-  return search(db, 'crm.lead').filter((l) => l.stage_id !== 'won').reduce((acc, l) => {
-    const p = predictiveProbability(acc, l);
-    return p == null || p === l.automated_probability ? acc : write(acc, 'crm.lead', l.id, { automated_probability: p });
-  }, db);
+  const score = scorer(db);
+  if (!score) return db;
+  const updates = new Map();
+  for (const l of search(db, 'crm.lead').filter((x) => !isWonLead(db, x))) {
+    const p = score(l);
+    if (p !== l.automated_probability) updates.set(l.id, { automated_probability: p });
+  }
+  return writeMany(db, 'crm.lead', updates);
 }
 
 const matchesTeam = (team, lead) => (!team.country || String(lead.country ?? '').toLowerCase() === team.country.toLowerCase())
@@ -50,7 +62,7 @@ export function assignLeads(db, team, at = today()) {
   const since = addDays(at, -30);
   const members = (team.member_ids ?? []).filter((m) => m.name);
   if (!members.length) return db;
-  const leads = search(db, 'crm.lead').filter((l) => !l.assign_date && !l.user && l.stage_id !== 'won' && (!l.team_id || l.team_id === team.id) && matchesTeam(team, l));
+  const leads = search(db, 'crm.lead').filter((l) => !l.assign_date && !l.user && !isWonLead(db, l) && (!l.team_id || l.team_id === team.id) && matchesTeam(team, l));
   const load = new Map(members.map((m) => [m.name, search(db, 'crm.lead').filter((l) => l.user === m.name && (l.assign_date ?? '') >= since).length]));
   return leads.reduce((acc, lead) => {
     const free = members.filter((m) => !(Number(m.capacity) > 0) || load.get(m.name) < Number(m.capacity))

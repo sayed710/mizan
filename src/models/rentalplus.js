@@ -1,59 +1,18 @@
 import { create, read, search, write } from '../orm.js';
 import { postEntry } from './ledger.js';
+import { extraModels } from './extra.js';
+import { round } from '../money.js';
 
-const periods = { hour: 1, day: 24, week: 168, month: 720 };
-const round = (n) => Math.round(n * 100) / 100;
-const timestamp = (value) => {
-  const time = typeof value === 'string' && value.trim() ? Date.parse(value) : NaN;
-  if (!Number.isFinite(time)) throw new Error('Enter a valid pickup and return date');
-  return time;
-};
-const windowOf = (from, to) => {
-  const start = timestamp(from), end = timestamp(to);
-  if (end < start) throw new Error('The return date must be after the pickup date');
-  return [start, end];
-};
+const baseRental = extraModels['sale.rental'];
+
+export { bestPrice, rentalHours } from './rentalpricing.js';
+import { periods, timestamp, windowOf } from './rentalpricing.js';
+
 const rentalOf = (db, id) => {
   const rental = read(db, 'sale.rental', id);
   if (!rental) throw new Error('Rental not found');
   return rental;
 };
-
-/** Elapsed hours rounded up to a whole hour, with a one-hour minimum. */
-export function rentalHours(pickup, end) {
-  const [from, to] = windowOf(pickup, end);
-  return Math.max(1, Math.ceil((to - from) / 36e5));
-}
-
-/** Compare largest-first combinations and rounded-up periods; prices are per unit. */
-export function bestPrice(db, productId, hours) {
-  if (!Number.isFinite(hours) || hours < 0) throw new Error('Enter a valid rental duration');
-  const wanted = Math.max(1, hours);
-  const rules = search(db, 'rental.pricing').filter((r) => r.product_id === productId)
-    .map((r) => ({ ...r, hours: periods[r.period] * r.duration })).sort((a, b) => b.hours - a.hours || a.price - b.price);
-  if (!rules.length) {
-    const rental = search(db, 'sale.rental').find((r) => r.product_id === productId);
-    if (!rental) throw new Error('Set rental pricing or a rental daily price for this product');
-    const qty = Math.ceil(wanted / 24), price = round(qty * Number(rental.price_per_day));
-    return { price, breakdown: [{ period: 'day', duration: 1, qty, price }] };
-  }
-  const quote = (index, remaining) => {
-    if (remaining <= 0) return { price: 0, breakdown: [] };
-    if (index === rules.length) return { price: Infinity, breakdown: [] };
-    const rule = rules[index];
-    const line = (qty) => ({ period: rule.period, duration: rule.duration, qty, price: round(qty * rule.price) });
-    const rounded = line(Math.ceil(remaining / rule.hours));
-    let best = { price: rounded.price, breakdown: [rounded] };
-    const qty = Math.floor(remaining / rule.hours);
-    const tail = quote(index + 1, remaining - qty * rule.hours);
-    const head = line(qty);
-    const combined = { price: round(head.price + tail.price), breakdown: [...(qty ? [head] : []), ...tail.breakdown] };
-    if (combined.price < best.price) best = combined;
-    const smaller = qty ? quote(index + 1, remaining) : tail;
-    return smaller.price < best.price ? smaller : best;
-  };
-  return quote(0, wanted);
-}
 
 /** Available fleet units, accounting for picked units already removed from on-hand stock. */
 export function availability(db, productId, from, to) {
@@ -72,11 +31,11 @@ export function holdDeposit(db, rentalId, amount) {
   const rental = rentalOf(db, rentalId);
   if (!Number.isFinite(amount) || round(amount) <= 0) throw new Error('Deposit amount must be positive');
   const value = round(amount);
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Deposit ${rental.name}`, lines: [
+  const booked = postEntry(db, { journal: 'BNK1', ref: `Deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
     { account: '101401', debit: value, partner_id: rental.partner_id },
     { account: '230100', credit: value, partner_id: rental.partner_id },
   ] });
-  return create(booked.db, 'rental.deposit', { rental_id: rentalId, amount: value, state: 'held', move_id: booked.id });
+  return create(booked.db, 'rental.deposit', { rental_id: rentalId, company_id: rental.company_id ?? 1, amount: value, state: 'held', move_id: booked.id });
 }
 
 /** Release the liability to bank and, for damage, other income; returns the new db. */
@@ -88,7 +47,7 @@ export function settleDeposit(db, depositId, { damage = 0, note } = {}) {
   const rental = rentalOf(db, deposit.rental_id);
   const withheld = round(damage), refund = round(deposit.amount - withheld);
   const partner_id = rental.partner_id;
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Settle deposit ${rental.name}`, lines: [
+  const booked = postEntry(db, { journal: 'BNK1', ref: `Settle deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
     { account: '230100', debit: deposit.amount, partner_id },
     ...(refund ? [{ account: '101401', credit: refund, partner_id }] : []),
     ...(withheld ? [{ account: '450000', credit: withheld, partner_id }] : []),
@@ -147,6 +106,7 @@ export const rentalPlusModels = {
   },
   'rental.deposit': {
     label: 'Security Deposits',
+    duplicate: false,
     fields: {
       rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', required: true },
       amount: { type: 'monetary', label: 'Amount', required: true, readonly: true },
@@ -160,8 +120,29 @@ export const rentalPlusModels = {
     list: ['rental_id', 'amount', 'state', 'withheld_amount', 'move_id'],
     form: {
       title: 'rental_id', statusbar: 'state', lockedWhen: (r) => r.state !== 'held',
-      buttons: [{ label: 'Refund', primary: true, when: (r) => r.state === 'held', run: (db, r) => ({ db: settleDeposit(db, r.id) }) }],
+      buttons: [
+        { label: 'Refund', primary: true, when: (r) => r.state === 'held', run: (db, r) => ({ db: settleDeposit(db, r.id) }) },
+        {
+          label: 'Withhold for Damage', when: (r) => r.state === 'held',
+          ask: [{ label: 'Damage amount to keep', type: 'number' }, { label: 'Note' }],
+          run: (db, r, [damage, note]) => ({ db: settleDeposit(db, r.id, { damage, note: note || undefined }) }),
+        },
+      ],
       groups: [['rental_id', 'amount', 'withheld_amount'], ['move_id', 'settlement_move_id']], tabs: [{ label: 'Note', fields: ['note'] }], chatter: true,
+    },
+  },
+  'sale.rental': {
+    ...baseRental,
+    form: {
+      ...baseRental.form,
+      buttons: [
+        ...baseRental.form.buttons,
+        {
+          label: 'Hold Deposit', when: (r) => ['reserved', 'picked'].includes(r.state),
+          ask: [{ label: 'Deposit amount', type: 'number' }],
+          run: (db, r, [amount]) => { const res = holdDeposit(db, r.id, amount); return { db: res.db, go: `#/rental/deposits/${res.id}` }; },
+        },
+      ],
     },
   },
 };

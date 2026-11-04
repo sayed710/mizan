@@ -2,8 +2,10 @@
 import { create, read, search, write } from '../orm.js';
 import { pad, today } from './common.js';
 import { postEntry } from './ledger.js';
+import { round } from '../money.js';
+import { leaveIntervals } from './timeoff.js';
+import { calendarFor, isWorkingDay } from './calendar.js';
 
-const round = (n) => Math.round(n * 100) / 100;
 
 /**
  * Default salary structure (rules in order). Categories: basic, allowance, gross (= basic + allowances),
@@ -36,15 +38,20 @@ const datesBetween = (from, to) => {
 
 /** Summarize scheduled working days, validated unpaid leave, and attendance overtime for a slip. */
 export function workedDays(db, slip) {
-  const contract = runningContract(db, slip.employee_id, slip.date_to);
-  const schedule = String(contract?.work_days || DEFAULT_WORK_DAYS);
-  const weekdays = new Set(schedule.split(',').map((day) => Number(day.trim())).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6));
+  const calendar = calendarFor(db, slip.employee_id, slip.date_to);
   const unpaidLeaves = search(db, 'hr.leave').filter((leave) => {
-    const type = String(leave.leave_type?.name ?? leave.leave_type ?? '').toLowerCase();
+    const configured = (db.records['hr.work.entry.type'] ?? []).find((t) => t.id === leave.work_entry_type_id);
+    const type = String(configured?.legacy_code || configured?.name || leave.leave_type?.name || leave.leave_type || '').toLowerCase();
     return leave.employee_id === slip.employee_id && leave.state === 'validate' && (leave.unpaid === true || type.includes('unpaid'));
   });
-  const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => weekdays.has(new Date(`${date}T00:00:00Z`).getUTCDay()));
-  const unpaidDays = workingDates.filter((date) => unpaidLeaves.some((leave) => leave.date_from <= date && leave.date_to >= date)).length;
+  const workingDates = datesBetween(slip.date_from, slip.date_to).filter((date) => isWorkingDay(calendar, date, db));
+  const intervals = unpaidLeaves.flatMap((leave) => leaveIntervals(db, leave));
+  const unpaidDays = round(workingDates.reduce((sum, date) => {
+    const occupied = intervals.filter((i) => i.date === date).sort((a, b) => a.from - b.from);
+    let until = -Infinity, hours = 0;
+    for (const i of occupied) { hours += Math.max(0, i.to - Math.max(i.from, until)); until = Math.max(until, i.to); }
+    return sum + (occupied.length ? Math.min(1, hours / occupied[0].dayHours) : 0);
+  }, 0));
   const overtimeHours = search(db, 'hr.attendance')
     .filter((attendance) => attendance.employee_id === slip.employee_id && attendance.date >= slip.date_from && attendance.date <= slip.date_to)
     .reduce((sum, attendance) => sum + Math.max(0, Number(attendance.overtime) || 0), 0);
@@ -126,9 +133,11 @@ function compute(db, slip) {
   const structure = read(db, 'hr.payroll.structure', contract?.structure_id ?? slip.structure_id);
   const rules = structure?.rules?.length ? structure.rules : DEFAULT_RULES;
   const worked = workedDays(db, slip);
+  const calendar = calendarFor(db, slip.employee_id, slip.date_to);
+  const hoursPerDay = Number(calendar?.hours_per_day) || 8;
   const workedDaysLines = [
-    { code: 'WORK100', name: 'Regular Work Days', days: worked.worked_days, hours: worked.worked_days * 8 },
-    { code: 'UNPAID', name: 'Unpaid Work Days', days: worked.unpaid_days, hours: worked.unpaid_days * 8 },
+    { code: 'WORK100', name: 'Regular Work Days', days: worked.worked_days, hours: worked.worked_days * hoursPerDay },
+    { code: 'UNPAID', name: 'Unpaid Work Days', days: worked.unpaid_days, hours: worked.unpaid_days * hoursPerDay },
     { code: 'OVERTIME', name: 'Overtime', days: 0, hours: worked.overtime_hours },
   ];
   return write(db, 'hr.payslip', slip.id, {
@@ -230,13 +239,16 @@ export const payrollModels = {
       employee_id: { type: 'many2one', relation: 'hr.employee', label: 'Employee', required: true },
       structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Salary Structure' },
       wage: { type: 'monetary', label: 'Wage' },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Working Schedule' },
       work_days: { type: 'char', label: 'Work Days' },
+      hours_per_day: { type: 'float', label: 'Hours per Day' },
+      hour_from: { type: 'float', label: 'Work Start Hour' },
       date_start: { type: 'date', label: 'Contract Start Date' },
       date_end: { type: 'date', label: 'Contract End Date' },
       contract_type: { type: 'selection', label: 'Contract Type', options: [['permanent', 'Permanent'], ['fixed', 'Fixed Term'], ['intern', 'Internship']] },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'New'], ['running', 'Running'], ['close', 'Expired'], ['cancel', 'Cancelled']] },
     },
-    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today(), work_days: DEFAULT_WORK_DAYS }),
+    defaults: () => ({ state: 'draft', contract_type: 'permanent', date_start: today(), work_days: DEFAULT_WORK_DAYS, hours_per_day: 8, hour_from: 9 }),
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'expiring', label: 'Expiring Soon', fn: (r) => r.state === 'running' && r.date_end && r.date_end <= today().slice(0, 7) + '-31' }]],
     groupBys: ['state', 'structure_id', 'contract_type'],
     kanban: { groupBy: 'state', title: 'name', lines: ['employee_id', 'wage', 'date_end'] },
@@ -245,7 +257,7 @@ export const payrollModels = {
       statusbar: 'state',
       statusbarClickable: true,
       title: 'name',
-      groups: [['employee_id', 'structure_id', 'contract_type'], ['wage', 'date_start', 'date_end']],
+      groups: [['employee_id', 'structure_id', 'contract_type'], ['wage', 'date_start', 'date_end', 'work_days', 'hours_per_day', 'hour_from']],
       chatter: true,
     },
   },
@@ -298,8 +310,8 @@ export const payrollModels = {
       lockedWhen: (r) => r.state !== 'draft',
       buttons: [
         { label: 'Compute Sheet', when: (r) => r.state === 'draft', run: (db, r) => ({ db: compute(db, r) }) },
-        { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirm(db, r) }) },
-        { label: 'Mark as Paid', primary: true, when: (r) => r.state === 'done', run: (db, r) => ({ db: pay(db, r) }) },
+        { label: 'Confirm', primary: true, posts: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirm(db, r) }) },
+        { label: 'Mark as Paid', primary: true, posts: true, when: (r) => r.state === 'done', run: (db, r) => ({ db: pay(db, r) }) },
         { label: 'Print', when: (r) => r.line_ids?.length, run: (db, r) => ({ db, go: `#/print/hr.payslip/${r.id}` }) },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => r.state === 'draft' },
       ],
@@ -327,11 +339,11 @@ export const payrollModels = {
       buttons: [
         { label: 'Generate Payslips', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: generateSlips(db, r) }) },
         {
-          label: 'Confirm All', when: (r) => r.state === 'draft',
+          label: 'Confirm All', posts: true, when: (r) => r.state === 'draft',
           run: (db, r) => ({ db: write(slipsOf(db, r).filter((p) => p.state === 'draft').reduce((acc, p) => confirm(acc, read(acc, 'hr.payslip', p.id)), db), 'hr.payslip.run', r.id, { state: 'done' }) }),
         },
         {
-          label: 'Pay All', primary: true, when: (r) => r.state === 'done',
+          label: 'Pay All', primary: true, posts: true, when: (r) => r.state === 'done',
           run: (db, r) => ({ db: write(slipsOf(db, r).filter((p) => p.state === 'done').reduce((acc, p) => pay(acc, read(acc, 'hr.payslip', p.id)), db), 'hr.payslip.run', r.id, { state: 'paid' }) }),
         },
       ],

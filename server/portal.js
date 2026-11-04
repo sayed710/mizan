@@ -8,7 +8,7 @@ import { demoPaymentsAllowed } from './api.js';
 const ORDER = 'sale.order';
 const INVOICE = 'account.move';
 const paths = { __proto__: null, [ORDER]: 'orders', [INVOICE]: 'invoices' };
-const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+export const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const money = (v) => escape((Number(v) || 0).toFixed(2));
 const tokenFor = (secret, model, r) => createHmac('sha256', secret).update(`${model}:${r.id}:${r.partner_id}`).digest('hex');
 const tokenMatches = (secret, model, r, given) => /^[a-f0-9]{64}$/.test(given ?? '') && timingSafeEqual(Buffer.from(given, 'hex'), Buffer.from(tokenFor(secret, model, r), 'hex'));
@@ -66,7 +66,7 @@ export function portalAddOption(db, r, rawIndex) {
   return quotePlus.addOption(db, r.id, index);
 }
 
-const page = (title, content) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)}</title><style>
+export const page = (title, content) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escape(title)}</title><style>
 body{margin:0;background:#f5f6f7;color:#20252b;font:1rem/1.6 system-ui,sans-serif}main{max-width:56rem;margin:2rem auto;padding:1.5rem;background:white}h1{line-height:1.2;overflow-wrap:anywhere}a{color:#174f87}table{width:100%;border-collapse:collapse}th,td{text-align:start;padding:.7rem;border-bottom:1px solid #ddd;overflow-wrap:anywhere}label{display:block;margin-block:1rem}input{font:inherit;max-width:100%;box-sizing:border-box}input,button{padding:.7rem;min-height:48px}button{font:inherit;cursor:pointer}form{margin-block:1rem}dl{display:grid;grid-template-columns:1fr 1fr}dd{text-align:end}p{white-space:pre-wrap;overflow-wrap:anywhere}.scroll{overflow-x:auto}:focus-visible{outline:3px solid #174f87;outline-offset:3px}@media(max-width:40rem){main{margin:0;padding:1rem}th,td{padding:.4rem}}@media print{body{background:white}main{margin:0;max-width:none}.no-print{display:none}}
 </style></head><body><main>${content}</main></body></html>`;
 const form = (url, action, token, content) => `<form method="post" action="${escape(url.split('?')[0] + '/' + action)}"><input type="hidden" name="access_token" value="${escape(token)}">${content}</form>`;
@@ -75,6 +75,11 @@ function documentPage(db, model, r, url, query, env) {
   const isOrder = model === ORDER;
   const title = isOrder ? r.state === 'sale' ? 'Sales Order' : 'Quotation' : 'Invoice';
   const partner = read(db, 'res.partner', r.partner_id);
+  const comp = read(db, 'res.company', r.company_id ?? 1);
+  const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
+  const docCurrency = (r.currency_id && read(db, 'res.currency', r.currency_id)?.name)
+    ?? (comp?.currency_id && read(db, 'res.currency', comp.currency_id)?.name)
+    ?? db.settings?.currency ?? 'USD';
   const token = new URL(url, 'http://x').searchParams.get('access_token');
   const lines = r[isOrder ? 'order_line' : 'invoice_line_ids'] ?? [];
   const printing = query.has('print') || query.has('download');
@@ -87,7 +92,7 @@ function documentPage(db, model, r, url, query, env) {
       controls += demoPaymentsAllowed(env) ? form(url, 'pay', token, '<p>Demo only: no real money is transferred.</p><button type="submit">Pay with demo provider</button>') : `<p>Pay by bank transfer. ${escape(search(db, 'payment.provider').find((p) => p.code === 'wire' && p.state === 'enabled')?.pending_msg || 'Contact us for bank details and use the document number as your payment reference.')}</p>`;
     }
   }
-  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(db.settings?.company?.name ?? db.settings?.company)} · ${escape(db.settings?.currency ?? 'USD')}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
+  return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
     ${query.has('message') ? `<p role="status">${escape(query.get('message'))}</p>` : ''}
     <div class="scroll"><table><caption>Document lines</caption><thead><tr><th scope="col">Description</th><th scope="col">Quantity</th><th scope="col">Unit price</th><th scope="col">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr><td>${escape(l.name || read(db, 'product', l.product_id)?.name)}</td><td>${escape(l.qty)}</td><td>${money(l.price_unit)}</td><td>${money(subtotal(l))}</td></tr>`).join('')}</tbody></table></div>
     <dl><dt>Untaxed</dt><dd>${money(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${money(r.amount_tax)}</dd><dt>Total</dt><dd>${money(r.amount_total)}</dd>${!isOrder ? `<dt>Amount due</dt><dd>${money(r.amount_residual)}</dd>` : ''}</dl><p>${escape(r.note)}</p>
@@ -104,7 +109,7 @@ function homePage(db, user, urlFor) {
 }
 
 /** Mountable portal handlers with a durable kv secret and the host server's authentication, headers and rate limiter. */
-export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, clientIp, tooMany, recordFailure, readRaw, securityHeaders, env = process.env }) {
+export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, canSee = () => true, clientIp, tooMany, recordFailure, readRaw, securityHeaders, env = process.env }) {
   sql.prepare("INSERT OR IGNORE INTO kv (key, value) VALUES ('portal_secret', ?)").run(randomBytes(32).toString('hex'));
   const secret = sql.prepare("SELECT value FROM kv WHERE key = 'portal_secret'").get().value;
   const urlFor = (model, r) => portalUrl(secret, model, r);
@@ -139,7 +144,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, cl
       if (!link || !paths[link[1]]) return error(res, 404, 'Document not found');
       if (allowed && !allowed.has(link[1])) return error(res, 403, 'No access to this document');
       const r = documentOf(getDb(), link[1], Number(link[2]));
-      if (!r) return error(res, 404, 'Document not found');
+      if (!r || !canSee(user, link[1], r)) return error(res, 404, 'Document not found');
       return send(res, 200, JSON.stringify({ url: urlFor(link[1], r) }), { 'Content-Type': 'application/json; charset=utf-8' });
     }
     if (url.pathname !== '/my' && !url.pathname.startsWith('/my/')) return false;
@@ -170,7 +175,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, cl
     try {
       const next = route[3] === 'sign' ? portalSignQuote(db, r, { name: input.get('name'), signature: input.get('signature') })
         : route[3] === 'pay' ? portalPayQuote(db, r, env) : portalAddOption(db, r, input.get('option'));
-      commitDb(next);
+      commitDb(next, { actor: 'portal' });
       message = 'Your quotation has been updated';
     } catch (e) { message = e.message; }
     return send(res, 303, '', { Location: `${back}&message=${encodeURIComponent(message)}` });

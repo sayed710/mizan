@@ -1,3 +1,4 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -72,7 +73,7 @@ test('duplicate PO product lines keep their individual purchase costs through pa
   db = run(db, 'stock.picking', rest.id, 'Validate');
   assert.deepEqual(layers(db, f.id).at(-1).unit_cost, 17);
   assert.equal(qty(db, f.id), 5);
-  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line });
+  const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_line_ids: read(db, 'purchase.order', po.id).order_line.map(({ purchase_method, qty_delivered, ...l }) => l) });
   assert.equal(delta(f.db, postMove(bill.db, bill.id), '110200'), 0);
 });
 
@@ -152,7 +153,7 @@ test('split POS tenders deliver exactly the original quantity and preserve the t
 
 test('production transfers actual FIFO component value into finished stock with no interim debt', () => {
   const component = product();
-  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99, cost_method: 'standard' });
+  const finished = product(receive(component.db, component.id, 10, 12), { name: 'Finished', cost: 99 });
   const bom = create(finished.db, 'mrp.bom', { name: 'Wiring BOM', product_id: finished.id, product_qty: 1, components: [{ product_id: component.id, qty: 2 }] });
   const mo = create(bom.db, 'mrp.production', { product_id: finished.id, bom_id: bom.id, product_qty: 2 });
   const confirmed = confirmMo(mo.db, read(mo.db, 'mrp.production', mo.id));
@@ -237,7 +238,34 @@ test('periodic receipts, deliveries, production, unbuild and scrap remain quanti
   const sale = payOrder(db, { lines: [line(f.id, 1)], method: 'cash' });
   const refunded = refundOrder(sale.db, read(sale.db, 'pos.order', sale.id)).db;
   assert.equal(qty(refunded, f.id), 8);
-  assert.equal(search(refunded, 'account.move').length, start + 2);
+  assert.equal(search(refunded, 'account.move').length, start + 4); // sale and tender, plus their reversals
   assert.equal(layers(refunded, f.id).length, 0);
   assert.ok(search(refunded, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
+});
+
+test('bill-before-receipt and invoice-before-delivery show interim account nets to zero', () => {
+  const f = product(seed(), { cost_method: 'fifo', purchase_method: 'purchase' });
+  const po = create(f.db, 'purchase.order', { partner_id: 2, order_line: [line(f.id, 4, 15)] });
+  let db = run(po.db, 'purchase.order', po.id, 'Confirm Order');
+  const pick = search(db, 'stock.picking').find((p) => p.purchase_id === po.id);
+  const draftBill = run(db, 'purchase.order', po.id, 'Create Bill');
+  const bill = search(draftBill, 'account.move').find((m) => m.purchase_id === po.id);
+  db = postMove(draftBill, bill.id);
+  assert.equal(delta(f.db, db, '110200'), 60);
+  db = run(db, 'stock.picking', pick.id, 'Validate');
+  assert.equal(delta(f.db, db, '110200'), 0);
+  assert.equal(delta(f.db, db, '110100'), 60);
+
+  const sale = create(db, 'sale.order', { partner_id: 1, invoice_policy: 'order', order_line: [{ product_id: f.id, qty: 2, price_unit: 25 }] });
+  db = run(sale.db, 'sale.order', sale.id, 'Confirm');
+  const delivery = search(db, 'stock.picking').find((p) => p.sale_id === sale.id);
+  const draftInv = run(db, 'sale.order', sale.id, 'Create Invoice');
+  const inv = search(draftInv, 'account.move').find((m) => m.sale_id === sale.id);
+  db = postMove(draftInv, inv.id);
+  assert.equal(delta(f.db, db, '110200'), 0);
+  assert.equal(delta(f.db, db, '400000'), -50);
+  db = run(db, 'stock.picking', delivery.id, 'Validate');
+  assert.equal(delta(f.db, db, '110200'), 0);
+  assert.equal(delta(f.db, db, '500000'), 30);
+  assert.equal(delta(f.db, db, '110100'), 30);
 });

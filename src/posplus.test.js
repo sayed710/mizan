@@ -1,18 +1,20 @@
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { amounts } from './models/common.js';
 import { accountId, isBalanced, journalItems } from './models/ledger.js';
-import { openSession, sessionTotals, startSession } from './models/pos.js';
+import { openSession, payOrder, sessionTotals, startSession } from './models/pos.js';
 import { posPlusModels, openTableOrder, tableStatus, transferTable, mergeTables, splitBill, addTip, payWithMethods, applyLoyaltyToOrder, zReport } from './models/posplus.js';
 
 const line = (qty = 2, price = 50, tax = 10) => ({ product_id: 1, qty, price_unit: price, tax, discount: 0 });
 const round = (n) => Math.round(n * 100) / 100;
 
 function setup() {
-  const config = create(startSession(seed(), 100).db, 'pos.config', { name: 'Restaurant', module_restaurant: true, iface_tipproduct: true, tip_product_id: 5, loyalty_enabled: true, payment_method_ids: [{ name: 'Cash', journal: 'cash' }, { name: 'Card', journal: 'bank' }] });
-  const floor = create(config.db, 'restaurant.floor', { name: 'Main', config_id: config.id, table_ids: [{ name: 'A', seats: 4, shape: 'square' }, { name: 'B', seats: 2, shape: 'round' }, { name: 'C', seats: 2, shape: 'square' }] });
+  const config = create(seed(), 'pos.config', { name: 'Restaurant', module_restaurant: true, iface_tipproduct: true, tip_product_id: 5, loyalty_enabled: true, payment_method_ids: [{ name: 'Cash', journal: 'cash' }, { name: 'Card', journal: 'bank' }] });
+  const started = startSession(config.db, 100, config.id);
+  const floor = create(started.db, 'restaurant.floor', { name: 'Main', config_id: config.id, table_ids: [{ name: 'A', seats: 4, shape: 'square' }, { name: 'B', seats: 2, shape: 'round' }, { name: 'C', seats: 2, shape: 'square' }] });
   const order = openTableOrder(floor.db, { configId: config.id, floorId: floor.id, tableName: 'A', customerCount: 2 });
   return { db: write(order.db, 'pos.order', order.id, { lines: [line()] }), id: order.id, configId: config.id, floorId: floor.id };
 }
@@ -99,7 +101,14 @@ test('cash plus card returns cash change, books each method and moves total stoc
   const balance = (code) => journalItems(paid.db).filter((l) => l.account_id === accountId(paid.db, code)).reduce((s, l) => s + l.debit - l.credit, 0);
   assert.equal(round(balance('101501') - cashBefore), 60);
   assert.equal(round(balance('101401') - bankBefore), 50);
-  assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 2, cash: 60, card: 50, expected: 160 });
+  // One settlement carries the whole bill with whole quantities; only the money is split (FLOW-017).
+  assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 1, cash: 60, card: 50, expected: 160 });
+  const settlements = search(paid.db, 'pos.order').filter((o) => o.settlement_of === id);
+  assert.deepEqual(settlements.map((o) => o.lines.map((l) => l.qty)), [order.lines.map((l) => l.qty)]);
+  assert.deepEqual(settlements[0].payment_ids, [
+    { payment_method_id: search(db, 'pos.payment.method').find((m) => m.type === 'cash').id, method: 'cash', amount: 60 },
+    { payment_method_id: search(db, 'pos.payment.method').find((m) => m.type === 'bank').id, method: 'bank', amount: 50 },
+  ]);
   assert.ok(search(paid.db, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
   assert.throws(() => payWithMethods(paid.db, id, [{ method: 'cash', amount: 110 }]), /draft/);
   assert.deepEqual(db, before);
@@ -152,7 +161,7 @@ test('Z report reconciles session totals, taxes, tips and full split-tender refu
   assert.equal(report.discounts, 0);
   const refunded = posPlusModels['pos.order'].form.buttons.find((b) => b.label === 'Refund').run(paid, read(paid, 'pos.order', id)).db;
   const after = zReport(refunded, session.id);
-  assert.equal(after.refunds, 2);
+  assert.equal(after.refunds, 1);
   assert.equal(after.orders, sessionTotals(refunded, session).orders);
   assert.deepEqual(after.byMethod, { cash: 0, bank: 0 });
   assert.equal(after.total, 0);
@@ -189,4 +198,37 @@ test('uneven split payments conserve cents in both revenue and tax', () => {
   assert.equal(report.taxes, 0.01);
   assert.deepEqual(report.byMethod, { cash: 0.03, bank: 0.03 });
   assert.ok(search(paid, 'account.move').filter((m) => m.state === 'posted').every((m) => isBalanced(m.line_ids)));
+});
+
+test('restaurant settlement retains exact same-type tender IDs and net change for refunds', () => {
+  const setupData = setup();
+  let db = setupData.db;
+  const cash = search(db, 'pos.payment.method').find((m) => m.type === 'cash');
+  const other = create(db, 'pos.payment.method', { name: 'Second cash', type: 'cash', company_id: cash.company_id, journal_id: cash.journal_id });
+  db = write(other.db, 'pos.config', setupData.configId, { payment_method_ids: [cash.id, other.id] });
+  db = write(db, 'pos.session', openSession(db).id, { config_id: setupData.configId });
+  const paid = payWithMethods(db, setupData.id, [{ method: 'cash', payment_method_id: other.id, amount: 120 }]);
+  const settlement = search(paid.db, 'pos.order').find((o) => o.settlement_of === setupData.id);
+  assert.equal(paid.change, 10);
+  assert.equal(settlement.payment_ids[0].payment_method_id, other.id);
+  assert.equal(settlement.payment_ids[0].amount, 110);
+  assert.throws(() => payOrder(paid.db, { lines: settlement.lines, refund_of: settlement.id, method: cash.id }), /match.*original/i);
+  assert.doesNotThrow(() => payOrder(paid.db, { lines: settlement.lines, refund_of: settlement.id, method: other.id }));
+});
+
+test('restaurant checkout uses selected payment method ID instead of stale or missing legacy method', () => {
+  for (const legacy of [undefined, 'cash']) {
+    const { db, id, configId } = setup();
+    const bank = search(db, 'pos.payment.method').find((m) => m.type === 'bank');
+    const cash = search(db, 'pos.payment.method').find((m) => m.type === 'cash');
+    const configured = write(db, 'pos.config', configId, { payment_method_ids: [bank.id, cash.id] });
+    const payment = { payment_method_id: bank.id, amount: 110, ...(legacy ? { method: legacy } : {}) };
+    const paid = payWithMethods(configured, id, [payment]);
+    const settlement = read(paid.db, 'pos.order', paid.id);
+    assert.deepEqual(settlement.payment_ids, [{ payment_method_id: bank.id, method: 'bank', amount: 110 }]);
+    assert.equal(read(paid.db, 'pos.order', id).payment_ids[0].method, 'bank');
+    assert.deepEqual(sessionTotals(paid.db, openSession(paid.db)), { orders: 1, cash: 0, card: 110, expected: 100 });
+    assert.throws(() => payWithMethods(configured, id, [{ ...payment, amount: 120 }]), /Only cash/);
+    assert.throws(() => payWithMethods(configured, id, [{ ...payment, payment_method_id: 999999 }]), /not enabled/);
+  }
 });

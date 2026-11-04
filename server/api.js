@@ -1,19 +1,25 @@
 // External REST API (/api/v1) authenticated with personal API keys (Authorization: Bearer <key>).
+import { RASTER } from './blobs.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { models } from '../src/models/index.js';
-import { create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
+import { models, uninstalledModels } from '../src/models/index.js';
+import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
+import { payQuote } from '../src/models/quoteplus.js';
 import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/models/shop.js';
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
+import { restrictRecords, visibleTo } from '../src/models/company.js';
+import { referFromLink } from '../src/models/skillsplus.js';
 
 const MAX_LIMIT = 500;
 
 const IMAGE = /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/;
-/** Only inline raster images reach the website (the CSP allows data: images). */
-export const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data : null);
+const BLOB = /^[0-9a-f]{32}$/;
+/** Only raster images reach the website: inline (the CSP allows data: images) or a stored file served by id. */
+export const safeImage = (v) => (IMAGE.test(v?.data ?? '') ? v.data
+  : BLOB.test(v?.blob ?? '') && RASTER.test(v.type ?? '') ? `/api/public/image/${v.blob}` : null);
 
 /** Products the shop can show or sell, in the field names the shared shop logic (src/models/shop.js) reads. */
 const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) && (!p.variant_of || isSellable(read(db, 'product', p.variant_of)))).map((p) => ({
@@ -26,12 +32,16 @@ const shopCatalog = (db) => search(db, 'product').filter((p) => isSellable(p) &&
 export const demoPaymentsAllowed = (env = process.env) => env.MIZAN_DEMO_PAYMENTS === '1' && env.NODE_ENV !== 'production';
 const enabledProviders = (db) => search(db, 'payment.provider').filter((p) => p.state === 'enabled' && (p.code !== 'demo' || demoPaymentsAllowed()));
 const selectablePricelists = (db) => search(db, 'product.pricelist').filter((p) => p.selectable);
+export const websiteCompany = (db) => read(db, 'res.company', 1) ?? search(db, 'res.company')[0];
 
 /** Public website content: only published pages and sellable products (no internal fields). */
-export const publicSite = (db, canAccess = () => false) => ({
-  company: db.settings?.company,
-  currency: db.settings?.currency ?? 'USD',
-  pages: search(db, 'website.page').filter((p) => {
+export const publicSite = (db, canAccess = () => false) => {
+  const company = websiteCompany(db);
+  const currency = company?.currency_id ? (read(db, 'res.currency', company.currency_id)?.name ?? db.settings?.currency ?? 'USD') : (db.settings?.currency ?? 'USD');
+  return {
+    company: company?.name ?? db.settings?.company,
+    currency,
+    pages: search(db, 'website.page').filter((p) => {
     const access = resolveUrl(db, p.slug);
     return access?.page || ((access?.needsPassword || access?.needsLogin) && canAccess(p));
   }).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
@@ -54,7 +64,8 @@ export const publicSite = (db, canAccess = () => false) => ({
     staff: (a.staff_ids ?? []).map((l) => read(db, 'hr.employee', l.employee_id)).filter(Boolean).map((e) => ({ id: e.id, name: e.name, avatar: safeImage(e.image) })),
     questions: (a.questions ?? []).filter((q) => q.label).map((q) => ({ label: q.label, required: !!q.required })),
   })),
-});
+  };
+};
 
 /** A real YYYY-MM-DD day (rejects 2099-02-31). */
 const isCalendarDate = (s) => {
@@ -144,8 +155,20 @@ export function publicApply(db, body) {
   const email = String(b.email ?? '').trim().slice(0, 254);
   if (!job) return { status: 400, body: { error: 'This position is not open' } };
   if (!name || !EMAIL.test(email)) return { status: 400, body: { error: 'Enter your name and a valid email address' } };
-  const res = create(db, 'hr.applicant', { name, email, phone: String(b.phone ?? '').slice(0, 40), job_id: job.id, description: String(b.motivation ?? '').slice(0, 5000), tag_ids: ['Website'] });
-  return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, res.db), { author: 'Website', isAdmin: false }) };
+  const extra = { phone: String(b.phone ?? '').slice(0, 40), description: String(b.motivation ?? '').slice(0, 5000), tag_ids: ['Website'] };
+  let next;
+  if (b.ref) {
+    // An employee's referral link: the applicant is attributed to them (the token only attributes, it grants nothing).
+    try {
+      const referred = referFromLink(db, { token: String(b.ref).slice(0, 40), jobId: job.id, name, email, fromWebsite: true });
+      next = write(referred.db, 'hr.applicant', referred.applicantId, extra);
+    } catch (e) {
+      return { status: 400, body: { error: e.message } };
+    }
+  } else {
+    next = create(db, 'hr.applicant', { name, email, job_id: job.id, ...extra }).db;
+  }
+  return { status: 201, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: 'Website', isAdmin: false }) };
 }
 
 export const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$/;
@@ -238,8 +261,8 @@ export function publicOrder(db, body) {
     });
     let next = postNote(order.db, 'sale.order', order.id, `Payment method: ${provider.name}`);
     if (provider.code === 'demo') {
-      const confirm = models['sale.order'].form.buttons.find((x) => x.label === 'Confirm');
-      next = confirm.run(next, read(next, 'sale.order', order.id)).db;
+      // Book the simulated payment as a real customer credit, so 'paid' is backed by a journal entry.
+      next = payQuote(next, order.id, totals.total);
       next = postNote(write(next, 'sale.order', order.id, { payment_state: 'paid' }), 'sale.order', order.id, `Paid online (${provider.name}): ${totals.total}`);
     }
     const saved = applyDiff(db, diffDb(db, next), { author: 'Website', isAdmin: false });
@@ -282,16 +305,20 @@ const describe = (name) => ({
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req
  * @returns {{ status: number, body: unknown, db?: object }} db is set when the request changed data.
  */
-export function handleApi({ method, path, query, body, db, user, allowed = null }) {
+export function handleApi({ method, path, query, body, db, user, allowed = null, companies = null, company = null, readOnly = null }) {
   const [, , , model, rawId] = path.split('/'); // "", "api", "v1", model, id
-  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !allowed || allowed.has(m)).map(describe) };
+  const unavailable = uninstalledModels(db.settings?.uninstalled);
+  if (model === 'models' && method === 'GET') return { status: 200, body: Object.keys(models).filter((m) => !unavailable.has(m) && (!allowed || allowed.has(m))).map(describe) };
   if (!model || !models[model]) return { status: 404, body: { error: `Unknown model ${model ?? ''}` } };
   if (allowed && !allowed.has(model)) return { status: 403, body: { error: `No access to ${model}` } };
+  if (unavailable.has(model)) return { status: 404, body: { error: `The app for ${model} is not installed` } };
   const id = rawId === undefined ? null : Number(rawId);
   if (rawId !== undefined && !(Number.isInteger(id) && id > 0)) return { status: 400, body: { error: 'Invalid id' } };
 
   // Writes go through the same validation as the web client (applyDiff strips undeclared fields).
-  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed }) });
+  const commit = (next) => ({ db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin, allowed, readOnly, login: user.login, companies }) });
+  const visible = (r) => r && visibleTo(companies, model, r, db);
+  // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
 
   try {
@@ -299,17 +326,19 @@ export function handleApi({ method, path, query, body, db, user, allowed = null 
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
-      const all = search(db, model).filter((r) => matches(db, model, r, terms));
+      const seen = companies && terms.length ? { ...db, records: restrictRecords(db, companies).records } : db;
+      const all = search(db, model).filter((r) => visible(r) && matches(seen, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }
     if (id === null && method === 'POST') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
-      const res = create(db, model, vals);
+      // A limited user's new record belongs to the company they are working in, not to company 1.
+      const res = create(db, model, !SHARED_MODELS.has(model) && companies && company && vals.company_id == null ? { ...vals, company_id: company } : vals);
       const { db: saved } = commit(res.db);
       return { status: 201, body: read(saved, model, res.id), db: saved };
     }
     const rec = read(db, model, id);
-    if (!rec) return { status: 404, body: { error: `${model} #${id} not found` } };
+    if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
     if (method === 'GET') return { status: 200, body: rec };
     if (method === 'PATCH') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };

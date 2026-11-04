@@ -1,5 +1,5 @@
 // Studio: user-defined fields stored in settings.customFields and merged into the model registry.
-import { models } from './index.js';
+import { models } from '../registry.js';
 
 export const CUSTOM_TYPES = [['char', 'Text'], ['text', 'Multiline Text'], ['float', 'Decimal'], ['monetary', 'Monetary'], ['date', 'Date'], ['boolean', 'Checkbox'], ['selection', 'Selection'], ['tags', 'Tags']];
 

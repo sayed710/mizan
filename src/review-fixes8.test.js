@@ -1,11 +1,12 @@
 // Regressions for review round 8 (valuation wiring, fiscal closing, timesheets).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write } from './orm.js';
+import { create, read, search, write, updateSettings } from './orm.js';
+import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { accountId, invoiceLines, postEntry, profitAndLoss } from './models/ledger.js';
-import { closeFiscalYear, compareProfitAndLoss, reopenFiscalYear } from './models/closing.js';
+import { closeFiscalYear, reopenFiscalYear } from './models/closing.js';
 import { adjustQuantity, receive } from './models/valuation.js';
 
 test('the registered product model keeps costing method and valuation, so goods bills clear 110200', () => {
@@ -28,8 +29,7 @@ test('closed years still report their result and reopening keeps the earlier loc
   db = closeFiscalYear(closeFiscalYear(y24.db, y23.id), y24.id);
   const p23 = { from: '2023-01-01', to: '2023-12-31' };
   const p24 = { from: '2024-01-01', to: '2024-12-31' };
-  const report = compareProfitAndLoss(db, [p23, p24]);
-  assert.deepEqual(report.rows.find((r) => r.key === 'revenue').values, [500, 1000]);
+  assert.deepEqual([profitAndLoss(db, p23).revenue, profitAndLoss(db, p24).revenue], [500, 1000]);
   assert.equal(profitAndLoss(db, p24).net, 1000);
   assert.equal(db.settings.lock_date, '2024-12-31');
   const reopened = reopenFiscalYear(db, y24.id);
@@ -49,23 +49,31 @@ test('Update Quantity and rentals keep stock valuation usable', () => {
     delete globalThis.prompt;
   }
   assert.equal(read(db, 'product', goods.id).qty_available, before + 2);
-  assert.doesNotThrow(() => receive(db, goods.id, 1, 10, { date: '2026-12-01' }));
+  assert.doesNotThrow(() => receive(db, goods.id, 1, 10, { date: addDays(today(), 1) }));
   assert.equal(read(adjustQuantity(db, goods.id, 0), 'product', goods.id).qty_available, 0);
   const rental = create(db, 'sale.rental', { product_id: goods.id, partner_id: 1, qty: 2, state: 'reserved' });
   const pickup = models['sale.rental'].form.buttons.find((b) => b.label === 'Pickup');
   const picked = pickup.run(rental.db, read(rental.db, 'sale.rental', rental.id)).db;
   assert.equal(read(picked, 'product', goods.id).qty_rented, 2);
-  assert.doesNotThrow(() => receive(picked, goods.id, 1, 10, { date: '2026-12-01' }));
+  assert.doesNotThrow(() => receive(picked, goods.id, 1, 10, { date: addDays(today(), 1) }));
 });
 
-test('posting a vendor bill refuses billing more than was received unless forced', async () => {
-  const { postMove } = await import('./models/accounting.js');
+test('vendor bill matching recommends review without blocking posting and allows an override', () => {
   let db = seed();
   const goods = search(db, 'product').find((p) => p.type === 'goods');
   const po = create(db, 'purchase.order', { partner_id: 7, state: 'purchase', order_line: [{ product_id: goods.id, qty: 5, qty_delivered: 3, price_unit: 10, tax: 0 }] });
-  const bill = (force) => create(po.db, 'account.move', { move_type: 'in_invoice', partner_id: 7, purchase_id: po.id, invoice_date: '2026-10-26', force_post: force, invoice_line_ids: [{ product_id: goods.id, qty: 5, price_unit: 10, tax: 0 }] });
-  const strict = bill(false);
-  assert.throws(() => postMove(strict.db, strict.id), /exceeds received/);
-  const forced = bill(true);
-  assert.equal(read(postMove(forced.db, forced.id), 'account.move', forced.id).state, 'posted');
+  const bill = (db) => create(db, 'account.move', { move_type: 'in_invoice', partner_id: 7, purchase_id: po.id, invoice_date: '2026-10-26', invoice_line_ids: [{ product_id: goods.id, qty: 5, price_unit: 10, tax: 0 }] });
+  const confirm = models['account.move'].form.buttons.find((b) => b.label === 'Confirm');
+  const plain = bill(po.db);
+  const plainPosted = confirm.run(plain.db, read(plain.db, 'account.move', plain.id)).db;
+  assert.equal(read(plainPosted, 'account.move', plain.id).state, 'posted');
+  assert.equal(read(plainPosted, 'account.move', plain.id).should_be_paid, 'yes');
+  const matched = bill(updateSettings(po.db, { three_way_matching: true }));
+  const posted = confirm.run(matched.db, read(matched.db, 'account.move', matched.id)).db;
+  assert.equal(read(posted, 'account.move', matched.id).state, 'posted');
+  assert.equal(read(posted, 'account.move', matched.id).should_be_paid, 'exception');
+  const approved = models['account.move'].form.buttons.find((b) => b.label === 'Approve for Payment').run(posted, read(posted, 'account.move', matched.id)).db;
+  assert.equal(read(approved, 'account.move', matched.id).should_be_paid, 'yes');
+  const received = write(posted, 'purchase.order', po.id, { order_line: [{ product_id: goods.id, qty: 5, qty_delivered: 5, price_unit: 10, tax: 0 }] });
+  assert.equal(read(received, 'account.move', matched.id).should_be_paid, 'yes');
 });

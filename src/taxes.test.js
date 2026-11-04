@@ -29,7 +29,9 @@ test('posting books each tax on its account and the entry balances', () => {
   const { db, id } = invoice(seed(), [line(seed(), 'VAT 14% Included'), line(seed(), 'VAT 14%', { price_unit: 50 })]);
   const move = read(db, 'account.move', id);
   assert.ok(isBalanced(move.line_ids));
-  assert.equal(move.line_ids.find((l) => l.account_id === accountId(db, '251000')).credit, 21);
+  const vat = move.line_ids.filter((l) => l.account_id === accountId(db, '251000'));
+  // One line per tax, each naming it, so the tax return reads them from the ledger.
+  assert.deepEqual(vat.map((l) => [l.tax_name, l.credit]).sort(), [['VAT 14% Included', 14], ['VAT 14%', 7]]);
   assert.equal(move.line_ids.find((l) => l.account_id === accountId(db, '121000')).debit, 171);
 });
 

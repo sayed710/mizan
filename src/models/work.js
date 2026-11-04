@@ -2,10 +2,52 @@
 import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { assignTicket, mergeTickets, rateTicket, slaDeadline, slaStatus, ticketExtraFields } from './helpdesk.js';
+import { isRotting } from './crm.js';
 
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 
 export const workModels = {
+  'project.task.type': {
+    label: 'Task Stages',
+    fields: {
+      name: { type: 'char', label: 'Stage Name', required: true },
+      active: { type: 'boolean', label: 'Active' },
+      sequence: { type: 'integer', label: 'Sequence' },
+      project_ids: { type: 'many2many', relation: 'project.project', label: 'Projects' },
+      fold: { type: 'boolean', label: 'Folded in Kanban' },
+      user_id: employee('Stage Owner'),
+      rotting_threshold_days: { type: 'integer', label: 'Rotting Threshold (Days)' },
+      auto_validation_state: {
+        type: 'selection',
+        label: 'Automatic Validation State',
+        options: [['done', 'Done'], ['canceled', 'Cancelled']],
+      },
+    },
+    defaults: (id) => ({ active: true, sequence: id ?? 10, project_ids: [], fold: false, rotting_threshold_days: 0 }),
+    list: ['name', 'sequence', 'fold', 'rotting_threshold_days', 'auto_validation_state', 'active'],
+    form: {
+      title: 'name',
+      groups: [
+        ['name', 'sequence', 'project_ids', 'user_id'],
+        ['fold', 'rotting_threshold_days', 'auto_validation_state', 'active'],
+      ],
+    },
+  },
+
+  'project.tags': {
+    label: 'Tags',
+    fields: {
+      name: { type: 'char', label: 'Tag Name', required: true },
+      color: { type: 'integer', label: 'Color' },
+    },
+    defaults: () => ({ color: 0 }),
+    list: ['name', 'color'],
+    form: {
+      title: 'name',
+      groups: [['name', 'color']],
+    },
+  },
+
   'hr.department': {
     label: 'Departments',
     fields: {
@@ -33,12 +75,15 @@ export const workModels = {
       department_id: { type: 'many2one', relation: 'hr.department', label: 'Department' },
       parent_id: employee('Manager'),
       work_email: { type: 'char', label: 'Work Email' },
+      user_login: { type: 'char', label: 'Related User (login)' },
+      referral_token: { type: 'char', label: 'Source Token', readonly: true, hidden: true },
       work_phone: { type: 'char', label: 'Work Phone' },
       mobile_phone: { type: 'char', label: 'Work Mobile' },
       work_location: { type: 'selection', label: 'Work Location', options: [['office', 'Office'], ['home', 'Home'], ['other', 'Other']] },
       coach_id: employee('Coach'),
       employee_type: { type: 'selection', label: 'Employee Type', options: [['employee', 'Employee'], ['worker', 'Worker'], ['student', 'Student'], ['trainee', 'Trainee'], ['contractor', 'Contractor'], ['freelance', 'Freelancer']] },
       working_hours: { type: 'selection', label: 'Working Hours', options: [['40', '40 hours/week'], ['35', '35 hours/week'], ['20', 'Part-time 20 hours/week'], ['flexible', 'Flexible']] },
+      resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Working Schedule' },
       join_date: { type: 'date', label: 'Joined on' },
       wage: { type: 'monetary', label: 'Monthly Wage' },
       tag_ids: { type: 'tags', label: 'Tags' },
@@ -77,7 +122,7 @@ export const workModels = {
       departure_date: { type: 'date', label: 'Departure Date' },
       departure_reason: { type: 'selection', label: 'Departure Reason', options: [['fired', 'Fired'], ['resigned', 'Resigned'], ['retired', 'Retired']] },
     },
-    defaults: () => ({ work_location: 'office', employee_type: 'employee', working_hours: '40', tag_ids: [], join_date: today(), resume_lines: [], certification_lines: [] }),
+    defaults: () => ({ work_location: 'office', employee_type: 'employee', working_hours: '40', tag_ids: [], join_date: today(), resume_lines: [], certification_lines: [], referral_token: crypto.randomUUID().replaceAll('-', '') }),
     filters: [
       [{ id: 'remote', label: 'Remote', fn: (r) => r.work_location === 'home' }],
       [{ id: 'visa', label: 'Visa Expiring Soon', fn: (r) => r.visa_expire && r.visa_expire <= addDays(today(), 60) }, { id: 'departed', label: 'Departed', fn: (r) => !!r.departure_date }],
@@ -98,11 +143,11 @@ export const workModels = {
       ],
       groups: [['work_email', 'work_phone', 'mobile_phone', 'tag_ids'], ['job_title', 'department_id', 'parent_id', 'coach_id']],
       tabs: [
-        { label: 'Work Information', fields: ['work_location', 'working_hours', 'employee_type', 'join_date', 'wage'] },
+        { label: 'Work Information', fields: ['work_location', 'working_hours', 'resource_calendar_id', 'employee_type', 'join_date', 'wage'] },
         { label: 'Resume', fields: ['resume_lines'] },
         { label: 'Certifications', fields: ['certification_lines'] },
         { label: 'Private Information', fields: ['private_address', 'private_email', 'private_phone', 'bank_account', 'birthday', 'place_of_birth', 'gender', 'marital', 'children', 'nationality', 'identification_id', 'passport_id', 'visa_no', 'permit_no', 'visa_expire', 'emergency_contact', 'emergency_phone'] },
-        { label: 'HR Settings', fields: ['badge_id', 'pin', 'departure_date', 'departure_reason'] },
+        { label: 'HR Settings', fields: ['user_login', 'badge_id', 'pin', 'departure_date', 'departure_reason'] },
       ],
       chatter: true,
     },
@@ -116,7 +161,7 @@ export const workModels = {
       user_id: employee('Project Manager'),
       date_start: { type: 'date', label: 'Start Date' },
       date: { type: 'date', label: 'End Date' },
-      tag_ids: { type: 'tags', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'project.tags', label: 'Tags' },
       description: { type: 'text', label: 'Description' },
     },
     defaults: () => ({ tag_ids: [], date_start: today() }),
@@ -138,16 +183,18 @@ export const workModels = {
       project_id: { type: 'many2one', relation: 'project.project', label: 'Project' },
       user_id: employee('Assignee'),
       stage_id: {
-        type: 'selection',
+        type: 'many2one',
+        relation: 'project.task.type',
         label: 'Stage',
         tracking: true,
-        options: [['todo', 'To Do'], ['progress', 'In Progress'], ['review', 'Review'], ['done', 'Done']],
       },
+      date_last_stage_update: { type: 'date', label: 'Last Stage Update', readonly: true },
+      is_rotting: { type: 'boolean', label: 'Rotting', compute: (r, db) => isRotting(db, 'project.task', r) },
       date_start: { type: 'date', label: 'Start Date' },
       date_deadline: { type: 'date', label: 'Deadline' },
       planned_hours: { type: 'float', label: 'Allocated Hours' },
       priority: { type: 'priority', label: 'Priority' },
-      tag_ids: { type: 'tags', label: 'Tags' },
+      tag_ids: { type: 'many2many', relation: 'project.tags', label: 'Tags' },
       description: { type: 'text', label: 'Description' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['in_progress', 'In Progress'], ['changes_requested', 'Changes Requested'], ['approved', 'Approved'], ['waiting', 'Waiting'], ['canceled', 'Cancelled'], ['done', 'Done']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
@@ -160,18 +207,33 @@ export const workModels = {
         newLine: () => ({ task_id: null }),
       },
     },
-    defaults: () => ({ stage_id: 'todo', state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [] }),
+    defaults: () => ({ stage_id: 1, state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [], date_last_stage_update: today() }),
     // Customer follows the project; a task blocked by open tasks waits and cannot be closed.
-    onchange: (r, key, db) => (key === 'project_id' && r.project_id && !r.partner_id ? { partner_id: (db.records['project.project'] ?? []).find((p) => p.id === r.project_id)?.partner_id ?? null } : {}),
+    onchange: (r, key, db) => {
+      const updates = {};
+      if (key === 'stage_id') {
+        updates.date_last_stage_update = today();
+        const stage = typeof r.stage_id === 'number'
+          ? (db.records['project.task.type'] ?? []).find((s) => s.id === r.stage_id)
+          : (db.records['project.task.type'] ?? []).find((s) => s.name?.toLowerCase() === String(r.stage_id).toLowerCase());
+        if (stage?.auto_validation_state) updates.state = stage.auto_validation_state;
+      }
+      if (key === 'project_id' && r.project_id && !r.partner_id) {
+        updates.partner_id = (db.records['project.project'] ?? []).find((p) => p.id === r.project_id)?.partner_id ?? null;
+      }
+      return updates;
+    },
     guard: (db, before, after) => {
-      const closing = (after.stage_id === 'done' || after.state === 'done') && (!before || before.stage_id !== after.stage_id || before.state !== after.state);
+      const isDone = (s) => s === 'done' || s === 4;
+      const closing = (isDone(after.stage_id) || after.state === 'done') && (!before || before.stage_id !== after.stage_id || before.state !== after.state);
       if (!closing) return null;
-      const open = (after.depend_on ?? []).map((d) => (db.records['project.task'] ?? []).find((t) => t.id === d.task_id)).filter((t) => t && t.stage_id !== 'done' && t.state !== 'done' && t.state !== 'canceled');
+      const open = (after.depend_on ?? []).map((d) => (db.records['project.task'] ?? []).find((t) => t.id === d.task_id)).filter((t) => t && !isDone(t.stage_id) && t.state !== 'done' && t.state !== 'canceled');
       return open.length ? `Blocked by: ${open.map((t) => t.name).join(', ')}` : null;
     },
     filters: [
-      [{ id: 'open', label: 'Open Tasks', fn: (r) => r.stage_id !== 'done' }, { id: 'done', label: 'Done', fn: (r) => r.stage_id === 'done' }],
-      [{ id: 'late', label: 'Late', fn: (r) => r.stage_id !== 'done' && r.date_deadline && r.date_deadline < today() }],
+      [{ id: 'open', label: 'Open Tasks', fn: (r) => r.stage_id !== 'done' && r.stage_id !== 4 && r.state !== 'done' }, { id: 'done', label: 'Done', fn: (r) => r.stage_id === 'done' || r.stage_id === 4 || r.state === 'done' }],
+      [{ id: 'late', label: 'Late', fn: (r) => r.stage_id !== 'done' && r.stage_id !== 4 && r.state !== 'done' && r.date_deadline && r.date_deadline < today() }],
+      [{ id: 'rotting', label: 'Rotting', fn: (r) => !!r.is_rotting }],
     ],
     groupBys: ['stage_id', 'state', 'project_id', 'user_id', 'partner_id', 'date_deadline'],
     kanban: { groupBy: 'stage_id', title: 'name', lines: ['project_id', 'date_deadline'], tags: 'tag_ids', priority: 'priority', badge: 'user_id', quickCreate: true },
@@ -254,16 +316,26 @@ export const workModels = {
       }, {
         // Merge duplicates into this ticket: their descriptions and messages move here and they are cancelled.
         label: 'Merge Tickets', when: (r) => !['solved', 'cancelled'].includes(r.stage_id),
-        run: (db, r) => {
-          const refs = prompt('Ticket ids to merge into this one (comma separated)', '');
-          const ids = String(refs ?? '').split(',').map((x) => Number(x.trim())).filter((x) => Number.isInteger(x) && x > 0);
-          return { db: ids.length ? mergeTickets(db, r.id, ids) : db };
+        wizard: (db, r) => ({ title: 'Merge Tickets', fields: [
+          { name: 'ticket_ids', type: 'many2many', relation: 'helpdesk.ticket', label: 'Tickets to merge into this one', required: true,
+            // Only tickets that can be merged: open ones of the same customer.
+            domain: (x) => x.id !== r.id && x.partner_id === r.partner_id && !['solved', 'cancelled'].includes(x.stage_id) },
+        ] }),
+        run: (db, r, v = {}) => {
+          const ids = (v.ticket_ids ?? []).map(Number).filter((x) => Number.isInteger(x) && x > 0);
+          if (!ids.length) throw new Error('Choose the tickets to merge');
+          return { db: mergeTickets(db, r.id, ids) };
         },
       }, {
         label: 'Record Rating', when: (r) => r.stage_id === 'solved' && !r.rating,
-        run: (db, r) => {
-          const rating = Number(prompt('Customer rating (1-5)', '5'));
-          return { db: Number.isInteger(rating) && rating > 0 ? rateTicket(db, r.id, rating, prompt('Comment', '') ?? '') : db };
+        wizard: () => ({ title: 'Record Rating', fields: [
+          { name: 'rating', type: 'selection', label: 'Rating', required: true, default: '5', options: [['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5']] },
+          { name: 'comment', type: 'text', label: 'Comment' },
+        ] }),
+        run: (db, r, v = {}) => {
+          const rating = Number(v.rating);
+          if (!(Number.isInteger(rating) && rating >= 1 && rating <= 5)) throw new Error('Choose a rating from 1 to 5');
+          return { db: rateTicket(db, r.id, rating, v.comment ?? '') };
         },
       }, {
         label: 'Plan Intervention', when: (r) => !r.fsm_task_id && r.stage_id !== 'solved',

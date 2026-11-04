@@ -6,7 +6,8 @@ import { addDays, today } from './common.js';
 const relation = (model, label) => ({ type: 'many2one', relation: model, label, required: true });
 const char = (label) => ({ type: 'char', label, required: true });
 const referral = apps3Models['hr.referral'];
-const scale = (r) => ({ new: 10, interview: 30, hired: 100 })[r.stage_id] ?? 0;
+// Anonymous applications earn points only after recruitment advances them beyond the new stage.
+const scale = (r) => r.website_submission && r.stage_id === 'new' ? 0 : ({ new: 10, interview: 30, hired: 100 })[r.stage_id] ?? 0;
 const normalize = (s) => String(s ?? '').trim().toLowerCase();
 const all = (db, model) => search(db, model, { includeArchived: true });
 const get = (db, model, id) => {
@@ -15,12 +16,16 @@ const get = (db, model, id) => {
   return r;
 };
 const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s ?? '') && Number.isFinite(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
-const tokenFor = (id) => {
-  let hash = 2166136261;
-  for (const c of `mizan-referral-v1:${id}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
-  return `${id}-${hash.toString(16).padStart(8, '0')}`;
+const tokenFor = (db, id) => db?.records?.['hr.employee']?.find((e) => e.id === id)?.referral_token ?? '';
+// Fixed-length, full comparison: no early return on the first mismatching character.
+const sameToken = (a, b) => {
+  if (!/^[0-9a-f]{32}$/.test(a ?? '') || typeof b !== 'string' || b.length !== 32) return false;
+  let different = 0;
+  for (let i = 0; i < 32; i++) different |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return different === 0;
 };
-const linkFor = (employeeId, jobId) => `/jobs/${jobId}?ref=${tokenFor(employeeId)}`;
+// The public jobs page (PublicSite.jsx) reads job and ref from the hash and sends ref with the application.
+const linkFor = (token, jobId) => `/#/shop/jobs?job=${jobId}&ref=${token}`;
 const skillLevel = (db, typeId, skill, level) => {
   const type = get(db, 'hr.skill.type', typeId);
   if (!(type.skill_ids ?? []).some((s) => s.name === skill)) throw new Error('Select a skill belonging to this skill type');
@@ -70,12 +75,14 @@ export function certificationsExpiring(db, date, days) {
 export function referralLink(db, employeeId, jobId) {
   get(db, 'hr.employee', employeeId);
   get(db, 'hr.job', jobId);
-  return linkFor(employeeId, jobId);
+  const token = tokenFor(db, employeeId);
+  if (!token) throw new Error('Migrate employee referral tokens before generating links');
+  return linkFor(token, jobId);
 }
 
 /** Resolve attribution and create a referral plus its recruitment application. */
-export function referFromLink(db, { token, jobId, name, email }) {
-  const employee = search(db, 'hr.employee').find((e) => tokenFor(e.id) === token);
+export function referFromLink(db, { token, jobId, name, email, fromWebsite = false }) {
+  const employee = search(db, 'hr.employee').find((e) => sameToken(e.referral_token, token));
   if (!employee) throw new Error('Unknown referral token');
   get(db, 'hr.job', jobId);
   const candidate = String(name ?? '').trim();
@@ -84,7 +91,7 @@ export function referFromLink(db, { token, jobId, name, email }) {
   if (all(db, 'hr.applicant').some((r) => r.job_id === jobId && normalize(r.email) === address)
     || all(db, 'hr.referral').some((r) => r.job_id === jobId && normalize(r.email) === address)) throw new Error('This email has already applied for this job');
   const applicant = create(db, 'hr.applicant', { name: candidate, email: address, job_id: jobId, source: 'referral' });
-  const result = create(applicant.db, 'hr.referral', { name: candidate, email: address, job_id: jobId, referrer_id: employee.id, applicant_id: applicant.id, source_token: token });
+  const result = create(applicant.db, 'hr.referral', { name: candidate, email: address, job_id: jobId, referrer_id: employee.id, applicant_id: applicant.id, source_token: token, website_submission: fromWebsite });
   return { db: result.db, referralId: result.id, applicantId: applicant.id };
 }
 
@@ -201,9 +208,11 @@ export const skillsPlusModels = {
     ...referral,
     fields: {
       ...referral.fields,
+      points: { ...referral.fields.points, compute: scale },
+      website_submission: { type: 'boolean', label: 'Website Application', readonly: true },
       applicant_id: { type: 'many2one', relation: 'hr.applicant', label: 'Application' },
-      source_token: { type: 'char', label: 'Source Token', readonly: true, compute: (r) => r.referrer_id ? tokenFor(r.referrer_id) : '' },
-      link: { type: 'char', label: 'Referral Link', readonly: true, compute: (r) => r.referrer_id && r.job_id ? linkFor(r.referrer_id, r.job_id) : '' },
+      source_token: { type: 'char', label: 'Source Token', readonly: true, compute: (r, db) => tokenFor(db, r.referrer_id) || r.source_token || '' },
+      link: { type: 'char', label: 'Referral Link', readonly: true, compute: (r, db) => r.referrer_id && r.job_id ? linkFor(tokenFor(db, r.referrer_id) || r.source_token || '', r.job_id) : '' },
       reward_points_spent: { type: 'integer', label: 'Points Spent', readonly: true },
       date: { type: 'date', label: 'Referred on' },
     },
@@ -217,6 +226,17 @@ export const skillsPlusModels = {
     defaults: () => ({ cost: 10, quantity: 1, active: true }),
     guard: (db, before, r) => !Number.isInteger(r.cost) || r.cost <= 0 || !Number.isInteger(r.quantity) || r.quantity < 0 ? 'Reward cost must be a positive integer and stock a non-negative integer' : null,
     list: ['name', 'cost', 'quantity', 'active'],
-    form: { title: 'name', groups: [['cost', 'quantity'], ['active']] },
+    form: {
+      title: 'name', groups: [['cost', 'quantity'], ['active']],
+      buttons: [{
+        label: 'Redeem', primary: true, when: (r) => r.active !== false && r.quantity > 0,
+        ask: [{ label: 'Employee name' }],
+        run: (db, r, [name]) => {
+          const employee = search(db, 'hr.employee').find((e) => e.name.toLowerCase() === name.toLowerCase());
+          if (!employee) throw new Error('No employee with that name');
+          return { db: buyReward(db, employee.id, r.id) };
+        },
+      }],
+    },
   },
 };

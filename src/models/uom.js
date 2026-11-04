@@ -112,14 +112,6 @@ export function packagingSuggestion(db, productId, qty) {
   return { packages, remainder };
 }
 
-/** Sale warning for a non-multiple of the selected product packaging, otherwise null. */
-export function checkPackagingMultiple(db, productId, qty, packagingId) {
-  const pack = packaging(db, productId, packagingId);
-  const count = finite(qty, 'Quantity') / Number(pack.qty);
-  return Math.abs(count - Math.round(count)) <= tolerance(count) ? null
-    : `Quantity should be a multiple of ${pack.qty} for ${pack.name}.`;
-}
-
 function guardUom(db, before, r) {
   if (!read(db, 'uom.category', r.category_id)) return 'Select an existing UoM category';
   if (!positive(r.ratio) || !positive(r.rounding)) return 'Ratio and rounding must be positive finite numbers';

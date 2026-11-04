@@ -1,10 +1,10 @@
 // Field Service depth: worksheets, materials, timesheets, signature and invoicing.
 import { create, read, search, write } from '../orm.js';
 import { addDays, amounts, productLines, today } from './common.js';
+import { round as round2 } from '../money.js';
 
 const QUARTER_MINUTES = 15;
 const STAGES = [['new', 'New'], ['planned', 'Planned'], ['progress', 'In Progress'], ['done', 'Done']];
-const round2 = (n) => Math.round(n * 100) / 100;
 
 /** Timesheet hours, or the legacy `hours` field while no timesheet is logged. */
 export const totalHours = (r) => {

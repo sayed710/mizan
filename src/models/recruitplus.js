@@ -2,6 +2,7 @@
 import { create, postNote, read, search, write } from '../orm.js';
 import { moreModels } from './more.js';
 import { today } from './common.js';
+import { referralLink } from './skillsplus.js';
 
 const base = moreModels['hr.applicant'];
 const stages = base.fields.stage_id.options;
@@ -105,7 +106,18 @@ export const recruitPlusModels = {
   'hr.job': {
     ...moreModels['hr.job'],
     fields: { ...moreModels['hr.job'].fields, skills: { type: 'tags', label: 'Required Skills' }, salary_max: { type: 'monetary', label: 'Salary Budget' } },
-    form: { ...moreModels['hr.job'].form, groups: [...moreModels['hr.job'].form.groups, ['skills', 'salary_max']] },
+    form: {
+      ...moreModels['hr.job'].form, groups: [...moreModels['hr.job'].form.groups, ['skills', 'salary_max']],
+      buttons: [...(moreModels['hr.job'].form.buttons ?? []), {
+        label: 'Referral Link', when: (r) => r.is_published,
+        ask: [{ label: 'Employee name' }],
+        run: (db, r, [name]) => {
+          const employee = search(db, 'hr.employee').find((e) => e.name.toLowerCase() === name.toLowerCase());
+          if (!employee) throw new Error('No employee with that name');
+          return { db, message: `${globalThis.location?.origin ?? ''}${referralLink(db, employee.id, r.id)}` };
+        },
+      }],
+    },
   },
   'hr.applicant': {
     ...base,

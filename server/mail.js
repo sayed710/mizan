@@ -1,27 +1,42 @@
 // Email actions: send a business document to its partner, or a mailing to its list.
 import { models } from '../src/models/index.js';
 import { postNote, read, write } from '../src/orm.js';
-import { applyDiff, diffDb } from '../src/sync.js';
+import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
-const money = (db, n) => (Number(n) || 0).toLocaleString('en-US', { style: 'currency', currency: db.settings?.currency ?? 'USD' });
+const docCurrency = (db, rec) => (rec.currency_id && read(db, 'res.currency', rec.currency_id)?.name)
+  ?? (read(db, 'res.company', rec.company_id ?? 1)?.currency_id && read(db, 'res.currency', read(db, 'res.company', rec.company_id ?? 1).currency_id)?.name)
+  ?? db.settings?.currency ?? 'USD';
+
+const money = (db, rec, n) => {
+  const curr = docCurrency(db, rec);
+  const num = Number(n) || 0;
+  if (typeof curr === 'string' && /^[A-Za-z]{3}$/.test(curr)) {
+    try {
+      return num.toLocaleString('en-US', { style: 'currency', currency: curr.toUpperCase() });
+    } catch { /* fallback */ }
+  }
+  return `${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${curr ?? ''}`.trim();
+};
 
 /** Plain-text rendering of a document: header, lines, totals. */
 function documentText(db, model, rec) {
   const lines = rec.order_line ?? rec.invoice_line_ids ?? [];
   const product = (id) => read(db, 'product', id)?.name ?? '';
+  const comp = read(db, 'res.company', rec.company_id ?? 1);
+  const compName = comp?.name ?? db.settings?.company ?? '';
   return [
-    `${db.settings?.company ?? ''}`,
+    `${compName}`,
     '',
     `${models[model].label.replace(/s$/, '')} ${rec.name}`,
     '',
-    ...lines.map((l) => `- ${product(l.product_id)}  ×${l.qty}  ${money(db, l.price_unit)}`),
+    ...lines.map((l) => `- ${product(l.product_id)}  ×${l.qty}  ${money(db, rec, l.price_unit)}`),
     '',
-    `Total: ${money(db, rec.amount_total)}`,
-    rec.amount_residual ? `Amount due: ${money(db, rec.amount_residual)}` : '',
+    `Total: ${money(db, rec, rec.amount_total)}`,
+    rec.amount_residual ? `Amount due: ${money(db, rec, rec.amount_residual)}` : '',
   ].filter((l, i, all) => l !== '' || all[i - 1] !== '').join('\n');
 }
 
@@ -39,6 +54,21 @@ export async function sendDocument(cfg, db, user, { model, id }) {
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
   return { status: 200, body: { ok: true }, db: applyDiff(db, diffDb(db, next), { author: user.name, isAdmin: user.isAdmin }) };
+}
+
+/**
+ * Store the result of a delivered email. The message is already out, so a concurrent edit of the document must not
+ * turn the send into a failure: on a conflict only the "sent" note is recorded and the newer state is kept.
+ * @returns {{db: object, notice?: string}}
+ */
+export function recordSent(current, snapshot, sent, opts) {
+  try {
+    return { db: applyDiff(current, diffDb(snapshot, sent), opts) };
+  } catch (e) {
+    if (!(e instanceof ConflictError)) throw e;
+    const notesOnly = { ...snapshot, messages: sent.messages };
+    return { db: applyDiff(current, diffDb(snapshot, notesOnly), opts), notice: 'The email was sent, but the document changed meanwhile, so its status was left as it is.' };
+  }
 }
 
 /** Send a mailing now: one tracked email per recipient (see mailtrack.js); `store` commits through normal validation. */

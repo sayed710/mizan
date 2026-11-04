@@ -60,6 +60,9 @@ test('demo payment confirms the order and records it as paid', () => {
   const order = lastOrder(out.db);
   assert.deepEqual([order.state, order.payment_state], ['sale', 'paid']);
   assert.ok(search(out.db, 'stock.picking').some((p) => p.sale_id === order.id), 'confirmation creates the delivery');
+  const payment = search(out.db, 'account.payment').find((p) => p.memo === `Prepayment ${order.name}`);
+  assert.equal(payment?.amount, order.amount_total, 'the paid state is backed by a payment for the order total');
+  assert.equal(search(out.db, 'account.move').find((m) => m.id === payment.move_id)?.state, 'posted');
 });
 
 test('order status needs the right token; only a token hash is stored', () => {
