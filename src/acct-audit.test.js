@@ -7,6 +7,7 @@ register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__reactProps$'))];
 const textOf = (node) => (node?.nodeType === 3 ? node.nodeValue : (node?.childNodes ?? []).map(textOf).join(''));
 
+// Working Files: menu route rendering, default filters, separation from tax returns, and model buttons
 test('Working Files: menu route rendering, default filters, separation from tax returns, and model buttons', async () => {
   const { setupDom, find } = await import('./test-support/dom.js');
   const { initStore, commit, getDb } = await import('./store.js');
@@ -353,6 +354,72 @@ test('Annual Report: menu route, body pre-filling, Refresh, Mark as Done, read-o
       commit(updated);
     });
     assert.equal(read(getDb(), 'audit.report', rep.id).title, 'Updated Draft Title');
+  } finally {
+    await React.act(async () => rootForm.unmount());
+  }
+});
+
+test('Annual Report: HTML field edits and saves through the public form path', async () => {
+  const { setupDom, find } = await import('./test-support/dom.js');
+  const { initStore, commit, getDb } = await import('./store.js');
+  const { create, read } = await import('./orm.js');
+  const { seed } = await import('./seed.js');
+  const { menusFor } = await import('./models/index.js');
+  const { FormView } = await import('./views/FormView.jsx');
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+
+  const { makeEl } = setupDom();
+  globalThis.document.createElementNS = (namespace, tag) => makeEl(tag);
+  await initStore();
+  seed();
+
+  const menus = menusFor('accounting');
+  const review = menus.find((m) => m.label === 'Review');
+  const auditMenu = review.children.find((m) => m.label === 'Audit');
+  const arLeaf = auditMenu.children.find((m) => m.key === 'annual-report');
+
+  const rep = create(getDb(), 'audit.report', {
+    title: 'Audit Report HTML Test',
+    start_date: '2026-01-01',
+    end_date: '2026-12-31',
+    company_id: 1,
+    body: '<h2>Initial Report</h2><p>Initial content</p>',
+  });
+  commit(rep.db);
+
+  const hostForm = makeEl('div');
+  hostForm.ownerDocument = globalThis.document;
+  const rootForm = createRoot(hostForm);
+
+  try {
+    await React.act(async () => {
+      rootForm.render(React.createElement(FormView, {
+        leaf: arLeaf,
+        id: rep.id,
+        base: '#/accounting/annual-report',
+        params: new URLSearchParams(),
+      }));
+    });
+
+    // Find the HTML field editor or fallback textarea
+    const editor = find(hostForm, (n) => (n.tagName === 'TEXTAREA' || props(n)?.role === 'textbox') && (props(n)?.['aria-label'] === 'Body' || props(n)?.placeholder === 'Report content…'));
+    assert.ok(editor, 'HTML field control is rendered in form');
+
+    // Simulate user editing the field
+    await React.act(async () => {
+      props(editor).onChange({ target: { value: '<h2>Updated Balance Sheet</h2><p>Audited figures confirmed</p>' } });
+    });
+
+    const saveBtn = find(hostForm, (n) => n.tagName === 'BUTTON' && textOf(n) === 'Save');
+    assert.ok(saveBtn, 'Save button is displayed after editing');
+
+    await React.act(async () => {
+      await props(saveBtn).onClick();
+    });
+
+    const savedReport = read(getDb(), 'audit.report', rep.id);
+    assert.equal(savedReport.body, '<h2>Updated Balance Sheet</h2><p>Audited figures confirmed</p>');
   } finally {
     await React.act(async () => rootForm.unmount());
   }

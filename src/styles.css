@@ -186,6 +186,79 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .tabs button[aria-selected='true'] { border-color: var(--border); background: var(--surface); margin-bottom: -1px; border-top: 2px solid var(--brand); }
 .tab-panel { padding: 14px 0; }
 .tab-panel textarea { min-height: 140px; resize: vertical; }
+.html-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  overflow: hidden;
+  transition: border-color .15s;
+}
+.html-editor:focus-within {
+  border-color: var(--brand);
+}
+.html-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.html-editor-toolbar .btn {
+  padding: 2px 8px;
+  font-size: 13px;
+  min-height: 28px;
+  min-width: 28px;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.html-editor-toolbar .btn:hover {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.html-editor-toolbar .btn[aria-pressed='true'],
+.html-editor-toolbar .btn.active {
+  background: var(--brand-soft);
+  color: var(--brand);
+  border-color: var(--brand);
+  font-weight: 600;
+}
+.html-editor-content {
+  min-height: 140px;
+  padding: 10px 12px;
+  outline: 0;
+  overflow-y: auto;
+  text-align: start;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  line-height: 1.5;
+}
+.html-editor-content:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted);
+  pointer-events: none;
+}
+.html-editor-content h2 {
+  font-size: 1.3em;
+  margin: 0.5em 0;
+}
+.html-editor-content p {
+  margin: 0.5em 0;
+}
+.html-editor-content ul, .html-editor-content ol {
+  padding-inline-start: 24px;
+  margin: 0.5em 0;
+}
 .lines { width: 100%; border-collapse: collapse; }
 .lines th, .lines td { padding: 6px; border-bottom: 1px solid var(--border); text-align: start; }
 .lines .num { text-align: end; white-space: nowrap; }

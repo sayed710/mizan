@@ -7,6 +7,9 @@ import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { parseAmount } from './models/common.js';
 import { parseDistributionInput } from './analytic_distribution.js';
+import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
+
+export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
@@ -261,38 +264,6 @@ function DistributionInput({ value, onChange, ...props }) {
   }} />;
 }
 
-// Stored HTML is user-editable: keep only structural tags, drop every attribute, and drop script-like elements with their content.
-const SAFE_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'P', 'B', 'STRONG', 'EM', 'I', 'U', 'BR', 'HR', 'UL', 'OL', 'LI', 'DIV', 'SPAN', 'TABLE', 'CAPTION', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD']);
-const KEEP_ATTRS = new Set(['colspan', 'rowspan']);
-export function sanitizeHtml(html, parse = typeof DOMParser === 'undefined' ? null : (text) => new DOMParser().parseFromString(text, 'text/html')) {
-  if (!parse) return null;
-  const doc = parse(String(html ?? ''));
-  const clean = (node) => {
-    for (const child of [...node.childNodes]) {
-      if (child.nodeType === 3) continue;
-      if (child.nodeType !== 1) { child.remove(); continue; }
-      clean(child);
-      const tag = child.tagName.toUpperCase();
-      if (!SAFE_TAGS.has(tag)) {
-        if (['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'TEMPLATE', 'SVG', 'MATH', 'NOSCRIPT'].includes(tag)) child.remove();
-        else child.replaceWith(...child.childNodes);
-        continue;
-      }
-      for (const attr of [...child.attributes]) {
-        const kept = attr.name === 'class' ? /^[\w\s-]*$/.test(attr.value) : KEEP_ATTRS.has(attr.name) && /^\d{1,3}$/.test(attr.value);
-        if (!kept) child.removeAttribute(attr.name);
-      }
-    }
-  };
-  clean(doc.body);
-  return doc.body.innerHTML;
-}
-
-function SafeHtml({ html }) {
-  const safe = sanitizeHtml(html);
-  return safe == null ? <div className="readonly-html">{String(html ?? '')}</div> : <div className="readonly-html" dangerouslySetInnerHTML={{ __html: safe }} />;
-}
-
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
@@ -337,7 +308,13 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   );
   switch (field.type) {
     case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
-    case 'html': return <textarea {...a11y} value={value ?? ''} placeholder={t('Report content…')} onChange={(e) => onChange(e.target.value)} />;
+    case 'html': {
+      const htmlLabel = label ?? (field ? (field.custom ? field.label : t(field.label)) : '');
+      if (sanitizeHtml('') === null) {
+        return <textarea {...a11y} aria-label={htmlLabel} value={value ?? ''} placeholder={placeholder ?? t('Report content…')} onChange={(e) => onChange(e.target.value)} />;
+      }
+      return <HtmlEditor id={id} label={htmlLabel} required={field.required} value={value} placeholder={placeholder} onChange={onChange} />;
+    }
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':
