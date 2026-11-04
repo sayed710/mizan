@@ -174,6 +174,7 @@ export function postMove(db, id) {
       if (distribution == null || (!Object.hasOwn(line, 'analytic_distribution') && !Object.keys(distribution).length)) return line;
       return { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
     });
+    checkMandatoryPlans(db, { ...r, line_ids });
     return postAnalytic(write(db, 'account.move', id, { state: 'posted', name, line_ids }), id);
   }
   if (!r.partner_id) throw new Error('Partner is required');
@@ -542,7 +543,7 @@ const invoiceLineBase = productLines('Invoice Lines', 'list_price');
 const invoiceLineField = { ...invoiceLineBase, onchange: (line, key, db, move) => {
   const updated = invoiceLineBase.onchange(line, key, db, move);
   return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) } : updated;
-}, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+}, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
