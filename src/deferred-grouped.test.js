@@ -321,7 +321,7 @@ test('public model and menu paths invoke grouped deferral generation consistentl
 test('schedule with one month posted by postDueEntries, then grouped generation for a later date recognizes only remaining months', () => {
   let db = seed();
   db = write(db, 'res.company', 1, {
-    deferred_generation_method: 'manual_grouped',
+    deferred_generation_method: 'manual',
     deferred_amount_computation_method: 'full_months',
     deferred_revenue_account_id: accountId(db, '212000'),
   });
@@ -356,6 +356,8 @@ test('schedule with one month posted by postDueEntries, then grouped generation 
   assert.equal(individualMove.is_deferred_grouped, undefined);
   assert.equal(individualMove.line_ids.find((l) => l.account_id === accountId(db, '410000'))?.credit, 100);
 
+  // Switch to grouped generation after the individual posting.
+  db = write(db, 'res.company', 1, { deferred_generation_method: 'manual_grouped' });
   // Now run grouped generation for a later date: 2026-02-28 (month 2)
   db = generateGroupedEntries(db, { date: '2026-02-28', kind: 'revenue' });
 

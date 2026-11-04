@@ -953,6 +953,8 @@ const ar = {
   'Post Despite Quantity Mismatch': 'ترحيل رغم اختلاف الكمية',
   'Revaluation Date': 'تاريخ إعادة التقييم',
   'Reversal Entry': 'القيد العكسي',
+  'Deferred Contributions': 'مساهمات التأجيل',
+  'Board Lines': 'بنود جدول التأجيل',
   'Timesheet Cost per Hour': 'تكلفة ساعة سجل الوقت',
   'Hourly Cost': 'التكلفة بالساعة',
   'Last Update Status': 'حالة آخر تحديث',
