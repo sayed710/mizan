@@ -542,7 +542,7 @@ const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
 const releasedTaxes = (db, r) => {
   const released = new Map();
   for (const m of db.records['account.move'] ?? []) {
-    if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
+    if (m.cash_basis_origin_move_id !== r.id || (m.company_id ?? 1) !== (r.company_id ?? 1) || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
       const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
@@ -593,7 +593,8 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
   });
-  return postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
+  const posted = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
+  return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id }) };
 }
 
 /** Draft, full refund, or full refund + new draft copy reversing a posted invoice or bill. */
@@ -728,7 +729,7 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const due = residual(r, db);
-  const paid = payMove(db, id, amount, date, { journalId: journalIdVal });
+  const paid = payMove(db, id, amount, date, { journalId: journalIdVal, ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}) });
   const gap = docRound(due - amount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap) return paid;
@@ -1005,6 +1006,7 @@ export const accountingModels = {
       payment_date: { type: 'date', label: 'Paid on', readonly: true },
       fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
       fx_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Settlement Invoice', readonly: true },
+      cash_basis_origin_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true, hidden: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
