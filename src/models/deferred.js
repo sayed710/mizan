@@ -9,8 +9,8 @@ const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date
 const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
 const DAY = 86400000;
 
-/** Allocate posted company currency over inclusive calendar days in each month. */
-function datedBoard(amount, start, end) {
+/** Allocate company currency over inclusive monthly periods. */
+function datedBoard(amount, start, end, method = 'days') {
   const valid = (date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
   if (!valid(start) || !valid(end) || start > end) throw new Error('Set valid deferred start and end dates');
   const rows = [];
@@ -19,10 +19,12 @@ function datedBoard(amount, start, end) {
     const [year, month] = cursor.split('-').map(Number);
     const last = monthEnd(year, month);
     const through = last < end ? last : end;
-    rows.push({ date: last, days: (Date.parse(through) - Date.parse(cursor)) / DAY + 1 });
+    const days = (Date.parse(through) - Date.parse(cursor)) / DAY + 1;
+    const monthDays = Number(last.slice(-2));
+    rows.push({ date: last, weight: method === 'full_months' ? 1 : method === 'months' ? days / monthDays : days });
     cursor = new Date(Date.parse(through) + DAY).toISOString().slice(0, 10);
   }
-  const amounts = allocateCents(amount, rows.map((row) => row.days));
+  const amounts = allocateCents(amount, rows.map((row) => row.weight));
   return rows.map((row, index) => ({ date: row.date, amount: amounts[index], posted: false, move_id: null }));
 }
 
@@ -36,7 +38,7 @@ export function createInvoiceDeferrals(db, move) {
     const entryLine = (move.line_ids ?? []).find((l) => (l.invoice_sources ?? []).some((s) => s.index === index));
     const source = entryLine?.invoice_sources.find((s) => s.index === index);
     if (!source?.original_account_id || !(source.amount > 0)) throw new Error('Deferred line needs a positive posted amount and recognition account');
-    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date);
+    const board = datedBoard(source.amount, line.deferred_start_date, line.deferred_end_date, company?.deferred_amount_computation_method);
     const created = create(next, 'account.deferral', { name: `${move.name} ${index + 1}`, kind: move.move_type === 'out_invoice' ? 'revenue' : 'expense', amount: source.amount, start_date: line.deferred_start_date, end_date: line.deferred_end_date, months: board.length, board, state: 'running', company_id: move.company_id ?? 1, partner_id: move.partner_id, source_move_id: move.id, source_line: index, deferred_account_id: entryLine.account_id, recognition_account_id: source.original_account_id, analytic_distribution: line.analytic_distribution });
     next = created.db;
     if (company?.deferred_generation_method === 'on_validation') next = postDueEntries(next, read(next, 'account.deferral', created.id), '9999-12-31');
@@ -76,7 +78,9 @@ export function computeBoard(db, d) {
   if (!(Number(d.amount) > 0)) throw new Error('The amount must be positive');
   if (!Number.isInteger(Number(d.months)) || Number(d.months) < 1) throw new Error('The number of months must be at least 1');
   if (!d.start_date) throw new Error('Set a start date');
-  const board = deferralBoard(d.amount, d.start_date, Number(d.months)).map((l) => ({ ...l, posted: false, move_id: null }));
+  const company = read(db, 'res.company', d.company_id ?? 1);
+  const end = d.end_date || deferralBoard(d.amount, d.start_date, Number(d.months)).at(-1).date;
+  const board = datedBoard(d.amount, d.start_date, end, company?.deferred_amount_computation_method);
   return write(db, 'account.deferral', d.id, { board, state: 'running' });
 }
 
@@ -150,7 +154,7 @@ export const deferredModels = {
         { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['kind', 'partner_id', 'amount', 'analytic_distribution'], ['start_date', 'months']],
+      groups: [['kind', 'partner_id', 'company_id', 'amount', 'analytic_distribution'], ['start_date', 'end_date', 'months']],
       tabs: [{ label: 'Recognition Board', fields: ['board'] }],
       chatter: true,
     },

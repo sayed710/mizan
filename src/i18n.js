@@ -90,6 +90,8 @@ const ar = {
   'Deferred Revenue Account': 'حساب الإيرادات المؤجلة',
   'Deferred Expense Account': 'حساب المصروفات المؤجلة',
   'Deferred Entry Generation': 'إنشاء قيود التأجيل',
+  'Based on': 'على أساس',
+  'Full Months': 'أشهر كاملة',
   'On Validation': 'عند الاعتماد',
   'Cancelled Depreciation': 'الإهلاك الملغى',
   'Generate Company Deferrals': 'إنشاء قيود التأجيل للشركة',
