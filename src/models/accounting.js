@@ -913,14 +913,14 @@ export const accountingModels = {
           ...fiscal,
           ...(partnerBank ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
-          ...(term ? { invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {}),
+          ...(partnerChange ? { invoice_payment_term_id: term ?? null, invoice_date_due: null, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {}),
         };
       }
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
-      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
+      move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: {
         type: 'many2one',
         relation: 'account.journal',
