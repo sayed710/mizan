@@ -66,6 +66,14 @@ test('counters work on models with more records than a function call can take as
   assert.equal(repairSeq(db).seq['res.partner'], 300_000);
 });
 
+test('startup preserves a safe historical counter even after many records were deleted', () => {
+  const db = seed();
+  const historical = { ...db, seq: { ...db.seq, 'res.partner': 2000000 } };
+  const repaired = repairSeq(historical);
+  assert.equal(repaired.seq['res.partner'], 2000000);
+  assert.equal(create(repaired, 'res.partner', { name: 'Never reuse an id' }).id, 2000001);
+});
+
 test('legacy records with ids above MAX_ID keep accepting new records after a repair', () => {
   const db = seed();
   const big = MAX_ID * 2;

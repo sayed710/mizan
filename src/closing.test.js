@@ -108,7 +108,7 @@ test('foreign invoices revalue residuals after rate changes with a balanced next
   const { db, id } = foreign();
   const snapshot = JSON.stringify(db);
   assert.deepEqual(unrealizedExchange(db, '2024-02-29'), [{ invoice_id: id, company_id: 1, partner_id: 1,
-    currency_id: read(db, 'account.move', id).currency_id, account: '121000', residual: 100, booked: 50, value: 100, difference: 50 }]);
+    currency_id: read(db, 'account.move', id).currency_id, account: '121000', account_id: accountId(db, '121000'), residual: 100, booked: 50, value: 100, difference: 50 }]);
   const done = revalueForeignBalances(db, '2024-02-29');
   assert.equal(JSON.stringify(db), snapshot);
   const adjustment = search(done, 'account.move').find((m) => m.revaluation_date === '2024-02-29');
@@ -121,7 +121,15 @@ test('foreign invoices revalue residuals after rate changes with a balanced next
   assert.deepEqual(reversal.line_ids.map((l) => [l.account_id, l.debit, l.credit]), adjustment.line_ids.map((l) => [l.account_id, l.credit, l.debit]));
   assert.equal(revalueForeignBalances(done, '2024-02-29'), done);
   const withoutMetadata = write(done, 'account.move', adjustment.id, { revaluation_date: null, reversal_move_id: null });
-  assert.equal(revalueForeignBalances(withoutMetadata, '2024-02-29'), withoutMetadata);
+  const repeated = revalueForeignBalances(withoutMetadata, '2024-02-29');
+  const newAdjustment = search(repeated, 'account.move').find((m) => m.revaluation_date === '2024-02-29');
+  assert.ok(newAdjustment);
+  assert.notEqual(newAdjustment.id, adjustment.id);
+  assert.ok(isBalanced(newAdjustment.line_ids));
+  const newReversal = read(repeated, 'account.move', newAdjustment.reversal_move_id);
+  assert.ok(newReversal);
+  assert.equal(newReversal.invoice_date, '2024-03-01');
+  assert.ok(isBalanced(newReversal.line_ids));
   assert.equal(read(done, 'account.move', id).amount_residual, 100);
   assert.equal(revalueForeignBalances(db, '2024-01-31'), db);
 });

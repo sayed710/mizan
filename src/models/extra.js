@@ -1,10 +1,14 @@
 // Sign, Documents, Planning, Rental (Appointments live in appointments.js).
 import { create, read, write } from '../orm.js';
-import { addDays, pad, today } from './common.js';
+import { addDays, pad, subtotal, today } from './common.js';
 import { moveStock } from './sales.js';
+import { bestPrice, rentalHours } from './rentalpricing.js';
+import { round } from '../money.js';
 
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
 const days = (a, b) => (a && b ? Math.max(1, Math.round((new Date(b) - new Date(a)) / 864e5)) : 1);
+const hasRentalRules = (db, productId) => (db.records['rental.pricing'] ?? []).some((rule) => rule.active !== false && rule.product_id === productId);
+const rentalPrice = (db, r) => bestPrice(db, r.product_id, rentalHours(r.pickup_date, r.return_date)).price;
 
 /** Turn a document into work elsewhere and link it back (bill to digitize, signature request, task). */
 function documentTo(db, d, model, vals, target, note) {
@@ -46,6 +50,14 @@ const rentOut = (db, r, sign) => {
 const lateDays = (r, at = today()) => (r.return_date ? Math.max(0, Math.round((new Date(r.actual_return_date ?? at) - new Date(r.return_date)) / 864e5)) : 0);
 const lateFee = (r, at) => Math.round(lateDays(r, at) * (Number(r.qty) || 0) * (Number(r.price_per_day) || 0) * (Number(r.late_fee_factor) || 0) * 100) / 100;
 
+/** Keep legacy billing flags, but derive new charges from live, linked invoice lines. */
+const rentalCharges = (db, r) => (db.records['account.move'] ?? [])
+  .filter((m) => m.state !== 'cancel' && m.move_type === 'out_invoice' && (m.company_id ?? 1) === (r.company_id ?? 1))
+  .flatMap((m) => (m.invoice_line_ids ?? []).filter((l) => l.rental_id === r.id));
+const billedRental = (db, r) => Boolean(r.invoiced || rentalCharges(db, r).some((l) => l.rental_charge === 'rental'));
+const billedLateFee = (db, r) => round((Number(r.late_fee_invoiced) || 0) + rentalCharges(db, r)
+  .filter((l) => l.rental_charge === 'late').reduce((sum, l) => sum + subtotal(l), 0));
+
 /** Units of the product reserved or out on other rentals overlapping [from, to]. */
 export function rentedQty(db, productId, from, to, excludeId) {
   return (db.records['sale.rental'] ?? [])
@@ -62,30 +74,36 @@ function confirmRental(db, r) {
   // Units already picked up are no longer on hand, so add them back before comparing.
   const out = (db.records['sale.rental'] ?? []).filter((o) => o.id !== r.id && o.product_id === r.product_id && o.state === 'picked').reduce((s, o) => s + (Number(o.qty) || 0), 0);
   if (product?.type === 'goods' && busy + (Number(r.qty) || 0) > onHand + out) throw new Error(`Only ${Math.max(0, onHand + out - busy)} ${product.name} available for these dates`);
-  return write(db, 'sale.rental', r.id, { state: 'reserved' });
+  const rental_unit_price = hasRentalRules(db, r.product_id) ? rentalPrice(db, r) : null;
+  return write(db, 'sale.rental', r.id, { state: 'reserved', rental_unit_price });
 }
 
 /** Invoice the late fee accrued since the last invoice (rental returned after being invoiced). */
 function lateFeeInvoice(db, r) {
-  const delta = Math.round((lateFee(r) - (Number(r.late_fee_invoiced) || 0)) * 100) / 100;
+  r = read(db, 'sale.rental', r.id);
+  if (r.legacy_billing_review) throw new Error('Review legacy billing before invoicing this rental');
+  const delta = Math.round((lateFee(r) - r.billing_late_fee) * 100) / 100;
   if (!(delta > 0)) throw new Error('No additional late fee to invoice');
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
-    invoice_line_ids: [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: delta, tax: 14 }],
+    invoice_line_ids: [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: delta, tax: 14, rental_id: r.id, rental_charge: 'late' }],
   });
-  return { db: write(next, 'sale.rental', r.id, { late_fee_invoiced: lateFee(r) }), go: `#/accounting/invoices/${id}` };
+  return { db: next, go: `#/accounting/invoices/${id}` };
 }
 
 function rentalInvoice(db, r) {
+  r = read(db, 'sale.rental', r.id);
+  if (r.legacy_billing_review) throw new Error('Review legacy billing before invoicing this rental');
+  if (r.billing_invoiced) throw new Error('This rental is already invoiced');
   const fee = lateFee(r);
   const { db: next, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: r.partner_id, invoice_origin: r.name, invoice_date: today(), invoice_date_due: addDays(today(), 15),
     invoice_line_ids: [
-      { product_id: r.product_id, name: 'Rental', qty: r.qty * days(r.pickup_date, r.return_date), price_unit: r.price_per_day, tax: 14 },
-      ...(fee ? [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: fee, tax: 14 }] : []),
+      { product_id: r.product_id, name: 'Rental', qty: r.rental_unit_price == null ? r.qty * days(r.pickup_date, r.return_date) : r.qty, price_unit: r.rental_unit_price ?? r.price_per_day, tax: 14, rental_id: r.id, rental_charge: 'rental' },
+      ...(fee ? [{ product_id: r.product_id, name: `Late return (${lateDays(r)} day(s))`, qty: 1, price_unit: fee, tax: 14, rental_id: r.id, rental_charge: 'late' }] : []),
     ],
   });
-  return { db: write(next, 'sale.rental', r.id, { invoiced: true, late_fee_invoiced: fee }), go: `#/accounting/invoices/${id}` };
+  return { db: next, go: `#/accounting/invoices/${id}` };
 }
 
 /** Why a shift clashes: another shift of the same resource on overlapping days, or approved time off. */
@@ -295,14 +313,22 @@ export const extraModels = {
       pickup_date: { type: 'date', label: 'Pick up Date' },
       return_date: { type: 'date', label: 'Return Date' },
       price_per_day: { type: 'monetary', label: 'Price per Day' },
-      amount_total: { type: 'monetary', label: 'Total', compute: (r) => (Number(r.qty) || 0) * (Number(r.price_per_day) || 0) * days(r.pickup_date, r.return_date) },
+      rental_unit_price: { type: 'monetary', label: 'Unit Price', readonly: true, hidden: true },
+      amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => {
+        const rulePrice = r.rental_unit_price == null && r.state === 'quotation' && r.product_id && r.pickup_date && r.return_date && r.return_date >= r.pickup_date && hasRentalRules(db, r.product_id) ? rentalPrice(db, r) : null;
+        return round((Number(r.qty) || 0) * (r.rental_unit_price ?? rulePrice ?? ((Number(r.price_per_day) || 0) * days(r.pickup_date, r.return_date))));
+      } },
       actual_return_date: { type: 'date', label: 'Returned on', readonly: true },
       late_fee_factor: { type: 'float', label: 'Late Fee (× daily price)' },
       late_fee: { type: 'monetary', label: 'Late Fee', compute: (r) => lateFee(r) },
       deposit: { type: 'monetary', label: 'Security Deposit' },
       late_fee_invoiced: { type: 'monetary', label: 'Late Fee Invoiced', readonly: true },
+      billing_late_fee: { type: 'monetary', label: 'Late Fee Invoiced', readonly: true, compute: (r, db) => billedLateFee(db, r) },
       state: state([['quotation', 'Quotation'], ['reserved', 'Reserved'], ['picked', 'Picked-up'], ['returned', 'Returned'], ['cancel', 'Cancelled']]),
       invoiced: { type: 'boolean', label: 'Invoiced', readonly: true },
+      billing_invoiced: { type: 'boolean', label: 'Invoiced', readonly: true, compute: (r, db) => billedRental(db, r) },
+      legacy_billing_review: { type: 'boolean', label: 'Legacy Billing Needs Review', readonly: true },
+      legacy_billing_review_note: { type: 'text', label: 'Legacy Billing Review Note', readonly: true },
     },
     defaults: (id) => ({ name: 'R' + pad(id), qty: 1, state: 'quotation', pickup_date: today(), return_date: addDays(today(), 3), price_per_day: 0, late_fee_factor: 1.5, deposit: 0, invoiced: false }),
     filters: [
@@ -311,7 +337,8 @@ export const extraModels = {
         { id: 'returns', label: 'Returns', fn: (r) => r.state === 'picked' && r.return_date <= today() },
         { id: 'late', label: 'Late', fn: (r) => r.state === 'picked' && r.return_date < today() },
       ],
-      [{ id: 'to_invoice', label: 'To Invoice', fn: (r) => ['picked', 'returned'].includes(r.state) && !r.invoiced }],
+      [{ id: 'to_invoice', label: 'To Invoice', fn: (r) => ['picked', 'returned'].includes(r.state) && !r.billing_invoiced && !r.legacy_billing_review },
+        { id: 'billing_review', label: 'Billing Needs Review', fn: (r) => r.legacy_billing_review }],
     ],
     groupBys: ['state', 'partner_id', 'product_id', 'pickup_date'],
     kanban: { groupBy: 'state', title: 'name', lines: ['partner_id', 'product_id', 'return_date', 'amount_total'] },
@@ -330,13 +357,24 @@ export const extraModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'quotation', run: (db, r) => ({ db: confirmRental(db, r) }) },
         { label: 'Pickup', primary: true, when: (r) => r.state === 'reserved', run: (db, r) => ({ db: write(rentOut(db, r, 1), 'sale.rental', r.id, { state: 'picked' }) }) },
         { label: 'Return', primary: true, when: (r) => r.state === 'picked', run: (db, r) => ({ db: write(rentOut(db, r, -1), 'sale.rental', r.id, { state: 'returned', actual_return_date: today() }) }) },
-        { label: 'Create Invoice', when: (r) => ['picked', 'returned'].includes(r.state) && !r.invoiced, run: rentalInvoice },
-        { label: 'Invoice Late Fee', when: (r) => r.state === 'returned' && r.invoiced && lateFee(r) > (Number(r.late_fee_invoiced) || 0), run: lateFeeInvoice },
+        { label: 'Create Invoice', when: (r) => ['picked', 'returned'].includes(r.state) && !r.billing_invoiced && !r.legacy_billing_review, run: rentalInvoice },
+        { label: 'Invoice Late Fee', when: (r) => r.state === 'returned' && r.billing_invoiced && !r.legacy_billing_review && lateFee(r) > r.billing_late_fee, run: lateFeeInvoice },
+        { label: 'Reconcile Legacy Billing', when: (r) => r.legacy_billing_review, wizard: (db, r) => ({ title: 'Reconcile Legacy Billing', fields: [
+          { name: 'invoiced', type: 'selection', label: 'Was the rental invoiced?', required: true, options: [['yes', 'Yes'], ['no', 'No']] },
+          { name: 'late_fee_invoiced', type: 'monetary', label: 'Legacy late fee invoiced (excluding linked charges)', required: true, default: Number(r.late_fee_invoiced) || 0 },
+          { name: 'note', type: 'text', label: 'Evidence or explanation', required: true },
+        ] }), run: (db, r, values = {}) => {
+          const late = Number(values.late_fee_invoiced);
+          const note = String(values.note ?? '').trim();
+          if (!['yes', 'no'].includes(values.invoiced) || values.late_fee_invoiced == null || values.late_fee_invoiced === '' || !Number.isFinite(late) || late < 0 || !note) throw new Error('Choose the billing status, enter the late fee and explain the review');
+          return { db: write(db, 'sale.rental', r.id, { invoiced: values.invoiced === 'yes', late_fee_invoiced: round(late), legacy_billing_review: false,
+            legacy_billing_review_note: note, legacy_billing_before_review: { invoiced: r.invoiced, late_fee_invoiced: r.late_fee_invoiced } }) };
+        } },
         { label: 'Cancel', vals: { state: 'cancel' }, when: (r) => ['quotation', 'reserved'].includes(r.state) },
       ],
       ribbon: (r) => (r.state === 'picked' && r.return_date < today() ? 'Late' : null),
       title: 'name',
-      groups: [['partner_id', 'product_id', 'qty', 'deposit'], ['pickup_date', 'return_date', 'actual_return_date', 'price_per_day', 'amount_total', 'late_fee_factor', 'late_fee']],
+      groups: [['partner_id', 'product_id', 'qty', 'deposit'], ['pickup_date', 'return_date', 'actual_return_date', 'price_per_day', 'amount_total', 'late_fee_factor', 'late_fee'], ['legacy_billing_review', 'legacy_billing_review_note']],
       chatter: true,
     },
   },

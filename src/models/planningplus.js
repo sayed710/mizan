@@ -2,6 +2,7 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { addDays, today } from './common.js';
 import { extraModels, shiftConflict } from './extra.js';
+import { calendarFor, isWorkingDay } from './calendar.js';
 
 const base = extraModels['planning.slot'];
 const day = (value) => value?.slice(0, 10);
@@ -12,7 +13,6 @@ const dates = (from, to) => {
   for (let d = from; d <= to; d = addDays(d, 1)) result.push(d);
   return result;
 };
-const workingDay = (date) => ![0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay());
 
 function period(from, to) {
   for (const value of [from, to]) {
@@ -139,11 +139,14 @@ export function acceptSwap(db, slotId, newEmployeeId) {
 /** Employee-keyed planned hours and weekday capacity, excluding approved leave days. */
 export function planningAnalysis(db, from, to) {
   period(from, to);
-  const workdays = dates(from, to).filter(workingDay);
+  const periodDates = dates(from, to);
   const leaves = search(db, 'hr.leave').filter((l) => l.state === 'validate');
   const slots = search(db, 'planning.slot').filter((s) => inPeriod(s, from, to));
   return Object.fromEntries(search(db, 'hr.employee').map((e) => {
-    const capacity = workdays.filter((d) => !leaves.some((l) => l.employee_id === e.id && l.date_from <= d && l.date_to >= d)).length * dailyHours(e);
+    const calendar = calendarFor(db, e.id);
+    const workdays = periodDates.filter((d) => isWorkingDay(calendar, d, db));
+    const hours = (Number(e.daily_hours) > 0 || Number(e.working_hours) > 0) ? dailyHours(e) : (Number(calendar?.hours_per_day) || dailyHours(e));
+    const capacity = workdays.filter((d) => !leaves.some((l) => l.employee_id === e.id && l.date_from <= d && l.date_to >= d)).length * hours;
     const planned = slots.filter((s) => s.employee_id === e.id).reduce((sum, s) => {
       const allDays = dates(s.start, s.end || s.start);
       const share = allDays.filter((d) => d >= from && d <= to).length / allDays.length;

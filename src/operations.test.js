@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { menuModelsForApps, modelsForApps, writableModelsForApps } from './models/index.js';
 import { payQuote } from './models/quoteplus.js';
 import { openSession, payOrder, startSession } from './models/pos.js';
@@ -40,6 +40,21 @@ test('a POS-only user pays and closes through server operations, priced from the
   assert.ok(!openSession(closed));
 });
 
+test('pos.pay rejects foreign-company products and accepts shared products', () => {
+  const db = startSession(seed(), 0).db;
+  const company = create(db, 'res.company', { name: 'Other company' });
+  const foreign = write(company.db, 'product', 1, { company_id: company.id });
+  const request = { cart: [{ product_id: 1, qty: 1 }], method: 'cash' };
+  const before = JSON.stringify(foreign.records);
+  assert.throws(() => runOperation(foreign, 'pos.pay', request, access(['pos'])), /not available in POS/);
+  assert.equal(JSON.stringify(foreign.records), before, 'rejected checkout makes no writes');
+
+  const shared = write(foreign, 'product', 1, { company_id: null });
+  const out = runOperation(shared, 'pos.pay', request, access(['pos']));
+  const saved = apply(shared, out);
+  assert.equal(read(saved, 'pos.order', out.reply.id).lines[0].product_id, 1);
+});
+
 test('operations need the model on the user\'s own menus and refuse unknown names', () => {
   const made = quote(seed());
   assert.ok(modelsForApps(['appointments']).has('account.move'), 'appointments reach invoices through a relation');
@@ -48,3 +63,29 @@ test('operations need the model on the user\'s own menus and refuse unknown name
   for (const name of ['nope', 'constructor', '__proto__']) assert.throws(() => runOperation(made.db, name, {}, access(['sales'])), (e) => e.status === 404);
   assert.throws(() => runOperation(made.db, 'pos.pay', { cart: [], method: 'bitcoin' }, access(['pos'])), /payment method/);
 });
+
+test('a POS user refunds through server operation pos.refund: rejects mismatched tenders and enforces single refund', () => {
+  let db = startSession(seed(), 100).db;
+  const payOut = runOperation(db, 'pos.pay', { cart: [{ product_id: 1, qty: 1 }], method: 'cash' }, access(['pos']));
+  db = apply(db, payOut);
+  const orderId = payOut.reply.id;
+
+  // Attempt mismatched tenders through pos.refund
+  assert.throws(
+    () => runOperation(db, 'pos.refund', { id: orderId, method: 'card' }, access(['pos'])),
+    /Invalid payment|match.*original/i
+  );
+
+  // Correct refund
+  const refundOut = runOperation(db, 'pos.refund', { id: orderId }, access(['pos']));
+  db = apply(db, refundOut);
+  const refundedOrder = read(db, 'pos.order', orderId);
+  assert.equal(refundedOrder.state, 'refunded');
+
+  // Duplicate refund through pos.refund rejected
+  assert.throws(
+    () => runOperation(db, 'pos.refund', { id: orderId }, access(['pos'])),
+    /already refunded/i
+  );
+});
+

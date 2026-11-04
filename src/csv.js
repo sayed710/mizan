@@ -1,6 +1,6 @@
 // RFC 4180-style CSV: quoted fields, doubled quotes, CRLF/LF line breaks.
 
-const quote = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+const quote = (v) => `"${String(v ?? '').replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '').replace(/"/g, '""')}"`;
 
 /** @param {Array<Array<unknown>>} rows */
 export const toCsv = (rows) => rows.map((r) => r.map(quote).join(',')).join('\r\n');

@@ -12,11 +12,11 @@ test('diff of identical snapshots is empty', () => {
 
 test('concurrent edits to different records both survive', () => {
   const base = seed();
-  const alice = write(base, 'crm.lead', 1, { stage_id: 'won' });
+  const alice = write(base, 'crm.lead', 1, { stage_id: 4 });
   const bob = write(base, 'crm.lead', 2, { priority: 3 });
   let server = applyDiff(base, diffDb(base, alice));
   server = applyDiff(server, diffDb(base, bob));
-  assert.equal(read(server, 'crm.lead', 1).stage_id, 'won');
+  assert.equal(read(server, 'crm.lead', 1).stage_id, 4);
   assert.equal(read(server, 'crm.lead', 2).priority, 3);
   assert.equal(server.messages.length, base.messages.length + 1);
 });

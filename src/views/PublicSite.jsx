@@ -229,27 +229,31 @@ export function PublicSite() {
         {route.page === 'jobs' && (applied ? <div className="site-thanks" role="status"><h2>{t('Thank you!')}</h2><p>{t('Your application was received.')}</p></div> : (
           <>
             <h2>{t('Jobs')}</h2>
-            {site.jobs.map((j) => (
-              <article key={j.id} className="shop-item job">
-                <h3>{j.name}</h3>
-                <p>{j.description}</p>
-                {(applying ?? Number(route.params.get('job'))) === j.id ? (
-                  <form className="checkout" onSubmit={async (e) => {
-                    e.preventDefault();
-                    const f = new FormData(e.currentTarget);
-                    const r = await post('/api/public/apply', { job_id: j.id, name: f.get('name'), email: f.get('email'), phone: f.get('phone'), motivation: f.get('motivation'), ref: route.params.get('ref') || undefined });
-                    if (r.ok) setApplied(true); else setError(r.data.error);
-                  }}>
-                    <label>{t('Name')}<input name="name" required maxLength={120} /></label>
-                    <label>{t('Email')}<input name="email" type="email" required /></label>
-                    <label>{t('Phone')}<input name="phone" type="tel" /></label>
-                    <label>{t('Why you?')}<textarea name="motivation" maxLength={5000} /></label>
-                    {error && <div className="alert" role="alert">{error}</div>}
-                    <button type="submit" className="btn primary">{t('Apply')}</button>
-                  </form>
-                ) : <button type="button" className="btn primary" onClick={() => setApplying(j.id)}>{t('Apply')}</button>}
-              </article>
-            ))}
+            {(() => {
+              const paramJob = Number(route.params.get('job'));
+              const activeJobId = site.jobs.some((item) => item.id === paramJob) ? paramJob : applying;
+              return site.jobs.map((j) => (
+                <article key={j.id} className="shop-item job">
+                  <h3>{j.name}</h3>
+                  <p>{j.description}</p>
+                  {activeJobId === j.id ? (
+                    <form className="checkout" onSubmit={async (e) => {
+                      e.preventDefault();
+                      const f = new FormData(e.currentTarget);
+                      const r = await post('/api/public/apply', { job_id: j.id, name: f.get('name'), email: f.get('email'), phone: f.get('phone'), motivation: f.get('motivation'), ref: route.params.get('ref') || undefined });
+                      if (r.ok) setApplied(true); else setError(r.data.error);
+                    }}>
+                      <label>{t('Name')}<input name="name" required maxLength={120} /></label>
+                      <label>{t('Email')}<input name="email" type="email" required /></label>
+                      <label>{t('Phone')}<input name="phone" type="tel" /></label>
+                      <label>{t('Why you?')}<textarea name="motivation" maxLength={5000} /></label>
+                      {error && <div className="alert" role="alert">{error}</div>}
+                      <button type="submit" className="btn primary">{t('Apply')}</button>
+                    </form>
+                  ) : <button type="button" className="btn primary" onClick={() => setApplying(j.id)}>{t('Apply')}</button>}
+                </article>
+              ));
+            })()}
           </>
         ))}
         {route.page === 'page' && (page ? <article className="site-page"><h1>{page.name}</h1><Content text={page.content} /></article> : <p className="alert">{t('Page not found')}</p>)}

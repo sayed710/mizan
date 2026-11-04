@@ -63,6 +63,12 @@ test('share links list documents, download only shared files as attachments, and
   assert.equal(sharePage(db, '/shop', '2030-01-01'), null);
 });
 
+test('malformed share paths stay in the share failure path instead of static fallback', () => {
+  for (const path of ['/share/', '/share/x', '/share/a/b/c', '/share/validtoken/not-a-number']) {
+    assert.equal(sharePage(seed(), path, '2030-01-01')?.status, 404, path);
+  }
+});
+
 test('public applications with a referral token are attributed to the employee', () => {
   let db = seed();
   if (!search(db, 'hr.job').some((j) => j.is_published)) db = create(db, 'hr.job', { name: 'Driver', is_published: true }).db;

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { read } from '../orm.js';
-import { cashFlow, executiveSummary, partnerLedger, trialBalance } from '../models/reports.js';
+import { read, search } from '../orm.js';
+import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from '../models/reports.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 
@@ -45,6 +45,24 @@ export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }
   );
 };
 
+export function CustomerStatement({ db, period }) {
+  const [partnerId, setPartnerId] = useState('');
+  const partners = search(db, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+  const selected = partners.some((p) => p.id === Number(partnerId)) ? Number(partnerId) : null;
+  const statement = selected ? customerStatement(db, selected, period) : null;
+  return <tbody>
+    <tr><td colSpan={4}><label>{t('Customer')} <select aria-label={t('Customer')} value={selected ?? ''} onChange={(e) => setPartnerId(e.target.value)}>
+      <option value="">{t('Select a customer')}</option>
+      {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+    </select></label></td></tr>
+    {statement && <>
+      <tr className="rep-section"><td>{t('Opening Balance')}</td><td /><td />{num(statement.opening)}</tr>
+      {statement.lines.map((line, i) => <tr key={i} className="rep-detail"><td>{line.date} · {line.move_name}{line.ref ? ` · ${line.ref}` : ''}</td>{num(line.debit)}{num(line.credit)}{num(line.balance)}</tr>)}
+      <tr className="rep-total strong"><td>{t('Closing Balance')}</td><td /><td />{num(statement.closing)}</tr>
+    </>}
+  </tbody>;
+}
+
 export function CashFlow({ db, period }) {
   const r = cashFlow(db, period);
   const section = (key, title) => (
@@ -61,6 +79,7 @@ export function CashFlow({ db, period }) {
       {section('operating', 'Operating Activities')}
       {section('investing', 'Investing Activities')}
       {section('financing', 'Financing Activities')}
+      {section('unclassified', 'Unclassified')}
       <tr className="rep-total"><td>{t('Net Change in Cash')}</td>{num(r.net)}</tr>
       <tr className="rep-total strong"><td>{t('Cash at the end of the period')}</td>{num(r.closing)}</tr>
     </tbody>

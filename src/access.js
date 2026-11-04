@@ -4,7 +4,7 @@
 export function appOpen(db, user, appId) {
   if (appId === 'settings') return true;
   if ((db.settings?.uninstalled ?? []).includes(appId)) return false;
-  return !user?.apps || user.apps.includes(appId);
+  return user?.isAdmin === true || !user?.apps || user.apps.includes(appId);
 }
 
 /** The employee linked to the signed-in login (hr.employee.user_login), if any. */

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write, unlink } from './orm.js';
 import { seed } from './seed.js';
+import { accountingCompany, assertEntryCompany } from './test-support/accounting-company.js';
+import { applyDiff, diffDb } from './sync.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { expensePlusModels, createSheet, submitSheet, approveSheet, refuseSheet, postSheet, registerPayment, reinvoiceExpenses, duplicates, expenseAnalysis } from './models/expenseplus.js';
 
@@ -104,6 +106,32 @@ test('company-paid report credits the bank and completes immediately without rei
   assert.equal(read(posted, 'hr.expense.sheet', id).state, 'done');
   assert.equal(search(posted, 'hr.expense').find((r) => r.sheet_id === id).state, 'paid');
   assert.throws(() => registerPayment(posted, id, 114, date), /status/);
+});
+
+test('expense report posting and reimbursement use the report company accounts and journals', () => {
+  const branch = accountingCompany(seed());
+  const expense = addExpense(branch.db, { company_id: branch.id });
+  const other = addExpense(expense.db, { company_id: 1 });
+  assert.throws(() => createSheet(other.db, [expense.id, other.id]), /same company/);
+  const report = createSheet(other.db, [expense.id]);
+  assert.equal(read(report.db, 'hr.expense.sheet', report.id).company_id, branch.id);
+  const accepted = approved(report.db, report.id);
+  const buttons = expensePlusModels['hr.expense.sheet'].form.buttons;
+  const post = buttons.find((b) => b.label === 'Post Journal Entries');
+  const posted = post.run(accepted, read(accepted, 'hr.expense.sheet', report.id)).db;
+  assertEntryCompany(assert, posted, entry(posted, report.id), branch.id);
+  const savedPrompt = globalThis.prompt;
+  try {
+    globalThis.prompt = () => '114';
+    const reimburse = buttons.find((b) => b.label === 'Register Payment');
+    const paid = reimburse.run(posted, read(posted, 'hr.expense.sheet', report.id)).db;
+    const newMoves = paid.records['account.move'].filter((m) => !posted.records['account.move'].some((old) => old.id === m.id));
+    assert.equal(newMoves.length, 1);
+    assertEntryCompany(assert, paid, newMoves[0], branch.id);
+    const savedPost = applyDiff(accepted, diffDb(accepted, posted), { isAdmin: true });
+    const saved = applyDiff(savedPost, diffDb(posted, paid), { isAdmin: true });
+    assertEntryCompany(assert, saved, read(saved, 'account.move', newMoves[0].id), branch.id);
+  } finally { globalThis.prompt = savedPrompt; }
 });
 
 test('reimbursement supports partial and full payment, keeps the partner, rejects invalid and excessive amounts', () => {

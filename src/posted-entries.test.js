@@ -82,7 +82,7 @@ test('a forged payment cannot point at an unrelated entry, an invoice, or more t
   const paid = save(db, payMove(db, id, 40));
   const entry = read(paid, 'account.move', id).payments[0].move_id;
   const again = read(paid, 'account.move', id);
-  assert.throws(() => forged(paid, 'account.move', { ...again, payments: [...again.payments, { date: '2026-10-26', amount: 40, move_id: entry }], amount_paid: 80 }), /more than its journal entry/);
+  assert.throws(() => forged(paid, 'account.move', { ...again, payments: [...again.payments, { date: read(paid, 'account.move', entry).invoice_date, amount: 40, move_id: entry }], amount_paid: 80 }), /more than its journal entry/);
   assert.throws(() => forged(paid, 'account.payment', { id: 9200, name: 'PBNK1/2026/9200', state: 'posted', partner_id: 1, amount: 100, move_id: other.id, payment_type: 'inbound' }), /journal entry/);
   assert.throws(() => forged(paid, 'account.payment', { id: 9201, name: 'PBNK1/2026/9201', state: 'posted', partner_id: 1, amount: 40, move_id: entry, payment_type: 'inbound' }), /another payment/);
 });

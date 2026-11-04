@@ -33,3 +33,13 @@ test('an array changed in place never returns a wrong or stale record', () => {
   assert.equal(read(db, 'res.partner', first.id).name, first.name);
   assert.equal(read(db, 'res.partner', 777777).name, 'Pushed');
 });
+
+test('an array changed in place by replacing an element with a new id finds the new record', () => {
+  const db = seed();
+  const list = db.records['res.partner'];
+  const [first] = list;
+  read(db, 'res.partner', first.id);
+  read(db, 'res.partner', first.id);
+  list[0] = { ...first, id: 888888, name: 'Replaced' };
+  assert.equal(read(db, 'res.partner', 888888)?.name, 'Replaced');
+});

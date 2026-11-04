@@ -12,7 +12,7 @@ function monthDays(year, month) {
   return Array.from({ length: 42 }, (_, i) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
 }
 
-export function CalendarView({ model, records, open, newHref }) {
+export function CalendarView({ model, records, open, newHref, db }) {
   const cal = models[model].calendar;
   const [cursor, setCursor] = useState(() => {
     const d = new Date();
@@ -24,6 +24,22 @@ export function CalendarView({ model, records, open, newHref }) {
     const d = r[cal.date];
     return d ? { ...acc, [d]: [...(acc[d] ?? []), r] } : acc;
   }, {});
+
+  if (model === 'hr.leave' && db?.records?.['resource.calendar.leaves']) {
+    const curCo = db.settings?.current_company_id ?? 1;
+    const holidays = (db.records['resource.calendar.leaves'] ?? []).filter((h) => !h.company_id || h.company_id === curCo);
+    for (const h of holidays) {
+      const from = (h.date_from || '').slice(0, 10);
+      const to = (h.date_to || '').slice(0, 10);
+      if (!from || !to) continue;
+      for (let cur = new Date(`${from}T00:00:00Z`); cur.toISOString().slice(0, 10) <= to; cur.setUTCDate(cur.getUTCDate() + 1)) {
+        const k = cur.toISOString().slice(0, 10);
+        const item = { ...h, __holiday: true, id: `holiday-${h.id}-${k}`, name: h.name || t('Public Holiday') };
+        byDay[k] = [...(byDay[k] ?? []), item];
+      }
+    }
+  }
+
   const now = today();
   const weekdays = days.slice(0, 7).map((d) => formatDate(iso(d), { weekday: 'short' }));
 
@@ -47,7 +63,13 @@ export function CalendarView({ model, records, open, newHref }) {
                 {newHref && <a className="cal-add" href={`${newHref}&default_${cal.date}=${key}`} aria-label={`${t('New')} ${key}`}>+</a>}
               </div>
               {items.map((r) => (
-                <button key={r.id} type="button" className="cal-event" onClick={() => open(r.id)} title={r.name}>
+                <button
+                  key={r.id}
+                  type="button"
+                  className={`cal-event ${r.__holiday ? 'cal-holiday' : ''}`}
+                  onClick={() => (r.__holiday ? (location.hash = `#/timeoff/public-holidays/${r.id.split('-')[1]}`) : open(r.id))}
+                  title={r.name}
+                >
                   {cal.time && r[cal.time] && <b>{r[cal.time]} </b>}{r.name}
                 </button>
               ))}

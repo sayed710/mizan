@@ -7,6 +7,7 @@ import { isBalanced } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
 import { autoClose, invoiceDue, kpis, mrr, nextDate, renew, subscriptionJobs, subscriptionPlusModels, upsell } from './models/subscriptionplus.js';
 import { addDays, today } from './models/common.js';
+import { models } from './models/index.js';
 
 const model = 'sale.subscription';
 const baseDb = () => {
@@ -107,9 +108,9 @@ test('renew creates reciprocal links and a clean draft successor starting at end
   const old = read(result.db, model, id);
   const successor = read(result.db, model, result.id);
   assert.equal(read(db, model, id).stage, 'progress');
-  assert.equal(old.stage, 'closed');
+  assert.equal(old.stage, 'progress');
   assert.equal(old.renewal_id, result.id);
-  assert.equal(old.closed_date, '2024-03-20');
+  assert.equal(old.closed_date, undefined);
   assert.equal(successor.origin_id, id);
   assert.equal(successor.start_date, '2024-04-01');
   assert.equal(successor.next_invoice_date, '2024-04-01');
@@ -121,6 +122,45 @@ test('renew creates reciprocal links and a clean draft successor starting at end
   const open = addSub(db);
   const renewed = renew(open.db, open.id, { date: '2024-03-20' });
   assert.equal(read(renewed.db, model, renewed.id).start_date, '2024-03-20');
+});
+
+test('renewal quotation preserves billing until a confirmed successor starts', () => {
+  const start = addDays(today(), -30);
+  const transition = addDays(today(), 30);
+  const sub = addSub(baseDb(), { start_date: start, next_invoice_date: today(), end_date: transition });
+  const buttons = models[model].form.buttons;
+  const quotation = buttons.find((b) => b.label === 'Renew').run(sub.db, read(sub.db, model, sub.id));
+  const successorId = Number(quotation.go.split('/').at(-1));
+  assert.equal(read(quotation.db, model, sub.id).stage, 'progress');
+  const billed = buttons.find((b) => b.label === 'Generate Invoice').run(quotation.db, read(quotation.db, model, sub.id)).db;
+  assert.equal(invoices(billed, sub.id).length, 1);
+  assert.equal(read(billed, model, successorId).stage, 'draft');
+  const confirmed = write(billed, model, successorId, { stage: 'progress' });
+  assert.equal(read(confirmed, model, sub.id).stage, 'progress');
+  assert.throws(() => buttons.find((b) => b.label === 'Generate Invoice').run(confirmed, read(confirmed, model, successorId)), /has not started/);
+  const beforeStart = invoiceDue(confirmed, addDays(transition, -1));
+  assert.equal(read(beforeStart, model, sub.id).stage, 'progress');
+  assert.equal(invoices(beforeStart, successorId).length, 0);
+  const started = invoiceDue(beforeStart, transition);
+  assert.equal(read(started, model, sub.id).stage, 'closed');
+  assert.equal(read(started, model, sub.id).closed_date, transition);
+  assert.equal(read(started, model, successorId).stage, 'progress');
+  assert.equal(invoices(started, successorId).length, 1);
+});
+
+test('confirming an effective renewal bills remaining original periods before closing it', () => {
+  const sub = addSub(baseDb(), { start_date: addDays(today(), -60), next_invoice_date: addDays(today(), -1), end_date: today() });
+  const quote = models[model].form.buttons.find((b) => b.label === 'Renew').run(sub.db, read(sub.db, model, sub.id));
+  const successorId = Number(quote.go.split('/').at(-1));
+  const plainWrite = write(quote.db, model, successorId, { stage: 'progress' });
+  assert.equal(read(plainWrite, model, sub.id).stage, 'progress');
+  assert.equal(invoices(plainWrite, sub.id).length, 0);
+  const startButton = models[model].form.buttons.find((b) => b.label === 'Start');
+  const confirmed = startButton.run(quote.db, read(quote.db, model, successorId)).db;
+  assert.equal(read(confirmed, model, sub.id).stage, 'closed');
+  assert.equal(read(confirmed, model, sub.id).closed_date, today());
+  assert.deepEqual(invoices(confirmed, sub.id).map((invoice) => invoice.subscription_period), [addDays(today(), -1)]);
+  assert.equal(read(confirmed, model, successorId).stage, 'progress');
 });
 
 test('kpis measures opening-cohort churn, new MRR, expansion and retention without counting drafts or upsells', () => {

@@ -16,13 +16,16 @@ const get = (db, model, id) => {
   return r;
 };
 const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s ?? '') && Number.isFinite(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
-const tokenFor = (id) => {
-  let hash = 2166136261;
-  for (const c of `mizan-referral-v1:${id}`) hash = Math.imul(hash ^ c.charCodeAt(0), 16777619) >>> 0;
-  return `${id}-${hash.toString(16).padStart(8, '0')}`;
+const tokenFor = (db, id) => db?.records?.['hr.employee']?.find((e) => e.id === id)?.referral_token ?? '';
+// Fixed-length, full comparison: no early return on the first mismatching character.
+const sameToken = (a, b) => {
+  if (!/^[0-9a-f]{32}$/.test(a ?? '') || typeof b !== 'string' || b.length !== 32) return false;
+  let different = 0;
+  for (let i = 0; i < 32; i++) different |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return different === 0;
 };
 // The public jobs page (PublicSite.jsx) reads job and ref from the hash and sends ref with the application.
-const linkFor = (employeeId, jobId) => `/#/shop/jobs?job=${jobId}&ref=${tokenFor(employeeId)}`;
+const linkFor = (token, jobId) => `/#/shop/jobs?job=${jobId}&ref=${token}`;
 const skillLevel = (db, typeId, skill, level) => {
   const type = get(db, 'hr.skill.type', typeId);
   if (!(type.skill_ids ?? []).some((s) => s.name === skill)) throw new Error('Select a skill belonging to this skill type');
@@ -72,12 +75,14 @@ export function certificationsExpiring(db, date, days) {
 export function referralLink(db, employeeId, jobId) {
   get(db, 'hr.employee', employeeId);
   get(db, 'hr.job', jobId);
-  return linkFor(employeeId, jobId);
+  const token = tokenFor(db, employeeId);
+  if (!token) throw new Error('Migrate employee referral tokens before generating links');
+  return linkFor(token, jobId);
 }
 
 /** Resolve attribution and create a referral plus its recruitment application. */
 export function referFromLink(db, { token, jobId, name, email, fromWebsite = false }) {
-  const employee = search(db, 'hr.employee').find((e) => tokenFor(e.id) === token);
+  const employee = search(db, 'hr.employee').find((e) => sameToken(e.referral_token, token));
   if (!employee) throw new Error('Unknown referral token');
   get(db, 'hr.job', jobId);
   const candidate = String(name ?? '').trim();
@@ -206,8 +211,8 @@ export const skillsPlusModels = {
       points: { ...referral.fields.points, compute: scale },
       website_submission: { type: 'boolean', label: 'Website Application', readonly: true },
       applicant_id: { type: 'many2one', relation: 'hr.applicant', label: 'Application' },
-      source_token: { type: 'char', label: 'Source Token', readonly: true, compute: (r) => r.referrer_id ? tokenFor(r.referrer_id) : '' },
-      link: { type: 'char', label: 'Referral Link', readonly: true, compute: (r) => r.referrer_id && r.job_id ? linkFor(r.referrer_id, r.job_id) : '' },
+      source_token: { type: 'char', label: 'Source Token', readonly: true, compute: (r, db) => tokenFor(db, r.referrer_id) || r.source_token || '' },
+      link: { type: 'char', label: 'Referral Link', readonly: true, compute: (r, db) => r.referrer_id && r.job_id ? linkFor(tokenFor(db, r.referrer_id) || r.source_token || '', r.job_id) : '' },
       reward_points_spent: { type: 'integer', label: 'Points Spent', readonly: true },
       date: { type: 'date', label: 'Referred on' },
     },

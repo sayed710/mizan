@@ -7,6 +7,7 @@ import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { companyViewDb } from '../companyView.js';
 import { invoiceKpis } from '../dashboardKpis.js';
+import { RateNote } from './RateNote.jsx';
 
 const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
 
@@ -25,6 +26,7 @@ function JournalCard({ card }) {
     <section className="panel journal-card">
       <h2><a href={list}>{card.journal.name}</a></h2>
       <dl>{figures.map(([label, value]) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>)}</dl>
+      <RateNote count={card.unratedCount} />
       {action && <a className="btn primary sm" href={action[1]}>{t(action[0])}</a>}
     </section>
   );
@@ -48,6 +50,7 @@ export function Dashboard() {
   return (
     <main className="action dashboard">
       <div className="control-panel"><h1 className="cp-title">{t('Dashboard')}</h1></div>
+      <RateNote count={kpi.unratedCount} />
       <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
       <div className="kpis">
         {tiles.map(([label, value, href]) => (

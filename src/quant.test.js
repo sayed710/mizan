@@ -1,15 +1,17 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write, setActiveCompany } from './orm.js';
+import { create, read, search, write, unlink, setActiveCompany } from './orm.js';
 import { seed } from './seed.js';
+import { createCompany } from './models/company.js';
 import { models, apps } from './models/index.js';
 import { receive } from './models/valuation.js';
 import { applyInventory, clearInventory, requestCount, ensureQuants } from './models/quant.js';
 import { applyDiff, diffDb } from './sync.js';
 import { migrate } from './migrations.js';
+import { today } from './models/common.js';
 
-const date = '2026-10-28';
+const date = today();
 function setup(tracking = 'none') {
   const p = create(seed(), 'product', { name: 'Quant widget', type: 'goods', cost: 10, qty_available: 0, tracking });
   const a = create(p.db, 'stock.location', { name: 'Quant A' });
@@ -94,11 +96,12 @@ test('locked count, including zero-valued stock, is refused without mutation', (
 
 test('direct valuation receipts create quants and company actions refuse foreign selected ids', () => {
   const { db: base, product } = setup();
-  let db = receive(base, product, 3, 10, { date });
+  const company = createCompany(base, { name: 'Branch' });
+  let db = receive(company.db, product, 3, 10, { date });
   assert.equal(total(db, product), 3);
   const q = quants(db, product)[0];
   db = write(db, 'stock.quant', q.id, { inventory_quantity: 4 });
-  setActiveCompany(2);
+  setActiveCompany(company.id);
   try {
     assert.equal(search(db, 'stock.quant').length, 0);
     assert.throws(() => applyInventory(db, [q.id], { date }), /company|accessible/i);
@@ -116,10 +119,38 @@ test('reservations allocate multiple lines once across locations and lots', () =
   const { db: base, product, a, b } = setup('lot');
   let db = transfer(base, product, 4, 'incoming', null, a, 'A');
   db = transfer(db, product, 3, 'incoming', null, b, 'B');
-  db = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'ready', move_ids: [{ product_id: product, qty: 3 }, { product_id: product, qty: 3 }] }).db;
+  db = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'ready', location_id: a, move_ids: [{ product_id: product, qty: 2 }, { product_id: product, qty: 2 }] }).db;
+  db = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'ready', location_id: b, move_ids: [{ product_id: product, qty: 2 }] }).db;
   const qs = quants(db, product);
   assert.equal(qs.reduce((s, q) => s + q.reserved_quantity, 0), 6);
   assert.equal(qs.reduce((s, q) => s + q.available_quantity, 0), 1);
+});
+
+test('unlocated multi-line picking reserves once across default-location quants', () => {
+  const { db: base, product, a, b } = setup('lot');
+  let db = transfer(base, product, 4, 'incoming', null, a, 'A');
+  db = transfer(db, product, 3, 'incoming', null, a, 'B');
+  db = transfer(db, product, 3, 'incoming', null, b, 'C');
+  const warehouse = search(db, 'stock.warehouse').find((w) => (w.company_id ?? 1) === 1 && w.lot_stock_id);
+  db = write(db, 'stock.warehouse', warehouse.id, { lot_stock_id: a });
+  let picking;
+  ({ db, id: picking } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', move_ids: [{ product_id: product, qty: 3 }, { product_id: product, qty: 3 }] }));
+  const todo = models['stock.picking'].form.buttons.find((button) => button.label === 'Mark as Todo');
+  db = todo.run(db, read(db, 'stock.picking', picking)).db;
+  assert.equal(read(db, 'stock.picking', picking).state, 'ready');
+  assert.ok(!read(db, 'stock.picking', picking).location_id);
+  const qs = quants(db, product);
+  const defaultQuants = qs.filter((q) => q.location_id === a);
+  const otherQuants = qs.filter((q) => q.location_id === b);
+  assert.deepEqual(defaultQuants.map((q) => [read(db, 'stock.lot', q.lot_id).name, q.reserved_quantity, q.available_quantity]).sort(), [['A', 4, 0], ['B', 2, 1]]);
+  assert.equal(defaultQuants.reduce((sum, q) => sum + q.reserved_quantity, 0), 6);
+  assert.equal(defaultQuants.reduce((sum, q) => sum + q.available_quantity, 0), 1);
+  assert.equal(otherQuants.reduce((sum, q) => sum + q.reserved_quantity, 0), 0);
+  assert.equal(otherQuants.reduce((sum, q) => sum + q.available_quantity, 0), 3);
+  let competing;
+  ({ db, id: competing } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', move_ids: [{ product_id: product, qty: 2 }] }));
+  db = todo.run(db, read(db, 'stock.picking', competing)).db;
+  assert.equal(read(db, 'stock.picking', competing).state, 'waiting');
 });
 
 test('migration derives done moves once and preserves unlocated opening quantities and lot identities', () => {
@@ -179,9 +210,10 @@ test('company-two counts only change their own quants and post their entries in 
   const { db: base, product, a } = setup();
   let db = transfer(base, product, 5, 'incoming', null, a);
   const first = quants(db, product).find((q) => q.quantity);
-  const loc = create(db, 'stock.location', { name: 'Company two', company_id: 2 });
-  db = { ...loc.db, settings: { ...loc.db.settings, current_company_id: 2 } };
-  setActiveCompany(2);
+  const company = createCompany(db, { name: 'Company two' });
+  const loc = create(company.db, 'stock.location', { name: 'Company two', company_id: company.id });
+  db = { ...loc.db, settings: { ...loc.db.settings, current_company_id: company.id } };
+  setActiveCompany(company.id);
   try {
     db = transfer(db, product, 3, 'incoming', null, loc.id);
     assert.equal(search(db, 'stock.valuation.layer').filter((l) => l.product_id === product).reduce((s, l) => s + l.quantity, 0), 3);
@@ -210,3 +242,220 @@ test('FIFO counts consume receipt costs and isolate another lot at the same loca
   assert.equal(read(db, 'stock.lot', qa.lot_id).qty, 1);
   assert.equal(read(db, 'product', product).qty_available, 5);
 });
+
+test('a saved physical count rejects intervening stock movements until recounted', () => {
+  const { db: base, product, a } = setup();
+  let db = transfer(base, product, 10, 'incoming', null, a);
+  const q = quants(db, product).find((row) => row.location_id === a);
+  db = write(db, 'stock.quant', q.id, { inventory_quantity: 10 });
+  db = transfer(db, product, 5, 'incoming', null, a);
+  const action = models['stock.quant'].form.buttons.find((b) => b.label === 'Apply');
+  assert.throws(() => action.run(db, read(db, 'stock.quant', q.id)), /changed|stale/i);
+  assert.equal(read(db, 'stock.quant', q.id).quantity, 15);
+  db = write(db, 'stock.quant', q.id, { inventory_quantity: 15 });
+  db = action.run(db, read(db, 'stock.quant', q.id)).db;
+  assert.equal(read(db, 'stock.quant', q.id).quantity, 15);
+  assert.equal(read(db, 'stock.quant', q.id).inventory_quantity_set, false);
+});
+
+test('scrapping a serial consumes its selected location and lot through the scrap action', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Serial scrap', type: 'goods', tracking: 'serial', qty_available: 0, cost: 10, cost_method: 'fifo' });
+  let location, receipt, scrap;
+  ({ db, id: location } = create(db, 'stock.location', { name: 'Scrap source', usage: 'internal' }));
+  ({ db, id: receipt } = create(db, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: location, move_ids: [{ product_id: product, qty: 1, lot_name: 'S1' }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', receipt)).db;
+  ({ db, id: scrap } = create(db, 'stock.scrap', { product_id: product, scrap_qty: 1, lot_name: 'S1', location_id: location }));
+  db = models['stock.scrap'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.scrap', scrap)).db;
+  const lot = search(db, 'stock.lot').find((l) => l.product_id === product && l.name === 'S1');
+  assert.equal(lot.qty, 0);
+  assert.equal(search(db, 'stock.quant').find((q) => q.product_id === product && q.location_id === location && q.lot_id === lot.id).quantity, 0);
+  assert.equal(read(db, 'product', product).qty_available, 0);
+  assert.ok(search(db, 'stock.valuation.layer').some((l) => l.picking_id && l.product_id === product && l.quantity === -1));
+});
+
+test('periodic tracked scrap preserves its generated picking link and consumes lot and location', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Periodic tracked scrap', type: 'goods', tracking: 'lot', valuation: 'manual_periodic', qty_available: 0, cost: 10 });
+  let location, receipt, scrap;
+  ({ db, id: location } = create(db, 'stock.location', { name: 'Periodic scrap source', usage: 'internal' }));
+  ({ db, id: receipt } = create(db, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: location, move_ids: [{ product_id: product, qty: 3, lot_name: 'LOT-P1' }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', receipt)).db;
+  ({ db, id: scrap } = create(db, 'stock.scrap', { product_id: product, scrap_qty: 2, lot_name: 'LOT-P1', location_id: location }));
+  db = models['stock.scrap'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.scrap', scrap)).db;
+
+  const doneScrap = read(db, 'stock.scrap', scrap);
+  assert.ok(doneScrap.picking_id);
+  const picking = read(db, 'stock.picking', doneScrap.picking_id);
+  assert.ok(picking);
+  assert.equal(picking.state, 'done');
+  assert.equal(picking.origin, doneScrap.name);
+  assert.equal(picking.move_ids[0].lot_name, 'LOT-P1');
+  assert.equal(picking.move_ids[0].qty, 2);
+
+  const lot = search(db, 'stock.lot').find((l) => l.product_id === product && l.name === 'LOT-P1');
+  assert.equal(lot.qty, 1);
+  assert.equal(search(db, 'stock.quant').find((q) => q.product_id === product && q.location_id === location && q.lot_id === lot.id).quantity, 1);
+  assert.equal(read(db, 'product', product).qty_available, 1);
+  assert.equal(search(db, 'stock.valuation.layer').filter((l) => l.product_id === product).length, 0);
+});
+
+test('periodic tracked scrap retains both its source receipt and generated movement', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Periodic linked scrap', type: 'goods', tracking: 'lot', valuation: 'manual_periodic', qty_available: 0, cost: 10 });
+  let location, receipt, scrap;
+  ({ db, id: location } = create(db, 'stock.location', { name: 'Linked scrap source', usage: 'internal' }));
+  ({ db, id: receipt } = create(db, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: location, move_ids: [{ product_id: product, qty: 3, lot_name: 'LINKED-LOT' }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', receipt)).db;
+  ({ db, id: scrap } = create(db, 'stock.scrap', { product_id: product, scrap_qty: 2, lot_name: 'LINKED-LOT', location_id: location, picking_id: receipt }));
+  const entriesBefore = search(db, 'account.move').length;
+  db = models['stock.scrap'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.scrap', scrap)).db;
+  const done = read(db, 'stock.scrap', scrap);
+  assert.equal(done.picking_id, receipt);
+  assert.ok(done.scrap_picking_id);
+  assert.notEqual(done.scrap_picking_id, receipt);
+  const movement = read(db, 'stock.picking', done.scrap_picking_id);
+  assert.equal(movement.state, 'done');
+  assert.equal(movement.origin, done.name);
+  assert.equal(movement.location_id, location);
+  assert.equal(read(db, 'stock.location', movement.location_dest_id).usage, 'inventory');
+  assert.deepEqual(movement.move_ids.map(({ product_id, qty, lot_name }) => ({ product_id, qty, lot_name })), [{ product_id: product, qty: 2, lot_name: 'LINKED-LOT' }]);
+  const lot = search(db, 'stock.lot').find((l) => l.product_id === product && l.name === 'LINKED-LOT');
+  assert.equal(lot.qty, 1);
+  assert.equal(search(db, 'stock.quant').find((q) => q.product_id === product && q.location_id === location && q.lot_id === lot.id).quantity, 1);
+  assert.equal(search(db, 'stock.valuation.layer').filter((l) => l.product_id === product).length, 0);
+  assert.equal(search(db, 'account.move').length, entriesBefore);
+  assert.throws(() => write(db, 'stock.scrap', scrap, { scrap_picking_id: receipt }), /completed|done/i);
+});
+
+test('completed transfers cannot be deleted or edited through the model API', () => {
+  const { db: base, product, a } = setup();
+  let id;
+  let db;
+  ({ db, id } = create(base, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: a, move_ids: [{ product_id: product, qty: 2 }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', id)).db;
+  assert.throws(() => unlink(db, 'stock.picking', [id]), /completed|done/i);
+  assert.throws(() => write(db, 'stock.picking', id, { move_ids: [{ product_id: product, qty: 8 }] }), /completed|done/i);
+  assert.throws(() => write(db, 'stock.picking', id, { state: 'draft' }), /completed|done/i);
+});
+
+test('referenced open predecessor transfers cannot be deleted through the model API', () => {
+  const { db: base, product, a } = setup();
+  let first, db;
+  ({ db, id: first } = create(base, 'stock.picking', { picking_type: 'incoming', state: 'ready', location_dest_id: a, move_ids: [{ product_id: product, qty: 2 }] }));
+  ({ db } = create(db, 'stock.picking', { picking_type: 'internal', state: 'waiting', move_orig_picking_id: first, move_ids: [{ product_id: product, qty: 2 }] }));
+  assert.throws(() => unlink(db, 'stock.picking', [first]), /referenced/i);
+});
+
+
+
+test('lot transfers use the matching company and cannot consume another location', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Shared lot', type: 'goods', tracking: 'lot', qty_available: 0, cost: 5 });
+  const company = createCompany(db, { name: 'Company two' });
+  db = company.db;
+  let a, b;
+  ({ db, id: a } = create(db, 'stock.location', { name: 'Company 1 lot stock', company_id: 1 }));
+  ({ db, id: b } = create(db, 'stock.location', { name: 'Company 2 lot stock', company_id: company.id }));
+  db = transfer(db, product, 5, 'incoming', null, a, 'SAME');
+  const first = db.records['stock.lot'].find((l) => l.product_id === product && l.company_id === 1);
+  const companyTransfer = (before, type, source, dest, qty) => {
+    const created = create(before, 'stock.picking', { company_id: company.id, picking_type: type, state: 'ready', location_id: source, location_dest_id: dest, move_ids: [{ product_id: product, qty, lot_name: 'SAME' }] });
+    return models['stock.picking'].form.buttons.find((button) => button.label === 'Validate').run(created.db, read(created.db, 'stock.picking', created.id)).db;
+  };
+  db = companyTransfer(db, 'incoming', null, b, 3);
+  const second = db.records['stock.lot'].find((l) => l.product_id === product && l.company_id === 2);
+  assert.notEqual(first.id, second.id);
+  db = companyTransfer(db, 'outgoing', b, null, 1);
+  assert.equal(read(db, 'stock.lot', first.id).qty, 5);
+  assert.equal(read(db, 'stock.lot', second.id).qty, 2);
+  assert.equal(db.records['stock.valuation.layer'].filter((l) => l.product_id === product && l.company_id === 1).reduce((sum, l) => sum + l.quantity, 0), 5);
+  assert.equal(db.records['stock.valuation.layer'].filter((l) => l.product_id === product && l.company_id === 2).reduce((sum, l) => sum + l.quantity, 0), 2);
+  assert.equal(db.records['stock.quant'].find((q) => q.lot_id === second.id && q.location_id === b).quantity, 2);
+  let empty;
+  ({ db, id: empty } = create(db, 'stock.location', { name: 'Empty lot stock', company_id: company.id }));
+  assert.throws(() => companyTransfer(db, 'outgoing', empty, null, 1), /stock/i);
+});
+
+test('reservation and validation exclude stock owned by another company', () => {
+  let { db, id: product } = create(seed(), 'product', { name: 'Shared company stock', type: 'goods', qty_available: 0, cost: 5 });
+  const company = createCompany(db, { name: 'Company two' });
+  db = company.db;
+  let foreign;
+  ({ db, id: foreign } = create(db, 'stock.location', { name: 'Other company', company_id: company.id }));
+  const input = create(db, 'stock.picking', { company_id: company.id, picking_type: 'incoming', state: 'ready', location_dest_id: foreign, move_ids: [{ product_id: product, qty: 10 }] });
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(input.db, read(input.db, 'stock.picking', input.id)).db;
+  const output = create(db, 'stock.picking', { company_id: 1, picking_type: 'outgoing', state: 'draft', move_ids: [{ product_id: product, qty: 5 }] });
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Mark as Todo').run(output.db, read(output.db, 'stock.picking', output.id)).db;
+  assert.equal(read(db, 'stock.picking', output.id).state, 'waiting');
+  assert.throws(() => models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', output.id)), /stock/i);
+});
+
+test('stock valuation history rejects direct model-layer edits and deletion', () => {
+  const { db: base, product, a } = setup();
+  const db = transfer(base, product, 2, 'incoming', null, a);
+  const layer = search(db, 'stock.valuation.layer').find((l) => l.product_id === product && l.quantity === 2);
+  assert.throws(() => write(db, 'stock.valuation.layer', layer.id, { value: 999 }), /history cannot/i);
+  assert.throws(() => unlink(db, 'stock.valuation.layer', [layer.id]), /deleted/i);
+});
+
+test('completed scrap orders cannot be deleted or mutated through the model layer', () => {
+  const { db: base, product, a } = setup();
+  let db = transfer(base, product, 2, 'incoming', null, a);
+  let scrap;
+  ({ db, id: scrap } = create(db, 'stock.scrap', { product_id: product, scrap_qty: 1, location_id: a }));
+  db = models['stock.scrap'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.scrap', scrap)).db;
+  assert.throws(() => unlink(db, 'stock.scrap', [scrap]), /completed|done/i);
+  assert.throws(() => write(db, 'stock.scrap', scrap, { scrap_qty: 5 }), /completed|done/i);
+});
+
+test('a count remains stale after offsetting movements restore the same quantity', () => {
+  const { db: base, product, a } = setup();
+  let db = transfer(base, product, 10, 'incoming', null, a);
+  const q = quants(db, product).find((row) => row.location_id === a);
+  db = write(db, 'stock.quant', q.id, { inventory_quantity: 10 });
+  db = transfer(db, product, 5, 'incoming', null, a);
+  db = transfer(db, product, 5, 'outgoing', a, null);
+  assert.equal(read(db, 'stock.quant', q.id).quantity, 10);
+  assert.throws(() => models['stock.quant'].form.buttons.find((b) => b.label === 'Apply').run(db, read(db, 'stock.quant', q.id)), /changed|stale/i);
+});
+
+test('lot-specific reservation uses quants not occupied by an unspecified reservation', () => {
+  const { db: base, product, a } = setup('lot');
+  let db = transfer(base, product, 4, 'incoming', null, a, 'A');
+  db = transfer(db, product, 4, 'incoming', null, a, 'B');
+  let generic, specific;
+  ({ db, id: generic } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', location_id: a, move_ids: [{ product_id: product, qty: 3 }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Mark as Todo').run(db, read(db, 'stock.picking', generic)).db;
+  ({ db, id: specific } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', location_id: a, move_ids: [{ product_id: product, qty: 4, lot_name: 'B' }] }));
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Mark as Todo').run(db, read(db, 'stock.picking', specific)).db;
+  assert.equal(read(db, 'stock.picking', specific).state, 'ready');
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', specific)).db;
+  assert.equal(search(db, 'stock.lot').find((l) => l.product_id === product && l.name === 'B').qty, 0);
+});
+
+test('Mark as Todo shares stock between specified and unspecified lot lines', () => {
+  const { db: base, product, a } = setup('lot');
+  let db = transfer(base, product, 5, 'incoming', null, a, 'A');
+  let picking;
+  ({ db, id: picking } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', location_id: a, move_ids: [{ product_id: product, qty: 5 }, { product_id: product, qty: 5, lot_name: 'A' }] }));
+  const todo = models['stock.picking'].form.buttons.find((b) => b.label === 'Mark as Todo');
+  db = todo.run(db, read(db, 'stock.picking', picking)).db;
+  assert.equal(read(db, 'stock.picking', picking).state, 'waiting');
+  assert.throws(() => models['stock.picking'].form.buttons.find((b) => b.label === 'Validate').run(db, read(db, 'stock.picking', picking)), /not enough free stock/i);
+  db = transfer(db, product, 5, 'incoming', null, a, 'B');
+  db = models['stock.picking'].form.buttons.find((b) => b.label === 'Check Availability').run(db, read(db, 'stock.picking', picking)).db;
+  assert.equal(read(db, 'stock.picking', picking).state, 'ready');
+});
+
+test('a transfer without a source reserves only its warehouse stock location', () => {
+  let { db, product, a, b } = setup();
+  db = transfer(db, product, 5, 'incoming', null, b);
+  db = transfer(db, product, 5, 'incoming', null, a);
+  const wh = search(db, 'stock.warehouse').find((w) => w.lot_stock_id);
+  db = write(db, 'stock.warehouse', wh.id, { lot_stock_id: a });
+  const todo = models['stock.picking'].form.buttons.find((button) => button.label === 'Mark as Todo');
+  let first, second;
+  ({ db, id: first } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', move_ids: [{ product_id: product, qty: 5 }] }));
+  db = todo.run(db, read(db, 'stock.picking', first)).db;
+  ({ db, id: second } = create(db, 'stock.picking', { picking_type: 'outgoing', state: 'draft', location_id: a, move_ids: [{ product_id: product, qty: 5 }] }));
+  db = todo.run(db, read(db, 'stock.picking', second)).db;
+  assert.equal(read(db, 'stock.picking', second).state, 'waiting');
+});
+

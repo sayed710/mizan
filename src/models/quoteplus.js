@@ -111,14 +111,14 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   if (journal != null && (!journalId || !['bank', 'cash'].includes(read(db, 'account.journal', journalId)?.type))) throw new Error('Select a bank or cash journal');
   const via = paymentJournal(db, journalId);
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
-  const booked = postEntry(db, { journal: via.code, date, ref: `Prepayment ${r.name}`, lines: [
+  const booked = postEntry(db, { journal: via.code, journal_id: journalId ?? null, date, ref: `Prepayment ${r.name}`, company: r.company_id ?? 1, lines: [
     { account: via.account, debit: round(value), partner_id: r.partner_id },
     { account: '121000', credit: round(value), partner_id: r.partner_id },
   ] });
   const payment = create(booked.db, 'account.payment', {
     name, state: 'posted', partner_type: 'customer', payment_type: 'inbound', partner_id: r.partner_id,
     sale_id: orderId, amount: round(value), unapplied: round(value), date, journal_id: journalId ?? null,
-    memo: `Prepayment ${r.name}`, move_id: booked.id,
+    memo: `Prepayment ${r.name}`, move_id: booked.id, company_id: r.company_id ?? 1,
   });
   return confirm(postNote(payment.db, 'sale.order', orderId, `Prepayment ${name}: ${round(value)}`), orderId);
 }

@@ -109,3 +109,19 @@ test('a foreign overpayment keeps one rounded bank amount and books the outstand
   assert.equal(payment.unapplied, 0.01); // the credit line of the entry, in company currency
   assert.ok(isBalanced(entry.line_ids));
 });
+
+test('a legacy invoice with drifted amount_paid can be paid further', () => {
+  const { db: seeded, id } = invoice(seed());
+  const legacy = {
+    ...seeded,
+    records: {
+      ...seeded.records,
+      'account.move': seeded.records['account.move'].map((m) => (m.id === id ? { ...m, amount_paid: 500, payments: [] } : m)),
+    },
+  };
+  const paid = payMove(legacy, id, 200, '2026-04-05');
+  const inv = read(paid, 'account.move', id);
+  assert.equal(inv.amount_paid, 700);
+  assert.equal(inv.payments.length, 1);
+  assert.equal(inv.payments[0].amount, 200);
+});

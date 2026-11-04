@@ -5,6 +5,7 @@ import { accountId } from './ledger.js';
 import { rateAt } from './currency.js';
 import { purchasePlusModels } from './purchaseplus.js';
 import { valuationModels } from './valuation.js';
+import { productProperty } from './productconfig-helpers.js';
 import { round } from '../money.js';
 
 const number = (n) => Number(n) || 0;
@@ -16,7 +17,7 @@ const quantities = (l, policy) => {
 };
 const orderFor = (db, bill) => bill.purchase_id ? read(db, 'purchase.order', bill.purchase_id)
   : search(db, 'purchase.order').find((p) => p.name === (bill.origin || bill.invoice_origin));
-const previousBills = (db, bill, po) => search(db, 'account.move').filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
+const previousBills = (db, bill, po) => (db.records['account.move'] ?? []).filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
   && m.state === 'posted' && orderFor(db, m)?.id === po.id);
 const totalQty = (lines, id) => lines.filter((l) => l.product_id === id).reduce((s, l) => s + number(l.qty), 0);
 
@@ -27,9 +28,9 @@ export function billableLines(db, poId) {
   return (po.order_line ?? []).map((l) => quantities(l, method(read(db, 'product', l.product_id))));
 }
 
-const status = (r) => {
+const status = (r, db) => {
   if (r.state !== 'purchase' || !r.order_line?.length) return 'no';
-  const lines = r.order_line.map((l) => quantities(l, l.purchase_method ?? 'receive'));
+  const lines = r.order_line.map((l) => quantities(l, db ? method(read(db, 'product', l.product_id)) : l.purchase_method ?? 'receive'));
   if (lines.some((l) => l.toBill > 0)) return 'to_invoice';
   return lines.every((l) => l.billed >= l.ordered) ? 'invoiced' : 'no';
 };
@@ -46,7 +47,9 @@ function createBill(db, r) {
     move_type: 'in_invoice', partner_id: po.partner_id, purchase_id: po.id, invoice_origin: po.name,
     invoice_date: today(), invoice_payment_term_id: term?.id ?? null,
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
-    currency_id: po.currency_id ?? null, fiscal_position_id: po.fiscal_position_id ?? null, invoice_line_ids: lines,
+    currency_id: po.currency_id ?? null, fiscal_position_id: po.fiscal_position_id ?? null,
+    incoterm_id: po.incoterm_id ?? null, incoterm_location: po.incoterm_location ?? null,
+    invoice_line_ids: lines,
   });
   const next = write(out.db, 'purchase.order', po.id, { order_line: policyLines(db, po).map((l, i) => ({ ...l, qty_invoiced: number(l.qty_invoiced) + eligible[i].toBill })) });
   return { db: next, go: `#/accounting/bills/${out.id}` };
@@ -86,14 +89,17 @@ export function matchBill(db, billId) {
   return matches(db, bill);
 }
 
-/** Refuse excess received-policy quantities unless forced; return price warnings. */
+/** Return price warnings without blocking confirmation of a vendor bill. */
 export function checkBillMatch(db, bill) {
   if (bill.move_type !== 'in_invoice' || !orderFor(db, bill)) return [];
   const rows = matches(db, bill);
-  if (!bill.force_post && rows.some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive')) {
-    throw new Error('Billed quantity exceeds received quantity; receive the goods or enable force post');
-  }
   return rows.filter((l) => Math.abs(l.priceDifference) >= 0.01);
+}
+
+/** Compute the review recommendation from current receipts and other posted bills. */
+export function shouldBePaid(db, bill) {
+  if (bill.move_type !== 'in_invoice' || !db.settings?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
+  return matches(db, bill).some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') ? 'exception' : 'yes';
 }
 
 /** Balanced company-currency adjustments to append to invoiceLines, using receipt interim values. */
@@ -106,7 +112,7 @@ export function priceDifferenceLines(db, bill) {
   const result = [];
   for (const l of bill.invoice_line_ids ?? []) {
     const p = read(db, 'product', l.product_id);
-    if (p?.type !== 'goods' || p.valuation === 'manual_periodic' || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
+    if (p?.type !== 'goods' || ['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation')) || (l.account_id && l.account_id !== accountId(db, '110200'))) continue;
     let skip = totalQty(prior, p.id) + (used.get(p.id) ?? 0), left = number(l.qty), value = 0;
     const layers = search(db, 'stock.valuation.layer').filter((v) => {
       const picking = read(db, 'stock.picking', v.picking_id);
@@ -153,7 +159,7 @@ export const billControlModels = {
       },
       onchange: (r, key, db) => ({ ...purchase.onchange?.(r, key, db), ...(['order_line', 'state'].includes(key) ? { order_line: policyLines(db, r) } : {}) }),
       form: { ...purchase.form, buttons: purchase.form.buttons.map((b) => b.label === 'Create Bill'
-        ? { ...b, when: (r) => status(r) === 'to_invoice', run: createBill }
+        ? { ...b, when: (r, db) => (r.invoice_status ?? status(r, db)) === 'to_invoice', run: createBill }
         : b.label === 'Confirm Order' ? { ...b, run: (db, r) => b.run(write(db, 'purchase.order', r.id, { order_line: policyLines(db, r) }), r) } : b) },
     };
   },

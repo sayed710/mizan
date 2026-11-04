@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
-import { apps, models } from './models/index.js';
+import { apps, leavesOf, models } from './models/index.js';
 import { seed } from './seed.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
@@ -23,7 +23,7 @@ test('ESG emissions convert quantity × factor into tonnes CO2e', () => {
 test('every app menu points to a registered model or a known page type', () => {
   const pages = new Set(['dashboard', 'settings', 'pos', 'discuss', 'report', 'barcode', 'shopfloor', 'overview', 'website', 'appstore', 'kiosk', 'surveytake', 'surveyresults', 'spreadsheet', 'studio', 'kitchen', 'captable', 'knowledge', 'analysis']);
   for (const app of apps) {
-    for (const leaf of app.menus.flatMap((m) => m.children ?? [m])) {
+    for (const leaf of leavesOf(app)) {
       assert.ok(leaf.model ? models[leaf.model] : pages.has(leaf.type), `${app.id}/${leaf.key}`);
     }
   }

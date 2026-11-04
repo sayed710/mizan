@@ -53,7 +53,7 @@ test('legacy analytic allocation falls back to 100%, while explicit empty distri
 test('invoices and bills allocate discounted untaxed amounts 60/40 with opposite signs and metadata', () => {
   const { db, a, b } = setup();
   const before = JSON.stringify(db);
-  for (const [type, sign, category, code] of [['out_invoice', 1, 'invoice', '400000'], ['in_invoice', -1, 'vendor_bill', '600000']]) {
+  for (const [type, sign, category, code] of [['out_invoice', 1, 'invoice', '400000'], ['in_invoice', -1, 'vendor_bill', '110200']]) {
     const move = { ...moveValues(a, b, type), id: 999 };
     const lines = analyticLinesForMove(db, move);
     assert.deepEqual(lines.map((l) => [l.account_id, l.amount]), [[a, 108 * sign], [b, 72 * sign]]);
