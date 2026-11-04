@@ -5,7 +5,7 @@ export function journalAudit(db, { from = '', to = '', companyId = null } = {}) 
   const groups = new Map();
   const journals = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
   for (const move of db.records['account.move'] ?? []) {
-    const date = move.invoice_date ?? move.date ?? '';
+    const date = move.date ?? move.invoice_date ?? '';
     if (move.state !== 'posted' || (from && date < from) || (to && date > to) || (companyId && (move.company_id ?? 1) !== companyId)) continue;
     const journal = journals.get(move.journal_id);
     if (!journal) continue;

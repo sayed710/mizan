@@ -342,7 +342,7 @@ function Analytic({ db, period }) {
   const lines = analyticActualLines(db, period);
   return (
     <tbody>
-      {search(db, 'account.analytic.account').map((a) => <Fragment key={a.id}>
+      {search(db, 'account.analytic.account', { includeArchived: true }).filter((a) => a.active !== false || actual.has(a.id)).map((a) => <Fragment key={a.id}>
         <Total label={a.name} value={actual.get(a.id) ?? 0} />
         {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
           <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
@@ -418,7 +418,7 @@ function Valuation({ db }) {
 
 // Per asset: depreciation posted in the period, accumulated to its end, and the resulting book value.
 function Depreciation({ db, period }) {
-  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft').map((a) => {
+  const rows = search(db, 'account.asset').filter((a) => a.state !== 'cancel' && a.state !== 'draft' && (!a.acquisition_date || !period.to || a.acquisition_date <= period.to) && (!a.disposal_date || !period.to || a.disposal_date > period.to)).map((a) => {
     const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
     const sum = (list) => list.reduce((s, l) => s + (Number(l.amount) || 0), 0);
     const accumulated = (Number(a.already_depreciated) || 0) + sum(posted.filter((l) => l.date <= period.to));
@@ -582,7 +582,7 @@ function ReportPage({ leaf }) {
             <option value="quarter">{t('This Quarter')}</option>
             <option value="year">{t('This Year')}</option>
             <option value="all">{t('All Dates')}</option>
-            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
+            {['journalAudit', 'customerStatement', 'fiscal', 'pnl', 'balance', 'ledger', 'trial', 'tax', 'cashflow', 'executive', 'depreciation', 'analytic', 'budget'].includes(leaf.report) && <option value="custom">{t('Custom Period')}</option>}
           </select>
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
