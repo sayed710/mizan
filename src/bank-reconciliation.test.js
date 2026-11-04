@@ -34,7 +34,7 @@ test('bank reconciliation enforces company for entries, payment entries, journal
   const liquidity = create(line.db, 'account.account', { name: 'Foreign Bank Liquidity', code: '999803', account_type: 'asset_cash', company_id: branch.id });
   const journal = create(liquidity.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: liquidity.id });
   assert.throws(() => addLine(journal.db, { company_id: 1, amount: 10, journal_id: journal.id }), /bank journal belongs to another company/);
-  const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id });
+  const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id, counterpart_account_id: search(journal.db, 'account.account').find((a) => a.code === '600000' && !a.company_id).id });
   const booked = run(branchLine.db, branchLine.id, 'Book to Account');
   const bookedEntry = read(booked, 'account.move', read(booked, LINE, branchLine.id).move_id);
   assert.equal(bookedEntry.company_id, branch.id);

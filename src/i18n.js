@@ -366,6 +366,7 @@ const ar = {
   Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Current Year Earnings Account': 'حساب أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
   'Initial Balance': 'الرصيد الافتتاحي', Period: 'الفترة', 'This Quarter': 'هذا الربع', 'All Dates': 'كل التواريخ', Journal: 'اليومية', 'Bank Journal': 'يومية البنك',
   'Account Name': 'اسم الحساب', 'Journal Name': 'اسم اليومية', 'Short Code': 'الكود المختصر', 'Default Account': 'الحساب الافتراضي',
+  'Suspense Account': 'الحساب المعلق', 'Cash Profit Account': 'حساب أرباح الصندوق', 'Cash Loss Account': 'حساب خسائر الصندوق', 'Expense Tax': 'ضريبة المصروف', 'Expense Journal': 'دفتر يومية المصروفات',
   'Invoice Sequence Prefix': 'بادئة تسلسل الفواتير', 'Next Invoice Number': 'رقم الفاتورة التالي',
   'Refund Sequence Prefix': 'بادئة تسلسل المرتجعات', 'Next Refund Number': 'رقم المرتجع التالي',
   'Default Sales Journal': 'دفتر المبيعات الافتراضي', 'Default Purchase Journal': 'دفتر المشتريات الافتراضي', 'Default General Journal': 'دفتر اليومية الافتراضي',

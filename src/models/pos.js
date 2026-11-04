@@ -8,7 +8,6 @@ import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
 
-const CASH = '101501';
 export const openSession = (db) => search(db, 'pos.session').find((s) => s.state === 'opened') ?? null;
 
 /** Open the register with the counted opening cash. */
@@ -773,9 +772,23 @@ export function closeSession(db, session, countedCash) {
   const currency = companyCurrencyRecord(db, session.company_id);
   const counted = roundCurrency(Number(countedCash) || 0, currency);
   const difference = roundCurrency(counted - expected, currency);
+  let cashJournal;
+  let differenceAccount;
+  if (difference) {
+    const config = read(db, 'pos.config', session.config_id);
+    const methods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+    const journals = [...new Set(methods.map((m) => m.journal_id).filter(Boolean))];
+    if (journals.length !== 1 || methods.some((m) => !m.journal_id)) throw new Error('Configure one cash journal on the point of sale cash payment methods');
+    cashJournal = read(db, 'account.journal', journals[0]);
+    if (!cashJournal || cashJournal.type !== 'cash' || (cashJournal.company_id && cashJournal.company_id !== (session.company_id ?? 1))) throw new Error('Configure a cash journal for this company');
+    paymentJournal(db, cashJournal.id, session.company_id ?? 1);
+    const field = difference > 0 ? 'profit_account_id' : 'loss_account_id';
+    differenceAccount = read(db, 'account.account', cashJournal[field]);
+    if (!differenceAccount || differenceAccount.active === false || (differenceAccount.company_id && differenceAccount.company_id !== (session.company_id ?? 1))) throw new Error(`Configure the ${difference > 0 ? 'profit' : 'loss'} account on cash journal ${cashJournal.name}`);
+  }
   const booked = difference ? postEntry(db, {
-    journal: 'POSS', company: session.company_id, ref: `${session.name} cash difference`,
-    lines: difference > 0 ? [{ account: CASH, debit: difference }, { account: '450000', credit: difference }] : [{ account: '690000', debit: -difference }, { account: CASH, credit: -difference }],
+    journal: cashJournal.id, company: session.company_id, ref: `${session.name} cash difference`,
+    lines: difference > 0 ? [{ account: cashJournal.default_account_id, debit: difference }, { account: differenceAccount.id, credit: difference }] : [{ account: differenceAccount.id, debit: -difference }, { account: cashJournal.default_account_id, credit: -difference }],
   }).db : db;
   return write(booked, 'pos.session', session.id, { state: 'closed', stop_at: today(), total_cash: cash, total_card: card, cash_expected: expected, cash_end: counted, cash_difference: difference });
 }

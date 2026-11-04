@@ -3,6 +3,7 @@
 // requester (never the requester themselves), checked on the server for every non-admin change.
 import { leaveAuthorization } from './timeoff.js';
 import { paymentJournal, partnerAccount } from './ledger.js';
+import { expenseDebits } from './expense-accounts.js';
 
 let actor = null;
 /** The signed-in user ({ login, name }) on the client; null in local mode. */
@@ -74,6 +75,14 @@ function sheetBookingError(db, r) {
     || expenses.some((e) => e.move_id !== entry.id || e.employee_id !== r.employee_id || e.state !== (r.state === 'done' ? 'paid' : 'posted'))) return 'A posted expense report needs its accounting entry and posted expenses';
   const credit = (m, accountId) => (m.line_ids ?? []).filter((l) => l.account_id === accountId).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
   const companyId = r.company_id ?? 1;
+  let expected;
+  try { expected = expenseDebits(db, r, expenses); }
+  catch (error) { return error.message; }
+  const expectedByAccount = new Map();
+  for (const line of expected) expectedByAccount.set(line.account, (expectedByAccount.get(line.account) ?? 0) + line.debit);
+  const actualByAccount = new Map();
+  for (const line of entry.line_ids ?? []) if (Number(line.debit) > 0) actualByAccount.set(line.account_id, (actualByAccount.get(line.account_id) ?? 0) + Number(line.debit));
+  if (actualByAccount.size !== expectedByAccount.size || [...expectedByAccount].some(([id, amount]) => !close(actualByAccount.get(id) ?? 0, amount))) return 'Expense report entry must use the configured expense and tax accounts';
   if (r.payment_mode === 'company_account') {
     let liquidity;
     try { liquidity = paymentJournal(db, entry.journal_id, companyId).accountId; }

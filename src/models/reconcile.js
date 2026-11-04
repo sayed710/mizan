@@ -1,6 +1,6 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { accountId, paymentJournal, postEntry } from './ledger.js';
+import { accountId, ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -84,7 +84,7 @@ function writeOff(db, rule, line) {
   const { db: booked, id } = postEntry(db, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
-      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : via.accountId, partner_id }),
+      side(balance, incoming, { account: line.bank_move_id ? ensureBankSuspense(db, company, via.id).id : via.accountId, partner_id }),
       ...items,
     ],
   });

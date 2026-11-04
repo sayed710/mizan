@@ -130,7 +130,7 @@ test('resetting deferred invoices and bills offsets recognition analytic actuals
 
 test('manual company bill recognition respects hard lock without disturbing earlier periods', () => {
   let db = seed();
-  const company = createCompany(db, { name: 'Other company', ...invoiceJournalDefaults(db) });
+  const company = createCompany(db, { name: 'Other company', ...invoiceJournalDefaults(db), deferred_expense_account_id: accountId(db, '132000') });
   db = company.db;
   const deferred = create(db, 'account.account', { name: 'Prepaid', code: '132000', account_type: 'asset_current', company_id: company.id });
   const expense = create(deferred.db, 'account.account', { name: 'Expense', code: '600000', account_type: 'expense', company_id: company.id });

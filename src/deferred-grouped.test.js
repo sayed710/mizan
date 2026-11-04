@@ -223,7 +223,7 @@ test('manually & grouped deferred generation posts grouped entries, next-day rev
   assert.equal(analyticBalance(db, analytic2.id, { to: '2026-02-28' }).balance, 0);   // 0 because inv 2 was reset and its month 1 recognition was reversed
 
   // Company isolation: create Company 2 with its own accounts and deferred invoice
-  const { db: withCo2, id: co2 } = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co2' });
+  const { db: withCo2, id: co2 } = createCompanyWithDefaultInvoiceJournals(db, { name: 'Branch Co2', deferred_revenue_account_id: accountId(db, '212000') });
   db = withCo2;
   const co2Inc = create(db, 'account.account', { code: '410000', name: 'Income Co2', account_type: 'income', company_id: co2 });
   const co2Def = create(co2Inc.db, 'account.account', { code: '212000', name: 'Def Rev Co2', account_type: 'liability_current', company_id: co2 });

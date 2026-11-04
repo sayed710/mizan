@@ -5,7 +5,7 @@ import { currentActor, employeeFor } from './authority.js';
 import { paymentJournal, postEntry, partnerAccount } from './ledger.js';
 import { moreModels } from './more.js';
 import { round } from '../money.js';
-import { productProperty } from './productconfig-helpers.js';
+import { expenseDebits } from './expense-accounts.js';
 
 const expense = moreModels['hr.expense'];
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -94,18 +94,11 @@ export function postSheet(db, id, date = today()) {
   const lines = checkedLines(db, r);
   if (lines.some((l) => l.state !== 'approved' || l.move_id)) throw new Error('All expenses must be approved and unposted');
   const own = lines[0].payment_mode === 'own_account';
-  const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
   const companyId = r.company_id ?? 1;
-  const via = own ? null : paymentJournal(contact.db, null, companyId);
+  const via = own ? null : paymentJournal(db, null, companyId);
+  const debits = expenseDebits(db, r, lines);
+  const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
   const payable = own ? partnerAccount(contact.db, contact.id, companyId, 'payable') : null;
-  const debits = lines.flatMap((l) => {
-    const product = read(db, 'product', l.product_id);
-    const expenseAccount = productProperty(db, product, 'property_account_expense_id');
-    const account = expenseAccount ? read(db, 'account.account', expenseAccount)?.code : '600000';
-    if (!account) throw new Error('Select a valid product expense account');
-    const tax = round(Number(l.total_amount) - Number(l.total_amount) / (1 + Number(l.tax ?? 0) / 100));
-    return [{ account, debit: round(Number(l.total_amount) - tax) }, ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(l.tax ?? 0)}%`, tax_side: 'purchase', tax_base: round(Number(l.total_amount) - tax) }] : [])];
-  });
   const booked = postEntry(contact.db, { journal: own ? (r.journal || 'MISC') : via.code, ...(via ? { journal_id: via.id } : {}), date, ref: r.name, company: companyId,
     lines: [...debits, own ? { account_id: payable, credit: total(lines), partner_id: contact.id } : { account_id: via.accountId, credit: total(lines) }],
   });
@@ -184,6 +177,7 @@ export const expensePlusModels = {
       accounting_date: { type: 'date', label: 'Accounting Date' },
       move_id: { ...expense.fields.move_id },
       journal: { type: 'char', label: 'Journal' },
+      expense_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Expense Journal' },
       amount_paid: { type: 'monetary', label: 'Reimbursed', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Reimbursement Contact', readonly: true },
     },
@@ -194,7 +188,7 @@ export const expensePlusModels = {
     kanban: { title: 'name', lines: ['employee_id', 'total_amount'], badge: 'state' },
     form: {
       title: 'name', statusbar: 'state', lockedWhen: (r) => r.state !== 'draft', chatter: true,
-      groups: [['employee_id', 'manager_id', 'payment_mode'], ['accounting_date', 'journal', 'total_amount', 'amount_paid', 'move_id', 'refuse_reason']],
+      groups: [['employee_id', 'manager_id', 'payment_mode'], ['accounting_date', 'journal', 'expense_journal_id', 'total_amount', 'amount_paid', 'move_id', 'refuse_reason']],
       tabs: [{ label: 'Expenses', fields: ['expense_line_ids'] }],
       buttons: [
         { label: 'Submit', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: submitSheet(db, r.id) }) },

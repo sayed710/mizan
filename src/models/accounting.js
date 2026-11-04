@@ -1021,7 +1021,18 @@ export const accountingModels = {
 
   'account.journal': {
     label: 'Journals',
-    guard: (db, before, after) => journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after),
+    guard: (db, before, after) => {
+      if (after.suspense_account_id) {
+        const account = read(db, 'account.account', after.suspense_account_id);
+        if (!['bank', 'cash'].includes(after.type) || !account || account.active === false || (account.company_id && account.company_id !== (after.company_id ?? 1))) return 'Select an active suspense account belonging to this bank or cash journal company';
+      }
+      for (const [field, label] of [['profit_account_id', 'profit'], ['loss_account_id', 'loss']]) {
+        if (!after[field]) continue;
+        const account = read(db, 'account.account', after[field]);
+        if (after.type !== 'cash' || !account || account.active === false || (account.company_id && account.company_id !== (after.company_id ?? 1))) return `Select an active ${label} account belonging to this cash journal company`;
+      }
+      return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after);
+    },
     protectDelete: (db, journal) => (journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null,
     fields: {
       name: { type: 'char', label: 'Journal Name', required: true },
@@ -1032,6 +1043,9 @@ export const accountingModels = {
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
+      suspense_account_id: { type: 'many2one', relation: 'account.account', label: 'Suspense Account' },
+      profit_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Profit Account' },
+      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Loss Account' },
       default_for_payments: { type: 'boolean', label: 'Default Payment Journal' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
@@ -1050,7 +1064,7 @@ export const accountingModels = {
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['invoice_sequence_prefix', 'invoice_sequence_next_number', 'refund_sequence_prefix', 'refund_sequence_next_number'], ['default_account_id', 'default_for_payments', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
+      groups: [['code', 'type'], ['invoice_sequence_prefix', 'invoice_sequence_next_number', 'refund_sequence_prefix', 'refund_sequence_next_number'], ['default_account_id', 'suspense_account_id', 'profit_account_id', 'loss_account_id', 'default_for_payments', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
     },
   },
 

@@ -550,7 +550,7 @@ test('POS posts and closes in the session company using that company journals an
     journals[code] = created.id;
   }
   db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
-  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true });
+  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true, profit_account_id: accounts['450000'], loss_account_id: accounts['690000'] });
   const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id, journal_id: journals.POSS }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'Branch cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   db = startSession(db, 0, cfg.id).db;

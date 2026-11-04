@@ -115,6 +115,8 @@ export function seed() {
     const id = add('account.journal', {
       code: journal.code, name: journal.name, type: journal.type,
       default_account_id: journal.account ? installedByCode[journal.account] : null,
+      ...(['bank', 'cash'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
+      ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
       default_for_payments: journal.default_for_payments === true,
       ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
       ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
@@ -150,7 +152,7 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
   db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'] });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,
@@ -271,8 +273,8 @@ export function seed() {
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
   const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
   add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
-  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
-  add('account.bank.statement.line', { journal_id: demoBankJournal, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart_account_id: installedByCode['630000'] });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart_account_id: installedByCode['690000'] });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   const tagInterior = add('project.tags', { name: 'Interior', color: 1 });

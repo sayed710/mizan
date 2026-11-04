@@ -30,7 +30,7 @@ test('partial statement match settles the oldest installment and leaves the rema
 test('oversized company transaction can match another document without another bank item', () => {
   const base = seed();
   const company = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
-  const journal = create(company.db, 'account.journal', { company_id: company.id, name: 'Branch bank', code: 'BRB', type: 'bank', default_account_id: search(company.db, 'account.account').find((a) => a.code === '101401').id });
+  const journal = create(company.db, 'account.journal', { company_id: company.id, name: 'Branch bank', code: 'BRB', type: 'bank', suspense_account_id: search(company.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id, default_account_id: search(company.db, 'account.account').find((a) => a.code === '101401').id });
   const first = invoice(journal.db, company.id, 100);
   const second = invoice(first.db, company.id, 50);
   const line = create(second.db, LINE, { company_id: company.id, journal_id: journal.id, date: '2026-01-20', payment_ref: 'two invoices', amount: 150, move_id: first.id });

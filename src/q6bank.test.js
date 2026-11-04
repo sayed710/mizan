@@ -137,7 +137,7 @@ test('invoice matching rule compares company values at statement date', () => {
 test('booked foreign bank amount survives later rate corrections', () => {
   for (const correctedRate of [0.5, 2]) {
     let { db, journal, fx } = fxSetup(); const inv = invoice(db, 50, fx); db = inv.db;
-    const line = create(db, LINE, { payment_ref: 'Q6', date: '2025-01-02', amount: 100, journal_id: journal, move_id: inv.id });
+    const line = create(db, LINE, { payment_ref: 'Q6', date: '2025-01-02', amount: 100, journal_id: journal, move_id: inv.id, counterpart_account_id: accountId(db, '450000') });
     db = run(line.db, LINE, line.id, 'Match');
     const partiallyMatched = read(db, LINE, line.id);
     assert.equal(partiallyMatched.open_amount, 62.5);

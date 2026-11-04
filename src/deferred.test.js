@@ -7,7 +7,8 @@ import { computeBoard, deferralBoard, postDueEntries } from './models/deferred.j
 import { seed } from './seed.js';
 
 const schedule = (vals) => {
-  const { db, id } = create(seed(), 'account.deferral', { name: 'Support contract', amount: 1000, start_date: '2026-01-15', months: 3, ...vals });
+  const base = seed();
+  const { db, id } = create(base, 'account.deferral', { name: 'Support contract', amount: 1000, start_date: '2026-01-15', months: 3, recognition_account_id: accountId(base, vals.kind === 'expense' ? '600000' : '400000'), ...vals });
   return { db: computeBoard(db, read(db, 'account.deferral', id)), id };
 };
 

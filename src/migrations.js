@@ -12,7 +12,7 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
-import { journalId } from './models/ledger.js';
+import { CHART, journalId } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { returnTaxLock } from './models/finance.js';
@@ -602,6 +602,25 @@ function migrateCashBasisOrigins(db) {
   return { ...next, settings };
 }
 
+
+MIGRATIONS.push({ version: 27, name: 'Configure installed journal and deferral accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    const matches = (db.records['account.account'] ?? []).filter((a) => a.company_id === company && a.code === code && a.account_type === type);
+    return matches.length === 1 ? matches[0].id : null;
+  };
+  const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company,
+    deferred_revenue_account_id: company.deferred_revenue_account_id ?? find(company.id, '212000'),
+    deferred_expense_account_id: company.deferred_expense_account_id ?? find(company.id, '132000'),
+  }));
+  const journals = (db.records['account.journal'] ?? []).map((journal) => {
+    if (!['bank', 'cash'].includes(journal.type)) return journal;
+    const company = journal.company_id ?? 1;
+    return { ...journal, suspense_account_id: journal.suspense_account_id ?? find(company, '101404'),
+      ...(journal.type === 'cash' ? { profit_account_id: journal.profit_account_id ?? find(company, '450000'), loss_account_id: journal.loss_account_id ?? find(company, '690000') } : {}) };
+  });
+  return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals } };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

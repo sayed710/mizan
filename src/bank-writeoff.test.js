@@ -14,7 +14,7 @@ function setup(type = 'out_invoice') {
   const base = seed();
   const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch cash', account_type: 'asset_cash' });
-  const journal = create(bank.db, 'account.journal', { company_id: branch.id, code: 'B2', name: 'Branch bank', type: 'bank', default_account_id: bank.id });
+  const journal = create(bank.db, 'account.journal', { company_id: branch.id, code: 'B2', name: 'Branch bank', type: 'bank', default_account_id: bank.id, suspense_account_id: search(bank.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id });
   const account = create(journal.db, 'account.account', { company_id: branch.id, code: '690777', name: 'Write-off', account_type: 'expense' });
   const invoice = create(account.db, 'account.move', { company_id: branch.id, move_type: type, partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   const db = postMove(invoice.db, invoice.id);

@@ -186,7 +186,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const deferred = l.deferred_start_date || l.deferred_end_date;
     if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
     const company = read(db, 'res.company', move.company_id ?? 1);
-    const account = deferred ? (company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] ?? accountId(db, sale ? '212000' : '132000', move.company_id)) : original;
+    const account = deferred ? company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] : original;
+    if (deferred && !account) throw new Error(`Configure the deferred ${sale ? 'revenue' : 'expense'} account on the company`);
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
     const docCurrency = documentCurrency(db, move);
@@ -481,12 +482,14 @@ export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
 
-/** Ensure the bank suspense account exists for older databases and company-specific charts. */
-export function ensureBankSuspense(db, company) {
-  const id = accountId(db, '101404', company);
-  const account = read(db, 'account.account', id);
-  if (account && (!account.company_id || account.company_id === company)) return { db, id };
-  return create(db, 'account.account', { code: '101404', name: 'Bank Suspense', account_type: 'asset_current', company_id: company });
+/** Resolve the suspense account configured on the statement's journal. */
+export function ensureBankSuspense(db, company, journalId) {
+  const journal = read(db, 'account.journal', journalId ?? paymentJournal(db, null, company).id);
+  const account = read(db, 'account.account', journal?.suspense_account_id);
+  if (!account) throw new Error(`Configure the suspense account on journal ${journal?.name ?? journalId ?? '(not selected)'}`);
+  if (journal?.company_id && journal.company_id !== company) throw new Error('Statement journal belongs to another company');
+  if (account.active === false || (account.company_id && account.company_id !== company)) throw new Error('The suspense account must be active and belong to the statement company');
+  return { db, id: account.id };
 }
 
 /** Resolve an optional journal outstanding account, falling back to the company setting. */

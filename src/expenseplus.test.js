@@ -9,7 +9,7 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { expensePlusModels, createSheet, submitSheet, approveSheet, refuseSheet, postSheet, registerPayment, reinvoiceExpenses, duplicates, expenseAnalysis } from './models/expenseplus.js';
 
 const date = '2026-06-01';
-const addExpense = (db, vals = {}) => create(db, 'hr.expense', { name: 'Client travel', employee_id: 2, date, total_amount: 114, tax: 14, ...vals });
+const addExpense = (db, vals = {}) => create(db, 'hr.expense', { name: 'Client travel', employee_id: 2, date, total_amount: 114, tax: 14, tax_id: read(db, 'res.company', vals.company_id ?? 1)?.account_purchase_tax_id, ...vals });
 const report = (vals = {}) => {
   const made = addExpense(seed(), vals);
   return createSheet(made.db, [made.id], { name: 'June expenses' });

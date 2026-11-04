@@ -262,7 +262,7 @@ test('asset disposal and deferred expense and revenue actions allocate profit an
   assert.deepEqual(loss.analytic_distribution, distribution);
   assert.equal(db.records['account.analytic.line'].find((l) => l.move_id === disposal.id).amount, -1200);
   for (const kind of ['expense', 'revenue']) {
-    const deferral = create(db, 'account.deferral', { name: kind, kind, amount: 300, months: 1, start_date: '2020-01-01', analytic_distribution: distribution }); db = deferral.db;
+    const deferral = create(db, 'account.deferral', { name: kind, kind, amount: 300, months: 1, start_date: '2020-01-01', analytic_distribution: distribution, recognition_account_id: db.records['account.account'].find((a) => a.code === (kind === 'expense' ? '600000' : '400000') && !a.company_id).id }); db = deferral.db;
     const actions = models['account.deferral'].form.buttons;
     db = actions.find((b) => b.label === 'Compute').run(db, read(db, 'account.deferral', deferral.id)).db;
     const next = actions.find((b) => b.label === 'Post Due Entries').run(db, read(db, 'account.deferral', deferral.id)).db;

@@ -6,8 +6,18 @@ import { postAnalytic } from './analyticplus.js';
 import { allocateCents, companyCurrencyRecord, roundCurrency } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
-const ACCOUNTS = { revenue: ['212000', '400000'], expense: ['600000', '132000'] };
 const DAY = 86400000;
+
+function scheduleAccounts(db, schedule) {
+  const company = schedule.company_id ?? 1;
+  const deferred = schedule.deferred_account_id ?? read(db, 'res.company', company)?.[schedule.kind === 'expense' ? 'deferred_expense_account_id' : 'deferred_revenue_account_id'];
+  const recognition = schedule.recognition_account_id;
+  for (const [id, label] of [[deferred, `deferred ${schedule.kind} account on the company`], [recognition, 'recognition account on the source line']]) {
+    const account = read(db, 'account.account', id);
+    if (!account || account.active === false || (account.company_id && account.company_id !== company)) throw new Error(`Configure the ${label}`);
+  }
+  return { deferred, recognition };
+}
 
 /** Allocate company currency over inclusive monthly periods. */
 function datedBoard(amount, start, end, method = 'days', currency = null) {
@@ -143,9 +153,9 @@ export function postDueEntries(db, d, upTo = today()) {
     throw new Error('Individual posting is unavailable for grouped deferrals');
   }
   if (d.state === 'cancel') return db;
-  const [defaultDebit, defaultCredit] = ACCOUNTS[d.kind] ?? ACCOUNTS.revenue;
-  const debit = (d.kind === 'expense' ? d.recognition_account_id : d.deferred_account_id) ?? defaultDebit;
-  const credit = (d.kind === 'expense' ? d.deferred_account_id : d.recognition_account_id) ?? defaultCredit;
+  const { deferred, recognition } = scheduleAccounts(db, d);
+  const debit = d.kind === 'expense' ? recognition : deferred;
+  const credit = d.kind === 'expense' ? deferred : recognition;
   const { db: next, board } = (d.board ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, board: [...acc.board, l] };
     if (!l.amount) return { ...acc, board: [...acc.board, { ...l, posted: true, move_id: null }] };
@@ -204,9 +214,7 @@ export function generateGroupedEntries(db, { date, company_id, kind } = {}) {
         .filter(({ amount }) => amount !== 0);
       const recognized = roundCurrency(boardLines.reduce((sum, { amount }) => sum + amount, 0), currency);
       if (recognized !== 0) {
-        const [defaultDebit, defaultCredit] = ACCOUNTS[k] ?? ACCOUNTS.revenue;
-        const deferredAcc = s.deferred_account_id ?? (k === 'expense' ? defaultCredit : defaultDebit);
-        const recognitionAcc = s.recognition_account_id ?? (k === 'expense' ? defaultDebit : defaultCredit);
+        const { deferred: deferredAcc, recognition: recognitionAcc } = scheduleAccounts(currentDb, s);
         recognizedItems.push({
           schedule: s,
           boardLines: boardLines.map(({ line, index, amount }) => ({ index, date: line.date, amount })),

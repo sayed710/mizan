@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { accountId, ensureBankSuspense, invoiceCounterpartAccount, paymentJournal, postEntry } from './ledger.js';
+import { ensureBankSuspense, invoiceCounterpartAccount, paymentJournal, postEntry } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -25,6 +25,7 @@ const modelFor = (db, line) => suggestRule(db, line)
 
 const inboundTypes = ['out_invoice', 'in_refund'];
 const outboundTypes = ['in_invoice', 'out_refund'];
+const eligibleCounterpart = (account, company) => Boolean(account && account.active !== false && (!account.company_id || account.company_id === company) && !['asset_cash', 'asset_receivable', 'liability_payable'].includes(account.account_type));
 
 /** Why this line cannot settle this invoice/bill. */
 export function matchError(db, line, move) {
@@ -78,21 +79,21 @@ export function reconcileWith(db, line, moveId) {
   if (hasWriteoff) {
     const amount = Number(line.writeoff_amount);
     const account = read(db, 'account.account', line.writeoff_account_id);
-    if (!account || (account.company_id && account.company_id !== company)) throw new Error('Write-off account belongs to another company or does not exist');
+    if (!eligibleCounterpart(account, company)) throw new Error('Write-off account belongs to another company, is inactive, or is not a valid counterpart');
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label');
     if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
     writeoffValue = docRound(amount * rate);
     if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
     const receivable = invoiceCounterpartAccount(db, move);
     const bankAccount = paymentJournal(db, line.journal_id, company).accountId;
-    if (account.id === receivable || account.id === bankAccount || account.id === accountId(db, '101404', company)) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
+    if (account.id === receivable || account.id === bankAccount || account.id === ensureBankSuspense(db, company, line.journal_id).id) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
   }
   let current = db;
   let bankMoveId = line.bank_move_id;
   let suspense = null;
   const bankCurrency = read(db, 'account.journal', line.journal_id)?.currency_id;
   if (bankMoveId || remaining > 0 || (bankCurrency && bankCurrency !== companyCurrencyRecord(db, company)?.id)) {
-    const ensured = ensureBankSuspense(current, company);
+    const ensured = ensureBankSuspense(current, company, line.journal_id);
     current = ensured.db;
     suspense = ensured.id;
     if (!bankMoveId) {
@@ -220,7 +221,7 @@ function matchPayment(db, line) {
   if (needsWriteoff) {
     if (!line.writeoff_account_id) throw new Error('The selected payments must total the bank transaction amount');
     writeoffAccount = read(db, 'account.account', line.writeoff_account_id);
-    if (!writeoffAccount || (writeoffAccount.company_id && writeoffAccount.company_id !== company)) {
+    if (!eligibleCounterpart(writeoffAccount, company)) {
       throw new Error('Select a write-off account belonging to the payment company for the bank difference');
     }
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label for the bank difference');
@@ -230,7 +231,7 @@ function matchPayment(db, line) {
         throw new Error('Write-off amount must equal the payment difference in company currency');
       }
     }
-    const forbidden = new Set([via.accountId, accountId(db, '101404', company), ...outstandingItems.map((item) => item.account)]);
+    const forbidden = new Set([via.accountId, ensureBankSuspense(db, company, line.journal_id).id, ...outstandingItems.map((item) => item.account)]);
     if (forbidden.has(writeoffAccount.id)) throw new Error('Write-off account must differ from the bank, suspense and outstanding accounts');
   }
   const allDirect = outstandingItems.every((item) => item.isDirect);
@@ -297,18 +298,19 @@ function autoReconcile(db, line) {
 function bookToAccount(db, line) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
-  const account = line.counterpart ?? (line.amount > 0 ? '450000' : '600000');
+  const via = paymentJournal(db, line.journal_id, line.company_id ?? 1);
+  const account = read(db, 'account.account', line.counterpart_account_id);
+  if (!eligibleCounterpart(account, line.company_id ?? 1)) throw new Error('Select a valid counterpart account for this company');
   const value = round(line.open_amount ?? statementCompanyAmount(db, line));
   if (!(value > 0)) throw new Error('This bank transaction has no open amount');
-  const via = paymentJournal(db, line.journal_id, line.company_id ?? 1);
-  const liquidity = line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : via.accountId;
+  const liquidity = line.bank_move_id ? ensureBankSuspense(db, line.company_id ?? 1, line.journal_id).id : via.accountId;
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(db, line.company_id)?.id;
   const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / bookedStatementAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * foreignValue } : {};
   const lines = line.amount > 0
-    ? [{ account: liquidity, debit: value, ...fx(1) }, { account, credit: value, ...fx(-1) }]
-    : [{ account, debit: value, ...fx(1) }, { account: liquidity, credit: value, ...fx(-1) }];
+    ? [{ account: liquidity, debit: value, ...fx(1) }, { account: account.id, credit: value, ...fx(-1) }]
+    : [{ account: account.id, debit: value, ...fx(1) }, { account: liquidity, credit: value, ...fx(-1) }];
   const { db: booked, id } = postEntry(db, { journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: value }] }) };
 }
@@ -431,7 +433,7 @@ function lineGuard(db, before, after) {
     const bankAccount = via.accountId;
     const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
     if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) return 'The bank entry must book the transaction amount once';
-    const suspense = accountId(db, '101404', company);
+    const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
     for (const allocation of allocations) {
       const entry = read(db, 'account.move', allocation.payment_move_id);
       if (allocation.invoice_id && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((p) => p.move_id === allocation.payment_move_id && !p.reversed)) return 'The matched document must link to its settlement entry';
@@ -471,7 +473,7 @@ function lineGuard(db, before, after) {
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
-    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
+    guard: (db, before, after) => datedLockGuard(['date', 'amount', 'partner_id', 'state', 'move_id', 'payment_move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'writeoff_account_id', 'writeoff_label', 'writeoff_amount', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'journal_id', 'counterpart_account_id', 'unique_import_id', 'payment_ref', 'company_id', 'active'], (l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, before, after) ?? lineGuard(db, before, after),
     protectDelete: (db, l) => datedLockDelete((l) => l.state === 'reconciled' || Boolean(l.bank_move_id) || Boolean(l.move_id))(db, l) ?? (l.state === 'reconciled' || l.bank_move_id ? 'A reconciled or booked bank transaction cannot be deleted' : null),
     guardLast: true,
     // Statement files from the bank (beside the generic CSV import).
@@ -489,7 +491,7 @@ export const bankModels = {
       payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Existing Payments' },
       batch_payment_id: { type: 'many2one', relation: 'account.batch.payment', label: 'Batch Payment' },
       payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
-      writeoff_account_id: { type: 'many2one', relation: 'account.account', label: 'Write-off Account' },
+      writeoff_account_id: { type: 'many2one', relation: 'account.account', label: 'Write-off Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
       writeoff_label: { type: 'char', label: 'Write-off Label' },
       writeoff_amount: { type: 'monetary', label: 'Write-off Amount' },
       writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry', readonly: true },
@@ -502,11 +504,7 @@ export const bankModels = {
         amount: { type: 'monetary', label: 'Amount' },
       } },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },
-      counterpart: {
-        type: 'selection',
-        label: 'Book to Account',
-        options: [['450000', '450000 Other Income'], ['600000', '600000 Expenses'], ['610000', '610000 Travel & Meals'], ['630000', '630000 Rent'], ['690000', '690000 Bank Fees']],
-      },
+      counterpart_account_id: { type: 'many2one', relation: 'account.account', label: 'Book to Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
     defaults: () => ({ date: today(), state: 'to_check' }),
@@ -538,7 +536,7 @@ export const bankModels = {
         { label: 'Book to Account', when: (r) => r.state === 'to_check', run: bookToAccount },
       ],
       title: 'payment_ref',
-      groups: [['date', 'partner_id', 'amount', 'open_amount', 'journal_id'], ['move_id', 'payment_id', 'counterpart'], ['writeoff_account_id', 'writeoff_label', 'writeoff_amount']],
+      groups: [['date', 'partner_id', 'amount', 'open_amount', 'journal_id'], ['move_id', 'payment_id', 'counterpart_account_id'], ['writeoff_account_id', 'writeoff_label', 'writeoff_amount']],
       chatter: true,
     },
   },

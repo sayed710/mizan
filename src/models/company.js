@@ -240,6 +240,11 @@ function companyGuard(db, before, r) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id']) {
+    if (!r[field]) continue;
+    const account = record(db, 'account.account', r[field]);
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active deferred account belonging to this company';
+  }
   if (r.current_year_earnings_account_id) {
     const account = record(db, 'account.account', r.current_year_earnings_account_id);
     if (!account || !['equity', 'equity_unaffected'].includes(account.account_type)
@@ -265,9 +270,9 @@ export function createCompany(db, vals) {
   const res = create(next, 'res.company', values);
   next = res.db;
   const accounts = {};
-  for (const [field, code, name, account_type] of [['current_year_earnings_account_id', '302000', 'Retained Earnings', 'equity'], ['account_default_receivable_id', '121000', 'Account Receivable', 'asset_receivable'], ['account_default_payable_id', '211000', 'Account Payable', 'liability_payable']]) {
+  for (const [field, code, name, account_type] of [['current_year_earnings_account_id', '302000', 'Retained Earnings', 'equity'], ['account_default_receivable_id', '121000', 'Account Receivable', 'asset_receivable'], ['account_default_payable_id', '211000', 'Account Payable', 'liability_payable'], ['deferred_revenue_account_id', '212000', 'Deferred Revenue', 'liability_current'], ['deferred_expense_account_id', '132000', 'Prepaid Expenses', 'asset_current']]) {
     if (values[field]) continue;
-    const account = create(next, 'account.account', { code, name, account_type, company_id: res.id, reconcile: account_type !== 'equity' });
+    const account = create(next, 'account.account', { code, name, account_type, company_id: res.id, reconcile: ['asset_receivable', 'liability_payable'].includes(account_type) });
     next = account.db;
     accounts[field] = account.id;
   }
