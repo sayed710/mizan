@@ -97,7 +97,9 @@ export function fiscalPositionFor(db, partnerId) {
   if (!p) return null;
   if (p.property_account_position_id) return p.property_account_position_id;
   const country = (p.country ?? '').trim().toLowerCase();
-  return search(db, 'account.fiscal.position').find((fp) => fp.auto_apply && (fp.country ?? '').trim().toLowerCase() === country && country)?.id ?? null;
+  const matches = search(db, 'account.fiscal.position').filter((fp) => fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country);
+  matches.sort((a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id);
+  return matches[0]?.id ?? null;
 }
 
 /** Line tax values for a product (sales or purchase side) after the fiscal position. */
@@ -139,14 +141,15 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
   let extraA = 0;
   let extraC = 0;
   for (const t of specs) {
-    if (!t.tax_include) continue;
     const baseA = t.tax_is_base_affected !== false ? 1 + extraA : 1;
     const baseC = t.tax_is_base_affected !== false ? extraC : 0;
     const amt = Number(t.tax) || 0;
     const taxA = t.tax_type === 'fixed' ? 0 : baseA * (amt / 100);
     const taxC = t.tax_type === 'fixed' ? qty * amt : baseC * (amt / 100);
-    inclA += taxA;
-    inclC += taxC;
+    if (t.tax_include) {
+      inclA += taxA;
+      inclC += taxC;
+    }
     if (t.tax_include_base_amount) {
       extraA += taxA;
       extraC += taxC;
@@ -184,12 +187,13 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
 }
 
 /** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
-export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null } = {}) {
+export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null, taxFilter = () => true } = {}) {
   const by = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
     const computed = computeLineTaxes(l, { currency: documentCurrency, roundingMethod });
     for (const t of computed.taxes) {
+      if (!taxFilter(t)) continue;
       if (t.amount === 0 && !t.tax_cash_basis) continue;
       const account_id = accountOf({ ...l, ...t });
       const tax_name = taxLabel(t);
@@ -214,7 +218,7 @@ export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, company
     rate,
     documentCurrency,
     companyCurrency,
-    options,
+    { ...options, taxFilter: (t) => t.tax_cash_basis },
   ).filter((g) => g.amount || g.base);
 
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
@@ -280,6 +284,7 @@ export const taxModels = {
     label: 'Fiscal Positions',
     fields: {
       name: { type: 'char', label: 'Fiscal Position', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
       auto_apply: { type: 'boolean', label: 'Detect Automatically' },
       country: { type: 'char', label: 'Country' },
       note: { type: 'text', label: 'Legal Notes' },
@@ -294,12 +299,12 @@ export const taxModels = {
         newLine: () => ({ account_src_id: null, account_dest_id: null }),
       },
     },
-    defaults: () => ({ auto_apply: false, tax_ids: [], account_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, tax_ids: [], account_ids: [] }),
     kanban: { title: 'name', lines: ['country'] },
-    list: ['name', 'country', 'auto_apply'],
+    list: ['sequence', 'name', 'country', 'auto_apply'],
     form: {
       title: 'name',
-      groups: [['auto_apply', 'country'], []],
+      groups: [['sequence', 'auto_apply', 'country'], []],
       tabs: [{ label: 'Tax Mapping', fields: ['tax_ids'] }, { label: 'Account Mapping', fields: ['account_ids'] }, { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,
     },

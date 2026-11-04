@@ -744,8 +744,9 @@ const termDue = (db, r) => {
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
+const billLineBase = productLines('Invoice Lines', 'cost');
 const invoiceLineField = { ...invoiceLineBase, onchange: (line, key, db, move) => {
-  const updated = invoiceLineBase.onchange(line, key, db, move);
+  const updated = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, move);
   return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) } : updated;
 }, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
@@ -902,7 +903,11 @@ export const accountingModels = {
           : null;
         const context = { ...r, ...fiscal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
-          ? { invoice_line_ids: r.invoice_line_ids.map((line) => ({ ...line, analytic_distribution: defaultDistributionForLine(db, line, context, line.analytic_distribution ?? {}) })) }
+          ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
+            const remap = (key === 'fiscal_position_id' || partnerChange) && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
+            const updated = remap ? invoiceLineField.onchange(line, 'product_id', db, context) : line;
+            return { ...updated, ...(remap ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
+          }) }
           : {};
         return {
           ...fiscal,
