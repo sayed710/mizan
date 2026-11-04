@@ -6,6 +6,22 @@ import { cashRound, documentCurrency, roundCurrency } from '../money.js';
 import { mixedDiscountFactor } from './terms.js';
 import { invoiceTaxGroups } from './ledger.js';
 
+/** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
+export function sameCommercialPartner(db, leftId, rightId) {
+  const commercialId = (id) => {
+    let partner = read(db, 'res.partner', id);
+    const seen = new Set();
+    while (partner?.parent_id) {
+      if (seen.has(partner.id)) return null;
+      seen.add(partner.id);
+      partner = read(db, 'res.partner', partner.parent_id);
+    }
+    return partner?.id ?? null;
+  };
+  const left = commercialId(leftId);
+  return left != null && left === commercialId(rightId);
+}
+
 // Field/line helpers shared by order-like models (sales, purchase, invoices).
 
 /** Local calendar date as YYYY-MM-DD (not UTC, so "today" matches the user's wall clock). */
