@@ -90,13 +90,13 @@ test('an outbound batch without a first check number is refused', () => {
 });
 
 test('amountInWords writes cheque-style amounts up to 999,999,999.99', () => {
-  assert.equal(amountInWords(0), 'Zero Dollars and 00/100');
-  assert.equal(amountInWords(7), 'Seven Dollars and 00/100');
-  assert.equal(amountInWords(15), 'Fifteen Dollars and 00/100');
-  assert.equal(amountInWords(100), 'One Hundred Dollars and 00/100');
-  assert.equal(amountInWords(1001.05), 'One Thousand One Dollars and 05/100');
-  assert.equal(amountInWords(1234.5), 'One Thousand Two Hundred Thirty-Four Dollars and 50/100');
-  assert.equal(amountInWords(999999999.99), 'Nine Hundred Ninety-Nine Million Nine Hundred Ninety-Nine Thousand Nine Hundred Ninety-Nine Dollars and 99/100');
-  assert.throws(() => amountInWords(-1), /between 0/);
-  assert.throws(() => amountInWords(1000000000), /between 0/);
+  assert.equal(amountInWords(0, 'Dollars'), 'Zero Dollars and 00/100');
+  assert.equal(amountInWords(7, 'Dollars'), 'Seven Dollars and 00/100');
+  assert.equal(amountInWords(15, 'Dollars'), 'Fifteen Dollars and 00/100');
+  assert.equal(amountInWords(100, 'Dollars'), 'One Hundred Dollars and 00/100');
+  assert.equal(amountInWords(1001.05, 'Dollars'), 'One Thousand One Dollars and 05/100');
+  assert.equal(amountInWords(1234.5, 'Dollars'), 'One Thousand Two Hundred Thirty-Four Dollars and 50/100');
+  assert.equal(amountInWords(999999999.99, 'Dollars'), 'Nine Hundred Ninety-Nine Million Nine Hundred Ninety-Nine Thousand Nine Hundred Ninety-Nine Dollars and 99/100');
+  assert.throws(() => amountInWords(-1, 'Dollars'), /between 0/);
+  assert.throws(() => amountInWords(1000000000, 'Dollars'), /between 0/);
 });

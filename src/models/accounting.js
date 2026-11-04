@@ -1,4 +1,4 @@
-import { create, postNote, read, search, unlink, write } from '../orm.js';
+import { create, postNote, read, unlink, write } from '../orm.js';
 import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
@@ -316,9 +316,9 @@ export function reverseDepreciation(db, move, options = {}) {
   return write(linked, 'account.asset', asset.id, { state: 'open', depreciation_ids: asset.depreciation_ids.map((l) => l.move_id === move.id ? { ...l, posted: false, move_id: null } : l) });
 }
 
-/** Credit notes of an invoice that are not cancelled, other than `exceptId`. */
+/** Issued credit notes of an invoice, other than `exceptId`; drafts do not consume credit. */
 const creditNotesOf = (db, invoiceId, exceptId = null) => (db.records['account.move'] ?? [])
-  .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state !== 'cancel');
+  .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state === 'posted');
 
 /** A credit note that settled its invoice (and the invoice it settled) stays: deleting either would leave the other falsely paid. */
 function settledByCreditNote(db, m) {
@@ -457,10 +457,10 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const excess = docRound(amount - value);
   const sale = isInbound(r);
   const counterpartCode = invoiceCounterpartAccount(db, r);
-  const via = paymentJournal(db, payJournal);
-  const journal = read(db, 'account.journal', payJournal ?? journalId(db, via.code, r.company_id));
+  const via = paymentJournal(db, payJournal, r.company_id ?? 1);
+  const journal = read(db, 'account.journal', via.id);
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
-  const liquidity = liquidityAccountId ?? outstanding ?? via.account;
+  const liquidity = liquidityAccountId ?? outstanding ?? via.account_id;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   const bank = bookedShare ?? toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
@@ -702,13 +702,16 @@ function discountTaxLines(db, invoice, term, discount) {
 }
 
 /** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
-export function payWithDiscount(db, id, amount, date = today()) {
+export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const r = read(db, 'account.move', id);
+  if (!validDate(date)) throw new Error('Enter a valid payment date');
+  const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
+  const journalIdVal = opts.journalId ?? opts.journal_id ?? null;
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const due = residual(r, db);
-  const paid = payMove(db, id, amount, date);
+  const paid = payMove(db, id, amount, date, { journalId: journalIdVal });
   const gap = docRound(due - amount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap) return paid;
@@ -740,17 +743,21 @@ export function payWithDiscount(db, id, amount, date = today()) {
   return postNote(write(booked, 'account.move', id, { amount_paid: docRound((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
-function registerPayment(db, r) {
+function registerPayment(db, r, values = {}) {
   if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
-  const due = roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r));
-  const amount = promptedAmount(prompt(`Payment amount (due ${money(due)})`, String(due)));
-  if (amount == null) return { db };
-  return { db: payWithDiscount(db, r.id, amount) };
+  const amount = promptedAmount(values.amount);
+  if (amount == null) throw new Error('Enter a payment amount greater than zero');
+  const date = values.date;
+  const journalIdVal = values.journal_id;
+  if (!validDate(date)) throw new Error('Enter a valid payment date');
+  if (!journalIdVal) throw new Error('Select a payment journal');
+  paymentJournal(db, journalIdVal, r.company_id ?? 1);
+  return { db: payWithDiscount(db, r.id, amount, date, { journalId: journalIdVal }) };
 }
 
-const termDue = (db, r) => {
+const termDue = (db, r, { clear = false } = {}) => {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : {};
+  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : clear ? { invoice_date_due: null } : {};
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
@@ -868,6 +875,7 @@ export const accountingModels = {
       code: { type: 'char', label: 'Short Code', required: true },
       type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
       default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
+      default_for_payments: { type: 'boolean', label: 'Default Payment Journal' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       check_next_number: { type: 'integer', label: 'Next Check Number' },
@@ -881,11 +889,11 @@ export const accountingModels = {
     },
     defaults: () => ({ type: 'general', restrict_mode_hash_table: false }),
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['code', 'name', 'type', 'default_account_id', 'restrict_mode_hash_table'],
+    list: ['code', 'name', 'type', 'default_account_id', 'default_for_payments', 'restrict_mode_hash_table'],
     form: {
       title: 'name',
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
-      groups: [['code', 'type'], ['default_account_id', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
+      groups: [['code', 'type'], ['default_account_id', 'default_for_payments', 'outstanding_receipts_account_id', 'outstanding_payments_account_id', 'restrict_mode_hash_table', 'check_next_number']],
     },
   },
 
@@ -908,9 +916,10 @@ export const accountingModels = {
         const partnerChange = key === 'partner_id';
         const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
         const fiscal = partnerChange ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id) } : {};
-        const partnerBank = partnerChange && isPurchase(r)
-          ? search(db, 'res.partner.bank').find((b) => b.partner_id === r.partner_id && b.allow_out_payment && b.active !== false)?.id ?? null
-          : null;
+        const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
+        const partnerBank = selectedBank && selectedBank.partner_id === r.partner_id && selectedBank.allow_out_payment
+          && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
+          ? selectedBank.id : null;
         const context = { ...r, ...fiscal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
@@ -921,9 +930,12 @@ export const accountingModels = {
           : {};
         return {
           ...fiscal,
-          ...(partnerBank ? { partner_bank_id: partnerBank } : {}),
+          ...(partnerChange && isPurchase(r) ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
-          ...(partnerChange ? { invoice_payment_term_id: term ?? null, invoice_date_due: null, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {}),
+          ...(partnerChange ? {
+            invoice_payment_term_id: term ?? null,
+            ...termDue(db, { ...r, invoice_payment_term_id: term ?? null }, { clear: true }),
+          } : {}),
         };
       }
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
@@ -1078,7 +1090,18 @@ export const accountingModels = {
         { label: 'Reset Payment Review', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted' && r.force_post, run: (db, r) => ({ db: write(db, 'account.move', r.id, { force_post: false }) }) },
         // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
-        { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
+        {
+          label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid',
+          wizard: (db, r) => ({
+            title: 'Register Payment',
+            fields: [
+              { name: 'amount', type: 'monetary', label: 'Payment Amount', required: true, default: String(roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r))) },
+              { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
+              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: null, domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && ['bank', 'cash'].includes(j.type) },
+            ],
+          }),
+          run: registerPayment,
+        },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
         {
           label: 'Credit Note',

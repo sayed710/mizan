@@ -1,10 +1,10 @@
 // Batch payments: pay several invoices in one operation; outbound batches also number and print checks.
 import { read, search, write } from '../orm.js';
-import { nextName, today } from './common.js';
+import { nextName, today, validDate } from './common.js';
 import { payMove } from './accounting.js';
-import { cents, round } from '../money.js';
+import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
-import { journalId } from './ledger.js';
+import { paymentJournal } from './ledger.js';
 import { nextCheckNumber } from './pay.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
@@ -66,13 +66,40 @@ export function checkRegisterRows(db, batches = db.records['account.batch.paymen
   return [...batchRows, ...individualRows];
 }
 
+function batchCurrency(db, batch) {
+  const lines = batch.lines ?? [];
+  if (!lines.length) {
+    const companyId = batch.company_id ?? read(db, 'account.journal', batch.journal_id)?.company_id;
+    const currency = companyId ? companyCurrencyRecord(db, companyId) : null;
+    return currency ? { id: currency.id, currency, error: null } : { id: null, currency: null, error: 'Configure a company currency before adding invoices to the batch' };
+  }
+  const currencies = [];
+  for (const line of lines) {
+    const move = read(db, 'account.move', line.move_id);
+    if (!move) return { id: null, currency: null, error: 'Select an existing invoice on every batch line' };
+    const currency = documentCurrency(db, move);
+    if (!currency) return { id: null, currency: null, error: 'Configure a currency for every company before adding invoices to the batch' };
+    currencies.push(currency);
+  }
+  const ids = new Set(currencies.map((currency) => currency.id));
+  if (ids.size !== 1) return { id: null, currency: null, error: 'Batch invoices must use the same currency; a mixed-currency total is unavailable' };
+  return { id: currencies[0].id, currency: currencies[0], error: null };
+}
+
 /** Replace the batch lines with every posted, still-open invoice of the matching type, at its residual. */
 export function fillOpenInvoices(db, batch) {
-  const company = (batch.journal_id ? read(db, 'account.journal', batch.journal_id)?.company_id : null) ?? batch.company_id ?? 1;
+  const selectedJournal = batch.journal_id ? read(db, 'account.journal', batch.journal_id) : null;
+  const company = selectedJournal?.company_id ?? batch.company_id;
+  if (!company || !read(db, 'res.company', company)) throw new Error('Select a company for the batch');
+  const journalConfig = paymentJournal(db, batch.journal_id, company);
+  const journal = read(db, 'account.journal', journalConfig.id);
+  const configuredCurrency = journal.currency_id ? read(db, 'res.currency', journal.currency_id) : companyCurrencyRecord(db, company);
+  if (!configuredCurrency) throw new Error('Configure the journal or company currency before filling the batch');
   const open = search(db, 'account.move').filter(
-    (m) => (m.company_id ?? 1) === company && m.state === 'posted' && m.move_type === MOVE_TYPE[batch.batch_type] && (Number(m.amount_residual) || 0) > 0,
+    (m) => (m.company_id ?? 1) === company && m.state === 'posted' && m.move_type === MOVE_TYPE[batch.batch_type]
+      && documentCurrency(db, m)?.id === configuredCurrency.id && (Number(m.amount_residual) || 0) > 0,
   );
-  return write(db, 'account.batch.payment', batch.id, { lines: open.map((m) => ({ move_id: m.id, amount: m.amount_residual })) });
+  return write(db, 'account.batch.payment', batch.id, { journal_id: journal.id, lines: open.map((m) => ({ move_id: m.id, amount: m.amount_residual })) });
 }
 
 /** Validate the batch, pay each line, number the checks (outbound), assign the reference and post. */
@@ -82,26 +109,39 @@ export function postBatch(db, batch) {
   if (!lines.length) throw new Error('Add at least one invoice to the batch');
   const expected = MOVE_TYPE[batch.batch_type];
   if (new Set(lines.map((l) => l.move_id)).size !== lines.length) throw new Error('An invoice can appear only once in a batch');
+  if (!validDate(batch.date)) throw new Error('Enter a valid batch payment date');
+  const companies = new Set();
   for (const line of lines) {
     const move = read(db, 'account.move', line.move_id);
     if (!move) throw new Error(line.move_id ? `Invoice ${line.move_id} not found` : 'Select an invoice on every batch line');
     if (move.state !== 'posted') throw new Error(`${move.name} is not posted`);
     if (move.move_type !== expected) throw new Error(`${move.name} is not a ${TYPE_LABEL[expected]}`);
+    companies.add(move.company_id ?? 1);
     const amount = Number(line.amount) || 0;
     if (!(amount > 0) || cents(amount) > cents(move.amount_residual)) {
       throw new Error(`${move.name}: the amount must be positive and at most the amount due (${round(move.amount_residual)})`);
     }
-    if (batch.batch_type === 'outbound' && move.partner_id) {
-      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: move.company_id ?? 1 });
-    }
   }
-  const company = read(db, 'account.move', lines[0].move_id)?.company_id ?? 1;
-  if (batch.batch_type === 'inbound' && lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch invoices must belong to the same company');
-  const journal = read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company));
-  if (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch payments require a bank journal and invoices in the same company');
+  if (companies.size !== 1) throw new Error('Batch invoices must belong to the same company');
+  const [company] = companies;
+  const currency = batchCurrency(db, batch);
+  if (currency.error) throw new Error(currency.error);
+  const journalConfig = paymentJournal(db, batch.journal_id, company);
+  const journal = read(db, 'account.journal', journalConfig.id);
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
   if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
-  const start = journal ? nextCheckNumber(db, journal.id, requested) : requested;
+  if (!['bank', 'cash'].includes(journal.type) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
+    throw new Error(batch.batch_type === 'outbound' ? 'Checks require a bank journal' : 'Inbound batches require a bank or cash journal');
+  }
+  if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
+  paymentJournal(db, journal.id, company);
+  for (const line of lines) {
+    const move = read(db, 'account.move', line.move_id);
+    if (batch.batch_type === 'outbound' && move.partner_id) {
+      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: company });
+    }
+  }
+  const start = batch.batch_type === 'outbound' ? nextCheckNumber(db, journal.id, requested) : requested;
   if (batch.batch_type === 'outbound' && !Number.isSafeInteger(start + lines.length)) throw new Error('Check number is too large');
 
   let next = db;
@@ -110,13 +150,13 @@ export function postBatch(db, batch) {
     const entryId = read(next, 'account.move', line.move_id).payments.at(-1).move_id;
     return { ...line, payment_id: search(next, 'account.payment').find((p) => p.move_id === entryId).id, cancelled: false };
   });
-  if (journal) next = write(next, 'account.journal', journal.id, { check_next_number: start + lines.length });
+  if (batch.batch_type === 'outbound') next = write(next, 'account.journal', journal.id, { check_next_number: start + lines.length });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
   return write(next, 'account.batch.payment', batch.id, {
     name,
     state: 'posted',
-    ...(!batch.journal_id ? { company_id: company } : {}),
+    company_id: company,
     lines: linked.map((line, index) => ({
       ...line,
       check_number: batch.batch_type === 'outbound' ? start + index : line.check_number ?? null,
@@ -138,7 +178,8 @@ const underThousand = (n) => {
 };
 
 /** Cheque-style amount in words: 1234.5 → 'One Thousand Two Hundred Thirty-Four Dollars and 50/100' (0 to 999,999,999.99). */
-export function amountInWords(amount, currency = 'Dollars') {
+export function amountInWords(amount, currency) {
+  if (typeof currency !== 'string' || !currency.trim()) throw new Error('Configure the currency unit name before spelling an amount');
   const totalCents = cents(amount);
   if (!(totalCents >= 0) || totalCents > 99999999999) throw new Error('Check amounts must be between 0 and 999,999,999.99');
   const value = Math.floor(totalCents / 100);
@@ -147,7 +188,14 @@ export function amountInWords(amount, currency = 'Dollars') {
   if (Math.floor(value / 1000) % 1000) words.push(`${underThousand(Math.floor(value / 1000) % 1000)} Thousand`);
   if (value % 1000) words.push(underThousand(value % 1000));
   const dollars = words.length ? words.join(' ') : 'Zero';
-  return `${dollars} ${currency} and ${String(totalCents % 100).padStart(2, '0')}/100`;
+  return `${dollars} ${currency.trim()} and ${String(totalCents % 100).padStart(2, '0')}/100`;
+}
+
+/** Numeric and written check amounts use the posted payment's currency, then its invoice currency. */
+export function checkAmountDisplay(db, payment, invoice, amount) {
+  const currency = payment?.currency_id ? read(db, 'res.currency', payment.currency_id) : documentCurrency(db, invoice);
+  if (!currency) throw new Error('Configure the payment currency before printing this check');
+  return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.unit_name) };
 }
 
 export const paymentModels = {
@@ -159,6 +207,8 @@ export const paymentModels = {
       date: { type: 'date', label: 'Date' },
       check_number_start: { type: 'integer', label: 'First Check Number' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', compute: (r, db) => batchCurrency(db, r).id },
+      currency_warning: { type: 'char', label: 'Currency Status', readonly: true, compute: (r, db) => batchCurrency(db, r).error ?? '' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted']] },
       lines: {
         type: 'one2many',
@@ -178,7 +228,10 @@ export const paymentModels = {
           return move ? { ...line, amount: move.amount_residual } : line;
         },
       },
-      amount_total: { type: 'monetary', label: 'Total', compute: (r) => round((r.lines ?? []).reduce((s, l) => s + (Number(l.amount) || 0), 0)) },
+      amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => {
+        const currency = batchCurrency(db, r);
+        return currency.error ? null : roundCurrency((r.lines ?? []).reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency.currency);
+      } },
     },
     defaults: () => ({ name: 'New', date: today(), state: 'draft', lines: [] }),
     kanban: { title: 'name', lines: ['batch_type', 'date', 'amount_total'], badge: 'state' },
@@ -192,7 +245,7 @@ export const paymentModels = {
         { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
-      groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['amount_total']],
+      groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['currency_id', 'amount_total', 'currency_warning']],
       tabs: [{ label: 'Payment Lines', fields: ['lines'] }],
       chatter: true,
     },

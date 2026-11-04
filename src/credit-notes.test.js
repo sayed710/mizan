@@ -57,18 +57,25 @@ test('settled customer and vendor credit notes can be corrected by a linked repl
 
 test('credit notes of one invoice cannot exceed it in total', () => {
   const { db, id } = postedInvoice(100);
-  const first = creditNote(db, move(db, id));
-  // A full draft already credits the whole invoice.
-  assert.throws(() => creditNote(first.db, move(first.db, id)), /already fully credited/);
+  let issuedFull;
+  {
+    const first = creditNote(db, move(db, id));
+    first.db = postMove(first.db, noteId(first));
+    issuedFull = first.db;
+    assert.throws(() => creditNote(first.db, move(first.db, id)), /already fully credited/);
+  }
+  const nextInvoice = create(issuedFull, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const partialBase = postMove(nextInvoice.db, nextInvoice.id);
+  const first = creditNote(partialBase, move(partialBase, nextInvoice.id));
   // Lower the first to 30: a second may be drafted, but not posted for the full 100.
   const partial = write(first.db, 'account.move', noteId(first), { invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 30, tax: 0 }] });
-  const second = creditNote(partial, move(partial, id));
+  const second = creditNote(partial, move(partial, nextInvoice.id));
   const afterFirst = postMove(second.db, noteId(first));
   assert.throws(() => postMove(afterFirst, noteId(second)), /would exceed .*70\.00 is left to credit/);
   const fitted = write(afterFirst, 'account.move', noteId(second), { invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 70, tax: 0 }] });
   const done = postMove(fitted, noteId(second));
-  assert.equal(move(done, id).payment_state, 'paid');
-  assert.throws(() => creditNote(done, move(done, id)), /already fully credited/);
+  assert.equal(move(done, nextInvoice.id).payment_state, 'paid');
+  assert.throws(() => creditNote(done, move(done, nextInvoice.id)), /already fully credited/);
 });
 
 test('a partial credit note leaves the rest due; on a paid invoice it stays open as customer credit', () => {

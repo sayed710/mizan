@@ -33,7 +33,7 @@ export const CHART = [
 ];
 
 export const JOURNALS = [
-  ['INV', 'Customer Invoices', 'sale', '400000'], ['BILL', 'Vendor Bills', 'purchase', '600000'], ['BNK1', 'Bank', 'bank', '101401'],
+  ['INV', 'Customer Invoices', 'sale', '400000'], ['BILL', 'Vendor Bills', 'purchase', '600000'], ['BNK1', 'Bank', 'bank', '101401', true],
   ['CSH1', 'Cash', 'cash', '101501'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', '620000'],
   ['POSS', 'Point of Sale', 'sale', '400000'],
 ];
@@ -344,11 +344,24 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Bank or cash journal code and its default account code (BNK1 / 101401 when unset or not a payment journal). */
-export function paymentJournal(db, journalId) {
-  const j = read(db, 'account.journal', journalId);
-  const account = j && ['bank', 'cash'].includes(j.type) ? read(db, 'account.account', j.default_account_id)?.code : null;
-  return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
+/** Resolve an explicitly selected or explicitly configured default bank/cash journal and its account. */
+export function paymentJournal(db, selectedJournalId, companyId = null) {
+  let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
+  if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
+  if (!selectedJournalId) {
+    const configured = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true);
+    const companyDefaults = companyId ? configured.filter((candidate) => candidate.company_id === companyId) : [];
+    const defaults = companyDefaults.length ? companyDefaults : configured.filter((candidate) => !candidate.company_id);
+    if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
+    if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
+    [journal] = defaults;
+  }
+  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Payment journal must be a bank or cash journal');
+  if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
+  const account = read(db, 'account.account', journal.default_account_id);
+  if (!account) throw new Error(`Configure a default account on the ${journal.name || 'selected'} payment journal`);
+  if (companyId && account.company_id && account.company_id !== companyId) throw new Error('Payment journal account belongs to another company');
+  return { id: journal.id, code: journal.code, account_id: account.id, account: account.code };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */
@@ -369,15 +382,16 @@ export function outstandingAccount(db, journal, company, inbound) {
   return id;
 }
 
-/** Posted journal items with their move date, optionally limited to [from, to] and company. */
-export function journalItems(db, { from, to, company_id, company } = {}) {
+/** Journal items with their move date, optionally limited by review status, date and company. */
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
+  const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
   const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
-  return search(db, 'account.move')
+  const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      return m.state === 'posted'
+      return m.state === wantedState
       && (!from || date >= from)
       && (!to || date <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany)
@@ -390,6 +404,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,
+        move_state: m.state,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,
         is_closing: !!m.is_closing,
@@ -397,6 +412,12 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         is_tax_payment: isTaxSettlement,
       }));
     });
+  if (reviewMode !== 'unreconciled') return rows;
+  return rows.filter((line) => {
+    const account = read(db, 'account.account', line.account_id);
+    const reconcilable = account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+    return reconcilable && line.reconciled !== true;
+  });
 }
 
 /** Balance per account (debit − credit) over the given items. */

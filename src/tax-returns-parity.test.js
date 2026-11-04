@@ -33,6 +33,11 @@ const invoiceLine = (db, taxName, use, vals = {}) => ({
   ...taxSnapshot(taxNamed(db, taxName, use)),
   ...vals,
 });
+const defaultPaymentJournal = (db) => {
+  const candidates = search(db, 'account.journal').filter((journal) => journal.default_for_payments === true);
+  assert.equal(candidates.length, 1);
+  return candidates[0].id;
+};
 
 test('invoice account onchange preserves a manually entered unit price', () => {
   const db = seed();
@@ -1086,17 +1091,13 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
 
   const direct = makeBill(standalonePaid, null);
   const register = models['account.move'].form.buttons.find((b) => b.label === 'Register Payment');
-  const oldPrompt = globalThis.prompt;
-  try {
-    globalThis.prompt = () => '100';
-    const result = register.run(direct.db, read(direct.db, 'account.move', direct.id)).db;
-    const payment = search(result, 'account.payment').find((p) => p.invoice_id === direct.id);
-    assert.equal(read(result, 'account.move', direct.id).amount_paid, 100);
-    assert.equal(payment.state, 'posted');
-    assert.ok(!payment.partner_bank_id);
-  } finally {
-    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
-  }
+  const result = register.run(direct.db, read(direct.db, 'account.move', direct.id), {
+    amount: 100, date: today(), journal_id: defaultPaymentJournal(direct.db),
+  }).db;
+  const payment = search(result, 'account.payment').find((p) => p.invoice_id === direct.id);
+  assert.equal(read(result, 'account.move', direct.id).amount_paid, 100);
+  assert.equal(payment.state, 'posted');
+  assert.ok(!payment.partner_bank_id);
 });
 
 test('outbound payment actions reject another company’s recipient bank and allow own or shared banks', () => {
@@ -1128,13 +1129,9 @@ test('outbound payment actions reject another company’s recipient bank and all
     partner_bank_id: foreign.id, invoice_date: today(), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const posted = confirmBill.run(bill.db, read(bill.db, 'account.move', bill.id)).db;
   const register = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment');
-  const oldPrompt = globalThis.prompt;
-  try {
-    globalThis.prompt = () => '100';
-    assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id)), /bank account.*company/i);
-  } finally {
-    if (oldPrompt === undefined) delete globalThis.prompt; else globalThis.prompt = oldPrompt;
-  }
+  assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id), {
+    amount: 100, date: today(), journal_id: defaultPaymentJournal(posted),
+  }), /bank account.*company/i);
   assert.throws(() => confirm(makePayment(posted, null, 1, bill.id)), /bank account.*company/i);
   const noBank = write(posted, 'account.move', bill.id, { partner_bank_id: null });
   assert.throws(() => confirm(makePayment(noBank, foreign.id, 1, bill.id)), /bank account.*company/i);

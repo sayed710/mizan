@@ -21,6 +21,17 @@ const shared = (id) => id == null || id === false || id === '';
 /** Current company ID, defaulting to the main company before initialization. */
 export const currentCompany = (db) => db.settings?.current_company_id ?? 1;
 
+/** Resolve the company for a document or a single-company batch without consulting the active UI company. */
+export function documentCompany(db, document) {
+  const companyIds = document?.company_id ? new Set([document.company_id]) : new Set((document?.lines ?? [])
+    .map((line) => read(db, 'account.move', line.move_id)?.company_id).filter(Boolean));
+  if (companyIds.size !== 1) return null;
+  const company = read(db, 'res.company', [...companyIds][0]);
+  if (!company) return null;
+  const currency = company.currency_id ? read(db, 'res.currency', company.currency_id) : null;
+  return { ...company, currency: currency?.name ?? null };
+}
+
 /** Select active companies without changing the caller's database or selection. */
 export function setCompanies(db, { current, allowed }) {
   if (!Array.isArray(allowed) || !allowed.length || !allowed.includes(current)) throw new Error('Select at least one company including the current company');
@@ -244,7 +255,11 @@ export function ensureMainCompany(db) {
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const code = db.settings?.currency ?? 'USD';
   const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const base = currency ? { db, id: currency.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
+  const unitName = db.settings?.currency_unit_currency === code ? String(db.settings?.currency_unit ?? '').trim() : '';
+  if (!currency && !unitName) throw new Error('Configure the whole currency unit name before initializing the company');
+  const base = currency
+    ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
+    : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
   const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
   return ensureReturnTypes(created);
 }
@@ -319,6 +334,8 @@ export const companyModels = {
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
@@ -353,7 +370,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

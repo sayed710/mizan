@@ -7,14 +7,16 @@ import { money } from '../ui.jsx';
 import { t } from '../i18n.js';
 import { formatCurrency } from '../money.js';
 
-export function JournalItems() {
+export function JournalItems({ leaf = {} } = {}) {
   const db = companyViewDb(useDb());
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState('');
   const name = (model, id) => read(db, model, id)?.name ?? '';
-  const rows = journalItems(db, { from, to }).map((line, index) => ({
+  const mode = leaf.reviewMode ?? 'posted';
+  const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
+  const rows = journalItems(db, { from, to, reviewMode: mode }).map((line, index) => ({
     ...line, index,
     account: name('account.account', line.account_id),
     partner: name('res.partner', line.partner_id),
@@ -28,7 +30,7 @@ export function JournalItems() {
     groups.get(key).push(line);
   }
   return <main className="action report-page">
-    <div className="control-panel"><h1 className="cp-title">{t('Journal Items')}</h1>
+    <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
       <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
       <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
       <label>{t('Search')} <input aria-label={t('Search')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
