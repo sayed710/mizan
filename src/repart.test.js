@@ -303,7 +303,7 @@ test('schema migration: upgrades legacy taxes with default repartition lines and
 
   const migrated = migrate(oldDb);
   assert.equal(migrated.schema_version, 25);
-  assert.equal(SCHEMA_VERSION, 25);
+  assert.equal(SCHEMA_VERSION, 26);
 
   const migratedTax = migrated.records['account.tax'].find((t) => t.id === 999);
   assert.ok(migratedTax);

@@ -1,8 +1,8 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
-import { nextName, today, validDate } from './common.js';
+import { nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
-import { payMove, releaseCashBasis } from './accounting.js';
+import { isInvoice, payMove, releaseCashBasis, residual } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -11,6 +11,8 @@ import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched } from './bank.js';
+
+const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
@@ -86,32 +88,111 @@ export function postPayment(db, p) {
   // Apply a company-currency payment against the recorded company balance of each document.
   const { db: applied, left } = open.reduce((acc, m) => {
     if (!(acc.left > 0)) return acc;
-    const rate = rateAt(acc.db, m.currency_id, date, m.company_id);
-    const docCurrency = documentCurrency(acc.db, m);
-    const step = Number(docCurrency?.rounding ?? 0.01);
-    const take = Math.min(m.amount_residual, Number((Math.floor((acc.left * rate / step) + 1e-9) * step).toPrecision(15)));
-    const cashAmount = companyRound(take / rate);
-    const companyAmount = settlementCompanyAmount(acc.db, m, take);
-    if (!(take > 0) || !(cashAmount > 0) || cashAmount > acc.left) return acc;
-    const diff = companyRound((cashAmount - companyAmount) * (inbound ? 1 : -1));
-    let withFx = acc.db;
-    let fxMove = null;
-    if (diff) {
-      const fx = postEntry(withFx, { journal: 'MISC', company: p.company_id ?? 1, date, ref: `Exchange difference ${name}`,
-        lines: diff > 0
-          ? [{ account: counterpart, debit: diff, partner_id: p.partner_id }, { account: exchangeAccount(withFx, p.company_id, diff), credit: diff }]
-          : [{ account: counterpart, credit: -diff, partner_id: p.partner_id }, { account: exchangeAccount(withFx, p.company_id, diff), debit: -diff }] });
-      withFx = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: moveId, fx_invoice_id: m.id } : entry) } }; fxMove = fx.id;
-    }
-    const released = releaseCashBasis(withFx, m, take / m.amount_total, date, { final: take >= m.amount_residual });
-    const next = write(released.db, 'account.move', m.id, { amount_paid: roundCurrency((Number(m.amount_paid) || 0) + take, docCurrency), payment_date: date, payments: [...(m.payments ?? []), { date, amount: take, move_id: moveId, company_amount: companyAmount, payment_company_amount: cashAmount, cash_basis_move_id: released.id, ...(fxMove ? { payment_fx_move_id: fxMove } : {}) }], ...(!m.partner_bank_id && currentPayment.partner_bank_id ? { partner_bank_id: currentPayment.partner_bank_id } : {}) });
-    return { db: postNote(next, 'account.move', m.id, `Payment ${name} applied: ${take}`), left: companyRound(acc.left - cashAmount) };
+    const res = allocatePaymentToInvoice(acc.db, { ...currentPayment, name, move_id: moveId }, m, acc.left, date);
+    return { db: res.db, left: res.left };
   }, { db: registered, left: amount });
   const settled = taxClosing ? write(applied, 'account.move', taxClosing.move.id, {
     amount_paid: amount, payment_date: date,
     payments: [...(taxClosing.move.payments ?? []), { date, amount, move_id: moveId, company_amount: amount, line_index: taxClosing.index }],
   }) : applied;
   return write(settled, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, unapplied: taxClosing ? 0 : left });
+}
+
+/**
+ * Allocate an available amount of payment credit against an invoice's residual balance.
+ * Returns { db, left, taken }.
+ */
+export function allocatePaymentToInvoice(db, payment, invoice, availableCredit, date = today(), requestedAmount = null) {
+  if (!(availableCredit > 0)) return { db, left: availableCredit, taken: 0 };
+  const inbound = payment.payment_type === 'inbound';
+  const companyCurrency = companyCurrencyRecord(db, invoice.company_id);
+  const companyRound = (n) => roundCurrency(n, companyCurrency);
+  const rate = rateAt(db, invoice.currency_id, date, invoice.company_id);
+  const docCurrency = documentCurrency(db, invoice);
+  const step = Number(docCurrency?.rounding ?? 0.01);
+  const invResidual = residual(invoice, db);
+  const maxTake = requestedAmount != null ? Math.min(invResidual, Number(requestedAmount)) : invResidual;
+  const take = Math.min(maxTake, Number((Math.floor((availableCredit * rate / step) + 1e-9) * step).toPrecision(15)));
+  const cashAmount = companyRound(take / rate);
+  const companyAmount = settlementCompanyAmount(db, invoice, take);
+  if (!(take > 0) || !(cashAmount > 0) || cashAmount > availableCredit) return { db, left: availableCredit, taken: 0 };
+  const diff = companyRound((cashAmount - companyAmount) * (inbound ? 1 : -1));
+  let withFx = db;
+  let fxMove = null;
+  const moveId = payment.move_id;
+  if (diff) {
+    const counterpart = payment.destination_account_code
+      || (payment.destination_account_id ? read(db, 'account.account', payment.destination_account_id)?.code : null)
+      || (['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000');
+    const fx = postEntry(withFx, {
+      journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
+      lines: diff > 0
+        ? [{ account: counterpart, debit: diff, partner_id: payment.partner_id }, { account: exchangeAccount(withFx, invoice.company_id, diff), credit: diff }]
+        : [{ account: counterpart, credit: -diff, partner_id: payment.partner_id }, { account: exchangeAccount(withFx, invoice.company_id, diff), debit: -diff }],
+    });
+    withFx = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: moveId, fx_invoice_id: invoice.id } : entry) } };
+    fxMove = fx.id;
+  }
+  const released = releaseCashBasis(withFx, invoice, take / invoice.amount_total, date, { final: take >= invResidual });
+  const next = write(released.db, 'account.move', invoice.id, {
+    amount_paid: roundCurrency((Number(invoice.amount_paid) || 0) + take, docCurrency),
+    payment_date: date,
+    payments: [...(invoice.payments ?? []), {
+      date,
+      amount: take,
+      move_id: moveId,
+      company_amount: companyAmount,
+      payment_company_amount: cashAmount,
+      cash_basis_move_id: released.id,
+      ...(fxMove ? { payment_fx_move_id: fxMove } : {}),
+    }],
+    ...(!invoice.partner_bank_id && payment.partner_bank_id ? { partner_bank_id: payment.partner_bank_id } : {}),
+  });
+  return {
+    db: postNote(next, 'account.move', invoice.id, `Payment ${payment.name} applied: ${take}`),
+    left: companyRound(availableCredit - cashAmount),
+    taken: take,
+  };
+}
+
+/**
+ * Apply an outstanding (unapplied) payment credit to an open invoice of the same commercial partner and company.
+ */
+export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = today(), amount = null) {
+  const payment = typeof paymentIdOrRec === 'object' && paymentIdOrRec !== null ? paymentIdOrRec : read(db, 'account.payment', paymentIdOrRec);
+  if (!payment || payment.state !== 'posted' || !payment.move_id) throw new Error('A posted payment is required');
+  const availableCredit = Number(payment.unapplied) || 0;
+  if (!(availableCredit > 0)) throw new Error('This payment has no unapplied credit');
+
+  const invoice = typeof invoiceIdOrRec === 'object' && invoiceIdOrRec !== null ? invoiceIdOrRec : read(db, 'account.move', invoiceIdOrRec);
+  if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice)) throw new Error('A posted invoice or bill is required');
+  if (!(residual(invoice, db) > 0)) throw new Error('The invoice is already paid');
+
+  if (!sameCommercialPartner(db, payment.partner_id, invoice.partner_id)) {
+    throw new Error('The payment and invoice must belong to the same commercial partner');
+  }
+  if ((payment.company_id ?? 1) !== (invoice.company_id ?? 1)) {
+    throw new Error('The payment and invoice must belong to the same company');
+  }
+  if (!SETTLES[payment.partner_type]?.[payment.payment_type]?.includes(invoice.move_type)) {
+    throw new Error('The payment cannot settle this document type');
+  }
+  if (payment.partner_bank_id && invoice.partner_bank_id && payment.partner_bank_id !== invoice.partner_bank_id) {
+    throw new Error('The recipient bank account does not match');
+  }
+
+  const appDate = date ?? today();
+  if (!validDate(appDate)) throw new Error('A valid application date is required');
+  if (appDate < (payment.date ?? '')) throw new Error('Application date cannot be before the payment date');
+  if (amount != null && (!Number.isFinite(Number(amount)) || Number(amount) <= 0)) {
+    throw new Error('The applied amount must be a positive number');
+  }
+
+  const { db: nextDb, left, taken } = allocatePaymentToInvoice(db, payment, invoice, availableCredit, appDate, amount);
+  if (!(taken > 0)) throw new Error('Could not allocate payment credit to invoice');
+
+  const withPayment = write(nextDb, 'account.payment', payment.id, { unapplied: left });
+  return postNote(withPayment, 'account.payment', payment.id, `Applied ${money(taken)} credit to ${invoice.name}`);
 }
 
 /** Post a linked mirror of an existing entry (optionally in a chosen journal/date, or reverse-and-create a new draft). */
@@ -123,6 +204,9 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   const sourceDate = source?.invoice_date ?? source?.date ?? '';
   if (!source || source.state !== 'posted' || source.move_type !== 'entry' || !validDate(date) || date < sourceDate) {
     throw new Error('A posted entry and valid reversal date are required');
+  }
+  if (source.fx_payment_move_id && source.fx_invoice_id && !opts.reconciliation_reversal) {
+    throw new Error('An exchange difference entry linked to a settlement cannot be reversed independently');
   }
   if (search(db, 'account.move').some((m) => m.state === 'posted' && m.reversed_entry_id === source.id)) {
     throw new Error('This entry has already been reversed');
@@ -148,6 +232,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     partner_id: source.partner_id ?? null,
     name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
@@ -196,7 +281,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
   const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company });
-  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id, cash_basis_origin_move_id: invoice.id });
 }
 
 /** Reverse a write-off settlement without changing unrelated invoice applications. */
@@ -245,7 +330,7 @@ export function reversePayment(db, p, date = today()) {
   const reversals = new Map();
   for (const id of sources) {
     const source = read(booked, 'account.move', id);
-    const made = reverseEntry(booked, source, date);
+    const made = reverseEntry(booked, source, date, { reconciliation_reversal: true });
     booked = made.db;
     reversals.set(id, made.id);
   }
@@ -389,9 +474,36 @@ export const payModels = {
       lockedWhen: (r) => r.state !== 'draft',
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
+        {
+          label: 'Apply Credit',
+          when: (r) => r.state === 'posted' && Number(r.unapplied) > 0,
+          wizard: (db, r) => ({
+            title: 'Apply Credit to Invoice',
+            fields: [
+              {
+                name: 'invoice_id',
+                type: 'many2one',
+                relation: 'account.move',
+                label: 'Invoice / Bill',
+                required: true,
+                domain: (m) => m.state === 'posted'
+                  && isInvoice(m)
+                  && (m.company_id ?? 1) === (r.company_id ?? 1)
+                  && sameCommercialPartner(db, m.partner_id, r.partner_id)
+                  && SETTLES[r.partner_type]?.[r.payment_type]?.includes(m.move_type)
+                  && residual(m, db) > 0,
+              },
+              { name: 'date', type: 'date', label: 'Application Date', default: today(), required: true },
+            ],
+          }),
+          run: (db, r, values = {}) => {
+            if (!values.invoice_id) throw new Error('Select an invoice to apply credit to');
+            return { db: applyPaymentCredit(db, r.id, values.invoice_id, values.date) };
+          },
+        },
         { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
-        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r) }) },
+        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',

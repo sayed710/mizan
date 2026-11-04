@@ -11,12 +11,13 @@ import { applyDiff, assignIds, diffDb } from './sync.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { saveFormRecord } from './views/formSave.js';
 import { openStorage } from '../server/storage.js';
+import { createCompany } from './models/company.js';
 
 const server = (old, next) => applyDiff(old, diffDb(old, next), { isAdmin: true });
 const entry = (db, company, date = '2026-01-01') => postEntry(db, { journal: 'SEC', date, company, lines: [{ account: '600000', debit: 100 }, { account: '211000', credit: 100 }] });
 const setup = () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = createCompany(db, { name: 'Second company' }); db = company.db;
   const journal = create(db, 'account.journal', { name: 'Secure journal', code: 'SEC', restrict_mode_hash_table: true }); db = journal.db;
   return { db, company: company.id, journal: journal.id };
 };

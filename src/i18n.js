@@ -168,6 +168,13 @@ const ar = {
   'Tagged Products': 'منتجات موسومة',
   'Pay Later': 'الدفع لاحقاً',
   'Receivable Account': 'حساب المدينين',
+  'Payable Account': 'حساب الدائنين',
+  'Default Receivable Account': 'حساب المدينين الافتراضي',
+  'Default Payable Account': 'حساب الدائنين الافتراضي',
+  'Inter-company Document': 'مستند بين الشركات',
+  'Inter-company Purchase Journal': 'دفتر مشتريات بين الشركات',
+  'Synchronize invoices/bills': 'مزامنة فواتير المبيعات والمشتريات',
+  'Unmatched Inter-company Items': 'البنود غير المتطابقة بين الشركات',
   'Outstanding Account': 'حساب المبالغ المعلقة',
   'Points of Sale': 'نقاط البيع',
   'PoS Product Categories': 'فئات منتجات نقاط البيع',
@@ -700,7 +707,7 @@ const ar = {
   'Matching Partner': 'الشريك المطابق', 'Partner is Set': 'الشريك محدد', 'Label Parameter': 'قيمة الوصف', 'Amount Min': 'الحد الأدنى', 'Amount Max': 'الحد الأقصى',
   'Button to generate counterpart entry': 'زر لإنشاء قيد مقابل', 'Rule to suggest counterpart entry': 'قاعدة لاقتراح قيد مقابل', 'Rule to match invoices/bills': 'قاعدة لمطابقة الفواتير',
   Refunds: 'المرتجعات', 'Vendor Refund': 'مرتجع مورد', 'Payment Type': 'نوع الدفع', 'Partner Type': 'نوع الشريك', Receive: 'استلام',
-  'Outstanding Credit': 'رصيد دائن معلق', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
+  'Outstanding Credit': 'رصيد دائن معلق', 'Apply Outstanding Credit': 'تطبيق الرصيد الدائن المعلق', 'Apply Credit': 'تطبيق الرصيد الدائن', 'Application Date': 'تاريخ التطبيق', 'Amount to Apply': 'المبلغ المراد تطبيقه', 'Apply Credit to Invoice': 'تطبيق الرصيد على الفاتورة', 'Outstanding Payment': 'دفعة معلقة', 'Customer Payments': 'مدفوعات العملاء', 'Vendor Payments': 'مدفوعات الموردين', 'Apply Reconciliation Model': 'تطبيق نموذج التسوية',
   'Depreciation Schedule': 'جدول الإهلاك الدوري',
   Base: 'الأساس',
   'Payment QR Codes': 'رموز QR للدفع', 'ZATCA phase 1 QR (Saudi)': 'رمز QR للمرحلة الأولى من زاتكا (السعودية)', 'Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.': 'يطبع رمز QR للمرحلة الأولى فقط. المرحلة الثانية من زاتكا (XML، الختم التشفيري، الاعتماد) والفوترة الإلكترونية في مصر والإمارات غير مدعومة بعد.', 'SEPA Credit Transfer (EPC)': 'تحويل SEPA (EPC)',
@@ -1266,6 +1273,9 @@ const ar = {
   'Distribution for Invoices': 'توزيع الفواتير',
   'Distribution for Refunds': 'توزيع المرتجعات',
   'of Tax': 'من الضريبة',
+  'Supplier Payment Terms': 'شروط دفع المورد',
+  'Default Sales Tax': 'ضريبة المبيعات الافتراضية',
+  'Default Purchase Tax': 'ضريبة المشتريات الافتراضية',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

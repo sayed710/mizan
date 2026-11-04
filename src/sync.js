@@ -413,6 +413,12 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (provenance.has(row.payment_fx_move_id)) throw new Error('Exchange entry is already used by another settlement');
       provenance.set(row.payment_fx_move_id, { fx_payment_move_id: row.move_id, fx_invoice_id: record.id });
     }
+    if (['out_refund', 'in_refund'].includes(record.move_type) && record.reversed_entry_id && record.state === 'posted') {
+      const submittedFx = (d.upserts?.['account.move'] ?? []).find((m) => m.fx_payment_move_id === record.id && m.fx_invoice_id === record.reversed_entry_id);
+      if (submittedFx && !oldMoves.has(submittedFx.id)) {
+        provenance.set(submittedFx.id, { fx_payment_move_id: record.id, fx_invoice_id: record.reversed_entry_id });
+      }
+    }
   }
   if (provenance.size) {
     records = { ...records, 'account.move': (records['account.move'] ?? []).map((m) => provenance.has(m.id) ? { ...m, ...provenance.get(m.id) } : m) };

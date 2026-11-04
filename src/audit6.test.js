@@ -31,6 +31,7 @@ test('foreign credit settlement uses the document company and booked counterpart
       if (code === 'FXGAIN') db = write(db, 'res.company', company.id, { income_currency_exchange_account_id: account.id });
       if (code === 'FXLOSS') db = write(db, 'res.company', company.id, { expense_currency_exchange_account_id: account.id });
     }
+    db = write(db, 'res.company', company.id, { [counterpartType === 'asset_receivable' ? 'account_default_receivable_id' : 'account_default_payable_id']: counterpart });
     const currency = create(db, 'res.currency', { name: 'Foreign', rate_ids: [{ date: '2037-01-01', rate: 2 }, { date: '2037-02-01', rate: 1 }] });
     const document = create(currency.db, 'account.move', { move_type: type, company_id: company.id, partner_id: partner, currency_id: currency.id, invoice_date: '2037-01-02', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
     db = postMove(document.db, document.id);
