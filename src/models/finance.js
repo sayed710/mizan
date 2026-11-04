@@ -911,7 +911,7 @@ function reminderDetails(levels, level, date, channel, oldest = null) {
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
  */
-export function runFollowUps(db, at = today()) {
+export function runFollowUps(db, at = today(), deliver = null) {
   const levels = search(db, 'account.followup.level').sort((a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0));
   if (!levels.length) return db;
   const overdue = followUps(db, at);
@@ -938,45 +938,57 @@ export function runFollowUps(db, at = today()) {
     }
   }
 
-  for (const f of overdueGroups) {
+  const processReminder = (state, f) => {
+    nextDb = state;
     const companyId = f.invoices[0].company_id ?? 1;
     const level = followUpLevel(nextDb, f, at);
     const partner = partners.get(f.partner_id);
-    if (!level || !partner) continue;
+    if (!level || !partner) return nextDb;
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
     const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
 
-    if (currentDelay >= Number(level.delay)) continue;
-    if (progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) continue;
+    if (currentDelay >= Number(level.delay)) return nextDb;
+    if (!deliver && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
 
     const channel = level.channel;
-    if (channel === 'email' && partner.email?.trim()) {
-      nextDb = logManualFollowUp(nextDb, partner.id, at, { scope: nextDb, reminder: f, companyId, channel, nextLevelBaseDate: f.oldest });
-      continue;
+    const recordFailure = (reason) => {
+      const deliveryState = channel ? 'not_sent' : 'not_configured';
+      const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+      nextDb = postNote(nextDb, 'res.partner', partner.id,
+        `${level.name}: ${round(f.total)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+      const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
+      const updated = updatePartnerFollowUp(current, companyId, {
+        followup_date: at,
+        followup_channel: channel ?? null,
+        followup_delivery_state: deliveryState,
+        followup_next_action_date: null,
+      });
+      return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
+    };
+    if (channel === 'email' && partner.email?.trim() && deliver) {
+      const message = { to: partner.email.trim(), subject: level.name, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      // Validate the bookkeeping before attempting an irreversible delivery.
+      const sent = logManualFollowUp(nextDb, partner.id, at, { scope: nextDb, reminder: f, companyId, channel, nextLevelBaseDate: f.oldest });
+      try {
+        const result = deliver(message);
+        if (result && typeof result.then === 'function') return result.then(() => sent, (error) => recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`));
+        return sent;
+      } catch (error) {
+        return recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`);
+      }
     }
-
-    const deliveryState = channel ? 'not_sent' : 'not_configured';
     const reason = !channel
       ? 'No delivery action is configured for this follow-up level.'
       : channel === 'email'
-        ? 'The customer has no email address.'
+        ? (partner.email?.trim() ? 'Automatic email delivery is not configured.' : 'The customer has no email address.')
         : `Automatic ${channel} delivery is unavailable; this reminder needs manual delivery.`;
-    const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-    nextDb = postNote(nextDb, 'res.partner', partner.id,
-      `${level.name}: ${round(f.total)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
-    const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
-    const updated = updatePartnerFollowUp(current, companyId, {
-      followup_date: at,
-      followup_channel: channel ?? null,
-      followup_delivery_state: deliveryState,
-      followup_next_action_date: null,
-    });
-    nextDb = write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
-  }
+    return recordFailure(reason);
+  };
 
-  return nextDb;
+  return overdueGroups.reduce((state, f) => state && typeof state.then === 'function'
+    ? state.then((resolved) => processReminder(resolved, f)) : processReminder(state, f), nextDb);
 }
 
 export function followUpLevel(db, reminder, at = today()) {

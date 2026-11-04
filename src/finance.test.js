@@ -81,14 +81,14 @@ test('automatic reminders log each reached level once per customer', async () =>
   const { messagesOf } = await import('./orm.js');
   const { applyDiff, diffDb } = await import('./sync.js');
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
-  const first = runFollowUps(db);
+  const first = runFollowUps(db, today(), () => {});
   assert.equal(partnerFollowUp(read(first, 'res.partner', 5), 1)?.followup_level_delay, 15);
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => m.body.includes('overdue \u2014 ')));
   const synced = applyDiff(db, diffDb(db, first));
   assert.ok(messagesOf(synced, 'res.partner', 5).some((m) => /First reminder: .* overdue — /.test(m.body)));
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
-  const later = runFollowUps(first, addDays(today(), 12));
+  const later = runFollowUps(first, addDays(today(), 12), () => {});
   assert.equal(partnerFollowUp(read(later, 'res.partner', 5), 1)?.followup_level_delay, 30);
 });
 
@@ -121,7 +121,7 @@ test('successive scheduled runs track follow-up progress per company and never m
     invoice_date_due: addDays(today(), -5),
   }).db;
 
-  const first = runFollowUps(curDb);
+  const first = runFollowUps(curDb, today(), () => {});
   const p1 = read(first, 'res.partner', 5);
   assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 15);
   assert.equal(partnerFollowUp(p1, branch.id)?.followup_level_delay, 30);
@@ -133,7 +133,7 @@ test('successive scheduled runs track follow-up progress per company and never m
   assert.equal(partnerFollowUp(pRepeat, 1)?.followup_level_delay, 15);
   assert.equal(partnerFollowUp(pRepeat, branch.id)?.followup_level_delay, 30);
 
-  const later = runFollowUps(first, addDays(today(), 15));
+  const later = runFollowUps(first, addDays(today(), 15), () => {});
   const pLater = read(later, 'res.partner', 5);
   assert.equal(partnerFollowUp(pLater, 1)?.followup_level_delay, 30);
   assert.equal(partnerFollowUp(pLater, branch.id)?.followup_level_delay, 30);
@@ -258,7 +258,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
     invoice_date: addDays(today(), -65),
     invoice_date_due: addDays(today(), -35),
   });
-  const run1 = runFollowUps(inv1.db);
+  const run1 = runFollowUps(inv1.db, today(), () => {});
   const p1 = read(run1, 'res.partner', 5);
   assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 30);
   assert.ok(messagesOf(run1, 'res.partner', 5).some((m) => /Second reminder/.test(m.body)));
@@ -278,7 +278,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
     invoice_date: addDays(today(), -50),
     invoice_date_due: addDays(today(), -20),
   });
-  const run2 = runFollowUps(inv2.db);
+  const run2 = runFollowUps(inv2.db, today(), () => {});
   const p2 = read(run2, 'res.partner', 5);
   assert.equal(partnerFollowUp(p2, 1)?.followup_level_delay, 15, 'restarts at first level (delay 15)');
   assert.ok(messagesOf(run2, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
