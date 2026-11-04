@@ -121,6 +121,8 @@ export const crmModels = {
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
+      property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',

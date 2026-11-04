@@ -5,7 +5,7 @@ import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettleme
 import { applyPaymentCredit, reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { TRANSITION, cashBasisTaxes, fiscalPositionFor, validateTaxCompany } from './taxes.js';
+import { TRANSITION, cashBasisTaxes, fiscalPositionFor, isSectionOrNote, productTax, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -18,6 +18,7 @@ import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS } from './assets.js';
+import { productProperty } from './productconfig-helpers.js';
 
 export { invoiceTaxAmount, total, applyPaymentCredit };
 
@@ -222,6 +223,36 @@ export function postAutoPostMoves(db, at = today()) {
   return next;
 }
 
+function intercompanyBill(db, move) {
+  if (!['out_invoice', 'out_refund'].includes(move.move_type)) return null;
+  if (move.intercompany_move_id && read(db, 'account.move', move.intercompany_move_id)?.state !== 'cancel') return null;
+  const buyer = (db.records['res.company'] ?? []).find((c) => c.id !== (move.company_id ?? 1) && c.partner_id === move.partner_id && c.active !== false);
+  const sale = move.sale_id && read(db, 'sale.order', move.sale_id);
+  const purchase = sale?.auto_purchase_id && read(db, 'purchase.order', sale.auto_purchase_id);
+  if (!buyer || !(buyer.intercompany_rule === 'invoice_bill' || (buyer.intercompany_rule === 'sale_purchase' && purchase?.auto_sale_id === sale.id && purchase.company_id === buyer.id))) return null;
+  const seller = read(db, 'res.company', move.company_id ?? 1);
+  if (!seller?.partner_id) throw new Error('Configure the selling company contact');
+  const journal = read(db, 'account.journal', buyer.intercompany_journal_id);
+  if (!journal || journal.type !== 'purchase' || journal.company_id !== buyer.id) throw new Error(`Configure the inter-company purchase journal for ${buyer.name}`);
+  const payable = read(db, 'account.account', buyer.account_default_payable_id);
+  if (!payable || payable.company_id !== buyer.id || payable.account_type !== 'liability_payable') throw new Error(`Configure the default payable account for ${buyer.name}`);
+  const invoice_line_ids = (move.invoice_line_ids ?? []).map((line) => {
+    if (isSectionOrNote(line)) return line;
+    const product = read(db, 'product', line.product_id);
+    const configured = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'));
+    const fallback = read(db, 'account.account', journal.default_account_id);
+    const account = configured && (!configured.company_id || configured.company_id === buyer.id) ? configured : fallback;
+    if (!account || (account.company_id && account.company_id !== buyer.id)) throw new Error(`Configure a product expense account or purchase journal default account for ${buyer.name}`);
+    const tax = productTax(db, product, 'purchase', null);
+    if (tax?.tax_id) {
+      const taxRecord = read(db, 'account.tax', tax.tax_id);
+      if (taxRecord?.company_id && taxRecord.company_id !== buyer.id) throw new Error(`Configure purchase taxes for ${buyer.name}`);
+    }
+    return { name: line.name, product_id: line.product_id, qty: line.qty, price_unit: line.price_unit, discount: line.discount, account_id: account.id, ...(tax ?? { tax: 0 }) };
+  });
+  return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id };
+}
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   let r = read(db, 'account.move', id);
@@ -307,7 +338,12 @@ export function postMove(db, id) {
     return account?.company_id && account.company_id !== (r.company_id ?? 1);
   })) throw new Error('Journal account belongs to another company');
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
+  const counterpart = intercompanyBill(db, r);
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  if (counterpart) {
+    const bill = create(posted, 'account.move', counterpart);
+    posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
+  }
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) return spawnRecurringMove(offsetCreditNote(deferred, id), read(deferred, 'account.move', id));
@@ -923,12 +959,16 @@ export const accountingModels = {
   'account.move': {
     label: 'Invoices',
     actions: { postAutoPostMoves },
-    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
+    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
     invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     audited: (db) => db.settings?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     onWrite: (db, after, before, vals) => {
+      if (before.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type)) {
+        const bill = read(db, 'account.move', before.intercompany_move_id);
+        if (bill?.state === 'draft') db = write(db, 'account.move', bill.id, { state: 'cancel' });
+      }
       if (before.state === 'posted' && after.state !== 'posted') db = reverseInvoiceDeferrals(db, before);
       if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
@@ -1023,6 +1063,7 @@ export const accountingModels = {
       reverse_date: { type: 'date', label: 'Reversal Date' },
       reverse_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Reversal Journal' },
       correction_of_id: { type: 'many2one', relation: 'account.move', label: 'Correction of', readonly: true },
+      intercompany_move_id: { type: 'many2one', relation: 'account.move', label: 'Inter-company Document', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
       inalterable_hash: { type: 'char', label: 'Inalterability Hash', readonly: true },
@@ -1184,7 +1225,7 @@ export const accountingModels = {
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : ''),
-      groups: [['partner_id', 'ref', 'invoice_origin', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until', 'auto_reverse', 'reverse_date', 'reverse_journal_id'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
+      groups: [['partner_id', 'ref', 'invoice_origin', 'intercompany_move_id', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until', 'auto_reverse', 'reverse_date', 'reverse_journal_id'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
       tabs: (r) => (isInvoice(r)
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),

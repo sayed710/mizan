@@ -243,7 +243,14 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const property = read(db, 'res.partner', move.partner_id)?.[sale ? 'property_account_receivable_id' : 'property_account_payable_id'];
+  const partnerAccount = read(db, 'account.account', property);
+  const type = sale ? 'asset_receivable' : 'liability_payable';
+  const counterpart = partnerAccount?.company_id === company?.id && partnerAccount.account_type === type && partnerAccount.active !== false
+    ? partnerAccount.id : company?.[sale ? 'account_default_receivable_id' : 'account_default_payable_id'];
+  const configured = read(db, 'account.account', counterpart);
+  if (!configured || configured.company_id !== company?.id || configured.account_type !== type || configured.active === false) throw new Error(`Configure the default ${sale ? 'receivable' : 'payable'} account for ${company?.name ?? 'the company'}`);
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
