@@ -44,7 +44,7 @@ function fixture({ method = 'full', ownership = 100 } = {}) {
 }
 
 function entry(db, company_id, date, lines) {
-  const posted = postEntry(db, { journal: 'MISC', date, lines });
+  const posted = postEntry(db, { journal: 'MISC', date, company: company_id, lines });
   return force(posted.db, 'account.move', posted.id, { company_id });
 }
 

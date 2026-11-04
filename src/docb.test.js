@@ -45,13 +45,14 @@ test('purchase matching does not infer a purchase order from source document', (
 
 test('three-way exception blocks payment until explicitly approved', () => {
   const po = purchaseFixture();
-  const enabled = { ...po.db, settings: { ...po.db.settings, three_way_matching: true } };
+  const enabled = write({ ...po.db, settings: { ...po.db.settings, three_way_matching: true } }, 'res.company', 1, { three_way_matching: true });
   const bill = makeBill(enabled, { purchase_id: po.id });
   const posted = run(bill.db, 'account.move', bill.id, 'Confirm').db;
   assert.equal(read(posted, 'account.move', bill.id).should_be_paid, 'exception');
   assert.throws(() => run(posted, 'account.move', bill.id, 'Register Payment'), /resolve or approve/i);
   const approved = run(posted, 'account.move', bill.id, 'Approve for Payment').db;
-  const bank = search(approved, 'account.journal').find((j) => j.default_for_payments);
+  const companyId = read(approved, 'account.move', bill.id).company_id ?? 1;
+  const bank = search(approved, 'account.journal').find((journal) => journal.default_for_payments && (!journal.company_id || journal.company_id === companyId));
   const paid = run(approved, 'account.move', bill.id, 'Register Payment', { amount: '40', date: read(approved, 'account.move', bill.id).invoice_date, journal_id: bank.id }).db;
   assert.equal(read(paid, 'account.move', bill.id).amount_paid, 40);
 });

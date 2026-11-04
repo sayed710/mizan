@@ -1,15 +1,15 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { discountAvailable, payWithDiscount, postMove } from './models/accounting.js';
 import { taxRepartitionLine, taxSnapshot } from './models/taxes.js';
 
 test('untaxed early discount settles to the configured account in each invoice company', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Discount branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Discount branch', currency_id: base.records['res.company'][0].currency_id });
   let db = branch.db;
   for (const companyId of [1, branch.id]) {
     const account = create(db, 'account.account', { name: 'Early discount expense', code: `DISC${companyId}`, account_type: 'expense', company_id: companyId });

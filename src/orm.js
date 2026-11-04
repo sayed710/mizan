@@ -132,7 +132,7 @@ export function create(db, model, vals) {
 
 function trackingMessages(db, model, before, vals) {
   const fields = models[model].fields;
-  const audited = models[model].audited?.(db);
+  const audited = models[model].audited?.(db, before);
   return Object.entries(vals)
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {

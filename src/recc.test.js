@@ -5,7 +5,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove, payMove } from './models/accounting.js';
 import { postPayment, applyPaymentCredit, reverseEntry } from './models/pay.js';
-import { createCompany } from './models/company.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 
 test('P1 finding 1: unapplied payment credit from overpayment can be applied to later open invoices', () => {
   const db0 = seed();
@@ -103,7 +103,7 @@ test('P1 finding 1: standalone advance payment credit can be matched against mul
 
 test('P1 finding 1: applyPaymentCredit validates company, commercial partner, document type, and dates', () => {
   const db0 = seed();
-  const company2 = createCompany(db0, { name: 'Second Co' });
+  const company2 = createCompanyWithDefaultInvoiceJournals(db0, { name: 'Second Co' });
   let db = updateSettings(company2.db, { allowed_company_ids: [1, company2.id] });
 
   const parent = create(db, 'res.partner', { name: 'Parent Org', is_company: true });
@@ -175,10 +175,10 @@ test('P1 finding 1: applyPaymentCredit validates company, commercial partner, do
 
 test('P1 finding 2: foreign credit note exchange difference cannot be independently reversed', () => {
   let db = seed();
-  const company = createCompany(db, { name: 'Exchange Co', currency_id: db.settings.base_currency_id });
+  const company = createCompanyWithDefaultInvoiceJournals(db, { name: 'Exchange Co', currency_id: db.settings.base_currency_id });
   db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
 
-  for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
+  for (const [code, accountType] of [['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
     const account = create(db, 'account.account', { company_id: company.id, code, name: code, account_type: accountType });
     db = account.db;
     if (code === 'FXGAIN') db = write(db, 'res.company', company.id, { income_currency_exchange_account_id: account.id });

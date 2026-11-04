@@ -30,7 +30,8 @@ test('Register Payment takes an amount typed with Arabic digits instead of silen
   const db = seed();
   const inv = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted' && m.amount_residual >= 100);
   const button = models['account.move'].form.buttons.find((b) => b.label === 'Register Payment');
-  const paymentJournals = search(db, 'account.journal').filter((journal) => journal.default_for_payments === true);
+  const companyId = inv.company_id ?? 1;
+  const paymentJournals = search(db, 'account.journal').filter((journal) => journal.default_for_payments && (!journal.company_id || journal.company_id === companyId));
   assert.equal(paymentJournals.length, 1);
   const journal_id = paymentJournals[0].id;
   const paid = button.run(db, read(db, 'account.move', inv.id), { amount: '١٠٠', date: today(), journal_id }).db;

@@ -1,6 +1,6 @@
 // Fixed assets: depreciation boards and their posting.
-import { read, write } from '../orm.js';
-import { today } from './common.js';
+import { read, search, write } from '../orm.js';
+import { addDays, today } from './common.js';
 import { accountId, journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
@@ -92,6 +92,20 @@ function computeBoard(db, asset) {
   return write(db, 'account.asset', asset.id, { depreciation_ids });
 }
 
+/** Report values as of a cutoff, excluding subsequent recorded adjustments. */
+export function depreciationReport(db, period, companyId = 'all') {
+  const rows = search(db, 'account.asset').filter((a) => (companyId === 'all' || (a.company_id ?? 1) === Number(companyId)) && a.state !== 'cancel' && a.state !== 'draft' && (!a.acquisition_date || a.acquisition_date <= period.to) && (!a.disposal_date || a.disposal_date > period.to)).map((a) => {
+    const original = (cents(a.original_value) - (a.revaluation_ids ?? []).filter((r) => r.date > period.to).reduce((s, r) => s + cents(r.amount), 0)) / 100;
+    const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
+    const sum = (list) => list.reduce((s, l) => s + cents(l.amount), 0);
+    const accumulated = (cents(a.already_depreciated) + sum(posted.filter((l) => l.date <= period.to))) / 100;
+    const inPeriod = sum(posted.filter((l) => (!period.from || l.date >= period.from) && l.date <= period.to)) / 100;
+    return { a, original, accumulated, inPeriod, book: (cents(original) - cents(accumulated)) / 100 };
+  });
+  const totals = Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, rows.reduce((s, row) => s + cents(row[key]), 0) / 100]));
+  return { rows, totals };
+}
+
 /** Validate the asset, build its board and start depreciating. */
 export function confirmAsset(db, asset) {
   return write(computeBoard(db, asset), 'account.asset', asset.id, { state: 'open' });
@@ -118,6 +132,28 @@ export function postDepreciation(db, asset, upTo = today()) {
   return write(next, 'account.asset', asset.id, { depreciation_ids: lines, state: lines.every((l) => l.posted) ? 'close' : 'open' });
 }
 
+/** Pause only after all depreciation due before the pause has been posted. */
+export function pauseAsset(db, asset, date = today()) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
+  if (asset.state !== 'open') throw new Error('Only running assets can be paused');
+  if ((asset.depreciation_ids ?? []).some((line) => !line.posted && line.date < date)) throw new Error('Post overdue depreciation before pausing the asset');
+  return write(db, 'account.asset', asset.id, { state: 'paused', pause_date: date });
+}
+
+/** Shift remaining periods by the paused days and recompute their residual amounts. */
+export function resumeAsset(db, asset, date = today()) {
+  asset = read(db, 'account.asset', asset.id) ?? asset;
+  if (asset.state !== 'paused' || !asset.pause_date) throw new Error('The asset needs a recorded pause date before it can be resumed');
+  if (date < asset.pause_date) throw new Error('Resume date cannot precede the pause date');
+  const days = dayNumber(date) - dayNumber(asset.pause_date);
+  const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
+  const pending = (asset.depreciation_ids ?? []).filter((line) => !line.posted);
+  const accumulated = cents(asset.already_depreciated) + postedCents(asset);
+  const dates = pending.map((line) => addDays(line.date, days));
+  const board = pending.length ? depreciationBoard(asset, { periods: pending.length, dates, remainingBase: cents(asset.original_value) - cents(asset.salvage_value) - accumulated, initialCumulated: accumulated }).map((line) => ({ ...line, posted: false, move_id: null })) : [];
+  return write(db, 'account.asset', asset.id, { state: 'open', pause_date: null, depreciation_ids: [...posted, ...board] });
+}
+
 /** Post due depreciation, drop the rest of the board and book the sale or scrapping of the asset. */
 export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, invoiceLine = 0 }) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
@@ -130,6 +166,7 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   validate(db, asset);
   const invoice = invoiceId && read(db, 'account.move', invoiceId);
   if (invoiceId && (invoice?.state !== 'posted' || invoice.move_type !== 'out_invoice' || (invoice.company_id ?? 1) !== (asset.company_id ?? 1))) throw new Error('Select a posted sale invoice in the asset company');
+  if (invoice && [invoice.date, invoice.invoice_date].some((invoiceDate) => invoiceDate && invoiceDate > date)) throw new Error('Disposal date cannot precede the sale invoice date');
   const saleLine = invoice && (invoice.line_ids ?? []).find((line) => (line.invoice_sources ?? []).some((source) => source.index === Number(invoiceLine)));
   if (invoice && !saleLine) throw new Error('Sale invoice line not found');
   const source = saleLine?.invoice_sources.find((item) => item.index === Number(invoiceLine));
@@ -164,6 +201,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   if (!['open', 'paused'].includes(asset.state) || asset.disposal_date) throw new Error('Only running or paused assets can be modified');
   if (!date) throw new Error('Set a modification date');
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
+  if ((asset.revaluation_ids ?? []).some((entry) => entry.date > date)) throw new Error('Modification date cannot precede an existing revaluation');
 
   validate(db, asset);
   let nextDb = postDepreciation(db, asset, date);
@@ -187,6 +225,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   const model = asset.model_id ? read(nextDb, 'account.asset.model', asset.model_id) : null;
   const assetAcc = asset.account_asset_id ?? model?.account_asset_id ?? null;
 
+  let adjustmentMoveId = null;
   if (delta !== 0) {
     if (!assetAcc) throw new Error('Configure the fixed asset account on the asset before modifying its value');
     let counterpartAcc;
@@ -208,6 +247,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
         ];
     const { db: booked, id: moveId } = postEntry(nextDb, { journal, date, ref: `${asset.name} value adjustment`, lines, company });
     nextDb = postAnalytic(booked, moveId);
+    adjustmentMoveId = moveId;
   }
 
   const unpostedLines = (asset.depreciation_ids ?? []).filter((l) => !l.posted);
@@ -231,6 +271,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   const updatedDepreciationIds = [...postedLines, ...newUnpostedLines];
   return write(nextDb, 'account.asset', asset.id, {
     original_value: newOriginal / 100,
+    revaluation_ids: delta ? [...(asset.revaluation_ids ?? []), { date, amount: delta / 100, move_id: adjustmentMoveId }] : (asset.revaluation_ids ?? []),
     salvage_value: currentSalvage / 100,
     depreciation_ids: updatedDepreciationIds,
     state: updatedDepreciationIds.length && updatedDepreciationIds.every((l) => l.posted) ? 'close' : asset.state,
@@ -279,6 +320,10 @@ export const assetModels = {
       cancelled_depreciation_ids: { type: 'one2many', label: 'Cancelled Depreciation', readonly: true, fields: {
         date: { type: 'date', label: 'Date' }, amount: { type: 'monetary', label: 'Depreciation' }, cumulated: { type: 'monetary', label: 'Cumulative Depreciation' }, remaining: { type: 'monetary', label: 'Book Value' }, posted: { type: 'boolean', label: 'Posted' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' }, cancelled: { type: 'boolean', label: 'Cancelled' },
       } },
+      revaluation_ids: { type: 'one2many', label: 'Value Adjustments', readonly: true, fields: {
+        date: { type: 'date', label: 'Date' }, amount: { type: 'monetary', label: 'Value Change' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' },
+      } },
+      pause_date: { type: 'date', label: 'Pause Date', readonly: true },
       disposal_date: { type: 'date', label: 'Disposal Date' },
       sale_value: { type: 'monetary', label: 'Sale Price' },
       sale_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Sale Invoice', readonly: true },
@@ -325,8 +370,8 @@ export const assetModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: confirmAsset(db, r) }) },
         { label: 'Compute Depreciation', when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
         { label: 'Post Depreciation', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: postDepreciation(db, read(db, 'account.asset', r.id)) }) },
-        { label: 'Pause', when: (r) => r.state === 'open', vals: { state: 'paused' } },
-        { label: 'Resume', primary: true, when: (r) => r.state === 'paused', vals: { state: 'open' } },
+        { label: 'Pause', when: (r) => r.state === 'open', run: (db, r) => ({ db: pauseAsset(db, r) }) },
+        { label: 'Resume', primary: true, when: (r) => r.state === 'paused', run: (db, r) => ({ db: resumeAsset(db, r) }) },
         { label: 'Modify Depreciation', when: (r) => ['open', 'paused'].includes(r.state) && !r.disposal_date,
           wizard: () => ({ title: 'Modify Depreciation', fields: [
             { name: 'date', type: 'date', label: 'Modification Date', required: true, default: today() },

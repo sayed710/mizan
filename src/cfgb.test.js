@@ -32,7 +32,7 @@ test('two sales journals number independently', () => {
   let db = seed();
   const journal1 = search(db, 'account.journal').find(j => j.code === 'INV');
   const account = search(db, 'account.account').find(a => a.code === '400000');
-  const createdJ2 = create(db, 'account.journal', { name: 'Second Sales Journal', code: 'SJ2', type: 'sale', company_id: 1, default_account_id: account.id });
+  const createdJ2 = create(db, 'account.journal', { name: 'Second Sales Journal', code: 'SJ2', type: 'sale', company_id: 1, default_account_id: account.id, invoice_sequence_prefix: 'SJ2/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'SJ2-R/', refund_sequence_next_number: 1 });
   db = createdJ2.db;
   const journal2 = read(db, 'account.journal', createdJ2.id);
 

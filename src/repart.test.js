@@ -285,7 +285,7 @@ test('schema migration: upgrades legacy taxes with default repartition lines and
   let db = seed();
   const oldDb = {
     ...db,
-    schema_version: 25,
+    schema_version: 27,
     records: {
       ...db.records,
       'account.tax': [

@@ -1,15 +1,15 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, messagesOf } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { payMove, postMove } from './models/accounting.js';
 import { followUps, logManualFollowUp, partnerFollowUp } from './models/finance.js';
 
 test('manual reminders record the actual level and channel separately per company and schedule the next level', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Reminder branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Reminder branch', currency_id: base.records['res.company'][0].currency_id });
   const partner = create(branch.db, 'res.partner', { name: 'Shared reminder customer', email: 'shared.reminder@example.test' });
   let db = partner.db;
   const invoices = [];

@@ -5,6 +5,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
+import { accountId } from './models/ledger.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -69,7 +70,7 @@ test('reposted bills reset draft asset model-derived fields when switched to unm
   let db = seed();
   const depAcc = create(db, 'account.account', { name: 'Accum Dep', code: '159900', account_type: 'asset_fixed' });
   db = depAcc.db;
-  const expAcc = create(db, 'account.account', { name: 'Dep Expense', code: '680000', account_type: 'expense' });
+  const expAcc = create(db, 'account.account', { name: 'Dep Expense', code: '680001', account_type: 'expense' });
   db = expAcc.db;
 
   const modelRes = create(db, 'account.asset.model', {
@@ -195,7 +196,11 @@ test('invoices and bills enforce existing, company-matched journal of appropriat
     code: 'INVA',
     type: 'sale',
     company_id: 1,
-    default_account_id: search(db, 'account.account').find((a) => a.code === '400000').id,
+    invoice_sequence_prefix: 'INVA/',
+    invoice_sequence_next_number: 1,
+    refund_sequence_prefix: 'RINVA/',
+    refund_sequence_next_number: 1,
+    default_account_id: accountId(db, '400000'),
   });
   db = altSale.db;
   const validInv = create(db, 'account.move', {
@@ -218,12 +223,14 @@ test('finding 15: taxes with foreign configured account reject posting when comp
   const company2Id = c2.id;
 
   // Setup Company 2 journals and base accounts
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV15/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV15/', refund_sequence_next_number: 1 });
+  db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2 = create(db, 'account.account', { name: 'B2 Inc', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2.db;
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2.id });
-  db = j2.db;
+  db = write(db, 'account.journal', j2.id, { default_account_id: inc2.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
   const defTax2 = create(db, 'account.account', { name: 'B2 Def Tax', code: '251000', account_type: 'liability_current', company_id: company2Id });
   db = defTax2.db;
 
@@ -272,12 +279,14 @@ test('finding 16: fiscal account rules apply to original selected account before
   db = c2.db;
   const company2Id = c2.id;
 
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV16/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV16/', refund_sequence_next_number: 1 });
+  db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2Base.id });
-  db = j2.db;
+  db = write(db, 'account.journal', j2.id, { default_account_id: inc2Base.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
   const inc2Dest = create(db, 'account.account', { name: 'B2 Inc Export', code: '400100', account_type: 'income', company_id: company2Id });
   db = inc2Dest.db;
 
@@ -347,12 +356,14 @@ test('finding 17: product with foreign configured account rejects posting when c
   db = c2.db;
   const company2Id = c2.id;
 
+  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, invoice_sequence_prefix: 'B2-INV17/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'B2-RINV17/', refund_sequence_next_number: 1 });
+  db = j2.db;
   const rec2 = create(db, 'account.account', { name: 'B2 Rec', code: '121000', account_type: 'asset_receivable', company_id: company2Id });
   db = write(rec2.db, 'res.company', company2Id, { account_default_receivable_id: rec2.id });
   const inc2Base = create(db, 'account.account', { name: 'B2 Inc Base', code: '400000', account_type: 'income', company_id: company2Id });
   db = inc2Base.db;
-  const j2 = create(db, 'account.journal', { name: 'B2 Sales', code: 'INV2', type: 'sale', company_id: company2Id, default_account_id: inc2Base.id });
-  db = j2.db;
+  db = write(db, 'account.journal', j2.id, { default_account_id: inc2Base.id });
+  db = write(db, 'res.company', company2Id, { default_sale_journal_id: j2.id });
 
   // Account only in Company 1
   const specAccC1 = create(db, 'account.account', { name: 'C1 Only Income', code: '499999', account_type: 'income', company_id: 1 });

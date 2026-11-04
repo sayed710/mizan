@@ -6,7 +6,8 @@ import { seed } from './seed.js';
 import { accountId, journalItems } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { postBatch, fillOpenInvoices, checkAmountDisplay } from './models/payments.js';
-import { createCompany, documentCompany } from './models/company.js';
+import { documentCompany } from './models/company.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany } from './models/qr.js';
 import { duplicateBillWarning } from './models/finance.js';
 import { documentCurrency } from './money.js';
@@ -150,7 +151,7 @@ test('draft credit notes do not consume issued credit, and posting rechecks the 
 test('printed issuer and QR settings follow the document company', () => {
   let db = seed();
   const eur = search(db, 'res.currency').find((currency) => currency.name === 'EUR');
-  const madeCompany = createCompany(db, {
+  const madeCompany = createCompanyWithDefaultInvoiceJournals(db, {
     name: 'Document Company B', currency_id: eur.id, vat: 'B-TAX', company_iban: 'DE89370400440532013000', invoice_qr: 'epc',
   });
   db = { ...madeCompany.db, settings: { ...madeCompany.db.settings, current_company_id: 1, invoice_qr: 'epc', company_vat: 'A-TAX', company_iban: 'NOT-B-COMPANY-IBAN' } };

@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
@@ -5,7 +6,6 @@ import { setupDom, find } from './test-support/dom.js';
 import { create, read, search, write, updateSettings } from './orm.js';
 import './models/index.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { balanceSheet, postEntry } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
@@ -73,7 +73,7 @@ test('grouped balance sheets include prior-period opening balances and sum to th
 
 test('tax-unit returns settle each member company obligation with its own payment and configured accounts', () => {
   let db = seed();
-  const sub = createCompany(db, { name: 'Subsidiary Co' });
+  const sub = createCompanyWithDefaultInvoiceJournals(db, { name: 'Subsidiary Co' });
   db = sub.db;
   db = create(db, 'res.partner.bank', { partner_id: 1, account_number: 'MAIN-TAX-BANK' }).db;
   const subCompany = read(db, 'res.company', sub.id);
@@ -180,7 +180,7 @@ test('tax-unit returns settle each member company obligation with its own paymen
 
 test('tax-unit submission fails explicitly when a member company is missing its required tax account configuration', () => {
   let db = seed();
-  const sub = createCompany(db, { name: 'Unconfigured Sub' });
+  const sub = createCompanyWithDefaultInvoiceJournals(db, { name: 'Unconfigured Sub' });
   db = sub.db;
   db = ensureReturnTypes(db);
 
@@ -241,7 +241,7 @@ test('horizontal group reports exclude entries from other allowed companies and 
   await initStore();
 
   let db = seed();
-  const other = createCompany(db, { name: 'Sister Firm', currency_id: db.records['res.company'][0].currency_id });
+  const other = createCompanyWithDefaultInvoiceJournals(db, { name: 'Sister Firm', currency_id: db.records['res.company'][0].currency_id });
   db = updateSettings(other.db, { current_company_id: 1, allowed_company_ids: [1, other.id] });
 
   const a1 = create(db, 'account.analytic.account', { name: 'Main Project', code: 'MP', plan: 'project' });
@@ -380,8 +380,8 @@ test('changing a draft return company outside its tax unit clears tax_unit_id an
   await initStore();
 
   let db = seed();
-  const sub = createCompany(db, { name: 'Unit Member' });
-  const outsider = createCompany(sub.db, { name: 'Outside Company' });
+  const sub = createCompanyWithDefaultInvoiceJournals(db, { name: 'Unit Member' });
+  const outsider = createCompanyWithDefaultInvoiceJournals(sub.db, { name: 'Outside Company' });
   db = ensureReturnTypes(outsider.db);
   db = updateSettings(db, { current_company_id: 1, allowed_company_ids: [1, sub.id, outsider.id] });
 
