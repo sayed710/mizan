@@ -5,7 +5,7 @@ import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettleme
 import { reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
+import { TRANSITION, cashBasisTaxes, fiscalPositionFor, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -235,6 +235,10 @@ export function postMove(db, id) {
   const code = ['out_refund', 'in_refund'].includes(r.move_type) ? `R${journalRecord.code}` : journalRecord.code;
   const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${code}/${year}/`);
   if (!isInvoice(r)) {
+    if ((r.line_ids ?? []).some((line) => {
+      const account = read(db, 'account.account', line.account_id);
+      return account?.company_id && account.company_id !== (r.company_id ?? 1);
+    })) throw new Error('Journal account belongs to another company');
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
     const entryDate = r.invoice_date ?? r.date ?? today();
@@ -278,6 +282,10 @@ export function postMove(db, id) {
   if (r.fiscal_position_id) {
     const fp = read(db, 'account.fiscal.position', r.fiscal_position_id);
     if (fp?.company_id && fp.company_id !== (r.company_id ?? 1)) throw new Error('Fiscal position belongs to another company');
+  }
+  for (const line of r.invoice_line_ids ?? []) {
+    validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
+    validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
   }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
@@ -919,7 +927,7 @@ export const accountingModels = {
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
         const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
-        const fiscal = partnerChange ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id) } : {};
+        const fiscal = (partnerChange || key === 'company_id') ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) } : {};
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const partnerBank = selectedBank && selectedBank.partner_id === r.partner_id && selectedBank.allow_out_payment
           && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
@@ -928,7 +936,7 @@ export const accountingModels = {
         const context = { ...r, ...fiscal, journal_id: journal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
-            const remap = (key === 'fiscal_position_id' || partnerChange) && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
+            const remap = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
             const updated = remap ? invoiceLineField.onchange(line, 'product_id', db, context) : line;
             return { ...updated, ...(remap ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
           }) }

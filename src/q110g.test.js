@@ -254,6 +254,9 @@ test('finding 15: taxes with foreign configured account reject posting when comp
   const taxAccC2 = create(db, 'account.account', { name: 'B2 Tax Acc', code: '259999', account_type: 'liability_current', company_id: company2Id });
   db = taxAccC2.db;
 
+  // Explicitly map the configured tax account to Company 2's account.
+  const fp = create(db, 'account.fiscal.position', { name: 'B2 tax mapping', company_id: company2Id, account_ids: [{ account_src_id: taxAccC1.id, account_dest_id: taxAccC2.id }] });
+  db = write(fp.db, 'account.move', inv.id, { fiscal_position_id: fp.id });
   // Now posting should succeed and use B2's tax account
   const posted = postMove(db, inv.id);
   const postedMove = read(posted, 'account.move', inv.id);
