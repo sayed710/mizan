@@ -133,6 +133,7 @@ export function seed() {
   const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
   db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
   db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
+  db = write(db, 'res.company', mainCompanyId, { account_sale_tax_id: vatSale, account_purchase_tax_id: vatPurchase });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
     (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');

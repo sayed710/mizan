@@ -1263,6 +1263,9 @@ const ar = {
   'Tax Calculation Rounding Method': 'طريقة تقريب حساب الضريبة',
   'Round per Line': 'تقريب لكل سطر',
   'Round Globally': 'تقريب إجمالي',
+  'Supplier Payment Terms': 'شروط دفع المورد',
+  'Default Sales Tax': 'ضريبة المبيعات الافتراضية',
+  'Default Purchase Tax': 'ضريبة المشتريات الافتراضية',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

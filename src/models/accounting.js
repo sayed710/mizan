@@ -747,11 +747,13 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
       debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
     })) : [];
   const baseValue = companyRound(bases.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
+  const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
+  const foreignAmount = (val) => (foreign ? { currency_id: r.currency_id, amount_currency: docRound(val) } : {});
   const { db: booked, id: discountMove } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`, company: company?.id ?? null,
     lines: sale
-      ? [{ account: discountAccount, debit: value - taxValue - baseValue, partner_id: r.partner_id }, ...bases, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
-      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...bases, ...taxes, { account: discountAccount, credit: value - taxValue - baseValue, partner_id: r.partner_id }],
+      ? [{ account: discountAccount, debit: value - taxValue - baseValue, partner_id: r.partner_id }, ...bases, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id, ...foreignAmount(-discount) }]
+      : [{ account: counterpart, debit: value, partner_id: r.partner_id, ...foreignAmount(discount) }, ...bases, ...taxes, { account: discountAccount, credit: value - taxValue - baseValue, partner_id: r.partner_id }],
   });
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
@@ -779,7 +781,10 @@ const termDue = (db, r, { clear = false } = {}) => {
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
 const billLineBase = productLines('Invoice Lines', 'cost');
-const invoiceLineField = { ...invoiceLineBase, onchange: (line, key, db, move) => {
+const invoiceLineField = {
+  ...invoiceLineBase,
+  newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
+  onchange: (line, key, db, move) => {
   const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: journalId(db, isPurchase(move) ? 'BILL' : 'INV', move.company_id ?? 1) } : move);
   const updated = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
   return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) } : updated;
@@ -932,7 +937,8 @@ export const accountingModels = {
     onchange: (r, key, db) => {
       if (['partner_id', 'fiscal_position_id', 'company_id'].includes(key)) {
         const partnerChange = key === 'partner_id';
-        const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
+        const partner = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+        const term = partner ? (isPurchase(r) ? partner.property_supplier_payment_term_id : partner.property_payment_term_id) : null;
         const fiscal = (partnerChange || key === 'company_id') ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) } : {};
         const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
         const partnerBank = selectedBank && selectedBank.partner_id === r.partner_id && selectedBank.allow_out_payment

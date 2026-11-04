@@ -220,7 +220,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
           {!readonly && (
             <tr>
               <td colSpan={cols.length + 2}>
-                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.() ?? {}])}>{t('Add a line')}</button>
+                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.(record, db) ?? {}])}>{t('Add a line')}</button>
               </td>
             </tr>
           )}
