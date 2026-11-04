@@ -418,11 +418,12 @@ function lockRule(db, before, after, ctx) {
     if (before || !after.closing_fiscal_year_id || read(db, 'account.fiscal.year', after.closing_fiscal_year_id)?.closing_move_id !== after.id) return 'Closing provenance is set only by closing the fiscal year';
   }
   if (before?.state === 'posted' && after.state !== 'posted' && bookedByBank(db, before.id)) return 'This entry is matched with a reconciled bank transaction and has to stay posted';
-  if (db.settings?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
+  const companyId = before?.company_id ?? after.company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  if (company?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
   // A year's own closing or reopening entry is booked into it once, as it is created.
-  const companyId = before?.company_id ?? after.company_id ?? 1;
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
   const proposed = companyTaxLock(ctx?.settings, companyId);
   const current = companyTaxLock(db.settings, companyId);
@@ -488,7 +489,8 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
-  if (db.settings?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  if (company?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;

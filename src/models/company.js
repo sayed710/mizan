@@ -210,6 +210,7 @@ export function withCompany(models) {
 
 function companyGuard(db, before, r) {
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
+  if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);
@@ -380,6 +381,8 @@ export const companyModels = {
       tax_start_date: { type: 'date', label: 'Tax Period Start' },
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
+      audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
     },
     defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly', deferred_amount_computation_method: 'days' }),
     guard: companyGuard,

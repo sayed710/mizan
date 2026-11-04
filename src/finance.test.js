@@ -66,7 +66,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
 test('the audit trail logs every change, keeps numbered entries and cannot be switched off', async () => {
   const { applyDiff } = await import('./sync.js');
   const { unlink } = await import('./orm.js');
-  const db0 = updateSettings(seed(), { audit_trail: true });
+  const db0 = write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true });
   const { db, id } = invoice(db0, {});
   const noted = write(db, 'account.move', id, { ref: 'PO-77' });
   assert.ok(noted.messages.some((m) => m.res_id === id && m.model === 'account.move' && /Reference/.test(m.body)));

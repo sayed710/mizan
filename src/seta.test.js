@@ -174,7 +174,7 @@ test('Finding 4: postPayment resolves company default payment journal and reject
 
 test('Finding 6: three-way matching exception blocks payMove, postPayment, and reconcileWith', async () => {
   let db = seed();
-  db = { ...db, settings: { ...db.settings, three_way_matching: true } };
+  db = write({ ...db, settings: { ...db.settings, three_way_matching: true } }, 'res.company', 1, { three_way_matching: true });
   const vendor = search(db, 'res.partner')[0];
   const prod = search(db, 'product').find((p) => (p.purchase_method ?? 'receive') === 'receive' && p.type === 'goods') ?? search(db, 'product')[0];
   db = write(db, 'product', prod.id, { purchase_method: 'receive', type: 'goods' });
@@ -296,8 +296,8 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
     },
   };
   const migrated = migrate(oldDb);
-  assert.equal(SCHEMA_VERSION, 26);
-  assert.equal(migrated.schema_version, 26);
+  assert.equal(SCHEMA_VERSION, 27);
+  assert.equal(migrated.schema_version, 27);
   assert.equal('lock_date' in migrated.settings, false);
   assert.equal('sale_lock_date' in migrated.settings, false);
   assert.equal('purchase_lock_date' in migrated.settings, false);

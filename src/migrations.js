@@ -584,6 +584,33 @@ MIGRATIONS.push({ version: 26, name: 'Lock dates and payment QR settings live on
   };
 } });
 
+MIGRATIONS.push({ version: 27, name: 'Accounting settings (three-way matching and audit trail) live on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const threeWayMatching = settings.three_way_matching;
+  const auditTrail = settings.audit_trail;
+
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    const updated = { ...c };
+    if (threeWayMatching !== undefined && updated.three_way_matching == null) {
+      updated.three_way_matching = threeWayMatching;
+    }
+    if (auditTrail !== undefined && updated.audit_trail == null) {
+      updated.audit_trail = auditTrail;
+    }
+    return updated;
+  });
+
+  const nextSettings = { ...settings };
+  delete nextSettings.three_way_matching;
+  delete nextSettings.audit_trail;
+
+  return {
+    ...db,
+    settings: nextSettings,
+    records: { ...db.records, 'res.company': companies },
+  };
+} });
+
 function migrateCashBasisOrigins(db) {
   const moves = db.records['account.move'] ?? [];
   const invoices = moves.filter((move) => ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type));
