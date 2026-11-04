@@ -98,12 +98,20 @@ export function seed() {
   };
   // The demo chart tags loans payable as financing explicitly; every other account follows its type.
   const chartActivity = { '260000': 'financing' };
-  CHART.forEach(([code, name, account_type]) => add('account.account', {
-    code, name, account_type,
-    reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-    tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
-  }));
-  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
+  const installedAccountIds = {};
+  CHART.forEach(([code, name, account_type, key]) => {
+    const id = add('account.account', {
+      code, name, account_type,
+      reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
+      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
+    });
+    if (key) installedAccountIds[key] = id;
+  });
+  let defaultPaymentJournalId = null;
+  JOURNALS.forEach(([code, name, type, accountKey, role]) => {
+    const id = add('account.journal', { code, name, type, default_account_id: accountKey ? installedAccountIds[accountKey] : null });
+    if (role === 'default_payment') defaultPaymentJournalId = id;
+  });
   const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
@@ -120,11 +128,15 @@ export function seed() {
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
-    lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
+    lines: [{ account_id: installedAccountIds.liquidity_bank, debit: 150000 }, { account_id: installedAccountIds.liquidity_cash, debit: 5000 }, { account: '301000', credit: 155000 }],
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  db = ensureMainCompany(db);
+  db = ensureMainCompany(db, {
+    account_receivable_id: installedAccountIds.receivable,
+    account_payable_id: installedAccountIds.payable,
+    default_payment_journal_id: defaultPaymentJournalId,
+  });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>

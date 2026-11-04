@@ -4,7 +4,7 @@ import { addDays, amountFields, amounts, pad, productLines, today } from './comm
 import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty, reservePicking } from './picking.js';
 import { round as round2 } from '../money.js';
@@ -154,12 +154,14 @@ function postExpense(db, r) {
   const product = read(db, 'product', r.product_id);
   const accountCode = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'))?.code || CATEGORY_ACCOUNT[r.category] || '600000';
   const own = r.payment_mode !== 'company_account';
+  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const via = own ? null : paymentJournal(db, null, companyId);
   const { db: booked, id } = postEntry(db, {
-    journal: own ? 'MISC' : 'BNK1', date: r.date ?? today(), ref: `Expense: ${r.name}`,
+    journal: own ? 'MISC' : via.code, ...(via ? { journal_id: via.id } : {}), company: companyId, date: r.date ?? today(), ref: `Expense: ${r.name}`,
     lines: [
       { account: accountCode, debit: round2(total - tax) },
       ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(r.tax) || 0}%`, tax_base: round2(total - tax) }] : []),
-      { account: own ? '230100' : '101401', credit: total },
+      own ? { account: '230100', credit: total } : { account_id: via.account, credit: total },
     ],
   });
   return write(booked, 'hr.expense', r.id, { state: own ? 'posted' : 'paid', move_id: id });
@@ -167,9 +169,11 @@ function postExpense(db, r) {
 
 /** Reimburse the employee for a posted expense they paid themselves. */
 function reimburse(db, r) {
+  const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
   const { db: paid } = postEntry(db, {
-    journal: 'BNK1', date: today(), ref: `Reimbursement: ${r.name}`,
-    lines: [{ account: '230100', debit: r.total_amount }, { account: '101401', credit: r.total_amount }],
+    journal: via.code, journal_id: via.id, company: companyId, date: today(), ref: `Reimbursement: ${r.name}`,
+    lines: [{ account: '230100', debit: r.total_amount }, { account_id: via.account, credit: r.total_amount }],
   });
   return write(paid, 'hr.expense', r.id, { state: 'paid' });
 }

@@ -457,8 +457,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const excess = docRound(amount - value);
   const sale = isInbound(r);
   const counterpartCode = invoiceCounterpartAccount(db, r);
-  const via = paymentJournal(db, payJournal);
-  const journal = read(db, 'account.journal', payJournal ?? journalId(db, via.code, r.company_id));
+  const via = paymentJournal(db, payJournal, r.company_id ?? 1);
+  const journal = read(db, 'account.journal', via.id);
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
   const liquidity = liquidityAccountId ?? outstanding ?? via.account;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
@@ -480,7 +480,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
       ? [{ account: liquidity, debit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(value + excess) }, { account: counterpartCode, credit: open, partner_id: r.partner_id, ...foreignAmount(-value) }, ...credit, ...fx]
       : [{ account: counterpartCode, debit: open, partner_id: r.partner_id, ...foreignAmount(value) }, ...credit, { account: liquidity, credit: bank + extra, partner_id: r.partner_id, ...liquidityForeignAmount(-value - excess) }, ...fx],
   });
-  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: journal?.id ?? journalId(db, via.code, r.company_id), invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
+  const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
   const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const withPayment = paymentId
@@ -510,7 +510,8 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   const diff = companyRound(incoming ? companyAmount - open : open - companyAmount);
   const fx = exchangeLines(db, invoice.company_id, diff);
   const partner_id = invoice.partner_id;
-  const booked = postEntry(db, { journal: 'BNK1', journal_id: journal, company: invoice.company_id ?? 1, date, ref: label,
+  const via = paymentJournal(db, journal, invoice.company_id ?? 1);
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, company: invoice.company_id ?? 1, date, ref: label,
     lines: incoming
       ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
       : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });

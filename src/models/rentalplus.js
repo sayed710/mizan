@@ -1,5 +1,5 @@
 import { create, read, search, write } from '../orm.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry } from './ledger.js';
 import { extraModels } from './extra.js';
 import { round } from '../money.js';
 
@@ -31,8 +31,10 @@ export function holdDeposit(db, rentalId, amount) {
   const rental = rentalOf(db, rentalId);
   if (!Number.isFinite(amount) || round(amount) <= 0) throw new Error('Deposit amount must be positive');
   const value = round(amount);
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
-    { account: '101401', debit: value, partner_id: rental.partner_id },
+  const companyId = rental.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Deposit ${rental.name}`, company: companyId, lines: [
+    { account_id: via.account, debit: value, partner_id: rental.partner_id },
     { account: '230100', credit: value, partner_id: rental.partner_id },
   ] });
   return create(booked.db, 'rental.deposit', { rental_id: rentalId, company_id: rental.company_id ?? 1, amount: value, state: 'held', move_id: booked.id });
@@ -47,9 +49,11 @@ export function settleDeposit(db, depositId, { damage = 0, note } = {}) {
   const rental = rentalOf(db, deposit.rental_id);
   const withheld = round(damage), refund = round(deposit.amount - withheld);
   const partner_id = rental.partner_id;
-  const booked = postEntry(db, { journal: 'BNK1', ref: `Settle deposit ${rental.name}`, company: rental.company_id ?? 1, lines: [
+  const companyId = rental.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Settle deposit ${rental.name}`, company: companyId, lines: [
     { account: '230100', debit: deposit.amount, partner_id },
-    ...(refund ? [{ account: '101401', credit: refund, partner_id }] : []),
+    ...(refund ? [{ account_id: via.account, credit: refund, partner_id }] : []),
     ...(withheld ? [{ account: '450000', credit: withheld, partner_id }] : []),
   ] });
   return write(booked.db, 'rental.deposit', depositId, { state: withheld ? 'withheld' : 'refunded', withheld_amount: withheld, note: note ?? deposit.note, settlement_move_id: booked.id });

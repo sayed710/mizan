@@ -1,7 +1,7 @@
 // Procurement routes (make-to-order buy/manufacture, dropship), storage locations and landed costs.
 import { create, read, search, write } from '../orm.js';
 import { today } from './common.js';
-import { postEntry, postedBillLine } from './ledger.js';
+import { postEntry, postedBillLine, resolveCounterpartAccount } from './ledger.js';
 import { costMethod } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
 import { allocateCents, round } from '../money.js';
@@ -121,6 +121,11 @@ export function replenish(db, at = today()) {
 /** Cost reclassification, difference and capitalization lines shared across periodic and perpetual landed costs. */
 function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expensed, isPeriodic }) {
   const entryLines = [];
+  const partnerId = lc.bill_id ? read(db, 'account.move', lc.bill_id)?.partner_id ?? null : null;
+  let payableAccount;
+  const defaultPayableAccount = () => (payableAccount ??= resolveCounterpartAccount(db, {
+    companyId: lc.company_id ?? 1, partnerId, accountType: 'liability_payable',
+  }));
   for (const c of group.costs) {
     if (!isPeriodic && !lc.bill_id && !c.recognized_account_id) continue;
     const costAccount = read(db, 'account.account', c.account_id);
@@ -135,7 +140,7 @@ function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expe
     }
     const difference = round(c.amount - c.recognized);
     if (!difference) continue;
-    const creditAccount = !lc.bill_id && !c.recognized_account_id && !isExpense && costCode && costCode !== '110200' ? costCode : '211000';
+    const creditAccount = !lc.bill_id && !c.recognized_account_id && !isExpense && costCode && costCode !== '110200' ? costCode : defaultPayableAccount();
     const value = Math.abs(difference);
     entryLines.push(
       difference > 0 ? { account: debitAccount, debit: value } : { account: debitAccount, credit: value },
@@ -144,7 +149,7 @@ function landedCostEntryLines(db, lc, group, { stock, expense, capitalized, expe
   }
   if (!isPeriodic) {
     const credits = group.costs.filter((c) => c.amount).map((c) => ({
-      account: read(db, 'account.account', c.account_id)?.code || (lc.bill_id ? expense : '211000'),
+      account: read(db, 'account.account', c.account_id)?.code || (lc.bill_id ? expense : defaultPayableAccount()),
       credit: c.amount,
     }));
     entryLines.push(

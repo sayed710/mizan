@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, today, validDate } from './common.js';
-import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
+import { journalId, outstandingAccount, paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
 import { payMove, releaseCashBasis } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -34,7 +34,7 @@ export function postPayment(db, p) {
   }
   const date = currentPayment.date ?? today();
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
-  const via = paymentJournal(db, currentPayment.journal_id);
+  const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const name = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
   const open = isTaxOrDirect
@@ -44,7 +44,7 @@ export function postPayment(db, p) {
           && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id))
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
-  const journal = read(db, 'account.journal', currentPayment.journal_id ?? journalId(db, via.code, currentPayment.company_id ?? 1));
+  const journal = read(db, 'account.journal', via.id);
   const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
   const liquidity = outstanding ?? via.account;
   let taxClosing = null;
@@ -66,14 +66,24 @@ export function postPayment(db, p) {
     if (matches.length !== 1 || (matches[0].move.payments ?? []).some((p) => !p.reversed)) throw new Error('An unsettled tax closing obligation is required');
     taxClosing = matches[0];
   }
-  const counterpart = currentPayment.destination_account_code
-    || (currentPayment.destination_account_id ? read(db, 'account.account', currentPayment.destination_account_id)?.code : null)
-    || (currentPayment.partner_type === 'supplier' ? '211000' : '121000');
+  let counterpart;
+  if (currentPayment.destination_account_id) {
+    counterpart = read(db, 'account.account', currentPayment.destination_account_id)?.id;
+    if (!counterpart) throw new Error('The configured destination account does not exist');
+  } else if (currentPayment.destination_account_code) {
+    throw new Error('Select the destination account by record');
+  } else {
+    counterpart = resolveCounterpartAccount(db, {
+      companyId: currentPayment.company_id ?? 1,
+      partnerId: currentPayment.partner_id,
+      accountType: currentPayment.partner_type === 'supplier' ? 'liability_payable' : 'asset_receivable',
+    });
+  }
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const amount = companyRound(Number(currentPayment.amount));
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: via.code, journal_id: journal?.id, date, ref: currentPayment.memo || name,
+    journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || name,
     lines: inbound
       ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, { account: counterpart, credit: amount, partner_id: currentPayment.partner_id }]
       : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, { account: liquidity, credit: amount, partner_id: currentPayment.partner_id }],
@@ -82,7 +92,7 @@ export function postPayment(db, p) {
     tax_return_id: currentPayment.return_id ?? null,
   });
   // Register the source before allocations so all callers can derive its currency semantics.
-  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, outstanding_account_id: outstanding, unapplied: amount });
+  const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding, unapplied: amount });
   // Apply a company-currency payment against the recorded company balance of each document.
   const { db: applied, left } = open.reduce((acc, m) => {
     if (!(acc.left > 0)) return acc;
@@ -134,10 +144,11 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
   if (!targetJournalId && opts.journal) {
     targetJournalId = typeof opts.journal === 'number' ? opts.journal : (journalId(db, opts.journal, companyId) ?? journalId(db, opts.journal));
   }
-  const journalRec = targetJournalId ? read(db, 'account.journal', targetJournalId) : null;
+  if (!targetJournalId) targetJournalId = paymentJournal(db, null, companyId).id;
+  const journalRec = read(db, 'account.journal', targetJournalId);
   if (targetJournalId && !journalRec) throw new Error('Selected journal does not exist');
   if (journalRec?.company_id && journalRec.company_id !== companyId) throw new Error('Journal belongs to another company');
-  const code = journalRec?.code ?? 'BNK1';
+  const code = journalRec.code;
   const reason = String(opts.reason ?? '').trim();
   const ref = reason ? `Reversal of ${source.name}, ${reason}` : `Reversal of ${source.name}`;
   const created = create(db, 'account.move', {

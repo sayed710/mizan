@@ -1,7 +1,7 @@
 // Loans: borrowings repaid by monthly instalments (annuity or fixed principal), posted as they fall due.
 import { read, write } from '../orm.js';
 import { promptedAmount, today } from './common.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry } from './ledger.js';
 import { cents } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
@@ -55,10 +55,12 @@ function computeBoard(db, loan) {
 /** Check the terms, book the money received from the lender and start the schedule. */
 export function confirmLoan(db, loan) {
   check(loan);
+  const companyId = loan.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
   const { db: booked, id: receiptId } = postEntry(db, {
-    journal: 'BNK1', company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
+    journal: via.code, journal_id: via.id, company: companyId, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
-      { account: '101401', debit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account_id: via.account, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
       { account: '260000', credit: loan.amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
@@ -67,14 +69,16 @@ export function confirmLoan(db, loan) {
 
 /** Post every unposted line dated on or before `upTo`; the loan closes once all lines are paid. */
 export function postDueLines(db, loan, upTo = today()) {
+  const companyId = loan.company_id ?? 1;
   const { db: next, line_ids } = (loan.line_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, line_ids: [...acc.line_ids, l] };
+    const via = paymentJournal(acc.db, null, companyId);
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'BNK1', company: loan.company_id, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
+      journal: via.code, journal_id: via.id, company: companyId, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
       lines: [
         { account: '260000', debit: l.principal, partner_id: loan.lender_id ?? undefined },
         { account: '690400', debit: l.interest, partner_id: loan.lender_id ?? undefined },
-        { account: '101401', credit: l.payment, partner_id: loan.lender_id ?? undefined },
+        { account_id: via.account, credit: l.payment, partner_id: loan.lender_id ?? undefined },
       ],
     });
     return { db: booked, line_ids: [...acc.line_ids, { ...l, posted: true, move_id: id }] };
@@ -89,11 +93,13 @@ export function earlyRepayment(db, loan, { date, amount }) {
   const pay = cents(amount);
   if (!(pay > 0)) throw new Error('The repayment amount must be positive');
   if (pay > outstanding) throw new Error('The repayment cannot exceed the outstanding balance');
+  const companyId = loan.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
   const { db: booked, id: repaymentId } = postEntry(db, {
-    journal: 'BNK1', company: loan.company_id, date, ref: `Early repayment ${loan.name}`,
+    journal: via.code, journal_id: via.id, company: companyId, date, ref: `Early repayment ${loan.name}`,
     lines: [
       { account: '260000', debit: amount, partner_id: loan.lender_id ?? undefined },
-      { account: '101401', credit: amount, partner_id: loan.lender_id ?? undefined },
+      { account_id: via.account, credit: amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   const posted = (loan.line_ids ?? []).filter((l) => l.posted);

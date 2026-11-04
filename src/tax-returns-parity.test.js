@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { seed } from './seed.js';
+import { configureCompanyChart } from './models/company.js';
 import { today, addDays } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
@@ -311,10 +312,20 @@ test('tax return actions post closing and payment to the company chart when acco
   db = company.db;
   const accounts = {};
   for (const code of ['251000', '131000', '101401']) {
-    const created = create(db, 'account.account', { code, name: `Company chart ${code}`, company_id: company.id });
+    const account_type = code === '101401' ? 'asset_cash' : code === '251000' ? 'liability_current' : 'asset_current';
+    const created = create(db, 'account.account', { code, name: `Company chart ${code}`, account_type, company_id: company.id });
     db = created.db;
     accounts[code] = created.id;
   }
+  const companyChart = read(db, 'res.company', company.id);
+  const bankJournal = create(db, 'account.journal', {
+    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'],
+  });
+  db = configureCompanyChart(bankJournal.db, company.id, {
+    account_receivable_id: companyChart.account_receivable_id,
+    account_payable_id: companyChart.account_payable_id,
+    default_payment_journal_id: bankJournal.id,
+  });
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
   db = create(db, 'res.partner.bank', { partner_id: 1, account_number: 'COMPANY TAX BANK' }).db;
   db = write(db, 'account.return.type', type.id, {

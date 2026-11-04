@@ -80,6 +80,7 @@ function writeOff(db, rule, line) {
   if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
+  const via = paymentJournal(db, line.journal_id, company);
   const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrencyRecord(db, company)), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
   const items = counterparts.flatMap((l) => {
     const taxes = (l.tax_ids ?? []).map((id) => { const tax = read(db, 'account.tax', id); if (!tax || !tax.account_id) throw new Error('Tax and its account must exist'); return tax; });
@@ -95,9 +96,9 @@ function writeOff(db, rule, line) {
   const gap = roundCurrency(companyValue - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));
   if (gap && items.length) { const key = incoming ? 'credit' : 'debit'; items[0][key] = roundCurrency(items[0][key] + gap, companyCurrencyRecord(db, company)); }
   const { db: booked, id } = postEntry(db, {
-    journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
+    journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
-      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : paymentJournal(db, line.journal_id).account, partner_id }),
+      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : via.account, partner_id }),
       ...items,
     ],
   });

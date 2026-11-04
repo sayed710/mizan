@@ -15,13 +15,13 @@ export const ACCOUNT_TYPES = [
 
 /** Default chart of accounts (codes follow a common 6-digit layout). */
 export const CHART = [
-  ['101401', 'Bank', 'asset_cash'], ['101501', 'Cash', 'asset_cash'], ['101402', 'Outstanding Receipts', 'asset_current'], ['101403', 'Outstanding Payments', 'asset_current'], ['101404', 'Bank Suspense', 'asset_current'], ['121000', 'Account Receivable', 'asset_receivable'],
+  ['101401', 'Bank', 'asset_cash', 'liquidity_bank'], ['101501', 'Cash', 'asset_cash', 'liquidity_cash'], ['101402', 'Outstanding Receipts', 'asset_current'], ['101403', 'Outstanding Payments', 'asset_current'], ['101404', 'Bank Suspense', 'asset_current'], ['121000', 'Account Receivable', 'asset_receivable', 'receivable'],
   ['131000', 'Tax Receivable (VAT input)', 'asset_current'], ['110100', 'Stock Valuation', 'asset_current'], ['110200', 'Stock Interim (Received)', 'asset_current'], ['151000', 'Fixed Assets', 'asset_fixed'],
-  ['211000', 'Account Payable', 'liability_payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
+  ['211000', 'Account Payable', 'liability_payable', 'payable'], ['251000', 'Tax Payable (VAT output)', 'liability_current'],
   ['212000', 'Deferred Revenue', 'liability_current'], ['132000', 'Prepaid Expenses', 'asset_current'], ['230000', 'Salaries Payable', 'liability_current'], ['230100', 'Employee Expenses Payable', 'liability_current'], ['240000', 'Social Insurance Payable', 'liability_current'], ['250100', 'Payroll Tax Payable', 'liability_current'],
-  ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
-  ['500000', 'Cost of Goods Sold', 'expense_direct_cost'], ['600000', 'Expenses', 'expense'], ['610000', 'Travel & Meals', 'expense'],
-  ['620000', 'Salaries & Wages', 'expense'], ['630000', 'Rent', 'expense'], ['690000', 'Bank Fees', 'expense_other'],
+  ['301000', 'Capital', 'equity'], ['400000', 'Product Sales', 'income', 'sales'], ['410000', 'Subscription Revenue', 'income'], ['450000', 'Other Income', 'income_other'],
+  ['500000', 'Cost of Goods Sold', 'expense_direct_cost'], ['600000', 'Expenses', 'expense', 'purchases'], ['610000', 'Travel & Meals', 'expense'],
+  ['620000', 'Salaries & Wages', 'expense', 'salary'], ['630000', 'Rent', 'expense'], ['690000', 'Bank Fees', 'expense_other'],
   ['450100', 'Foreign Exchange Gain', 'income_other'], ['690100', 'Foreign Exchange Loss', 'expense_other'],
   ['450200', 'Cash Discount Gain', 'income_other'], ['690200', 'Cash Discount Loss', 'expense_other'],
   ['152000', 'Accumulated Depreciation', 'asset_fixed'], ['680000', 'Depreciation Expense', 'expense'],
@@ -31,9 +31,9 @@ export const CHART = [
 ];
 
 export const JOURNALS = [
-  ['INV', 'Customer Invoices', 'sale', '400000'], ['BILL', 'Vendor Bills', 'purchase', '600000'], ['BNK1', 'Bank', 'bank', '101401'],
-  ['CSH1', 'Cash', 'cash', '101501'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', '620000'],
-  ['POSS', 'Point of Sale', 'sale', '400000'],
+  ['INV', 'Customer Invoices', 'sale', 'sales'], ['BILL', 'Vendor Bills', 'purchase', 'purchases'], ['BNK1', 'Bank', 'bank', 'liquidity_bank', 'default_payment'],
+  ['CSH1', 'Cash', 'cash', 'liquidity_cash'], ['MISC', 'Miscellaneous Operations', 'general', null], ['SAL', 'Salaries', 'general', 'salary'],
+  ['POSS', 'Point of Sale', 'sale', 'sales'],
 ];
 
 const idByCode = (db, model, code, company) => {
@@ -47,6 +47,31 @@ const idByCode = (db, model, code, company) => {
 
 export const accountId = (db, code, company = null) => idByCode(db, 'account.account', code, company);
 export const journalId = (db, code, company = null) => idByCode(db, 'account.journal', code, company);
+
+/** Validate an explicitly configured account without resolving it through its code or another account's identity. */
+export function assertCompanyAccount(db, id, companyId, accountType, label) {
+  if (!id) throw new Error(`${label} is not configured`);
+  const account = read(db, 'account.account', id);
+  if (!account) throw new Error(`${label} does not exist`);
+  if (account.active === false) throw new Error(`${label} is archived`);
+  if (account.account_type !== accountType) throw new Error(`${label} must be a ${accountType.replaceAll('_', ' ')} account`);
+  if (account.company_id && account.company_id !== (companyId ?? 1)) throw new Error(`${label} must be shared with or belong to this company`);
+  return account.id;
+}
+
+/** Resolve one partner counterpart from an explicit partner override or the company's installed chart settings. */
+export function resolveCounterpartAccount(db, { companyId = 1, partnerId = null, accountType, accountOverrideId = null }) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  if (!company) throw new Error('The accounting company does not exist');
+  const receivable = accountType === 'asset_receivable';
+  if (!receivable && accountType !== 'liability_payable') throw new Error('Choose a receivable or payable counterpart type');
+  const partner = partnerId == null ? null : read(db, 'res.partner', partnerId);
+  if (partnerId != null && !partner) throw new Error('The accounting partner does not exist');
+  const propertyField = receivable ? 'property_account_receivable_id' : 'property_account_payable_id';
+  const companyField = receivable ? 'account_receivable_id' : 'account_payable_id';
+  const id = accountOverrideId ?? partner?.[propertyField] ?? company[companyField];
+  return assertCompanyAccount(db, id, company.id, accountType, receivable ? 'Receivable account' : 'Payable account');
+}
 
 export function resolveCompanyAccount(db, accountId, companyId) {
   if (!accountId) return null;
@@ -189,7 +214,11 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
+  const counterpart = resolveCounterpartAccount(db, {
+    companyId: move.company_id ?? 1,
+    partnerId: move.partner_id,
+    accountType: sale ? 'asset_receivable' : 'liability_payable',
+  });
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
@@ -340,11 +369,20 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Bank or cash journal code and its default account code (BNK1 / 101401 when unset or not a payment journal). */
-export function paymentJournal(db, journalId) {
-  const j = read(db, 'account.journal', journalId);
-  const account = j && ['bank', 'cash'].includes(j.type) ? read(db, 'account.account', j.default_account_id)?.code : null;
-  return account ? { code: j.code, account } : { code: 'BNK1', account: '101401' };
+/** Resolve a selected or explicitly configured company payment journal and its validated liquidity account. */
+export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  if (!company && !selectedJournalId) throw new Error('The payment company does not exist');
+  const targetCompanyId = company?.id ?? companyId ?? 1;
+  const id = selectedJournalId ?? company.default_payment_journal_id;
+  if (!id) throw new Error('Configure a default payment journal for this company');
+  const journal = read(db, 'account.journal', id);
+  if (!journal) throw new Error('The selected payment journal does not exist');
+  if (journal.active === false) throw new Error('The selected payment journal is archived');
+  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Select a bank or cash payment journal');
+  if (journal.company_id && journal.company_id !== targetCompanyId) throw new Error('The selected payment journal belongs to another company');
+  const account = assertCompanyAccount(db, journal.default_account_id, targetCompanyId, 'asset_cash', 'The selected journal liquidity account');
+  return { id: journal.id, code: journal.code, account };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */

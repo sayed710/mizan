@@ -4,7 +4,7 @@ import './models/index.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { create, read, search, updateSettings, write } from './orm.js';
-import { createCompany } from './models/company.js';
+import { configureCompanyChart, createCompany } from './models/company.js';
 import { postMove } from './models/accounting.js';
 import { confirmAsset } from './models/assets.js';
 import { accountId, journalItems } from './models/ledger.js';
@@ -24,13 +24,22 @@ test('foreign credit settlement uses the document company and booked counterpart
     const company = createCompany(db, { name: 'Other company' });
     db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
     let counterpart;
+    const accountDefaults = {};
     for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
       const account = create(db, 'account.account', { company_id: company.id, code, name: code, account_type: accountType });
       db = account.db;
       if (accountType === counterpartType) counterpart = account.id;
+      if (accountType === 'asset_receivable') accountDefaults.receivable = account.id;
+      if (accountType === 'liability_payable') accountDefaults.payable = account.id;
       if (code === 'FXGAIN') db = write(db, 'res.company', company.id, { income_currency_exchange_account_id: account.id });
       if (code === 'FXLOSS') db = write(db, 'res.company', company.id, { expense_currency_exchange_account_id: account.id });
     }
+    const companyConfig = read(db, 'res.company', company.id);
+    db = configureCompanyChart(db, company.id, {
+      account_receivable_id: accountDefaults.receivable,
+      account_payable_id: accountDefaults.payable,
+      default_payment_journal_id: companyConfig.default_payment_journal_id,
+    });
     const currency = create(db, 'res.currency', { name: 'Foreign', rate_ids: [{ date: '2037-01-01', rate: 2 }, { date: '2037-02-01', rate: 1 }] });
     const document = create(currency.db, 'account.move', { move_type: type, company_id: company.id, partner_id: partner, currency_id: currency.id, invoice_date: '2037-01-02', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
     db = postMove(document.db, document.id);

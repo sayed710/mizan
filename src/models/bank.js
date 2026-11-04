@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { accountId, ensureBankSuspense, journalId, paymentJournal, postEntry } from './ledger.js';
+import { accountId, ensureBankSuspense, invoiceCounterpartAccount, paymentJournal, postEntry } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -80,8 +80,8 @@ export function reconcileWith(db, line, moveId) {
     if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
     writeoffValue = docRound(amount * rate);
     if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
-    const receivable = accountId(db, ['in_invoice', 'in_refund'].includes(move.move_type) ? '211000' : '121000', company);
-    const bankAccount = accountId(db, paymentJournal(db, line.journal_id).account, company);
+    const receivable = invoiceCounterpartAccount(db, move);
+    const bankAccount = paymentJournal(db, line.journal_id, company).account;
     if (account.id === receivable || account.id === bankAccount || account.id === accountId(db, '101404', company)) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
   }
   let current = db;
@@ -93,7 +93,7 @@ export function reconcileWith(db, line, moveId) {
     current = ensured.db;
     suspense = ensured.id;
     if (!bankMoveId) {
-      const via = paymentJournal(db, line.journal_id);
+      const via = paymentJournal(db, line.journal_id, company);
       const incoming = line.amount > 0;
       const amount = statementCompanyAmount(db, line);
       const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
@@ -171,8 +171,8 @@ function resolveAndValidatePayments(db, line) {
     if (isPaymentMatched(db, payment, line.id)) throw new Error('Payment is already matched');
   }
 
-  const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id);
-  const journal = read(db, 'account.journal', line.journal_id ?? payments[0].journal_id ?? journalId(db, via.code, company));
+  const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id, company);
+  const journal = read(db, 'account.journal', via.id);
   if (journal && !['bank', 'cash'].includes(journal.type)) throw new Error('Bank transactions need a bank or cash journal');
   if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
   // Amounts are compared in company currency; only a foreign-currency bank journal fixes the payment currency.
@@ -192,7 +192,7 @@ function paymentOutstandingItem(db, payment, line, via) {
   const outstanding = payment.outstanding_account_id;
   const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === outstanding && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
   if (!outstanding || liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
-  if (read(db, 'account.account', outstanding)?.code === via.account) throw new Error('Outstanding and bank accounts must differ');
+  if (outstanding === via.account) throw new Error('Outstanding and bank accounts must differ');
   return { account: outstanding, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref };
 }
 
@@ -226,7 +226,7 @@ function matchPayment(db, line) {
         throw new Error('Write-off amount must equal the payment difference in company currency');
       }
     }
-    const forbidden = new Set([accountId(db, via.account, company), accountId(db, '101404', company), ...outstandingItems.map((item) => item.account)]);
+    const forbidden = new Set([via.account, accountId(db, '101404', company), ...outstandingItems.map((item) => item.account)]);
     if (forbidden.has(writeoffAccount.id)) throw new Error('Write-off account must differ from the bank, suspense and outstanding accounts');
   }
   const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
@@ -279,7 +279,8 @@ function bookToAccount(db, line) {
   const account = line.counterpart ?? (line.amount > 0 ? '450000' : '600000');
   const value = round(line.open_amount ?? statementCompanyAmount(db, line));
   if (!(value > 0)) throw new Error('This bank transaction has no open amount');
-  const liquidity = line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : paymentJournal(db, line.journal_id).account;
+  const via = paymentJournal(db, line.journal_id, line.company_id ?? 1);
+  const liquidity = line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : via.account;
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(db, line.company_id)?.id;
   const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / bookedStatementAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
@@ -287,7 +288,7 @@ function bookToAccount(db, line) {
   const lines = line.amount > 0
     ? [{ account: liquidity, debit: value, ...fx(1) }, { account, credit: value, ...fx(-1) }]
     : [{ account, debit: value, ...fx(1) }, { account: liquidity, credit: value, ...fx(-1) }];
-  const { db: booked, id } = postEntry(db, { journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
+  const { db: booked, id } = postEntry(db, { journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: value }] }) };
 }
 
@@ -357,7 +358,7 @@ export function bookedStatementAmount(db, line) {
   if (!line.bank_move_id) return statementCompanyAmount(db, line);
   const company = line.company_id ?? 1;
   const entry = read(db, 'account.move', line.bank_move_id);
-  const account = accountId(db, paymentJournal(db, line.journal_id).account, company);
+  const account = paymentJournal(db, line.journal_id, company).account;
   const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
   return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
 }
@@ -403,8 +404,8 @@ function lineGuard(db, before, after) {
     const allocated = allocations.reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== referenceAmount) return 'Bank transaction allocations must match its amount';
     const bankEntry = read(db, 'account.move', after.bank_move_id);
-    const via = paymentJournal(db, after.journal_id);
-    const bankAccount = accountId(db, via.account, company);
+    const via = paymentJournal(db, after.journal_id, company);
+    const bankAccount = via.account;
     const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
     if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) return 'The bank entry must book the transaction amount once';
     const suspense = accountId(db, '101404', company);

@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
+import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
@@ -308,7 +308,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const fx = read(db, 'account.move', p.payment_fx_move_id);
   const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
   if (uses > 1) return 'Exchange entry is already used by another settlement';
-  const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+  const account = invoiceCounterpartAccount(db, invoice);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && l.partner_id === invoice.partner_id).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const configured = exchangeAccount(db, invoice.company_id, difference);
   const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
@@ -341,13 +341,29 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
-  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
+  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
+  let account;
+  try {
+    account = invoice
+      ? invoiceCounterpartAccount(db, invoice)
+      : resolveCounterpartAccount(db, {
+        companyId: after.company_id ?? 1,
+        partnerId: after.partner_id,
+        accountType: after.partner_type === 'supplier' ? 'liability_payable' : 'asset_receivable',
+      });
+  } catch (error) {
+    return error.message;
+  }
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
-  const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
+  let bank;
+  try {
+    bank = after.outstanding_account_id ?? paymentJournal(db, after.journal_id, after.company_id ?? 1).account;
+  } catch (error) {
+    return error.message;
+  }
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };

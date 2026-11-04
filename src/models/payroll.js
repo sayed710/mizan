@@ -1,7 +1,7 @@
 // Payroll: payslips computed from the employee wage, posted to accounting, grouped in monthly batches.
 import { create, read, search, write } from '../orm.js';
 import { pad, today } from './common.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry } from './ledger.js';
 import { round } from '../money.js';
 import { leaveIntervals } from './timeoff.js';
 import { calendarFor, isWorkingDay } from './calendar.js';
@@ -166,9 +166,11 @@ function confirm(db, slip) {
 
 function pay(db, slip) {
   const net = netOf(slip);
+  const companyId = read(db, 'hr.employee', slip.employee_id)?.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
   const { db: booked } = postEntry(db, {
-    journal: 'BNK1', ref: `Salary payment ${slip.name}`,
-    lines: [{ account: '230000', debit: net }, { account: '101401', credit: net }],
+    journal: via.code, journal_id: via.id, company: companyId, ref: `Salary payment ${slip.name}`,
+    lines: [{ account: '230000', debit: net }, { account_id: via.account, credit: net }],
   });
   return write(booked, 'hr.payslip', slip.id, { state: 'paid' });
 }

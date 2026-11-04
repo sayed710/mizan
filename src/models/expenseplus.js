@@ -2,7 +2,7 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { nextName, promptedAmount, today } from './common.js';
 import { currentActor, employeeFor } from './authority.js';
-import { postEntry } from './ledger.js';
+import { paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
 import { moreModels } from './more.js';
 import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
@@ -95,6 +95,9 @@ export function postSheet(db, id, date = today()) {
   if (lines.some((l) => l.state !== 'approved' || l.move_id)) throw new Error('All expenses must be approved and unposted');
   const own = lines[0].payment_mode === 'own_account';
   const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
+  const companyId = r.company_id ?? 1;
+  const via = own ? null : paymentJournal(contact.db, null, companyId);
+  const payable = own ? resolveCounterpartAccount(contact.db, { companyId, partnerId: contact.id, accountType: 'liability_payable' }) : null;
   const debits = lines.flatMap((l) => {
     const product = read(db, 'product', l.product_id);
     const expenseAccount = productProperty(db, product, 'property_account_expense_id');
@@ -103,8 +106,8 @@ export function postSheet(db, id, date = today()) {
     const tax = round(Number(l.total_amount) - Number(l.total_amount) / (1 + Number(l.tax ?? 0) / 100));
     return [{ account, debit: round(Number(l.total_amount) - tax) }, ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(l.tax ?? 0)}%`, tax_side: 'purchase', tax_base: round(Number(l.total_amount) - tax) }] : [])];
   });
-  const booked = postEntry(contact.db, { journal: r.journal || 'MISC', date, ref: r.name, company: r.company_id ?? 1,
-    lines: [...debits, { account: own ? '211000' : '101401', credit: total(lines), partner_id: contact.id }],
+  const booked = postEntry(contact.db, { journal: own ? (r.journal || 'MISC') : via.code, ...(via ? { journal_id: via.id } : {}), date, ref: r.name, company: companyId,
+    lines: [...debits, own ? { account_id: payable, credit: total(lines), partner_id: contact.id } : { account_id: via.account, credit: total(lines) }],
   });
   const linked = lines.reduce((acc, l) => write(acc, 'hr.expense', l.id, { move_id: booked.id }), booked.db);
   return transition(linked, r, own ? 'post' : 'done', own ? 'posted' : 'paid', {
@@ -119,8 +122,11 @@ export function registerPayment(db, id, amount, date = today()) {
   const due = round(r.total_amount - (r.amount_paid || 0));
   if (!Number.isFinite(value) || value <= 0) throw new Error('Enter a positive reimbursement amount');
   if (value > due) throw new Error('Reimbursement exceeds the outstanding amount');
-  const booked = postEntry(db, { journal: 'BNK1', date, ref: `Reimbursement: ${r.name}`, company: r.company_id ?? 1, lines: [
-    { account: '211000', debit: value, partner_id: r.partner_id }, { account: '101401', credit: value, partner_id: r.partner_id },
+  const companyId = r.company_id ?? 1;
+  const via = paymentJournal(db, null, companyId);
+  const payable = resolveCounterpartAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' });
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Reimbursement: ${r.name}`, company: companyId, lines: [
+    { account_id: payable, debit: value, partner_id: r.partner_id }, { account_id: via.account, credit: value, partner_id: r.partner_id },
   ] });
   return transition(booked.db, r, value === due ? 'done' : 'post', value === due ? 'paid' : 'posted', { amount_paid: round((r.amount_paid || 0) + value) });
 }

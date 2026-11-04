@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, postEntry } from './ledger.js';
+import { invoiceLines, paymentJournal, postEntry, resolveCounterpartAccount } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -390,7 +390,7 @@ function validateReturnValuation(db, { original, lines, session }) {
   }
 }
 
-function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency }) {
+function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id }) {
   if (original) {
     if (roundCurrency(total.total, currency) !== 0) {
       const valuationMoveIds = new Set(
@@ -412,14 +412,14 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
       }
     }
   } else if (roundCurrency(expectedTotal, currency) !== 0) {
-    const counterpart = accountId(db, '121000', session.company_id);
-    if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
+    resolveCounterpartAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
     for (const p of resolvedPayments) {
       const m = read(db, 'pos.payment.method', p.payment_method_id);
       if (m && m.type !== 'pay_later') {
-        const journal = read(db, 'account.journal', m.journal_id);
-        const account = read(db, 'account.account', m.outstanding_account_id || journal?.default_account_id)?.code;
-        if (!account) throw new Error('Payment account is required');
+        const journal = paymentJournal(db, m.journal_id, session.company_id ?? 1);
+        const account = m.outstanding_account_id ?? journal.account;
+        const configured = read(db, 'account.account', account);
+        if (!configured || (configured.company_id && configured.company_id !== (session.company_id ?? 1))) throw new Error('Payment account must belong to the POS company');
       }
     }
   }
@@ -488,7 +488,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency });
 
   validateReturnValuation(db, { original, lines, session });
-  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency });
+  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id });
 
   return {
     session,
@@ -572,14 +572,18 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     name,
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
-  const counterpart = accountId(db, '121000', session.company_id);
-  if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
+  const counterpart = resolveCounterpartAccount(db, { companyId: session.company_id ?? 1, partnerId: partner_id, accountType: 'asset_receivable' });
   const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
   const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
-      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id || counterpart,
+      account_id: resolveCounterpartAccount(db, {
+        companyId: session.company_id ?? 1,
+        partnerId: partner_id,
+        accountType: 'asset_receivable',
+        accountOverrideId: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id,
+      }),
       partner_id,
       debit: (refund_of || isReturn || Number(p.amount) < 0) ? 0 : Math.abs(Number(p.amount)),
       credit: (refund_of || isReturn || Number(p.amount) < 0) ? Math.abs(Number(p.amount)) : 0,
@@ -591,16 +595,20 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: 'POSS', company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: 'POSS', company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {
     const m = read(booked, 'pos.payment.method', p.payment_method_id);
     if (m.type === 'pay_later') continue;
     const journal = read(booked, 'account.journal', m.journal_id);
-    const account = read(booked, 'account.account', m.outstanding_account_id || journal.default_account_id)?.code;
-    const receivable = read(booked, 'account.account', m.receivable_account_id)?.code ?? '121000';
-    if (!account) throw new Error('Payment account is required');
+    const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).account;
+    const receivable = resolveCounterpartAccount(booked, {
+      companyId: session.company_id ?? 1,
+      partnerId: partner_id,
+      accountType: 'asset_receivable',
+      accountOverrideId: m.receivable_account_id,
+    });
     const amount = Number(p.amount);
     const isOutbound = refund_of || isReturn || amount < 0;
     const tenderEntry = postEntry(booked, {
@@ -609,8 +617,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
       company: session.company_id,
       ref: name,
       lines: isOutbound
-        ? [{ account, credit: Math.abs(amount), partner_id }, { account: receivable, debit: Math.abs(amount), partner_id }]
-        : [{ account, debit: Math.abs(amount), partner_id }, { account: receivable, credit: Math.abs(amount), partner_id }],
+        ? [{ account_id: account, credit: Math.abs(amount), partner_id }, { account_id: receivable, debit: Math.abs(amount), partner_id }]
+        : [{ account_id: account, debit: Math.abs(amount), partner_id }, { account_id: receivable, credit: Math.abs(amount), partner_id }],
     });
     booked = tenderEntry.db;
     moveIds.push(tenderEntry.id);

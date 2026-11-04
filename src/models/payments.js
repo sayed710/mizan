@@ -4,7 +4,7 @@ import { nextName, today } from './common.js';
 import { payMove } from './accounting.js';
 import { cents, round } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
-import { journalId } from './ledger.js';
+import { paymentJournal } from './ledger.js';
 import { nextCheckNumber } from './pay.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
@@ -97,7 +97,8 @@ export function postBatch(db, batch) {
   }
   const company = read(db, 'account.move', lines[0].move_id)?.company_id ?? 1;
   if (batch.batch_type === 'inbound' && lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company)) throw new Error('Batch invoices must belong to the same company');
-  const journal = batch.batch_type === 'outbound' ? read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company)) : null;
+  const payment = batch.batch_type === 'outbound' ? paymentJournal(db, batch.journal_id ?? null, company) : null;
+  const journal = payment ? read(db, 'account.journal', payment.id) : null;
   if (batch.batch_type === 'outbound' && (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company))) throw new Error('Checks require a bank journal and invoices in the same company');
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
   if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');

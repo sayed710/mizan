@@ -8,7 +8,7 @@ import { reversePayment } from './models/pay.js';
 import { agedBalance } from './models/finance.js';
 import { revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 import { accountId, isBalanced, journalId, postEntry } from './models/ledger.js';
-import { createCompany } from './models/company.js';
+import { configureCompanyChart, createCompany } from './models/company.js';
 
 function fixture(type = 'out_invoice') {
   const currency = create(seed(), 'res.currency', { name: 'FXC', rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }, { date: '2026-03-01', rate: 0.5 }] });
@@ -65,10 +65,18 @@ test('companies revalue only their own invoices using their own journal and acco
   const first = fixture();
   const secondCompany = createCompany(first.db, { name: 'Second company' });
   let db = secondCompany.db;
+  const accounts = {};
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) {
-    db = create(db, 'account.account', { code, name: code, account_type: type, company_id: secondCompany.id }).db;
+    const created = create(db, 'account.account', { code, name: code, account_type: type, company_id: secondCompany.id });
+    db = created.db;
+    accounts[code] = created.id;
   }
-  db = create(db, 'account.journal', { code: 'MISC', name: 'Second miscellaneous', type: 'general', company_id: secondCompany.id }).db;
+  const journal = create(db, 'account.journal', { code: 'MISC', name: 'Second miscellaneous', type: 'general', company_id: secondCompany.id });
+  db = configureCompanyChart(journal.db, secondCompany.id, {
+    account_receivable_id: accounts['121000'],
+    account_payable_id: read(db, 'res.company', secondCompany.id).account_payable_id,
+    default_payment_journal_id: read(db, 'res.company', secondCompany.id).default_payment_journal_id,
+  });
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: secondCompany.id, currency_id: read(db, 'account.move', first.id).currency_id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   db = postMove(invoice.db, invoice.id);
   const done = revalueForeignBalances(db, '2026-02-28');
