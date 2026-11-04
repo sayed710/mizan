@@ -46,7 +46,7 @@ test('revaluation reverses next day, is idempotent, and later cutoff uses revers
 
 test('locked revaluation rejects without changing the database', () => {
   const { db } = fixture();
-  const locked = updateSettings(db, { lock_date: '2026-02-28' });
+  const locked = write(updateSettings(db, { lock_date: '2026-02-28' }), 'res.company', 1, { lock_date: '2026-02-28' });
   const before = JSON.stringify(locked);
   assert.throws(() => revalueForeignBalances(locked, '2026-02-28'), /locked/i);
   assert.equal(JSON.stringify(locked), before);

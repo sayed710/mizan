@@ -2,7 +2,7 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, postEntry, resolveDocumentJournal } from './ledger.js';
+import { invoiceLines, partnerAccount, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
@@ -406,7 +406,7 @@ function validateReturnValuation(db, { original, lines, session }) {
   }
 }
 
-function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency }) {
+function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id }) {
   if (original) {
     if (roundCurrency(total.total, currency) !== 0) {
       const valuationMoveIds = new Set(
@@ -428,8 +428,7 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
       }
     }
   } else if (roundCurrency(expectedTotal, currency) !== 0) {
-    const counterpart = accountId(db, '121000', session.company_id);
-    if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
+    partnerAccount(db, partner_id, session.company_id, 'receivable');
     for (const p of resolvedPayments) {
       const m = read(db, 'pos.payment.method', p.payment_method_id);
       if (m && m.type !== 'pay_later') {
@@ -504,7 +503,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency });
 
   validateReturnValuation(db, { original, lines, session });
-  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency });
+  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId });
 
   return {
     session,
@@ -597,8 +596,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     name,
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
-  const counterpart = accountId(db, '121000', session.company_id);
-  if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
+  const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
   const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
   const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
   const saleLines = [
@@ -624,7 +622,7 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     if (m.type === 'pay_later') continue;
     const journal = read(booked, 'account.journal', m.journal_id);
     const account = read(booked, 'account.account', m.outstanding_account_id || journal.default_account_id)?.code;
-    const receivable = read(booked, 'account.account', m.receivable_account_id)?.code ?? '121000';
+    const receivable = m.receivable_account_id || counterpart;
     if (!account) throw new Error('Payment account is required');
     const amount = Number(p.amount);
     const isOutbound = refund_of || isReturn || amount < 0;

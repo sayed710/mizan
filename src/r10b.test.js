@@ -10,7 +10,7 @@ import { startSession } from './models/pos.js';
 
 test('sales journal entries respect the sales lock', () => {
   let db = seed();
-  db = { ...db, settings: { ...db.settings, sale_lock_date: '2026-12-31' } };
+  db = write({ ...db, settings: { ...db.settings, sale_lock_date: '2026-12-31' } }, 'res.company', 1, { sale_lock_date: '2026-12-31' });
   const journal = db.records['account.journal'].find((j) => j.type === 'sale');
   const accounts = db.records['account.account'];
   const move = create(db, 'account.move', { move_type: 'entry', journal_id: journal.id, date: '2026-01-01', line_ids: [{ account_id: accounts[0].id, debit: 1, credit: 0 }, { account_id: accounts[1].id, debit: 0, credit: 1 }] });

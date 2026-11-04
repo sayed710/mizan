@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -270,7 +270,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
                     <FollowUpActions db={db} reminder={f} companyId={company.id} />
                   </td>
                   <td className="num">{f.oldest}</td>
-                  <td className="num">{money(f.total)}</td>
+                  <td className="num">{formatFollowUpTotals(f)}</td>
                 </tr>
               );
             })}
@@ -294,7 +294,7 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
               <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
             </td>
             <td className="num">{f.oldest}</td>
-            <td className="num">{money(f.total)}</td>
+            <td className="num">{formatFollowUpTotals(f)}</td>
           </tr>
         );
       })}

@@ -2,7 +2,7 @@
 import { create, read, search, write, postNote } from '../orm.js';
 import { nextName, promptedAmount, today } from './common.js';
 import { currentActor, employeeFor } from './authority.js';
-import { postEntry } from './ledger.js';
+import { partnerAccount, postEntry } from './ledger.js';
 import { moreModels } from './more.js';
 import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
@@ -104,7 +104,7 @@ export function postSheet(db, id, date = today()) {
     return [{ account, debit: round(Number(l.total_amount) - tax) }, ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(l.tax ?? 0)}%`, tax_side: 'purchase', tax_base: round(Number(l.total_amount) - tax) }] : [])];
   });
   const booked = postEntry(contact.db, { journal: r.journal || 'MISC', date, ref: r.name, company: r.company_id ?? 1,
-    lines: [...debits, { account: own ? '211000' : '101401', credit: total(lines), partner_id: contact.id }],
+    lines: [...debits, { account: own ? partnerAccount(contact.db, contact.id, r.company_id, 'payable') : '101401', credit: total(lines), partner_id: contact.id }],
   });
   const linked = lines.reduce((acc, l) => write(acc, 'hr.expense', l.id, { move_id: booked.id }), booked.db);
   return transition(linked, r, own ? 'post' : 'done', own ? 'posted' : 'paid', {
@@ -120,7 +120,7 @@ export function registerPayment(db, id, amount, date = today()) {
   if (!Number.isFinite(value) || value <= 0) throw new Error('Enter a positive reimbursement amount');
   if (value > due) throw new Error('Reimbursement exceeds the outstanding amount');
   const booked = postEntry(db, { journal: 'BNK1', date, ref: `Reimbursement: ${r.name}`, company: r.company_id ?? 1, lines: [
-    { account: '211000', debit: value, partner_id: r.partner_id }, { account: '101401', credit: value, partner_id: r.partner_id },
+    { account: partnerAccount(db, r.partner_id, r.company_id, 'payable'), debit: value, partner_id: r.partner_id }, { account: '101401', credit: value, partner_id: r.partner_id },
   ] });
   return transition(booked.db, r, value === due ? 'done' : 'post', value === due ? 'paid' : 'posted', { amount_paid: round((r.amount_paid || 0) + value) });
 }

@@ -39,7 +39,7 @@ const LAYOUTS = {
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
 };
 
-export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment';
+export const printable = (model) => model in LAYOUTS || model === 'account.batch.payment' || model === 'account.payment';
 
 /** One cheque per batch line: payee, date, number, amount in figures and in words. */
 function Checks({ db, batch }) {
@@ -65,7 +65,7 @@ function Checks({ db, batch }) {
           <article key={number ?? l.move_id} className="paper check">
             <header className="paper-head"><b className="paper-company">{company.name}</b><span>{t('Check')} #{number}</span></header>
             <p>{t('Date')}: {formatDate(batch.date)}</p>
-            <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
+            <p>{t('Pay to the order of')} <b>{read(db, 'res.partner', payment?.partner_id ?? move?.partner_id)?.name ?? '—'}</b> <span className="num">{amounts.numeric}</span></p>
             <p className="check-words">{amounts.words}</p>
             <footer className="paper-foot muted">{t('Memo')}: {move?.name}</footer>
           </article>
@@ -88,6 +88,10 @@ export function PrintDoc({ model, id }) {
     return () => clearTimeout(timer);
   }, [recId]);
   if (rec && model === 'account.batch.payment') return <Checks db={db} batch={rec} />;
+  if (rec && model === 'account.payment' && rec.state === 'posted' && rec.payment_type === 'outbound' && rec.check_number != null) {
+    const batch = { company_id: rec.company_id, date: rec.date, lines: [{ move_id: rec.invoice_id, payment_id: rec.id, amount: rec.amount }] };
+    return <Checks db={db} batch={batch} />;
+  }
   if (!rec || !layout) return <main className="action"><p className="empty">{t('Record not found.')}</p></main>;
 
   const company = documentCompany(db, rec);

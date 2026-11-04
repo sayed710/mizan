@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { accountId, ensureBankSuspense, journalId, paymentJournal, postEntry } from './ledger.js';
+import { accountId, ensureBankSuspense, invoiceCounterpartAccount, journalId, paymentJournal, postEntry } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -10,6 +10,7 @@ import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
+import { shouldBePaid } from './billcontrol.js';
 
 /** Statement amounts use the journal currency; open allocations use company currency. */
 export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
@@ -54,6 +55,7 @@ export function reconcileWith(db, line, moveId) {
   const move = read(db, 'account.move', moveId);
   const err = matchError(db, line, move);
   if (err) throw new Error(err);
+  if (shouldBePaid(db, move) === 'exception') throw new Error('Resolve or approve the three-way matching exception before paying this bill');
   if (line.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
   const date = line.date ?? today();
   const company = line.company_id ?? 1;
@@ -81,7 +83,7 @@ export function reconcileWith(db, line, moveId) {
     if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
     writeoffValue = docRound(amount * rate);
     if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
-    const receivable = accountId(db, ['in_invoice', 'in_refund'].includes(move.move_type) ? '211000' : '121000', company);
+    const receivable = invoiceCounterpartAccount(db, move);
     const bankAccount = accountId(db, paymentJournal(db, line.journal_id).account, company);
     if (account.id === receivable || account.id === bankAccount || account.id === accountId(db, '101404', company)) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
   }

@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
+import { invoiceCounterpartAccount, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { isInvoice, payMove, releaseCashBasis, residual } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -11,6 +11,7 @@ import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched } from './bank.js';
+import { shouldBePaid } from './billcontrol.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -36,14 +37,15 @@ export function postPayment(db, p) {
   }
   const date = currentPayment.date ?? today();
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
-  const via = paymentJournal(db, currentPayment.journal_id);
+  const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const name = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
   const open = isTaxOrDirect
     ? []
     : search(db, 'account.move')
         .filter((m) => m.state === 'posted' && m.partner_id === currentPayment.partner_id && (m.company_id ?? 1) === (currentPayment.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[currentPayment.partner_type]?.[currentPayment.payment_type]?.includes(m.move_type)
-          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id))
+          && (!currentPayment.partner_bank_id || !m.partner_bank_id || m.partner_bank_id === currentPayment.partner_bank_id)
+          && shouldBePaid(db, m) !== 'exception')
         .sort((a, b) => (a.invoice_date_due ?? '').localeCompare(b.invoice_date_due ?? ''));
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', currentPayment.journal_id ?? journalId(db, via.code, currentPayment.company_id ?? 1));
@@ -70,7 +72,7 @@ export function postPayment(db, p) {
   }
   const counterpart = currentPayment.destination_account_code
     || (currentPayment.destination_account_id ? read(db, 'account.account', currentPayment.destination_account_id)?.code : null)
-    || (currentPayment.partner_type === 'supplier' ? '211000' : '121000');
+    || partnerAccount(db, currentPayment.partner_id, currentPayment.company_id, currentPayment.partner_type === 'supplier' ? 'payable' : 'receivable');
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const amount = companyRound(Number(currentPayment.amount));
@@ -123,7 +125,7 @@ export function allocatePaymentToInvoice(db, payment, invoice, availableCredit, 
   if (diff) {
     const counterpart = payment.destination_account_code
       || (payment.destination_account_id ? read(db, 'account.account', payment.destination_account_id)?.code : null)
-      || (['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000');
+      || invoiceCounterpartAccount(db, invoice);
     const fx = postEntry(withFx, {
       journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
       lines: diff > 0
@@ -232,6 +234,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     date,
     ref,
     reversed_entry_id: source.id,
+    ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
     partner_id: source.partner_id ?? null,
     name: nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
@@ -280,7 +283,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
   const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company });
-  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id });
+  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id, cash_basis_origin_move_id: invoice.id });
 }
 
 /** Reverse a write-off settlement without changing unrelated invoice applications. */
@@ -502,7 +505,7 @@ export const payModels = {
         },
         { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
-        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r) }) },
+        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',

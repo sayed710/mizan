@@ -1525,4 +1525,3 @@ test('server checkout returns authoritative payable total with rounding differen
   });
   assert.equal(orderOut.total, 10.00, 'payOrder total must include rounding_difference');
 });
-
