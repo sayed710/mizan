@@ -22,10 +22,11 @@ const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace
 export function parseCamt(text) {
   return [...String(text).matchAll(/<(?:\w+:)?Ntry>([\s\S]*?)<\/(?:\w+:)?Ntry>/g)].map(([, b]) => {
     const amount = Number(xmlTag(b, ['Amt']));
+    const amountTag = b.match(/<(?:\w+:)?Amt\b[^>]*>/)?.[0] ?? '';
     const ref = xmlTag(b, ['Ustrd']) || xmlTag(b, ['AddtlNtryInf']) || xmlTag(b, ['Nm']);
     return {
       date: (xmlTag(b, ['BookgDt', 'Dt']) || xmlTag(b, ['BookgDt', 'DtTm'])).slice(0, 10) || null,
-      currency: b.match(/<(?:\w+:)?Amt\b[^>]*\bCcy\s*=\s*["']([^"']+)["']/)?.[1] ?? null,
+      currency: amountTag.match(/\sCcy\s*=\s*["']([^"']+)["']/)?.[1] ?? null,
       amount: xmlTag(b, ['CdtDbtInd']) === 'DBIT' ? -amount : amount,
       payment_ref: unescapeXml(ref),
       unique_import_id: xmlTag(b, ['AcctSvcrRef']) || null,
@@ -44,7 +45,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);
-  if (camt && lines.some((l) => l.currency && l.currency !== currency?.name)) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
+  if (camt && lines.some((l) => !l.currency || l.currency !== currency?.name)) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
   const journalId = defaults.journal_id ?? null;
   const known = new Set(search(db, 'account.bank.statement.line').filter((l) => (l.journal_id ?? null) === journalId && (l.company_id ?? 1) === company).map((l) => l.unique_import_id).filter(Boolean));
   const fresh = lines.filter((l) => {
@@ -53,6 +54,6 @@ export function importStatement(db, fileName, text, defaults = {}) {
     known.add(l.unique_import_id);
     return true;
   });
-  const next = fresh.reduce((acc, l) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journal.company_id ?? 1 } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
+  const next = fresh.reduce((acc, { currency: _currency, ...l }) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journal.company_id ?? 1 } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
   return { db: next, count: fresh.length };
 }

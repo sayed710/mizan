@@ -8,10 +8,11 @@ import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
+import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 
 /** Statement amounts use the journal currency; open allocations use company currency. */
-function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
   const company = line.company_id ?? 1;
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   return toCompany(db, currency, amount, line.date ?? today(), company);
@@ -60,8 +61,12 @@ export function reconcileWith(db, line, moveId) {
   const step = Number(docCurrency?.rounding ?? 0.01);
   const available = round(line.open_amount ?? statementCompanyAmount(db, line));
   const rate = rateAt(db, move.currency_id, date, company);
-  const value = Math.min(docRound(move.amount_residual), Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
-  const used = toCompany(db, move.currency_id, value, date, company);
+  const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  const total = bookedStatementAmount(db, line);
+  const foreignOpen = docRound(Math.abs(line.amount) * available / total);
+  const sameCurrency = journalCurrency === (move.currency_id ?? companyCurrencyRecord(db, company)?.id);
+  const value = Math.min(docRound(move.amount_residual), sameCurrency ? foreignOpen : Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
+  const used = sameCurrency && value === foreignOpen ? available : sameCurrency && line.bank_move_id ? round(total * value / Math.abs(line.amount)) : toCompany(db, move.currency_id, value, date, company);
   if (!(value > 0) || !(used > 0) || used > available) throw new Error('The open statement amount is too small to settle this invoice');
   const remaining = round(available - used);
   const hasWriteoff = line.writeoff_account_id != null || line.writeoff_amount != null || Boolean(line.writeoff_label);
@@ -198,7 +203,7 @@ function matchPayment(db, line) {
   const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via));
   const amount = statementCompanyAmount(db, line);
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
-  if (paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
+  if (!(journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id) && paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
 
   const incoming = line.amount > 0;
   const foreign = journal?.currency_id && journal.currency_id !== companyCurrencyRecord(db, company)?.id;
@@ -211,6 +216,8 @@ function matchPayment(db, line) {
     : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }));
 
   const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
+  const difference = round((incoming ? 1 : -1) * (amount - paymentsTotal));
+  if (difference) lines.push({ account: exchangeAccount(db, company, difference), ...(difference > 0 ? { credit: difference } : { debit: -difference }) });
   const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
 
   return {
@@ -244,7 +251,7 @@ function bookToAccount(db, line) {
   const liquidity = line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : paymentJournal(db, line.journal_id).account;
   const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
   const foreign = currency && currency !== companyCurrencyRecord(db, line.company_id)?.id;
-  const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / statementCompanyAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
+  const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / bookedStatementAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * foreignValue } : {};
   const lines = line.amount > 0
     ? [{ account: liquidity, debit: value, ...fx(1) }, { account, credit: value, ...fx(-1) }]
@@ -314,6 +321,16 @@ function unreconcile(db, line) {
   return { db: current };
 }
 
+/** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
+export function bookedStatementAmount(db, line) {
+  if (!line.bank_move_id) return statementCompanyAmount(db, line);
+  const company = line.company_id ?? 1;
+  const entry = read(db, 'account.move', line.bank_move_id);
+  const account = accountId(db, paymentJournal(db, line.journal_id).account, company);
+  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
+  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
+}
+
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
 function lineGuard(db, before, after) {
   if (before && (before.state === 'reconciled' || before.bank_move_id) && after.state === 'to_check' && !after.move_id) return unreconcileError(db, before, after);
@@ -347,17 +364,18 @@ function lineGuard(db, before, after) {
     const batchCompany = batchPaymentCompany(db, batch);
     if (!batch || batchCompany !== company) return 'The linked payment belongs to another company or does not exist';
   }
-  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > statementCompanyAmount(db, after))) return 'Invalid open bank transaction amount';
+  const referenceAmount = bookedStatementAmount(db, after);
+  if (after.open_amount != null && (!Number.isFinite(Number(after.open_amount)) || after.open_amount < 0 || round(after.open_amount) > referenceAmount)) return 'Invalid open bank transaction amount';
   if (before?.bank_move_id && JSON.stringify((after.allocations ?? []).slice(0, (before.allocations ?? []).length)) !== JSON.stringify(before.allocations ?? [])) return 'Bank transaction allocations cannot be changed';
   if (after.bank_move_id && after.open_amount != null) {
     const allocations = after.allocations ?? [];
     const allocated = allocations.reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
-    if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== statementCompanyAmount(db, after)) return 'Bank transaction allocations must match its amount';
+    if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== referenceAmount) return 'Bank transaction allocations must match its amount';
     const bankEntry = read(db, 'account.move', after.bank_move_id);
     const via = paymentJournal(db, after.journal_id);
     const bankAccount = accountId(db, via.account, company);
     const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
-    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== statementCompanyAmount(db, after)) return 'The bank entry must book the transaction amount once';
+    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) return 'The bank entry must book the transaction amount once';
     const suspense = accountId(db, '101404', company);
     for (const allocation of allocations) {
       const entry = read(db, 'account.move', allocation.payment_move_id);
