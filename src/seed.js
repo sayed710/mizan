@@ -132,7 +132,7 @@ export function seed() {
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
   db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
-  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1 }] });
+  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
     (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');
@@ -460,8 +460,8 @@ export function seed() {
   add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
   add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

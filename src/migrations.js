@@ -537,6 +537,12 @@ MIGRATIONS.push({ version: 23, name: 'Explicit base currency and fiscal earnings
     records: { ...db.records, 'res.company': companies } };
 } });
 
+MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared', up: (db) => ({
+  ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => ({
+    ...currency, rate_ids: (currency.rate_ids ?? []).map((row) => ({ ...row, company_id: row.company_id ?? null })),
+  })) },
+}) });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
