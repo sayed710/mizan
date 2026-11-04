@@ -1,5 +1,5 @@
 // Tax Returns and Return Types (Odoo 20 parity).
-import { create, read, search, updateSettings, write } from '../orm.js';
+import { create, getActiveCompany, read, search, updateSettings, write } from '../orm.js';
 import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { accountId } from './ledger.js';
@@ -17,14 +17,12 @@ const syncTaxLockDate = (db, companyId, excludeId = null) => {
 
 /** Determine if a return is an audit working file rather than a standard tax return. */
 export function isAuditReturn(r, db) {
-  if (!r) return false;
-  if (r.audit_status != null) return true;
-  if (r.type_id && db) {
-    const type = read(db, 'account.return.type', r.type_id);
-    if (type?.category === 'audit') return true;
-  }
-  return false;
+  return !!(r?.type_id && db && read(db, 'account.return.type', r.type_id)?.category === 'audit');
 }
+
+// A new working-file form has no persisted type until its first save.
+const auditForm = (r, db, context) => isAuditReturn(r, db)
+  || (!!context?.isNew && context.leaf?.key === 'working-files' && !r?.type_id);
 
 /** Compute audit verification checks for an audit return. */
 export function computeAuditChecks(db, ret) {
@@ -427,11 +425,14 @@ export function resetReturnToDraft(db, returnId) {
 }
 
 function returnGuard(db, before, after) {
-  const isAudit = isAuditReturn(after, db) || isAuditReturn(before, db);
+  const isAudit = isAuditReturn(after, db);
+  if (before && isAuditReturn(before, db) !== isAudit) return 'Cannot change a return between tax and audit workflows';
+  if (!isAudit && after.audit_status != null) return 'Audit status requires an audit return type';
   if (isAudit) {
-    if (before?.audit_status === 'done' && after.audit_status === 'done') {
-      const LOCKED = ['type_id', 'date_from', 'date_to', 'company_id', 'name'];
-      if (LOCKED.some((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
+    if (before?.audit_status === 'done') {
+      const fields = new Set([...Object.keys(before), ...Object.keys(after)]);
+      if (!['done', 'ongoing'].includes(after.audit_status)
+        || [...fields].some((k) => k !== 'audit_status' && JSON.stringify(before[k]) !== JSON.stringify(after[k]))) {
         return 'Done audit files cannot be modified';
       }
     }
@@ -550,6 +551,12 @@ export const taxReturnModels = {
   'account.return': {
     label: 'Tax Returns',
     guard: returnGuard,
+    prepareCreate: (db, vals) => {
+      if (!vals.audit_status || vals.type_id) return { db, vals };
+      const companyId = Number(vals.company_id ?? getActiveCompany() ?? 1);
+      const ensured = ensureAuditReturnType(db, companyId);
+      return { db: ensured.db, vals: { ...vals, type_id: ensured.typeId } };
+    },
     fields: {
       name: { type: 'char', label: 'Return', required: true },
       type_id: { type: 'many2one', relation: 'account.return.type', label: 'Return Type', required: true },
@@ -641,18 +648,18 @@ export const taxReturnModels = {
     kanban: { title: 'name', lines: ['date_from', 'date_to', 'total_amount_to_pay'], badge: 'state' },
     form: {
       statusbar: 'state',
-      statusbarFor: (r, db) => (isAuditReturn(r, db) ? 'audit_status' : 'state'),
+      statusbarFor: (r, db, context) => (auditForm(r, db, context) ? 'audit_status' : 'state'),
       statusbarClickable: false,
       lockedWhen: (r, db) => (isAuditReturn(r, db) ? r?.audit_status === 'done' : ['submitted', 'paid'].includes(r?.state)),
       title: 'name',
-      groups: (r, db) => (isAuditReturn(r, db) ? [
+      groups: (r, db, context) => (auditForm(r, db, context) ? [
         ['type_id', 'date_from', 'date_to', 'company_id'],
         ['audit_status', 'date_deadline'],
       ] : [
         ['type_id', 'date_from', 'date_to', 'company_id'],
         ['date_deadline', 'date_lock', 'date_submission', 'total_amount_to_pay', 'is_completed'],
       ]),
-      tabs: (r, db) => (isAuditReturn(r, db) ? [
+      tabs: (r, db, context) => (auditForm(r, db, context) ? [
         {
           label: 'Checks',
           fields: ['checks'],
@@ -710,8 +717,8 @@ export const taxReturnModels = {
         },
         {
           label: 'Reset to Draft',
-          when: (r, db) => !isAuditReturn(r, db) && ['reviewed', 'submitted'].includes(r.state),
-          run: (db, r) => ({ db: resetReturnToDraft(db, r.id) }),
+          when: (r, db) => (isAuditReturn(r, db) ? r.audit_status === 'done' : ['reviewed', 'submitted'].includes(r.state)),
+          run: (db, r) => ({ db: isAuditReturn(r, db) ? write(db, 'account.return', r.id, { audit_status: 'ongoing' }) : resetReturnToDraft(db, r.id) }),
         },
       ],
       chatter: true,

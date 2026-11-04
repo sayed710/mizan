@@ -105,6 +105,8 @@ const message = (model, resId, body, kind, record, source) => ({
 });
 
 export function create(db, model, vals) {
+  const prepared = models[model].prepareCreate?.(db, vals);
+  if (prepared) ({ db, vals } = prepared);
   const id = nextId(db, model);
   const rec = {
     ...(models[model].defaults?.(id) ?? {}),
