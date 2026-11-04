@@ -30,6 +30,9 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
   return base;
 };
 
+/** Replace all snapshot fields when merging a newly selected tax into a line. */
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, ...snapshot });
+
 /** The tax a fiscal position substitutes for `taxId` (the same tax when unmapped; null when mapped to no tax). */
 export function mapTax(db, fpId, taxId) {
   const rule = (read(db, 'account.fiscal.position', fpId)?.tax_ids ?? []).find((m) => m.tax_src_id === taxId);
@@ -97,7 +100,7 @@ export function fiscalPositionFor(db, partnerId) {
   if (!p) return null;
   if (p.property_account_position_id) return p.property_account_position_id;
   const country = (p.country ?? '').trim().toLowerCase();
-  const matches = search(db, 'account.fiscal.position').filter((fp) => fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country);
+  const matches = search(db, 'account.fiscal.position').filter((fp) => fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()));
   matches.sort((a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id);
   return matches[0]?.id ?? null;
 }
@@ -286,6 +289,7 @@ export const taxModels = {
       name: { type: 'char', label: 'Fiscal Position', required: true },
       sequence: { type: 'integer', label: 'Sequence' },
       auto_apply: { type: 'boolean', label: 'Detect Automatically' },
+      vat_required: { type: 'boolean', label: 'VAT Required' },
       country: { type: 'char', label: 'Country' },
       note: { type: 'text', label: 'Legal Notes' },
       tax_ids: {
@@ -299,12 +303,12 @@ export const taxModels = {
         newLine: () => ({ account_src_id: null, account_dest_id: null }),
       },
     },
-    defaults: () => ({ sequence: 10, auto_apply: false, tax_ids: [], account_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, tax_ids: [], account_ids: [] }),
     kanban: { title: 'name', lines: ['country'] },
     list: ['sequence', 'name', 'country', 'auto_apply'],
     form: {
       title: 'name',
-      groups: [['sequence', 'auto_apply', 'country'], []],
+      groups: [['sequence', 'auto_apply', 'country', 'vat_required'], []],
       tabs: [{ label: 'Tax Mapping', fields: ['tax_ids'] }, { label: 'Account Mapping', fields: ['account_ids'] }, { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,
     },

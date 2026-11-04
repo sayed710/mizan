@@ -6,10 +6,13 @@ import { TRANSITION, computeLineTaxes, isSectionOrNote, lineTaxOf, mapAccount, t
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
+import { reportingBookedAmount } from './money.js';
+
+export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
 
 export const ACCOUNT_TYPES = [
-  ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
-  ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['equity', 'Equity'],
+  ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
+  ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['liability_non_current', 'Non-current Liabilities'], ['liability_credit_card', 'Credit Card'], ['equity', 'Equity'], ['equity_unaffected', 'Current Year Earnings'], ['off_balance', 'Off-Balance Sheet'],
   ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_other', 'Other Expenses'],
 ];
 
@@ -100,10 +103,33 @@ export function invoiceCounterpartAccount(db, invoice) {
   return ids[0];
 }
 
+export function resolveDocumentJournal(db, move) {
+  if (!move) return null;
+  let jId = move.journal_id;
+  if (!jId && move.id) {
+    jId = read(db, 'account.move', move.id)?.journal_id;
+  }
+  if (!jId && (move.session_id || move.pos_config_id || move.config_id)) {
+    const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
+    const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
+    const config = configId ? read(db, 'pos.config', configId) : null;
+    jId = session?.journal_id || config?.journal_id || journalId(db, 'POSS', session?.company_id ?? config?.company_id ?? move.company_id ?? 1);
+  }
+  if (!jId) {
+    const isEntry = move.move_type === 'entry';
+    const isPur = ['in_invoice', 'in_refund'].includes(move.move_type);
+    const code = isEntry ? 'MISC' : (isPur ? 'BILL' : 'INV');
+    jId = journalId(db, code, move.company_id ?? 1);
+  }
+  return jId ? read(db, 'account.journal', jId) : null;
+}
+
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const base = accountId(db, sale ? '400000' : '600000', move.company_id);
+  const journal = resolveDocumentJournal(db, move);
+  if (!journal) throw new Error('Select a journal for this document');
+  const base = journal.default_account_id;
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -114,7 +140,10 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    return { accountId: base, configured: false, type: 'default' };
+    if (!base) {
+      throw new Error(`Journal "${journal.name || journal.code}" has no default account configured`);
+    }
+    return { accountId: base, configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     if (isSectionOrNote(l)) continue;
@@ -138,13 +167,39 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const docCurrency = documentCurrency(db, move);
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
-    const zero = !computed.tax && !cashBasis ? (l.tax_name || taxLabel(l)) : '';
-    const tags = [...new Set([...(l.tax_tag_ids ?? []), ...computed.taxes.flatMap((t) => t.tax_tag_ids ?? [])])].sort((a, b) => a - b);
-    const key = `${account}:${zero}:${tags.join(',')}:${cashBasis}`;
-    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis, amount: 0, lines: [] };
-    group.amount += computed.untaxed;
-    group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
-    byAccount.set(key, group);
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
+    const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
+
+    if (!computed.tax && !cashBasis) {
+      const zeroTaxes = computed.taxes.length
+        ? computed.taxes
+        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), tax_tag_ids: l.tax_tag_ids ?? [] }];
+      for (const [compIndex, t] of zeroTaxes.entries()) {
+        const zero = taxLabel(t);
+        const zeroTaxId = t.tax_id ?? null;
+        const tags = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b);
+        const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
+        const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
+        if (compIndex === 0) {
+          group.amount += computed.untaxed;
+          group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+        }
+        group.base += t.base ?? computed.untaxed;
+        byAccount.set(key, group);
+      }
+    } else {
+      const zero = '';
+      const zeroTaxId = null;
+      const tags = [...new Set(computed.taxes.length
+        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => t.tax_tag_ids ?? [])
+        : cashBasis ? [] : (l.tax_tag_ids ?? []))].sort((a, b) => a - b);
+      const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
+      const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
+      group.amount += computed.untaxed;
+      group.base += computed.untaxed;
+      group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+      byAccount.set(key, group);
+    }
   }
   return [...byAccount.values()];
 }
@@ -222,7 +277,17 @@ export function invoiceLines(db, move) {
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
+  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, base, zero, lines, tags, zeroTaxId, distribution }) => [
+    account,
+    companyRound(docRound(amount) / rate),
+    docRound(amount),
+    zero,
+    lines,
+    tags,
+    zeroTaxId,
+    distribution,
+    companyRound(docRound(base ?? amount) / rate),
+  ]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
   const mixedDiscount = discountFactor !== 1;
@@ -310,7 +375,7 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, cashBasis]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: !cashBasis } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
@@ -369,20 +434,21 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
 }
 
-/** Resolve a selected or explicitly configured company payment journal and its validated liquidity account. */
-export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
-  const company = read(db, 'res.company', companyId ?? 1);
-  if (!company && !selectedJournalId) throw new Error('The payment company does not exist');
-  const targetCompanyId = company?.id ?? companyId ?? 1;
+/** Resolve a selected or explicitly configured company payment journal by ID. */
+export function paymentJournal(db, selectedJournalId = null, companyContext = 1) {
+  const company = typeof companyContext === 'object' && companyContext !== null
+    ? companyContext
+    : read(db, 'res.company', companyContext ?? 1);
+  if (!company?.id) throw new Error('The payment company does not exist');
   const id = selectedJournalId ?? company.default_payment_journal_id;
   if (!id) throw new Error('Configure a default payment journal for this company');
   const journal = read(db, 'account.journal', id);
   if (!journal) throw new Error('The selected payment journal does not exist');
   if (journal.active === false) throw new Error('The selected payment journal is archived');
   if (!['bank', 'cash'].includes(journal.type)) throw new Error('Select a bank or cash payment journal');
-  if (journal.company_id && journal.company_id !== targetCompanyId) throw new Error('The selected payment journal belongs to another company');
-  const account = assertCompanyAccount(db, journal.default_account_id, targetCompanyId, 'asset_cash', 'The selected journal liquidity account');
-  return { id: journal.id, code: journal.code, account };
+  if (journal.company_id && journal.company_id !== company.id) throw new Error('The selected payment journal belongs to another company');
+  const accountId = assertCompanyAccount(db, journal.default_account_id, company.id, 'asset_cash', 'The selected journal liquidity account');
+  return { id: journal.id, code: journal.code, accountId };
 }
 
 /** Ensure the bank suspense account exists for older databases and company-specific charts. */
@@ -403,15 +469,16 @@ export function outstandingAccount(db, journal, company, inbound) {
   return id;
 }
 
-/** Posted journal items with their move date, optionally limited to [from, to] and company. */
-export function journalItems(db, { from, to, company_id, company } = {}) {
+/** Journal items with their move date, optionally limited by review status, date and company. */
+export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
+  const wantedState = reviewMode === 'draft' ? 'draft' : 'posted';
   const returns = new Map((db.records?.['account.return'] ?? []).map((r) => [r.id, r]));
   const settlementMoves = new Set((db.records?.['account.payment'] ?? []).filter((p) => p.is_tax_payment || p.return_id).map((p) => p.move_id).filter(Boolean));
-  return search(db, 'account.move')
+  const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      return m.state === 'posted'
+      return m.state === wantedState
       && (!from || date >= from)
       && (!to || date <= to)
       && (!targetCompany || (m.company_id ?? 1) === targetCompany)
@@ -424,6 +491,7 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,
+        move_state: m.state,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,
         is_closing: !!m.is_closing,
@@ -431,12 +499,18 @@ export function journalItems(db, { from, to, company_id, company } = {}) {
         is_tax_payment: isTaxSettlement,
       }));
     });
+  if (reviewMode !== 'unreconciled') return rows;
+  return rows.filter((line) => {
+    const account = read(db, 'account.account', line.account_id);
+    const reconcilable = account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+    return reconcilable && line.reconciled !== true;
+  });
 }
 
 /** Balance per account (debit − credit) over the given items. */
 export function balances(db, items) {
   const map = new Map();
-  for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + (Number(l.debit) || 0) - (Number(l.credit) || 0));
+  for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + reportingBookedAmount(db, l, (Number(l.debit) || 0) - (Number(l.credit) || 0)));
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
@@ -466,9 +540,9 @@ export function balanceSheet(db, at = today(), { weight } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
   const rows = balances(db, weighted(journalItems(db, filter), weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
-  const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_fixed'], 1);
-  const liabilities = pick(['liability_payable', 'liability_current'], -1);
-  const equity = pick(['equity'], -1);
+  const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
+  const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
+  const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));

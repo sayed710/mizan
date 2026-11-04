@@ -46,7 +46,7 @@ export function postPayment(db, p) {
   const inbound = currentPayment.payment_type === 'inbound';
   const journal = read(db, 'account.journal', via.id);
   const outstanding = outstandingAccount(db, journal, currentPayment.company_id ?? 1, inbound);
-  const liquidity = outstanding ?? via.account;
+  const liquidity = outstanding ?? via.accountId;
   let taxClosing = null;
   if (currentPayment.return_id || currentPayment.is_tax_payment) {
     const ret = read(db, 'account.return', currentPayment.return_id);

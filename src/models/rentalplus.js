@@ -34,7 +34,7 @@ export function holdDeposit(db, rentalId, amount) {
   const companyId = rental.company_id ?? 1;
   const via = paymentJournal(db, null, companyId);
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Deposit ${rental.name}`, company: companyId, lines: [
-    { account_id: via.account, debit: value, partner_id: rental.partner_id },
+    { account_id: via.accountId, debit: value, partner_id: rental.partner_id },
     { account: '230100', credit: value, partner_id: rental.partner_id },
   ] });
   return create(booked.db, 'rental.deposit', { rental_id: rentalId, company_id: rental.company_id ?? 1, amount: value, state: 'held', move_id: booked.id });
@@ -53,7 +53,7 @@ export function settleDeposit(db, depositId, { damage = 0, note } = {}) {
   const via = paymentJournal(db, null, companyId);
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Settle deposit ${rental.name}`, company: companyId, lines: [
     { account: '230100', debit: deposit.amount, partner_id },
-    ...(refund ? [{ account_id: via.account, credit: refund, partner_id }] : []),
+    ...(refund ? [{ account_id: via.accountId, credit: refund, partner_id }] : []),
     ...(withheld ? [{ account: '450000', credit: withheld, partner_id }] : []),
   ] });
   return write(booked.db, 'rental.deposit', depositId, { state: withheld ? 'withheld' : 'refunded', withheld_amount: withheld, note: note ?? deposit.note, settlement_move_id: booked.id });

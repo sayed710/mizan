@@ -60,13 +60,15 @@ test('discount button uses the posted invoice counterpart account', () => {
   const invoice = create(term.db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: today(), invoice_payment_term_id: term.id, invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   const posted = press(invoice.db, 'account.move', invoice.id, 'Confirm');
   const db = { ...posted, records: { ...posted.records, 'account.move': posted.records['account.move'].map((move) => move.id === invoice.id ? { ...move, line_ids: move.line_ids.map((line) => read(posted, 'account.account', line.account_id)?.account_type === 'asset_receivable' ? { ...line, account_id: account.id } : line) } : move) } };
-  const oldPrompt = globalThis.prompt;
-  globalThis.prompt = () => '98';
-  try {
-    const paid = press(db, 'account.move', invoice.id, 'Register Payment');
-    const discount = read(paid, 'account.move', read(paid, 'account.move', invoice.id).payments.at(-1).move_id);
-    assert.ok(discount.line_ids.some((line) => line.account_id === account.id && line.credit === 2));
-  } finally { globalThis.prompt = oldPrompt; }
+  const configuredJournalId = read(db, 'res.company', 1).default_payment_journal_id;
+  const paymentJournals = Object.values(db.records['account.journal']).filter((journal) => journal.id === configuredJournalId);
+  assert.equal(paymentJournals.length, 1);
+  const journal_id = paymentJournals[0].id;
+  const paid = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment').run(db, read(db, 'account.move', invoice.id), {
+    amount: 98, date: today(), journal_id,
+  }).db;
+  const discount = read(paid, 'account.move', read(paid, 'account.move', invoice.id).payments.at(-1).move_id);
+  assert.ok(discount.line_ids.some((line) => line.account_id === account.id && line.credit === 2));
 });
 
 

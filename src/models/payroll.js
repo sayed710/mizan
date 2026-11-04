@@ -170,7 +170,7 @@ function pay(db, slip) {
   const via = paymentJournal(db, null, companyId);
   const { db: booked } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, ref: `Salary payment ${slip.name}`,
-    lines: [{ account: '230000', debit: net }, { account_id: via.account, credit: net }],
+    lines: [{ account: '230000', debit: net }, { account_id: via.accountId, credit: net }],
   });
   return write(booked, 'hr.payslip', slip.id, { state: 'paid' });
 }

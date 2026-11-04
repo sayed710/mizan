@@ -1,6 +1,6 @@
-import { create, postNote, read, search, unlink, write } from '../orm.js';
+import { create, postNote, read, unlink, write } from '../orm.js';
 import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
@@ -41,7 +41,6 @@ const paymentState = (r, db) => {
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-const PREFIX = { out_invoice: 'INV', out_refund: 'RINV', in_invoice: 'BILL', in_refund: 'RBILL', entry: 'MISC' };
 
 /** Ids of the entries that settle invoices (payments and early-payment discounts). */
 const settlingEntries = (db) => new Set((db.records['account.move'] ?? []).flatMap((m) => (m.payments ?? []).flatMap((p) => [p.move_id, p.payment_fx_move_id]).filter(Boolean)));
@@ -227,7 +226,14 @@ export function postMove(db, id) {
     r = { ...r, invoice_line_ids: refreshAdvanceDeductions(db, order, r.invoice_line_ids, id) };
   }
   const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
-  const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${PREFIX[r.move_type]}/${year}/`);
+  const journal = r.journal_id || journalId(db, isInvoice(r) ? (isPurchase(r) ? 'BILL' : 'INV') : 'MISC', r.company_id ?? 1);
+  if (!journal) throw new Error(isInvoice(r) ? `No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company` : 'Select a journal for this entry');
+  const journalRecord = read(db, 'account.journal', journal);
+  if (!journalRecord) throw new Error('Selected journal does not exist');
+  if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
+  if (!journalRecord.code?.trim()) throw new Error('Set a short code on the journal');
+  const code = ['out_refund', 'in_refund'].includes(r.move_type) ? `R${journalRecord.code}` : journalRecord.code;
+  const name = r.name && r.name !== '/' ? r.name : nextName(db, 'account.move', `${code}/${year}/`);
   if (!isInvoice(r)) {
     if (badLineSign(r.line_ids)) throw new Error('Debits and credits cannot be negative');
     if (!isBalanced(r.line_ids, companyCurrencyRecord(db, r.company_id))) throw new Error('Journal entry is not balanced: total debit must equal total credit');
@@ -244,8 +250,7 @@ export function postMove(db, id) {
       }
     }
     const line_ids = (r.line_ids ?? []).map((line) => {
-      const type = read(db, 'account.account', line.account_id)?.account_type;
-      const eligible = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(type);
+      const eligible = analyticEligibleAccount(read(db, 'account.account', line.account_id));
       const distribution = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : eligible ? findAnalyticDistribution(db, {
         partner_id: line.partner_id ?? r.partner_id, product_id: line.product_id, account_id: line.account_id, company_id: r.company_id ?? 1,
       }) : null);
@@ -253,18 +258,13 @@ export function postMove(db, id) {
       return { ...line, analytic_distribution: normalizeDistribution(distribution, db) };
     });
     checkMandatoryPlans(db, { ...r, line_ids });
-    const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, line_ids }), id);
+    const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids }), id);
     const reversed = r.auto_reverse ? reverseEntry(posted, read(posted, 'account.move', id), r.reverse_date, { journal_id: r.reverse_journal_id ?? r.journal_id }).db : posted;
     return spawnRecurringMove(reversed, read(reversed, 'account.move', id));
   }
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   if (!validInvoiceTotal(r, db)) throw new Error('The total must be positive; use a credit note or refund instead');
-  const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
-  if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
-  const journalRecord = read(db, 'account.journal', journal);
-  if (!journalRecord) throw new Error('Selected journal does not exist');
-  if (journalRecord.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   const expectedType = isPurchase(r) ? 'purchase' : 'sale';
   if (journalRecord.type !== expectedType) throw new Error(`Journal must be of type ${expectedType}`);
   if (r.sale_id) {
@@ -281,20 +281,21 @@ export function postMove(db, id) {
   }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
-  checkBillMatch(db, r);
+  const matchWarnings = checkBillMatch(db, r);
   const resolvedLines = (r.invoice_line_ids ?? []).map((line) => {
     if (line.analytic_distribution && Object.keys(line.analytic_distribution).length > 0) return line;
-    const dist = distributionOfLine(line, db, r);
+    const dist = distributionOfLine(line, db, { ...r, journal_id: journal });
     return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
   });
-  const updatedR = { ...r, invoice_line_ids: resolvedLines };
+  const updatedR = { ...r, journal_id: journal, invoice_line_ids: resolvedLines };
   const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (line_ids.some((line) => {
     const account = read(db, 'account.account', line.account_id);
     return account?.company_id && account.company_id !== (r.company_id ?? 1);
   })) throw new Error('Journal account belongs to another company');
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
-  const posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
   if (isRefund(r) && r.reversed_entry_id) return spawnRecurringMove(offsetCreditNote(deferred, id), read(deferred, 'account.move', id));
   const withAssets = r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
@@ -316,9 +317,9 @@ export function reverseDepreciation(db, move, options = {}) {
   return write(linked, 'account.asset', asset.id, { state: 'open', depreciation_ids: asset.depreciation_ids.map((l) => l.move_id === move.id ? { ...l, posted: false, move_id: null } : l) });
 }
 
-/** Credit notes of an invoice that are not cancelled, other than `exceptId`. */
+/** Issued credit notes of an invoice, other than `exceptId`; drafts do not consume credit. */
 const creditNotesOf = (db, invoiceId, exceptId = null) => (db.records['account.move'] ?? [])
-  .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state !== 'cancel');
+  .filter((m) => m.reversed_entry_id === invoiceId && m.id !== exceptId && m.state === 'posted');
 
 /** A credit note that settled its invoice (and the invoice it settled) stays: deleting either would leave the other falsely paid. */
 function settledByCreditNote(db, m) {
@@ -460,7 +461,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const via = paymentJournal(db, payJournal, r.company_id ?? 1);
   const journal = read(db, 'account.journal', via.id);
   const outstanding = directBank || liquidityAccountId ? null : outstandingAccount(db, journal, r.company_id ?? 1, sale);
-  const liquidity = liquidityAccountId ?? outstanding ?? via.account;
+  const liquidity = liquidityAccountId ?? outstanding ?? via.accountId;
   // Bank moves at today's rate, the receivable/payable at the invoice rate; the gap is an exchange difference.
   const bank = bookedShare ?? toCompany(db, r.currency_id, value, date, r.company_id);
   // The last payment clears exactly what is left on the receivable/payable, so no cent stays behind.
@@ -520,7 +521,9 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
-const releasedTaxKey = (account, name, tags = []) => `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
+const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
+  ? JSON.stringify([account, taxId, [...tags].sort((a, b) => a - b)])
+  : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
 
 /** Tax already released for an invoice, per tax account code. */
 const releasedTaxes = (db, r) => {
@@ -529,7 +532,7 @@ const releasedTaxes = (db, r) => {
     if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
-      const key = releasedTaxKey(code, l.tax_name, l.tax_tag_ids);
+      const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
       const previous = released.get(key) ?? { amount: 0, base: 0 };
       const zeroTax = !(Number(l.debit) || Number(l.credit));
       // Signed bases (and older zero-amount bases) include the refund direction.
@@ -559,7 +562,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_name, g.tax_tag_ids)) : null;
+    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids)) : null;
     const legacy = final ? released.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
@@ -570,9 +573,9 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   if (!due.length) return { db, id: null };
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
-  const lines = due.flatMap(({ account, amount, base, tax_name, tax_tag_ids }) => {
+  const lines = due.flatMap(({ account, amount, base, tax_id, tax_name, tax_tag_ids }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
@@ -696,19 +699,23 @@ function discountTaxLines(db, invoice, term, discount) {
   return (invoice.line_ids ?? []).filter((line) => line.tax_name && !line.tax_zero).map((line) => ({
     account_id: line.account_id, partner_id: invoice.partner_id, name: line.tax_name,
     debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
-    tax_name: line.tax_name, tax_base: companyRound((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    tax_id: line.tax_id, tax_name: line.tax_name, tax_base: companyRound((isRefund(invoice) ? 1 : -1) * (Number(line.tax_base) || 0) * share), tax_base_signed: true,
+    ...(line.tax_tag_ids?.length ? { tax_tag_ids: line.tax_tag_ids } : {}),
     ...(line.tax_side ? { tax_side: line.tax_side } : {}),
   }));
 }
 
 /** Pay `amount`; when it settles the invoice net of an early-payment discount, book the discount too. */
-export function payWithDiscount(db, id, amount, date = today()) {
+export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const r = read(db, 'account.move', id);
+  if (!validDate(date)) throw new Error('Enter a valid payment date');
+  const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
+  const journalIdVal = opts.journalId ?? opts.journal_id ?? null;
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const due = residual(r, db);
-  const paid = payMove(db, id, amount, date);
+  const paid = payMove(db, id, amount, date, { journalId: journalIdVal });
   const gap = docRound(due - amount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
   if (!(gap > 0) || discount < gap) return paid;
@@ -719,11 +726,19 @@ export function payWithDiscount(db, id, amount, date = today()) {
   const counterpart = invoiceCounterpartAccount(db, r);
   const taxes = discountTaxLines(db, r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
   const taxValue = companyRound(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
+  const share = discount / (total(r, db) || 1);
+  const bases = read(db, 'account.payment.term', r.invoice_payment_term_id)?.discount_tax_computation === 'included'
+    ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
+      account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
+      tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
+      debit: companyRound((Number(line.credit) || 0) * share), credit: companyRound((Number(line.debit) || 0) * share),
+    })) : [];
+  const baseValue = companyRound(bases.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const { db: booked, id: discountMove } = postEntry(paid, {
     journal: 'MISC', date, ref: `Early payment discount ${r.name}`, company: company?.id ?? null,
     lines: sale
-      ? [{ account: discountAccount, debit: value - taxValue, partner_id: r.partner_id }, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
-      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...taxes, { account: discountAccount, credit: value - taxValue, partner_id: r.partner_id }],
+      ? [{ account: discountAccount, debit: value - taxValue - baseValue, partner_id: r.partner_id }, ...bases, ...taxes, { account: counterpart, credit: value, partner_id: r.partner_id }]
+      : [{ account: counterpart, debit: value, partner_id: r.partner_id }, ...bases, ...taxes, { account: discountAccount, credit: value - taxValue - baseValue, partner_id: r.partner_id }],
   });
   const after = read(booked, 'account.move', id);
   // Recorded like a payment (dated, pointing at its entry), so locked-period checks can verify it.
@@ -732,24 +747,30 @@ export function payWithDiscount(db, id, amount, date = today()) {
   return postNote(write(booked, 'account.move', id, { amount_paid: docRound((Number(after.amount_paid) || 0) + discount), payment_date: date, payments }), 'account.move', id, `Early payment discount of ${money(discount)} applied`);
 }
 
-function registerPayment(db, r) {
-  const due = roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r));
-  const amount = promptedAmount(prompt(`Payment amount (due ${money(due)})`, String(due)));
-  if (amount == null) return { db };
-  return { db: payWithDiscount(db, r.id, amount) };
+function registerPayment(db, r, values = {}) {
+  if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
+  const amount = promptedAmount(values.amount);
+  if (amount == null) throw new Error('Enter a payment amount greater than zero');
+  const date = values.date;
+  const journalIdVal = values.journal_id;
+  if (!validDate(date)) throw new Error('Enter a valid payment date');
+  if (!journalIdVal) throw new Error('Select a payment journal');
+  const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
+  return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
 }
 
-const termDue = (db, r) => {
+const termDue = (db, r, { clear = false } = {}) => {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
-  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : {};
+  return term && r.invoice_date ? { invoice_date_due: dueDate(term, r.invoice_date) } : clear ? { invoice_date_due: null } : {};
 };
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
 const billLineBase = productLines('Invoice Lines', 'cost');
 const invoiceLineField = { ...invoiceLineBase, onchange: (line, key, db, move) => {
-  const updated = (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, move);
-  return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, move) } : updated;
-}, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+  const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: journalId(db, isPurchase(move) ? 'BILL' : 'INV', move.company_id ?? 1) } : move);
+  const updated = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
+  return db && ['product_id', 'account_id'].includes(key) ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) } : updated;
+}, fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
@@ -899,10 +920,12 @@ export const accountingModels = {
         const partnerChange = key === 'partner_id';
         const term = partnerChange && r.partner_id ? read(db, 'res.partner', r.partner_id)?.property_payment_term_id : null;
         const fiscal = partnerChange ? { fiscal_position_id: fiscalPositionFor(db, r.partner_id) } : {};
-        const partnerBank = partnerChange && isPurchase(r)
-          ? search(db, 'res.partner.bank').find((b) => b.partner_id === r.partner_id && b.allow_out_payment && b.active !== false)?.id ?? null
-          : null;
-        const context = { ...r, ...fiscal };
+        const selectedBank = partnerChange && isPurchase(r) && r.partner_bank_id ? read(db, 'res.partner.bank', r.partner_bank_id) : null;
+        const partnerBank = selectedBank && selectedBank.partner_id === r.partner_id && selectedBank.allow_out_payment
+          && selectedBank.active !== false && (!selectedBank.company_id || selectedBank.company_id === (r.company_id ?? 1))
+          ? selectedBank.id : null;
+        const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
+        const context = { ...r, ...fiscal, journal_id: journal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
             const remap = (key === 'fiscal_position_id' || partnerChange) && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
@@ -912,16 +935,19 @@ export const accountingModels = {
           : {};
         return {
           ...fiscal,
-          ...(partnerBank ? { partner_bank_id: partnerBank } : {}),
+          ...(partnerChange && isPurchase(r) ? { partner_bank_id: partnerBank } : {}),
           ...linesUpdate,
-          ...(term ? { invoice_payment_term_id: term, ...termDue(db, { ...r, invoice_payment_term_id: term }) } : {}),
+          ...(partnerChange ? {
+            invoice_payment_term_id: term ?? null,
+            ...termDue(db, { ...r, invoice_payment_term_id: term ?? null }, { clear: true }),
+          } : {}),
         };
       }
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
-      move_type: { type: 'selection', label: 'Type', readonly: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
+      move_type: { type: 'selection', label: 'Type', readonly: true, copy: true, options: [['out_invoice', 'Customer Invoice'], ['out_refund', 'Credit Note'], ['in_invoice', 'Vendor Bill'], ['in_refund', 'Vendor Refund'], ['entry', 'Journal Entry']] },
       journal_id: {
         type: 'many2one',
         relation: 'account.journal',
@@ -1069,7 +1095,18 @@ export const accountingModels = {
         { label: 'Reset Payment Review', when: (r) => r.move_type === 'in_invoice' && r.state === 'posted' && r.force_post, run: (db, r) => ({ db: write(db, 'account.move', r.id, { force_post: false }) }) },
         // Server-only: Claude reads an uploaded bill (image/PDF) into this draft.
         { label: 'Digitize Document', upload: 'image/*,application/pdf', server: '/api/integrations/digitize', requires: 'ai', when: (r) => r.state === 'draft' && r.move_type === 'in_invoice' },
-        { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid', run: registerPayment },
+        {
+          label: 'Register Payment', primary: true, when: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid',
+          wizard: (db, r) => ({
+            title: 'Register Payment',
+            fields: [
+              { name: 'amount', type: 'monetary', label: 'Payment Amount', required: true, default: String(roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r))) },
+              { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
+              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: null, domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && ['bank', 'cash'].includes(j.type) },
+            ],
+          }),
+          run: registerPayment,
+        },
         { label: 'Send by Email', email: 'document', when: (r) => r.state === 'posted' && isInvoice(r), run: (db) => ({ db }) },
         {
           label: 'Credit Note',

@@ -31,8 +31,8 @@ test('bank reconciliation enforces company for entries, payment entries, journal
   assert.equal(read(done, LINE, line.id).state, 'reconciled');
   assert.throws(() => write(done, LINE, line.id, { company_id: branch.id }), /cannot be changed/);
 
-  const bankAccount = create(line.db, 'account.account', { name: 'Foreign bank liquidity', code: 'FB-ACCOUNT', account_type: 'asset_cash', company_id: branch.id });
-  const journal = create(bankAccount.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: bankAccount.id });
+  const liquidity = create(line.db, 'account.account', { name: 'Foreign Bank Liquidity', code: '999803', account_type: 'asset_cash', company_id: branch.id });
+  const journal = create(liquidity.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: liquidity.id });
   assert.throws(() => addLine(journal.db, { company_id: 1, amount: 10, journal_id: journal.id }), /bank journal belongs to another company/);
   const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id });
   const booked = run(branchLine.db, branchLine.id, 'Book to Account');

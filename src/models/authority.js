@@ -76,7 +76,7 @@ function sheetBookingError(db, r) {
   const companyId = r.company_id ?? 1;
   if (r.payment_mode === 'company_account') {
     let liquidity;
-    try { liquidity = paymentJournal(db, entry.journal_id, companyId).account; }
+    try { liquidity = paymentJournal(db, entry.journal_id, companyId).accountId; }
     catch (error) { return error.message; }
     return r.state === 'done' && close(credit(entry, liquidity), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
   }
@@ -89,7 +89,7 @@ function sheetBookingError(db, r) {
     let reimbursed = 0;
     for (const move of reimbursements) {
       let liquidity;
-      try { liquidity = paymentJournal(db, move.journal_id, companyId).account; }
+      try { liquidity = paymentJournal(db, move.journal_id, companyId).accountId; }
       catch (error) { return error.message; }
       reimbursed += Math.min(-credit(move, payable), credit(move, liquidity));
     }

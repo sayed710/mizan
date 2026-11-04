@@ -118,7 +118,10 @@ test('automatic follow-ups record email delivery and leave levels unchanged when
   assert.equal(messagesOf(runFollowUps(attempted, today()), 'res.partner', partner.id).length, messagesOf(attempted, 'res.partner', partner.id).length);
 
   const withEmail = write(attempted, 'res.partner', partner.id, { email: 'reminder@example.test' });
-  const sent = runFollowUps(withEmail, addDays(today(), 1));
+  const failed = await runFollowUps(withEmail, addDays(today(), 1), async () => { throw new Error('SMTP unavailable'); });
+  assert.equal(partnerFollowUp(read(failed, 'res.partner', partner.id), 1).followup_delivery_state, 'not_sent');
+  assert.equal(partnerFollowUp(read(failed, 'res.partner', partner.id), 1).followup_level_delay, null);
+  const sent = await runFollowUps(failed, addDays(today(), 1), async () => {});
   const sentProgress = partnerFollowUp(read(sent, 'res.partner', partner.id), 1);
   assert.equal(sentProgress.followup_delivery_state, 'sent');
   assert.equal(sentProgress.followup_level_delay, 15);

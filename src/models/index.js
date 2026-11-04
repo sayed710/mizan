@@ -217,8 +217,11 @@ const allApps = [
         ] },
       ] },
       { label: 'Review', children: [
-                { label: 'Control', children: [
+        { label: 'Control', children: [
           { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
+          { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' } },
+          { key: 'unreconciled', label: 'Unreconciled', type: 'report', report: 'unreconciledItems', reviewMode: 'unreconciled' },
+          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },

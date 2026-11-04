@@ -5,7 +5,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, accountId, journalId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -138,6 +138,8 @@ export function seed() {
     default_payment_journal_id: defaultPaymentJournalId,
   });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
+  const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
+  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1 }] });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
     (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');
@@ -247,9 +249,9 @@ export function seed() {
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
   const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
-  add('account.bank.statement.line', { date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
-  add('account.bank.statement.line', { date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
-  add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
+  add('account.bank.statement.line', { journal_id: defaultPaymentJournalId, date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
+  add('account.bank.statement.line', { journal_id: defaultPaymentJournalId, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
+  add('account.bank.statement.line', { journal_id: defaultPaymentJournalId, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
@@ -320,7 +322,7 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1 });
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1, journal_id: journalId(db, 'POSS', 1) });
   add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
@@ -465,8 +467,8 @@ export function seed() {
   add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
   add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

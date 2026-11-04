@@ -439,7 +439,7 @@ test('Two-company isolation: Working Files and Annual Report are strictly scoped
   let db = seed();
 
   // Create Company 2
-  const comp2 = createCompany(db, { name: 'Audit Company Two' });
+  const comp2 = createCompany(db, { name: 'Audit Company Two', currency_id: db.records['res.company'][0].currency_id });
   db = comp2.db;
   const company2Id = comp2.id;
 

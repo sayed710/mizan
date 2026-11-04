@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -197,7 +197,7 @@ function Tax({ db, period }) {
 }
 
 const Aged = (kind) => function AgedBody({ db, period }) {
-  const { buckets, rows } = agedBalance(db, kind, period.to || today());
+  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to));
   const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (
@@ -214,6 +214,19 @@ const Aged = (kind) => function AgedBody({ db, period }) {
     </tbody>
   );
 };
+
+function FollowUpActions({ db, reminder, companyId }) {
+  const email = read(db, 'res.partner', reminder.partner_id)?.email?.trim();
+  const channel = followUpLevel(db, reminder)?.channel;
+  const manualChannel = ['phone', 'letter'].includes(channel) ? channel : 'email';
+  const options = { scope: db, reminder, companyId };
+  return <>
+    {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
+      onClick={() => commit(openManualFollowUp(getDb(), reminder.partner_id, today(), options))}>{t('Open Reminder in Mail App')}</a>{' '}</>}
+    {(manualChannel !== 'email' || email) &&
+      <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), reminder.partner_id, today(), { ...options, channel: manualChannel }))}>{t('Confirm Sent')}</button>}
+  </>;
+}
 
 export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   const settingsAllowed = (sourceDb ?? db).settings?.allowed_company_ids ?? [currentCompany(sourceDb ?? db)];
@@ -248,20 +261,12 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
               <td colSpan={3}><strong>{company.name}</strong></td>
             </tr>
             {items.map((f) => {
-              const email = read(db, 'res.partner', f.partner_id)?.email;
-              const body = followUpText(db, f);
               return (
                 <tr key={`${company.id}-${f.partner_id}`} className="rep-detail">
                   <td>
                     <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
                     <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-                    {email && (
-                      <>
-                        <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                          onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Open Reminder in Mail App')}</a>{' '}
-                        <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: company.id }))}>{t('Confirm Sent')}</button>
-                      </>
-                    )}
+                    <FollowUpActions db={db} reminder={f} companyId={company.id} />
                   </td>
                   <td className="num">{f.oldest}</td>
                   <td className="num">{money(f.total)}</td>
@@ -280,20 +285,12 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
   return (
     <tbody>
       {singleItems.map((f) => {
-        const email = read(db, 'res.partner', f.partner_id)?.email;
-        const body = followUpText(db, f);
         return (
           <tr key={f.partner_id} className="rep-detail">
             <td>
               <a href={`#/open/res.partner/${f.partner_id}`}>{partnerName(db, f.partner_id)}</a>{' '}
               <span className="muted">{f.invoices.map((m) => m.name).join(', ')}</span>{' '}
-              {email && (
-                <>
-                  <a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(body)}`}
-                    onClick={() => commit(openManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Open Reminder in Mail App')}</a>{' '}
-                  <button type="button" className="btn sm" onClick={() => commit(logManualFollowUp(getDb(), f.partner_id, today(), { scope: db, reminder: f, companyId: singleCompanyId }))}>{t('Confirm Sent')}</button>
-                </>
-              )}
+              <FollowUpActions db={db} reminder={f} companyId={singleCompanyId} />
             </td>
             <td className="num">{f.oldest}</td>
             <td className="num">{money(f.total)}</td>
@@ -513,7 +510,7 @@ const REPORTS = {
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id }) {
   if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
-  const component = leaf.report === 'journalItems' ? JournalItems
+  const component = ['journalItems', 'unreconciledItems'].includes(leaf.report) ? JournalItems
     : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
     : leaf.report === 'checks' ? Checks
     : leaf.report === 'loansAnalysis' ? LoansAnalysis

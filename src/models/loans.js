@@ -60,7 +60,7 @@ export function confirmLoan(db, loan) {
   const { db: booked, id: receiptId } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
-      { account_id: via.account, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account_id: via.accountId, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
       { account: '260000', credit: loan.amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
@@ -78,7 +78,7 @@ export function postDueLines(db, loan, upTo = today()) {
       lines: [
         { account: '260000', debit: l.principal, partner_id: loan.lender_id ?? undefined },
         { account: '690400', debit: l.interest, partner_id: loan.lender_id ?? undefined },
-        { account_id: via.account, credit: l.payment, partner_id: loan.lender_id ?? undefined },
+        { account_id: via.accountId, credit: l.payment, partner_id: loan.lender_id ?? undefined },
       ],
     });
     return { db: booked, line_ids: [...acc.line_ids, { ...l, posted: true, move_id: id }] };
@@ -99,7 +99,7 @@ export function earlyRepayment(db, loan, { date, amount }) {
     journal: via.code, journal_id: via.id, company: companyId, date, ref: `Early repayment ${loan.name}`,
     lines: [
       { account: '260000', debit: amount, partner_id: loan.lender_id ?? undefined },
-      { account_id: via.account, credit: amount, partner_id: loan.lender_id ?? undefined },
+      { account_id: via.accountId, credit: amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   const posted = (loan.line_ids ?? []).filter((l) => l.posted);

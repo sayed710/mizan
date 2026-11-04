@@ -28,7 +28,7 @@ const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?
  * Apply every installed app's scheduled action due at `at`; returns the same db object when nothing changed. A job that throws
  * (e.g. a locked period) leaves db unchanged so the other jobs still run, and is reported through `onError`.
  */
-export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) {
+export function runScheduledJobs(db, at = today(), { onError = () => {}, deliverFollowUp = null } = {}) {
   const tolerant = (step) => (d, ...args) => {
     try {
       return step(d, ...args);
@@ -51,7 +51,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
     ['inventory', (db, at) => replenish(db, at)],
-    ['accounting', runFollowUps],
+    ['accounting', (db, at) => runFollowUps(db, at, deliverFollowUp)],
     ['accounting', (db) => autoReconcile(db)],
     ['automation', tolerant(processDue)],
     ['social', publishDue],
@@ -69,5 +69,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
   ];
 
   const uninstalled = new Set(db.settings?.uninstalled ?? []);
-  return JOBS.filter(([app]) => !uninstalled.has(app)).reduce((acc, [, job]) => job(acc, at), db);
+  return JOBS.filter(([app]) => !uninstalled.has(app)).reduce((acc, [, job]) => (
+    acc && typeof acc.then === 'function' ? acc.then((state) => job(state, at)) : job(acc, at)
+  ), db);
 }

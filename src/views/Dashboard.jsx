@@ -13,7 +13,7 @@ const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entrie
 
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
 function JournalCard({ card }) {
-  const list = `#/accounting/${LINKS[card.kind]}`;
+  const list = `#/accounting/${LINKS[card.kind]}${card.kind === 'bank' ? `?view=list&rel=journal_id:${card.journal.id}` : ''}`;
   const figures = {
     sale: [['To Validate', card.draft], ['Unpaid', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
     purchase: [['To Validate', card.draft], ['To Pay', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
@@ -21,7 +21,7 @@ function JournalCard({ card }) {
     cash: [['Balance', money(card.balance)]],
     general: [['Posted Entries', card.entries], ['Drafts', card.draft]],
   }[card.kind];
-  const action = { sale: ['New Invoice', '#/accounting/invoices/new'], purchase: ['New Bill', '#/accounting/bills/new'], bank: ['Reconcile', '#/accounting/bank'], cash: ['Reconcile', '#/accounting/bank'] }[card.kind];
+  const action = { sale: ['New Invoice', '#/accounting/invoices/new'], purchase: ['New Bill', '#/accounting/bills/new'], bank: ['Reconcile', list], cash: ['Reconcile', '#/accounting/bank'] }[card.kind];
   return (
     <section className="panel journal-card">
       <h2><a href={list}>{card.journal.name}</a></h2>

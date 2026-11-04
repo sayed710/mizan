@@ -107,7 +107,7 @@ export function postSheet(db, id, date = today()) {
     return [{ account, debit: round(Number(l.total_amount) - tax) }, ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(l.tax ?? 0)}%`, tax_side: 'purchase', tax_base: round(Number(l.total_amount) - tax) }] : [])];
   });
   const booked = postEntry(contact.db, { journal: own ? (r.journal || 'MISC') : via.code, ...(via ? { journal_id: via.id } : {}), date, ref: r.name, company: companyId,
-    lines: [...debits, own ? { account_id: payable, credit: total(lines), partner_id: contact.id } : { account_id: via.account, credit: total(lines) }],
+    lines: [...debits, own ? { account_id: payable, credit: total(lines), partner_id: contact.id } : { account_id: via.accountId, credit: total(lines) }],
   });
   const linked = lines.reduce((acc, l) => write(acc, 'hr.expense', l.id, { move_id: booked.id }), booked.db);
   return transition(linked, r, own ? 'post' : 'done', own ? 'posted' : 'paid', {
@@ -126,7 +126,7 @@ export function registerPayment(db, id, amount, date = today()) {
   const via = paymentJournal(db, null, companyId);
   const payable = resolveCounterpartAccount(db, { companyId, partnerId: r.partner_id, accountType: 'liability_payable' });
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Reimbursement: ${r.name}`, company: companyId, lines: [
-    { account_id: payable, debit: value, partner_id: r.partner_id }, { account_id: via.account, credit: value, partner_id: r.partner_id },
+    { account_id: payable, debit: value, partner_id: r.partner_id }, { account_id: via.accountId, credit: value, partner_id: r.partner_id },
   ] });
   return transition(booked.db, r, value === due ? 'done' : 'post', value === due ? 'paid' : 'posted', { amount_paid: round((r.amount_paid || 0) + value) });
 }

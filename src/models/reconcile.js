@@ -98,14 +98,14 @@ function writeOff(db, rule, line) {
   const { db: booked, id } = postEntry(db, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
-      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : via.account, partner_id }),
+      side(balance, incoming, { account: line.bank_move_id ? accountId(db, '101404', company) : via.accountId, partner_id }),
       ...items,
     ],
   });
   return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: companyValue }] });
 }
 
-/** Apply a rule to a statement line: match the first candidate invoice/bill, or post its write-off entry. */
+/** Apply a rule to a statement line: match an unambiguous invoice/bill, or post its write-off entry. */
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
@@ -120,8 +120,8 @@ export function applyRule(db, rule, line) {
       if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice');
       return db;
     }
-    const match = exact.find((m) => sameCommercialPartner(db, m.partner_id, line.partner_id));
-    return match ? reconcileWith(db, line, match.id) : db;
+    if (exact.length > 1) throw new Error('Multiple invoices match. Review and select one in "Match with".');
+    return exact.length ? reconcileWith(db, line, exact[0].id) : db;
   }
   return writeOff(db, rule, line);
 }

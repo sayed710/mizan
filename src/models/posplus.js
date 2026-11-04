@@ -422,6 +422,7 @@ export const posPlusModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       module_restaurant: { type: 'boolean', label: 'Restaurant' },
       iface_tipproduct: { type: 'boolean', label: 'Tips' },
       tip_product_id: { type: 'many2one', relation: 'product', label: 'Tip Product' },
@@ -437,7 +438,7 @@ export const posPlusModels = {
     list: ['name', 'module_restaurant', 'loyalty_enabled', 'cash_rounding'],
     form: {
       title: 'name',
-      groups: [['company_id', 'module_restaurant', 'cash_rounding', 'rounding_method_id', 'only_round_cash_method']],
+      groups: [['company_id', 'journal_id', 'module_restaurant', 'cash_rounding', 'rounding_method_id', 'only_round_cash_method']],
       tabs: [
         { label: 'Payments', fields: ['payment_method_ids', 'iface_tipproduct', 'tip_product_id'] },
         { label: 'Order Types', fields: ['available_preset_ids', 'default_preset_id'] },

@@ -47,7 +47,7 @@ test('company chart defaults resolve receivable, payable, and payment journal by
   const vendorLines = invoiceLines(db, { move_type: 'in_invoice', company_id: 1, partner_id: 2, invoice_date: '2026-01-01', name: 'Vendor', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   assert.ok(customerLines.some((line) => line.account_id === receivable.id));
   assert.ok(vendorLines.some((line) => line.account_id === payable.id));
-  assert.deepEqual(paymentJournal(db, null, 1), { id: journal.id, code: 'CUSTOM', account: bank.id });
+  assert.deepEqual(paymentJournal(db, null, 1), { id: journal.id, code: 'CUSTOM', accountId: bank.id });
   const payment = create(db, 'account.payment', { company_id: 1, partner_id: 1, partner_type: 'customer', payment_type: 'inbound', amount: 25, date: '2026-01-02' });
   db = postPayment(payment.db, read(payment.db, 'account.payment', payment.id));
   const posted = read(db, 'account.payment', payment.id);

@@ -161,7 +161,7 @@ function postExpense(db, r) {
     lines: [
       { account: accountCode, debit: round2(total - tax) },
       ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(r.tax) || 0}%`, tax_base: round2(total - tax) }] : []),
-      own ? { account: '230100', credit: total } : { account_id: via.account, credit: total },
+      own ? { account: '230100', credit: total } : { account_id: via.accountId, credit: total },
     ],
   });
   return write(booked, 'hr.expense', r.id, { state: own ? 'posted' : 'paid', move_id: id });
@@ -173,7 +173,7 @@ function reimburse(db, r) {
   const via = paymentJournal(db, null, companyId);
   const { db: paid } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, date: today(), ref: `Reimbursement: ${r.name}`,
-    lines: [{ account: '230100', debit: r.total_amount }, { account_id: via.account, credit: r.total_amount }],
+    lines: [{ account: '230100', debit: r.total_amount }, { account_id: via.accountId, credit: r.total_amount }],
   });
   return write(paid, 'hr.expense', r.id, { state: 'paid' });
 }

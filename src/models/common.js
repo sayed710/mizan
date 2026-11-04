@@ -1,7 +1,7 @@
 import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
-import { computeLineTaxes, expandTaxIds, lineUntaxed, productTax, taxLabel, taxSnapshot } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, lineUntaxed, productTax, replaceTaxSnapshot, taxLabel, taxSnapshot } from './taxes.js';
 import { cashRound, documentCurrency, roundCurrency } from '../money.js';
 import { mixedDiscountFactor } from './terms.js';
 import { invoiceTaxGroups } from './ledger.js';
@@ -164,10 +164,10 @@ export const productLines = (label, priceField) => ({
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.
   onchange: (line, key, db, record) => {
-    if (key === 'tax_id') return { ...line, ...taxSnapshot(read(db, 'account.tax', line.tax_id), db) };
+    if (key === 'tax_id') return { ...line, ...replaceTaxSnapshot(taxSnapshot(read(db, 'account.tax', line.tax_id), db)) };
     if (key === 'tax_ids') {
       const expanded = expandTaxIds(db, line.tax_ids ?? []);
-      return { ...line, ...(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
+      return { ...line, ...replaceTaxSnapshot(expanded[0] ? taxSnapshot(expanded[0], db) : taxSnapshot(null)), tax_breakdown: expanded.map((t) => taxSnapshot(t)) };
     }
     if (!['product_id', 'uom_id'].includes(key) && !(key === 'qty' && record?.pricelist_id)) return line;
     const product = read(db, 'product', line.product_id);
@@ -176,8 +176,8 @@ export const productLines = (label, priceField) => ({
     const qty = uom_id && stock ? convert(db, line.qty, uom_id, stock, { round: false }) : line.qty;
     const base = product?.[priceField] ?? 0;
     const price = record?.pricelist_id ? priceFor(db, record.pricelist_id, line.product_id, qty, base) : base;
-    const tax = key === 'product_id' ? productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id) : null;
-    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ?? {}) };
+    const tax = key === 'product_id' ? (productTax(db, product, priceField === 'cost' ? 'purchase' : 'sale', record?.fiscal_position_id) ?? taxSnapshot(null)) : null;
+    return { ...line, ...(uom_id ? { uom_id } : {}), price_unit: uom_id && stock ? convertPrice(db, price, stock, uom_id) : price, ...(tax ? replaceTaxSnapshot(tax) : {}) };
   },
 });
 

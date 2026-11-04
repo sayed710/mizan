@@ -122,7 +122,7 @@ export function payQuote(db, orderId, amount, { date = today(), journal } = {}) 
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
   const counterpart = resolveCounterpartAccount(db, { companyId, partnerId: r.partner_id, accountType: 'asset_receivable' });
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Prepayment ${r.name}`, company: companyId, lines: [
-    { account_id: via.account, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
+    { account_id: via.accountId, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
     { account_id: counterpart, credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
   ] });
   const payment = create(booked.db, 'account.payment', {

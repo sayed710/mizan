@@ -11,7 +11,7 @@ import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes, r
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
-import { fiscalPositionFor } from './taxes.js';
+import { fiscalPositionFor, isSectionOrNote, productTax, replaceTaxSnapshot, taxSnapshot } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
 import { journalId } from './ledger.js';
 import { documentCurrency, roundCurrency } from '../money.js';
@@ -162,14 +162,15 @@ export function syncInvoicedQty(db, move) {
   if (!order) return db;
   const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
   const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
-  const byKey = new Map(lines.map((l, i) => [l.sale_line_key, i]).filter(([key]) => key));
+  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_key';
+  const byKey = new Map(lines.map((l, i) => [l[lineKey], i]).filter(([key]) => key));
   const unlinked = [];
   for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
     if (l.down_payment_key) continue;
     const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(l.qty) || 0);
-    const ix = model === 'sale.order' && l.sale_line_key ? byKey.get(l.sale_line_key) : undefined;
+    const ix = l[lineKey] ? byKey.get(l[lineKey]) : undefined;
     if (ix !== undefined && lines[ix].product_id === l.product_id) lines[ix].qty_invoiced += fromStock(db, lines[ix], toStock(db, l, qty));
-    else if (!l.sale_line_key) unlinked.push({ ...l, qty });
+    else if (!l[lineKey]) unlinked.push({ ...l, qty });
   }
   const reset = write(db, model, order.id, { order_line: lines });
   return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', unlinked);
@@ -658,9 +659,16 @@ export const salesModels = {
       ...amountFields('order_line'),
     },
     onchange: (r, key, db) => {
-      if (key !== 'partner_id' || !r.partner_id) return {};
-      const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
-      return p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id, fiscal_position_id: fiscalPositionFor(db, p.id) } : {};
+      const p = key === 'partner_id' && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+      if (key !== 'fiscal_position_id' && !p) return {};
+      const fiscal_position_id = p ? fiscalPositionFor(db, p.id) : r.fiscal_position_id;
+      const order_line = (r.order_line ?? []).map((line) => {
+        if (!line.product_id || isSectionOrNote(line)) return line;
+        const product = read(db, 'product', line.product_id);
+        if (!product) throw new Error('Cannot update taxes: a line product no longer exists');
+        return { ...line, ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id) ?? taxSnapshot(null)), tax_ids: [] };
+      });
+      return { ...(p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id, fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
