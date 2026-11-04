@@ -5,9 +5,8 @@ import { t } from './i18n.js';
 const SAFE_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'P', 'B', 'STRONG', 'EM', 'I', 'U', 'BR', 'HR', 'UL', 'OL', 'LI', 'DIV', 'SPAN', 'TABLE', 'CAPTION', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD']);
 const KEEP_ATTRS = new Set(['colspan', 'rowspan']);
 
-export function sanitizeHtml(html, parse = typeof DOMParser === 'undefined' ? null : (text) => new DOMParser().parseFromString(text, 'text/html')) {
-  if (!parse) return null;
-  const doc = parse(String(html ?? ''));
+/** Strip disallowed elements and attributes from a live node's subtree in place, keeping the caret and undo history. */
+export function sanitizeInPlace(node) {
   const clean = (node) => {
     for (const child of [...node.childNodes]) {
       if (child.nodeType === 3) continue;
@@ -25,8 +24,13 @@ export function sanitizeHtml(html, parse = typeof DOMParser === 'undefined' ? nu
       }
     }
   };
-  clean(doc.body);
-  return doc.body.innerHTML;
+  clean(node);
+  return node;
+}
+
+export function sanitizeHtml(html, parse = typeof DOMParser === 'undefined' ? null : (text) => new DOMParser().parseFromString(text, 'text/html')) {
+  if (!parse) return null;
+  return sanitizeInPlace(parse(String(html ?? '')).body).innerHTML;
 }
 
 export function SafeHtml({ html }) {
@@ -65,6 +69,8 @@ function escapeTextForHtml(text) {
 export function HtmlEditor({ id, label, required, value, placeholder, onChange }) {
   const editorRef = useRef(null);
   const lastEmittedRef = useRef(value ?? '');
+  // The selection being dragged inside the editor, so dropping it elsewhere in the editor moves it.
+  const dragSourceRef = useRef(null);
   const [content, setContent] = useState(() => sanitizeHtml(value) ?? (value ?? ''));
   const [states, setStates] = useState({
     bold: false,
@@ -141,11 +147,8 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
   }, []);
 
   const handleInput = () => {
-    const raw = editorRef.current?.innerHTML ?? '';
-    const clean = sanitizeHtml(raw) ?? '';
-    if (raw !== clean && editorRef.current) {
-      editorRef.current.innerHTML = clean;
-    }
+    if (editorRef.current) sanitizeInPlace(editorRef.current);
+    const clean = sanitizeHtml(editorRef.current?.innerHTML ?? '') ?? '';
     lastEmittedRef.current = clean;
     onChange?.(clean);
     updateToolbar();
@@ -212,8 +215,15 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
     if (clean) insertCleanHtml(clean);
   };
 
+  const handleDragStart = () => {
+    const sel = window.getSelection?.();
+    dragSourceRef.current = sel?.rangeCount > 0 && editorRef.current?.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+  };
+
   const handleDrop = (e) => {
     e.preventDefault();
+    const source = dragSourceRef.current;
+    dragSourceRef.current = null;
     const clean = extractCleanPayload(e.dataTransfer);
     if (!clean) return;
 
@@ -229,8 +239,22 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
       }
     }
 
+    const inEditor = range && editorRef.current?.contains(range.startContainer);
+    if (source && inEditor && !e.ctrlKey && !e.altKey) {
+      // Moving within the editor: dropping onto the dragged text is a no-op; otherwise remove the source, keeping the
+      // drop point anchored by a marker because the deletion can shift it.
+      if (source.isPointInRange(range.startContainer, range.startOffset)) return;
+      const marker = document.createElement('span');
+      range.insertNode(marker);
+      source.deleteContents();
+      range = document.createRange();
+      range.setStartBefore(marker);
+      range.collapse(true);
+      marker.remove();
+    }
+
     const sel = window.getSelection?.();
-    if (range && editorRef.current?.contains(range.startContainer)) {
+    if (inEditor) {
       sel?.removeAllRanges();
       sel?.addRange(range);
     }
@@ -337,6 +361,8 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
         onInput={handleInput}
         onPaste={handlePaste}
         onDrop={handleDrop}
+        onDragStart={handleDragStart}
+        onDragEnd={() => { dragSourceRef.current = null; }}
         onKeyUp={updateToolbar}
         onMouseUp={updateToolbar}
         onFocus={updateToolbar}

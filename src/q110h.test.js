@@ -175,7 +175,10 @@ test('Finding 19: dropped HTML is sanitized and unsanitized markup cannot remain
 
   // 2. Direct unsanitized input to live DOM is purged on handleInput
   await React.act(async () => {
-    editor.innerHTML = '<script>pwn()</script><p>Clean text</p>';
+    // A live DOM holds parsed nodes, as the browser builds them from typed or inserted markup.
+    const live = new (createMockDomParser())().parseFromString('<script>pwn()</script><p>Clean text</p>').body;
+    editor.childNodes = live.childNodes;
+    Object.defineProperty(editor, 'innerHTML', { configurable: true, get: () => live.innerHTML, set: () => { throw new Error('innerHTML must not be reassigned'); } });
     props(editor).onInput();
   });
 
