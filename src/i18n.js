@@ -676,7 +676,7 @@ const ar = {
   'Tax Name': 'اسم الضريبة', 'Tax Computation': 'حساب الضريبة', 'Tax Type': 'نوع الضريبة',
   'Label on Invoices': 'الاسم على الفواتير', 'Included in Price': 'مشمولة في السعر', 'Tax Exigibility': 'استحقاق الضريبة', 'Based on Invoice': 'حسب الفاتورة',
   'Based on Payment': 'حسب الدفع', 'Tax Account': 'حساب الضريبة', 'Tax Group': 'مجموعة الضريبة', 'Fiscal Positions': 'الأوضاع المالية', 'Fiscal Position': 'الوضع المالي',
-  'Detect Automatically': 'اكتشاف تلقائي', 'Legal Notes': 'ملاحظات قانونية', 'Tax Mapping': 'ربط الضرائب', 'Account Mapping': 'ربط الحسابات', 'Tax on Product': 'ضريبة المنتج',
+  'Detect Automatically': 'اكتشاف تلقائي', 'VAT Required': 'الرقم الضريبي مطلوب', 'Legal Notes': 'ملاحظات قانونية', 'Tax Mapping': 'ربط الضرائب', 'Account Mapping': 'ربط الحسابات', 'Tax on Product': 'ضريبة المنتج',
   'Tax to Apply': 'الضريبة المطبقة', 'Account on Product': 'حساب المنتج', 'Account to Use Instead': 'الحساب البديل', 'Sales Taxes': 'ضرائب المبيعات', 'Purchase Taxes': 'ضرائب المشتريات',
   'Asset Name': 'اسم الأصل', 'Acquisition Date': 'تاريخ الاقتناء', 'Original Value': 'القيمة الأصلية', 'Not Depreciable Value': 'القيمة غير القابلة للإهلاك',
   'Depreciated at Import': 'مُهلك عند الاستيراد', 'Book Value': 'القيمة الدفترية', 'Depreciation Board': 'جدول الإهلاك', Depreciation: 'الإهلاك', 'Cumulative Depreciation': 'الإهلاك المتراكم',

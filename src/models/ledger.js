@@ -77,10 +77,33 @@ export function invoiceCounterpartAccount(db, invoice) {
   return ids[0];
 }
 
+export function resolveDocumentJournal(db, move) {
+  if (!move) return null;
+  let jId = move.journal_id;
+  if (!jId && move.id) {
+    jId = read(db, 'account.move', move.id)?.journal_id;
+  }
+  if (!jId && (move.session_id || move.pos_config_id || move.config_id)) {
+    const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
+    const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
+    const config = configId ? read(db, 'pos.config', configId) : null;
+    jId = session?.journal_id || config?.journal_id || journalId(db, 'POSS', session?.company_id ?? config?.company_id ?? move.company_id ?? 1);
+  }
+  if (!jId) {
+    const isEntry = move.move_type === 'entry';
+    const isPur = ['in_invoice', 'in_refund'].includes(move.move_type);
+    const code = isEntry ? 'MISC' : (isPur ? 'BILL' : 'INV');
+    jId = journalId(db, code, move.company_id ?? 1);
+  }
+  return jId ? read(db, 'account.journal', jId) : null;
+}
+
 /** Invoice base groups, including the source lines used to allocate a posted group. */
 export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const base = accountId(db, sale ? '400000' : '600000', move.company_id);
+  const journal = resolveDocumentJournal(db, move);
+  if (!journal) throw new Error('Select a journal for this document');
+  const base = journal.default_account_id;
   const byAccount = new Map();
   const getSourceAccount = (l) => {
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
@@ -91,7 +114,10 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     }
     const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
     if (configured) return { accountId: configured, configured: true, type: 'product' };
-    return { accountId: base, configured: false, type: 'default' };
+    if (!base) {
+      throw new Error(`Journal "${journal.name || journal.code}" has no default account configured`);
+    }
+    return { accountId: base, configured: true, type: 'journal default' };
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
     if (isSectionOrNote(l)) continue;

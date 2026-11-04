@@ -26,7 +26,7 @@ test('sale order of company 2 creates invoice belonging to company 2 and uses co
   db = updateSettings(co.db, { current_company_id: 1, allowed_company_ids: [1, co.id] });
 
   // Create accounts and journal for company 2
-  const invJournalCo2 = create(db, 'account.journal', { name: 'Customer Invoices Co2', code: 'INV', type: 'sale', company_id: co.id });
+  const invJournalCo2 = create(db, 'account.journal', { name: 'Customer Invoices Co2', code: 'INV', type: 'sale', company_id: co.id, default_account_id: search(db, 'account.account').find((a) => a.code === '400000').id });
   db = invJournalCo2.db;
 
   const sale = create(db, 'sale.order', {
