@@ -17,7 +17,8 @@ function invoice(db, company, amount) {
 }
 
 test('journal-less inbound batch matches a statement in its payments company', () => {
-  const branch = createCompany(seed(), { name: 'Branch' });
+  const base = seed();
+  const branch = createCompany(base, { name: 'Branch', currency_id: base.settings.base_currency_id });
   let db = write(branch.db, 'res.company', branch.id, { outstanding_receipts_account_id: accountId(branch.db, '101402', branch.id) });
   const inv = invoice(db, branch.id, 100);
   const batch = create(inv.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: inv.id, amount: 100 }] });

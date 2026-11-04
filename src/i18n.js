@@ -355,7 +355,7 @@ const ar = {
   'Journal Items': 'بنود القيد', Undefined: 'غير محدد', 'Invoice Sources': 'مصادر الفاتورة', 'Journal Entry': 'قيد يومية', Account: 'الحساب', Label: 'البيان', Debit: 'مدين', Credit: 'دائن',
   Balance: 'الرصيد', Revenue: 'الإيرادات', 'Cost of Revenue': 'تكلفة الإيرادات', 'Gross Profit': 'مجمل الربح', 'Net Operating Income': 'صافي الدخل التشغيلي',
   'Other Expenses': 'مصروفات أخرى', 'Net Income': 'صافي الدخل', Assets: 'الأصول', 'Total Assets': 'إجمالي الأصول', Liabilities: 'الخصوم',
-  Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
+  Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Current Year Earnings Account': 'حساب أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
   'Initial Balance': 'الرصيد الافتتاحي', Period: 'الفترة', 'This Quarter': 'هذا الربع', 'All Dates': 'كل التواريخ', Journal: 'اليومية', 'Bank Journal': 'يومية البنك',
   'Account Name': 'اسم الحساب', 'Journal Name': 'اسم اليومية', 'Short Code': 'الكود المختصر', 'Default Account': 'الحساب الافتراضي',
   Receivable: 'المدينون', 'Bank and Cash': 'البنك والنقدية', 'Current Assets': 'الأصول المتداولة', 'Fixed Assets': 'الأصول الثابتة',

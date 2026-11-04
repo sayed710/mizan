@@ -7,6 +7,7 @@ import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, roun
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
+import { currentYearEarningsAccount } from './earnings.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
 
@@ -493,9 +494,10 @@ export function balanceSheet(db, at = today(), { weight } = {}) {
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
+  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
-    assets, liabilities, equity, earnings,
+    assets, liabilities, equity, earnings, earningsAccount,
     totalAssets: total(assets), totalLiabilities: total(liabilities), totalEquity: round(total(equity) + earnings),
   };
 }

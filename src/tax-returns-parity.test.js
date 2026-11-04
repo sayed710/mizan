@@ -7,7 +7,7 @@ import { payMove, postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { postBatch } from './models/payments.js';
 import { accountId, journalId, postEntry } from './models/ledger.js';
-import { migrate } from './migrations.js';
+import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { applyDiff, diffDb } from './sync.js';
 import {
   generateReturns,
@@ -1196,7 +1196,7 @@ test('migration v15: sequence advance, preserved formatting, and uniqueness of a
   };
 
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 22);
+  assert.equal(migrated.schema_version, SCHEMA_VERSION);
 
   // Sequence is advanced past highest migrated ID
   assert.ok((migrated.seq?.['res.partner.bank'] ?? 0) >= 41, 'Sequence advanced past existing and migrated bank IDs');

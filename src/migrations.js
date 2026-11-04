@@ -524,6 +524,18 @@ MIGRATIONS.push({ version: 21, name: 'Fiscal years: retain global closing lock',
 MIGRATIONS.push({ version: 22, name: 'Currency rounding defaults', up: (db) => ({
   ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => currency.rounding == null ? { ...currency, rounding: 0.01 } : currency) },
 }) });
+MIGRATIONS.push({ version: 23, name: 'Explicit base currency and fiscal earnings accounts', up: (db) => {
+  db = MIGRATIONS.find((migration) => migration.version === 22).up(db);
+  const currencies = (db.records['res.currency'] ?? []).filter((currency) => currency.name === db.settings?.currency);
+  const companies = (db.records['res.company'] ?? []).map((company) => {
+    if (company.current_year_earnings_account_id != null) return company;
+    const accounts = (db.records['account.account'] ?? []).filter((account) => account.code === '302000'
+      && ['equity', 'equity_unaffected'].includes(account.account_type) && (!account.company_id || account.company_id === company.id));
+    return accounts.length === 1 ? { ...company, current_year_earnings_account_id: accounts[0].id } : company;
+  });
+  return { ...db, settings: { ...db.settings, ...(db.settings?.base_currency_id == null && currencies.length === 1 ? { base_currency_id: currencies[0].id } : {}) },
+    records: { ...db.records, 'res.company': companies } };
+} });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
