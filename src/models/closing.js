@@ -3,7 +3,7 @@ import { create, read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
 import { companyCurrency, toCompany } from './currency.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
 import { companyViewDb } from '../companyView.js';
 
@@ -153,12 +153,14 @@ export function unrealizedExchange(db, date) {
   checkDate(date);
   return search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice'].includes(m.move_type)
     && m.invoice_date <= date && m.currency_id && read(db, 'res.currency', m.currency_id)?.name !== ownCurrency(db, m)).flatMap((m) => {
+    const docRound = (n) => roundCurrency(n, documentCurrency(db, m));
+    const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
     const allocations = settlementCompanyAllocations(db, m);
-    const activePaid = round(allocations.filter(({ row }) => !row.reversed).reduce((s, { row }) => s + (Number(row.amount) || 0), 0));
-    if (round(Number(m.amount_paid) || 0) !== activePaid) throw new Error(`Invoice ${m.name || m.id} has payments not explained by settlement allocations`);
+    const activePaid = docRound(allocations.filter(({ row }) => !row.reversed).reduce((s, { row }) => s + (Number(row.amount) || 0), 0));
+    if (docRound(Number(m.amount_paid) || 0) !== activePaid) throw new Error(`Invoice ${m.name || m.id} has payments not explained by settlement allocations`);
     const paid = allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, date));
-    const paidForeign = round(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
-    const residual = round(m.amount_total - paidForeign);
+    const paidForeign = docRound(paid.reduce((s, a) => s + Number(a.row.amount || 0), 0));
+    const residual = docRound(m.amount_total - paidForeign);
     if (residual <= 0) return [];
     const accountType = m.move_type === 'out_invoice' ? 'asset_receivable' : 'liability_payable';
     const counterpart = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
@@ -169,10 +171,10 @@ export function unrealizedExchange(db, date) {
     const sign = accountType === 'liability_payable' ? -1 : 1;
     const original = counterpart
       .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
-    const paidBooked = round(paid.reduce((s, a) => s + a.value, 0));
-    const booked = round(original - paidBooked);
+    const paidBooked = companyRound(paid.reduce((s, a) => s + a.value, 0));
+    const booked = companyRound(original - paidBooked);
     const value = toCompany(db, m.currency_id, residual, date, m.company_id);
-    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, account_id, residual, booked, value, difference: round(value - booked) }];
+    return [{ invoice_id: m.id, company_id: m.company_id ?? 1, partner_id: m.partner_id, currency_id: m.currency_id, account, account_id, residual, booked, value, difference: companyRound(value - booked) }];
   });
 }
 
@@ -188,12 +190,12 @@ export function foreignBankBalances(db, date) {
         || read(db, 'account.account', line.account_id)?.account_type !== 'asset_cash') continue;
       const key = `${company}:${line.account_id}:${line.currency_id}`;
       const row = groups.get(key) ?? { company_id: company, account_id: line.account_id, currency_id: line.currency_id, foreign: 0, booked: 0 };
-      row.foreign = round(row.foreign + (Number(line.amount_currency) || 0));
-      row.booked = round(row.booked + (Number(line.debit) || 0) - (Number(line.credit) || 0));
+      row.foreign = roundCurrency(row.foreign + (Number(line.amount_currency) || 0), read(db, 'res.currency', line.currency_id));
+      row.booked = roundCurrency(row.booked + (Number(line.debit) || 0) - (Number(line.credit) || 0), companyCurrencyRecord(db, company));
       groups.set(key, row);
     }
   }
-  return [...groups.values()].map((row) => ({ ...row, difference: round(toCompany(db, row.currency_id, row.foreign, date, row.company_id) - row.booked) }));
+  return [...groups.values()].map((row) => ({ ...row, difference: roundCurrency(toCompany(db, row.currency_id, row.foreign, date, row.company_id) - row.booked, companyCurrencyRecord(db, row.company_id)) }));
 }
 
 /** Open foreign positions visible to the selected companies. */
@@ -216,11 +218,12 @@ export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode
     if (!settings?.expense_currency_exchange_account_id) next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other', company);
     let gain = 0;
     let loss = 0;
+    const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(next, company));
     const lines = rows.filter((r) => r.company_id === company).map((r) => {
-      const amount = round(r.difference * (read(next, 'account.account', r.account_id)?.account_type === 'liability_payable' ? -1 : 1));
-      if (amount > 0) gain = round(gain + amount);
-      else loss = round(loss - amount);
-      return { account_id: r.account_id, partner_id: r.partner_id, ...side(amount) };
+      const amount = companyRound(r.difference * (read(next, 'account.account', r.account_id)?.account_type === 'liability_payable' ? -1 : 1));
+      if (amount > 0) gain = companyRound(gain + amount);
+      else loss = companyRound(loss - amount);
+      return { account_id: r.account_id, partner_id: r.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
     });
     if (gain) lines.push({ account: settings?.income_currency_exchange_account_id || gainCode, credit: gain });
     if (loss) lines.push({ account: settings?.expense_currency_exchange_account_id || lossCode, debit: loss });

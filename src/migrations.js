@@ -526,6 +526,10 @@ MIGRATIONS.push({ version: 21, name: 'Fiscal years: remove legacy global closing
   // Closed years already enforce company-specific locks. The former global lock did not retain its previous value.
   return { ...db, settings: { ...db.settings, lock_date: null } };
 } });
+MIGRATIONS.push({ version: 22, name: 'Currency rounding defaults', up: (db) => ({
+  ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => currency.rounding == null ? { ...currency, rounding: 0.01 } : currency) },
+}) });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

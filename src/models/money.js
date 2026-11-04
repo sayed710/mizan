@@ -1,7 +1,7 @@
 // Document amounts are booked in their own company's currency, then translated into the active reporting currency.
 import { read } from '../orm.js';
 import { today } from './common.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, roundCurrency } from '../money.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 export const currencyCode = (db, rec) => (rec?.currency_id ? read(db, 'res.currency', rec.currency_id)?.name ?? null : null);
 
@@ -28,14 +28,14 @@ function reportingValue(db, rec, amount, at) {
   if (rec.currency_id && rec.currency_id !== own) {
     const sourceRate = baseRate(db, rec.currency_id, docDate(rec)), ownRate = baseRate(db, own, docDate(rec));
     if (sourceRate === null || ownRate === null) return null;
-    booked = round(amount * ownRate / sourceRate);
+    booked = roundCurrency(amount * ownRate / sourceRate, companyCurrencyRecord(db, rec.company_id));
   }
   if (own === target) return booked;
   const ownRate = baseRate(db, own, at), targetRate = baseRate(db, target, at);
-  return ownRate === null || targetRate === null ? null : round(booked * targetRate / ownRate);
+  return ownRate === null || targetRate === null ? null : roundCurrency(booked * targetRate / ownRate, companyCurrencyRecord(db, db.settings?.current_company_id));
 }
 
 export const unrated = (db, rec, at = today()) => reportingValue(db, rec, 1, at) === null;
 export const companyAmount = (db, rec, field, at = today()) => reportingValue(db, rec, Number(rec?.[field]) || 0, at) ?? 0;
-export const companySum = (db, recs, field, at = today()) => round(recs.reduce((s, r) => s + companyAmount(db, r, field, at), 0));
+export const companySum = (db, recs, field, at = today()) => roundCurrency(recs.reduce((s, r) => s + companyAmount(db, r, field, at), 0), companyCurrencyRecord(db, db.settings?.current_company_id));
 export const unratedCount = (db, recs, at = today()) => recs.filter((r) => unrated(db, r, at)).length;

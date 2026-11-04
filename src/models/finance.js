@@ -6,7 +6,7 @@ import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, payment
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, unratedCount } from './money.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 
@@ -37,15 +37,16 @@ const valueOf = (r, k) => JSON.stringify(k === 'active' ? r?.active !== false : 
 const changedFields = (before, after, fields) => fields.some((k) => valueOf(before, k) !== valueOf(after, k));
 
 /** True when the paid status moved only by appending payments dated after the lock, and by exactly their amount. */
-function settlesAfterLock(before, after, lock) {
+function settlesAfterLock(db, before, after, lock) {
   const was = Array.isArray(before.payments) ? before.payments : [];
   const now = Array.isArray(after.payments) ? after.payments : [];
   if (now.length < was.length || JSON.stringify(now.slice(0, was.length)) !== JSON.stringify(was)) return false;
   const added = now.slice(was.length);
   if (!added.every((p) => p && typeof p.date === 'string' && p.date > lock && Number(p.amount) > 0)) return false;
-  const paid = round((Number(before.amount_paid) || 0) + added.reduce((sum, p) => sum + Number(p.amount), 0));
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, after));
+  const paid = docRound((Number(before.amount_paid) || 0) + added.reduce((sum, p) => sum + Number(p.amount), 0));
   const date = added.length ? added.at(-1).date : before.payment_date;
-  return Math.abs(paid - (Number(after.amount_paid) || 0)) < 0.005 && after.payment_date === date;
+  return docRound(paid - (Number(after.amount_paid) || 0)) === 0 && after.payment_date === date;
 }
 
 /**
@@ -126,7 +127,7 @@ function postedMoveRule(db, before, after) {
     }
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
     if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'Debits and credits cannot be negative';
-    if (!isBalanced(lines)) return 'A posted entry needs balanced journal items';
+    if (!isBalanced(lines, companyCurrencyRecord(db, after.company_id))) return 'A posted entry needs balanced journal items';
     if (!after.name || after.name === '/') return 'A posted entry needs a number';
   }
   return null;
@@ -145,6 +146,7 @@ export const appliedValue = (db, inv, p) => {
 /** What a payment or discount entry can settle for `inv`: its partner's receivable/payable on the settling side. */
 function settlementCapacity(db, entry, inv) {
   if (!entry || entry.state !== 'posted' || entry.id === inv.id || (entry.company_id ?? 1) !== (inv.company_id ?? 1)) return 0;
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, inv.company_id));
   const taxReturn = (db.records['account.return'] ?? []).find((r) => (r.closing_move_ids ?? []).includes(inv.id) && ['submitted', 'paid'].includes(r.state));
   if (taxReturn) {
     const payment = (db.records['account.payment'] ?? []).find((p) => p.state === 'posted' && p.is_tax_payment && p.return_id === taxReturn.id && p.move_id === entry.id);
@@ -164,7 +166,7 @@ function settlementCapacity(db, entry, inv) {
     && note.partner_id === original.partner_id && (note.currency_id ?? null) === (original.currency_id ?? null);
   if (entry.move_type !== 'entry' && !creditPair(entry, inv) && !creditPair(inv, entry)) return 0;
   const account = invoiceCounterpartAccount(db, inv);
-  return round((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
+  return companyRound((entry.line_ids ?? []).filter((l) => l.partner_id === inv.partner_id && l.account_id === account)
     .reduce((s, l) => s + (settledByCredit(inv) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), 0));
 }
 
@@ -185,7 +187,9 @@ export function moveInvariant(db, after, before) {
   const now = Array.isArray(after.payments) ? after.payments : [];
   const paidBefore = Number(before?.amount_paid) || 0;
   const paidAfter = Number(after.amount_paid) || 0;
-  if (Math.abs(paidAfter - paidBefore) < 0.005 && JSON.stringify(was) === JSON.stringify(now)) return null;
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, after));
+  const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
+  if (docRound(paidAfter - paidBefore) === 0 && JSON.stringify(was) === JSON.stringify(now)) return null;
   const reversed = was.filter((p, i) => !p.reversed && now[i]?.reversed);
   if (now.length < was.length || was.some((p, i) => {
     const current = now[i];
@@ -213,14 +217,14 @@ export function moveInvariant(db, after, before) {
     const reversal = p.move_id && [...entries.values()].find((m) => m.state === 'posted' && m.move_type === 'entry' && m.reversed_entry_id === p.move_id);
     return (source?.state === 'posted' && p.date && p.date < source.invoice_date) || (reversal && p.date > reversal.invoice_date);
   })) return 'Payment application date must be after payment and before reversal';
-  if (Math.abs(round(paidBefore - reversed.reduce((sum, p) => sum + Number(p.amount), 0) + added.reduce((sum, p) => sum + Number(p.amount), 0)) - paidAfter) >= 0.005) return 'The paid amount must match the registered payments';
+  if (docRound(paidBefore - reversed.reduce((sum, p) => sum + Number(p.amount), 0) + added.reduce((sum, p) => sum + Number(p.amount), 0) - paidAfter) !== 0) return 'The paid amount must match the registered payments';
   // One entry may settle several invoices (a payment applied oldest first), but never more than it booked.
   for (const moveId of new Set(added.map((p) => p.move_id))) {
     const used = [...entries.values()].reduce((sum, m) => sum + (m.payments ?? []).filter((p) => !p.reversed && p?.move_id === moveId).reduce((s, p) => s + appliedValue(db, m, p), 0), 0);
     // ponytail: a cent of slack for foreign-currency rounding on partial payments.
-    if (used > settlementCapacity(db, entries.get(moveId), after) + 0.01) return 'A payment cannot settle more than its journal entry booked';
+    if (used > settlementCapacity(db, entries.get(moveId), after) + companyStep + 1e-9) return 'A payment cannot settle more than its journal entry booked';
   }
-  if (added.some((p) => p.payment_company_amount != null && Math.abs(Number(p.payment_company_amount) - toCompany(db, after.currency_id, p.amount, p.date, after.company_id)) > 0.01)) return 'Payment company amount does not match the booked conversion';
+  if (added.some((p) => p.payment_company_amount != null && Math.abs(Number(p.payment_company_amount) - toCompany(db, after.currency_id, p.amount, p.date, after.company_id)) > companyStep + 1e-9)) return 'Payment company amount does not match the booked conversion';
   for (const [index, p] of added.entries()) {
     const prior = { ...read(db, 'account.move', after.id), payments: now.slice(0, was.length + index) };
     const isTaxClosing = after.move_type === 'entry' && isReturnEntry(db, after);
@@ -244,7 +248,8 @@ export function settlementFxError(db, invoice, p, allocated) {
     return row.reversed && reversalDate && reversalDate > p.date ? { ...row, reversed: false } : row;
   }) };
   const booked = allocated ?? settlementCompanyAmount(db, prior, Number(p.amount));
-  const difference = payment && !payment.invoice_id ? round((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1)) : 0;
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
+  const difference = payment && !payment.invoice_id ? companyRound((cash - booked) * (payment.payment_type === 'inbound' ? 1 : -1)) : 0;
   if (!difference) return p.payment_fx_move_id ? 'An exchange entry is not required for this settlement' : null;
   const fx = read(db, 'account.move', p.payment_fx_move_id);
   const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
@@ -256,7 +261,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const lines = fx?.line_ids ?? [];
   const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
   const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-  if (fx?.state !== 'posted' || fx.move_type !== 'entry' || fx.fx_payment_move_id !== p.move_id || fx.fx_invoice_id !== invoice.id || (fx.company_id ?? 1) !== (invoice.company_id ?? 1) || fx.invoice_date !== p.date || lines.length !== 2 || other.length !== 1 || round(net) !== round(difference) || round(otherNet) !== round(-difference)) return 'A dedicated posted exchange entry must match the settlement';
+  if (fx?.state !== 'posted' || fx.move_type !== 'entry' || fx.fx_payment_move_id !== p.move_id || fx.fx_invoice_id !== invoice.id || (fx.company_id ?? 1) !== (invoice.company_id ?? 1) || fx.invoice_date !== p.date || lines.length !== 2 || other.length !== 1 || companyRound(net) !== companyRound(difference) || companyRound(otherNet) !== companyRound(-difference)) return 'A dedicated posted exchange entry must match the settlement';
   return null;
 }
 
@@ -283,15 +288,17 @@ export function paymentInvariant(db, after) {
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
   const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
-  const net = (id) => round((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
+  const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
+  const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
   const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
-  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : round(Number(after.amount));
+  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
   const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
   const counterpart = (inbound ? -1 : 1) * net(account);
   const document = invoice && read(db, 'account.move', invoice.id);
   const prior = document && { ...document, payments: (document.payments ?? []).filter((p) => p.move_id !== after.move_id) };
-  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > 0.01
-    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > 0.01)) return 'The journal entry must book this payment amount and direction';
+  if (counterpart < 0 || (!counterpart && (!prior || settlementCompanyAmount(db, prior, Number(after.amount)) !== 0)) || Math.abs((inbound ? 1 : -1) * net(bank) - expected) > companyStep + 1e-9
+    || (!invoice && Math.abs((inbound ? -1 : 1) * net(account) - expected) > companyStep + 1e-9)) return 'The journal entry must book this payment amount and direction';
   }
   if ((db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.state === 'posted' && p.move_id === entry.id)) return 'The journal entry already records another payment';
   return null;
@@ -339,7 +346,7 @@ function lockRule(db, before, after, ctx) {
   if (!beforeLocked && !afterLocked) return null;
   const lock = [beforeLocked && beforeLock, afterLocked && afterLock].filter(Boolean).sort().at(-1);
   const changed = !before || changedFields(before, after, LOCKED_FIELDS)
-    || (beforeLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(before, after, beforeLock));
+    || (beforeLocked && changedFields(before, after, SETTLEMENT_FIELDS) && !settlesAfterLock(db, before, after, beforeLock));
   return changed ? `The period up to ${lock} is locked` : null;
 }
 
@@ -552,6 +559,7 @@ export function taxesByTax(db, period = {}) {
 
 /** Open installments in company currency, using the schedule recorded when the document was posted. */
 function openInstallments(db, m, kind, at) {
+  const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
   const items = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
@@ -560,15 +568,15 @@ function openInstallments(db, m, kind, at) {
   const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
   const allocations = settlementCompanyAllocations(db, m);
-  let paid = (m.payment_date && m.payment_date <= at ? round(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
+  let paid = (m.payment_date && m.payment_date <= at ? companyRound(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
   let dues = items.map((l) => ({ date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date, amount: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)) }));
   if (!items.length) {
     const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
-    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
+    const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date, documentCurrency(db, m)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
     let assigned = 0;
     dues = docDues.map((d, i) => {
-      const amount = i === docDues.length - 1 ? round(booked - assigned) : round(booked * d.amount / (Number(m.amount_total) || 1));
-      assigned = round(assigned + amount);
+      const amount = i === docDues.length - 1 ? companyRound(booked - assigned) : companyRound(booked * d.amount / (Number(m.amount_total) || 1));
+      assigned = companyRound(assigned + amount);
       return { ...d, amount };
     });
   }
@@ -576,7 +584,7 @@ function openInstallments(db, m, kind, at) {
   return dues.map((due) => {
     const applied = Math.min(paid, due.amount);
     paid -= applied;
-    return { date: due.date, amount: round(due.amount - applied) };
+    return { date: due.date, amount: companyRound(due.amount - applied) };
   }).filter((due) => due.amount > 0);
 }
 

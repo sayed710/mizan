@@ -154,6 +154,7 @@ const ar = {
   'Default Preset': 'النمط المسبق الافتراضي',
   'Only Round Cash': 'تقريب المبالغ النقدية فقط',
   'Rounding Precision': 'دقة التقريب',
+  'Decimal Places': 'المنازل العشرية',
   'Rounding Method': 'طريقة التقريب',
   'Rounding Strategy': 'استراتيجية التقريب',
   'Profit Account': 'حساب الأرباح',

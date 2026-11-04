@@ -6,7 +6,6 @@ import { t } from '../i18n.js';
 import { display, formatDate, money } from '../ui.jsx';
 import { amountInWords } from '../models/payments.js';
 import { subtotal } from '../models/common.js';
-import { currencyCode } from '../models/money.js';
 import { invoiceQrPayload, qrMatrix } from '../models/qr.js';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -112,15 +111,15 @@ export function PrintDoc({ model, id }) {
           <tbody>
             {(rec[layout.lines] ?? []).map((l, i) => (
               <tr key={i}>
-                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{display(db, f, l[k], rec)}</td>)}
-                {priced && <td className="num">{money(subtotal(l), currencyCode(db, rec))}</td>}
+                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{display(db, f, l[k], { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id })}</td>)}
+                {priced && <td className="num">{display(db, { type: 'monetary' }, subtotal(l), rec)}</td>}
               </tr>
             ))}
           </tbody>
         </table>
         <dl className="totals paper-totals">
           {layout.totals.map((f) => (
-            <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{money(rec[f], currencyCode(db, rec))}</dd></div>
+            <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>
           ))}
         </dl>
         {model === 'account.move' && <PaymentQr db={db} company={currentCompany(db)} move={rec} />}

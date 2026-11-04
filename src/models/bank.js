@@ -8,7 +8,7 @@ import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard } from './finance.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
@@ -47,9 +47,13 @@ export function reconcileWith(db, line, moveId) {
   if (line.state !== 'to_check') throw new Error('This bank transaction is already reconciled');
   const date = line.date ?? today();
   const company = line.company_id ?? 1;
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
+  const docCurrency = documentCurrency(db, move);
+  const docRound = (n) => roundCurrency(n, docCurrency);
+  const step = Number(docCurrency?.rounding ?? 0.01);
   const available = round(line.open_amount ?? Math.abs(Number(line.amount)));
   const rate = rateAt(db, move.currency_id, date, company);
-  const value = Math.min(round(move.amount_residual), Math.floor((available * rate + 1e-9) * 100) / 100);
+  const value = Math.min(docRound(move.amount_residual), Number((Math.floor(available * rate / step + 1e-9) * step).toPrecision(15)));
   const used = toCompany(db, move.currency_id, value, date, company);
   if (!(value > 0) || !(used > 0) || used > available) throw new Error('The open statement amount is too small to settle this invoice');
   const remaining = round(available - used);
@@ -61,8 +65,8 @@ export function reconcileWith(db, line, moveId) {
     if (!account || (account.company_id && account.company_id !== company)) throw new Error('Write-off account belongs to another company or does not exist');
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label');
     if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
-    writeoffValue = round(amount * rate);
-    if (!(writeoffValue > 0) || writeoffValue > round(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
+    writeoffValue = docRound(amount * rate);
+    if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
     const receivable = accountId(db, ['in_invoice', 'in_refund'].includes(move.move_type) ? '211000' : '121000', company);
     const bankAccount = accountId(db, paymentJournal(db, line.journal_id).account, company);
     if (account.id === receivable || account.id === bankAccount || account.id === accountId(db, '101404', company)) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
@@ -94,6 +98,7 @@ function matchPayment(db, line) {
   if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
   const payment = read(db, 'account.payment', line.payment_id);
   const company = line.company_id ?? 1;
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   if (!payment || payment.state !== 'posted' || !payment.move_id) throw new Error('Select a posted payment');
   if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
   if (search(db, 'account.bank.statement.line').some((l) => l.id !== line.id && l.state === 'reconciled' && l.payment_move_id === payment.move_id)) throw new Error('Payment is already matched');
@@ -115,12 +120,14 @@ function matchPayment(db, line) {
 }
 
 function autoReconcile(db, line) {
-  const match = candidates(db, line).find((m) => round(m.amount_residual) === round(line.open_amount ?? Math.abs(line.amount)));
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
+  const match = candidates(db, line).find((m) => toCompany(db, m.currency_id, m.amount_residual, line.date ?? today(), m.company_id) === round(line.open_amount ?? Math.abs(line.amount)));
   if (!match) throw new Error('No open invoice or bill with this exact amount. Pick one in "Match with" or book it to an account.');
   return { db: reconcileWith(db, line, match.id) };
 }
 
 function bookToAccount(db, line) {
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   const account = line.counterpart ?? (line.amount > 0 ? '450000' : '600000');
   const value = round(line.open_amount ?? Math.abs(line.amount));
@@ -201,6 +208,7 @@ function lineGuard(db, before, after) {
     if (changed) return 'A booked bank transaction cannot be changed';
   }
   const company = after.company_id ?? 1;
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   if (after.journal_id) {
     const journal = read(db, 'account.journal', after.journal_id);
     if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';

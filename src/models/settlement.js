@@ -1,5 +1,5 @@
 import { read } from '../orm.js';
-import { round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 
 function invoiceCompanyBalance(db, invoice) {
   const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
@@ -28,17 +28,19 @@ export function applicationActiveAt(db, payment, invoice, date, { postingHistory
 
 /** Derive each application's booked value in its original settlement order. */
 export function settlementCompanyAllocations(db, invoice) {
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
   const booked = invoiceCompanyBalance(db, invoice);
   const total = Number(invoice.amount_total) || 0;
   const history = [];
   for (const payment of invoice.payments ?? []) {
     const effDate = applicationEffectiveDate(payment, invoice);
     const prior = history.filter(({ row }) => applicationActiveAt(db, row, invoice, effDate, { postingHistory: true }));
-    const applied = round(prior.reduce((sum, item) => sum + Number(item.row.amount || 0), 0));
+    const applied = docRound(prior.reduce((sum, item) => sum + Number(item.row.amount || 0), 0));
     const allocated = round(prior.reduce((sum, item) => sum + item.value, 0));
     const remaining = Math.max(0, round(booked - allocated));
-    const next = round(applied + Number(payment.amount || 0));
-    const value = payment.company_amount != null ? Number(payment.company_amount) : (next >= round(total) ? remaining : Math.min(remaining, Math.max(0, round(round(next * booked / (total || 1)) - allocated))));
+    const next = docRound(applied + Number(payment.amount || 0));
+    const value = payment.company_amount != null ? Number(payment.company_amount) : (next >= docRound(total) ? remaining : Math.min(remaining, Math.max(0, round(round(next * booked / (total || 1)) - allocated))));
     history.push({ row: payment, value });
   }
   return history;
@@ -46,12 +48,14 @@ export function settlementCompanyAllocations(db, invoice) {
 
 /** Allocate the booked balance cumulatively, excluding reversed applications. */
 export function settlementCompanyAmount(db, invoice, amount) {
+  const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
+  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
   const booked = invoiceCompanyBalance(db, invoice);
   const total = Number(invoice.amount_total) || 0;
   const active = settlementCompanyAllocations(db, invoice).filter(({ row }) => !row.reversed);
-  const docApplied = round(active.reduce((sum, item) => sum + Number(item.row.amount || 0), 0));
+  const docApplied = docRound(active.reduce((sum, item) => sum + Number(item.row.amount || 0), 0));
   const companyApplied = round(active.reduce((sum, item) => sum + item.value, 0));
   const remaining = Math.max(0, round(booked - companyApplied));
-  if (round(docApplied + amount) >= round(total)) return remaining;
+  if (docRound(docApplied + amount) >= docRound(total)) return remaining;
   return Math.min(remaining, Math.max(0, round(round((docApplied + amount) * booked / (total || 1)) - companyApplied)));
 }
