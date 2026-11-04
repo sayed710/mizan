@@ -108,7 +108,30 @@ export function seed() {
     const id = add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null, default_for_payments: defaultForPayments });
     if (code === 'BNK1') demoBankJournal = id;
   });
-  const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
+  const tax = (name, type_tax_use, amount, account, vals = {}) => {
+    const accId = account ? accountId(db, account) : null;
+    return add('account.tax', {
+      name,
+      type_tax_use,
+      amount,
+      amount_type: 'percent',
+      account_id: accId,
+      tax_exigibility: 'on_invoice',
+      price_include: false,
+      active: true,
+      tax_group: 'VAT',
+      invoice_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      refund_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      tag_ids: [],
+      ...vals,
+    });
+  };
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
   const zeroExport = tax('0% Exports', 'sale', 0, null);

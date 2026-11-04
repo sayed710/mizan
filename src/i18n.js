@@ -1263,6 +1263,9 @@ const ar = {
   'Tax Calculation Rounding Method': 'طريقة تقريب حساب الضريبة',
   'Round per Line': 'تقريب لكل سطر',
   'Round Globally': 'تقريب إجمالي',
+  'Distribution for Invoices': 'توزيع الفواتير',
+  'Distribution for Refunds': 'توزيع المرتجعات',
+  'of Tax': 'من الضريبة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

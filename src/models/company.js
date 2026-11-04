@@ -302,7 +302,7 @@ function purchaseLine(db, line, fpId, companyId) {
   const price_unit = !tax.tax_include ? net
     : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
       : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
-  const { tax_tag_ids, ...taxFields } = tax;
+  const { tax_tag_ids, invoice_repartition_line_ids, refund_repartition_line_ids, ...taxFields } = tax;
   return { ...kept, price_unit, ...taxFields, ...(tax_tag_ids?.length ? { tax_tag_ids } : {}) };
 }
 

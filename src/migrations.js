@@ -543,6 +543,37 @@ MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared
   })) },
 }) });
 
+MIGRATIONS.push({
+  version: 25,
+  name: 'Taxes: repartition lines for invoice and refund documents',
+  up: (db) => ({
+    ...db,
+    records: {
+      ...db.records,
+      'account.tax': (db.records['account.tax'] ?? []).map((t) => {
+        const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
+        const taxTags = [...(t.tag_ids ?? [])];
+        const accountId = t.account_id ?? null;
+        return {
+          ...t,
+          invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
+            ? t.invoice_repartition_line_ids
+            : [
+                { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+                { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+              ],
+          refund_repartition_line_ids: t.refund_repartition_line_ids?.length
+            ? t.refund_repartition_line_ids
+            : [
+                { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+                { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+              ],
+        };
+      }),
+    },
+  }),
+});
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
