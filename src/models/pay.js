@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { journalId, outstandingAccount, paymentJournal, postEntry } from './ledger.js';
+import { invoiceCounterpartAccount, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { isInvoice, payMove, releaseCashBasis, residual } from './accounting.js';
 import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -70,7 +70,7 @@ export function postPayment(db, p) {
   }
   const counterpart = currentPayment.destination_account_code
     || (currentPayment.destination_account_id ? read(db, 'account.account', currentPayment.destination_account_id)?.code : null)
-    || (currentPayment.partner_type === 'supplier' ? '211000' : '121000');
+    || partnerAccount(db, currentPayment.partner_id, currentPayment.company_id, currentPayment.partner_type === 'supplier' ? 'payable' : 'receivable');
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const amount = companyRound(Number(currentPayment.amount));
@@ -123,7 +123,7 @@ export function allocatePaymentToInvoice(db, payment, invoice, availableCredit, 
   if (diff) {
     const counterpart = payment.destination_account_code
       || (payment.destination_account_id ? read(db, 'account.account', payment.destination_account_id)?.code : null)
-      || (['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000');
+      || invoiceCounterpartAccount(db, invoice);
     const fx = postEntry(withFx, {
       journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${payment.name}`,
       lines: diff > 0

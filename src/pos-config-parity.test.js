@@ -536,7 +536,7 @@ test('foreign rounded invoices and credit notes retain currency amounts and can 
 test('POS posts and closes in the session company using that company journals and accounts', () => {
   let db = seed();
   const company = createCompany(db, { name: 'Branch' }); db = company.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: company.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
@@ -765,7 +765,7 @@ test('automatically valued goods sold in a second company scope stock valuation 
   let db = seed();
   const company = createCompany(db, { name: 'Company Two' });
   db = company.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
@@ -795,7 +795,7 @@ test('automatically valued goods sold in a second company scope stock valuation 
 test('shared product POS valuation opens and consumes only the session company stock', () => {
   let db = seed();
   const company = createCompany(db, { name: 'Independent stock company' }); db = company.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['301000', 'equity']]) {
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['301000', 'equity']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
@@ -1514,4 +1514,3 @@ test('server checkout returns authoritative payable total with rounding differen
   });
   assert.equal(orderOut.total, 10.00, 'payOrder total must include rounding_difference');
 });
-

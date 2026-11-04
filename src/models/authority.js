@@ -2,6 +2,7 @@
 // time off, allocations, expenses, timesheets and approval requests then needs that employee to be a manager of the
 // requester (never the requester themselves), checked on the server for every non-admin change.
 import { leaveAuthorization } from './timeoff.js';
+import { partnerAccount } from './ledger.js';
 
 let actor = null;
 /** The signed-in user ({ login, name }) on the client; null in local mode. */
@@ -72,12 +73,13 @@ function sheetBookingError(db, r) {
   if (!expenses.length || !entry || entry.state !== 'posted' || entry.ref !== r.name || !(total > 0)
     || expenses.some((e) => e.move_id !== entry.id || e.employee_id !== r.employee_id || e.state !== (r.state === 'done' ? 'paid' : 'posted'))) return 'A posted expense report needs its accounting entry and posted expenses';
   const account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code)?.id;
-  const credit = (m, code) => (m.line_ids ?? []).filter((l) => l.account_id === account(code)).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
-  if (r.payment_mode === 'company_account') return r.state === 'done' && close(credit(entry, '101401'), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
-  if (r.payment_mode !== 'own_account' || !close(credit(entry, '211000'), total)) return 'Employee expenses need their posted payable accounting entry';
+  const credit = (m, id) => (m.line_ids ?? []).filter((l) => l.account_id === id).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
+  if (r.payment_mode === 'company_account') return r.state === 'done' && close(credit(entry, account('101401')), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
+  const payable = partnerAccount(db, r.partner_id, r.company_id, 'payable');
+  if (r.payment_mode !== 'own_account' || !close(credit(entry, payable), total)) return 'Employee expenses need their posted payable accounting entry';
   if (r.state === 'done') {
     const reimbursed = (db.records['account.move'] ?? []).filter((m) => m.state === 'posted' && m.ref === `Reimbursement: ${r.name}` && (m.company_id ?? 1) === (r.company_id ?? 1))
-      .reduce((s, m) => s + Math.min(-credit(m, '211000'), credit(m, '101401')), 0);
+      .reduce((s, m) => s + Math.min(-credit(m, payable), credit(m, account('101401'))), 0);
     if (!close(Number(r.amount_paid), total) || !close(reimbursed, total)) return 'Paid employee expenses need their posted reimbursement entries';
   }
   return null;
