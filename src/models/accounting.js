@@ -179,6 +179,18 @@ export function postMove(db, id) {
   if (!r.partner_id) throw new Error('Partner is required');
   if (!(r.invoice_line_ids ?? []).length) throw new Error('Add at least one invoice line');
   if (!validInvoiceTotal(r)) throw new Error('The total must be positive; use a credit note or refund instead');
+  if (r.sale_id) {
+    const sale = read(db, 'sale.order', r.sale_id);
+    if (sale && (sale.company_id ?? 1) !== (r.company_id ?? 1)) throw new Error('Invoice and sales order must belong to the same company');
+  }
+  if (r.purchase_id) {
+    const po = read(db, 'purchase.order', r.purchase_id);
+    if (po && (po.company_id ?? 1) !== (r.company_id ?? 1)) throw new Error('Bill and purchase order must belong to the same company');
+  }
+  if (r.fiscal_position_id) {
+    const fp = read(db, 'account.fiscal.position', r.fiscal_position_id);
+    if (fp?.company_id && fp.company_id !== (r.company_id ?? 1)) throw new Error('Fiscal position belongs to another company');
+  }
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   checkBillMatch(db, r);
@@ -188,8 +200,10 @@ export function postMove(db, id) {
     return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
   });
   const updatedR = { ...r, invoice_line_ids: resolvedLines };
-  const journal = journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
+  const journal = r.journal_id || journalId(db, isPurchase(r) ? 'BILL' : 'INV', r.company_id ?? 1);
   if (!journal) throw new Error(`No ${isPurchase(r) ? 'vendor bill' : 'customer invoice'} journal for this company`);
+  const journalRecord = read(db, 'account.journal', journal);
+  if (journalRecord?.company_id && journalRecord.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
   const line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
   if (line_ids.some((line) => {
     const account = read(db, 'account.account', line.account_id);

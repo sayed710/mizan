@@ -70,10 +70,24 @@ export function invoiceBaseGroups(db, move) {
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
     if (!sale && !dropship && p?.type === 'goods' && !['manual_periodic', 'periodic'].includes(productProperty(db, p, 'property_valuation'))) return accountId(db, '110200', move.company_id);
-    return productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+    const configured = productProperty(db, p, sale ? 'property_account_income_id' : 'property_account_expense_id');
+    const acc = configured ? read(db, 'account.account', configured) : null;
+    if (acc) {
+      if (!acc.company_id || acc.company_id === (move.company_id ?? 1)) return acc.id;
+      const matched = accountId(db, acc.code, move.company_id);
+      if (matched) return matched;
+    }
+    return null;
   };
   for (const [index, l] of (move.invoice_line_ids ?? []).entries()) {
-    const original = mapAccount(db, move.fiscal_position_id, l.account_id || productAccount(l) || base);
+    let lineAcc = l.account_id;
+    if (lineAcc) {
+      const acc = read(db, 'account.account', lineAcc);
+      if (acc && acc.company_id && acc.company_id !== (move.company_id ?? 1)) {
+        lineAcc = accountId(db, acc.code, move.company_id) || lineAcc;
+      }
+    }
+    const original = mapAccount(db, move.fiscal_position_id, lineAcc || productAccount(l) || base);
     const deferred = l.deferred_start_date || l.deferred_end_date;
     if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
     const company = read(db, 'res.company', move.company_id ?? 1);
@@ -130,7 +144,19 @@ export function invoiceLines(db, move) {
   // Tax lines per tax account; cash-basis taxes wait on a transition account until payment.
   const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
-  const taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), (l) => (l.tax_cash_basis ? accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) : l.tax_account_id || taxAcc), rate);
+  const taxAccountFor = (l) => {
+    if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
+    if (l.tax_account_id) {
+      const acc = read(db, 'account.account', l.tax_account_id);
+      if (acc) {
+        if (!acc.company_id || acc.company_id === (move.company_id ?? 1)) return acc.id;
+        const matched = accountId(db, acc.code, move.company_id);
+        if (matched) return matched;
+      }
+    }
+    return taxAcc;
+  };
+  const taxes = taxGroups(move.invoice_line_ids.filter((l) => lineTaxOf(l) !== 0), taxAccountFor, rate);
   const actualTaxes = taxes.filter((g) => g.amount !== 0 || g.document_amount !== 0);
   const adjustTax = Boolean(rounding && rounding.strategy === 'biggest_tax' && actualTaxes.length && diffDoc !== 0);
   if (adjustTax) {

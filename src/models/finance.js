@@ -116,6 +116,14 @@ function postedMoveRule(db, before, after) {
   }
   if (after.state === 'posted' && before?.state !== 'posted') {
     if (before && before.state !== 'draft') return 'Only draft entries can be posted';
+    if (after.sale_id) {
+      const sale = read(db, 'sale.order', after.sale_id);
+      if (sale && (sale.company_id ?? 1) !== (after.company_id ?? 1)) return 'Invoice and sales order must belong to the same company';
+    }
+    if (after.purchase_id) {
+      const po = read(db, 'purchase.order', after.purchase_id);
+      if (po && (po.company_id ?? 1) !== (after.company_id ?? 1)) return 'Bill and purchase order must belong to the same company';
+    }
     const lines = Array.isArray(after.line_ids) ? after.line_ids : [];
     if (lines.some((l) => Number(l.debit) < 0 || Number(l.credit) < 0)) return 'Debits and credits cannot be negative';
     if (!isBalanced(lines)) return 'A posted entry needs balanced journal items';
