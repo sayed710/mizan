@@ -51,7 +51,8 @@ test('a taxable negative adjustment offsets the posted tax and reported base', (
   assert.ok(taxItem);
   assert.equal(taxItem.credit, 11.20);
   assert.equal(taxItem.tax_base, 80);
-  assert.deepEqual(row(taxesByTax(posted.db), 'VAT 14%'), { side: 'sale', name: 'VAT 14%', base: 80, tax: 11.20 });
+  const vat14 = search(db, 'account.tax').find((t) => t.name === 'VAT 14%' && t.type_tax_use === 'sale');
+  assert.deepEqual(row(taxesByTax(posted.db), 'VAT 14%'), { side: 'sale', tax_id: vat14.id, name: 'VAT 14%', base: 80, tax: 11.20 });
 });
 
 test('separately taxed negative adjustments retain their signed base on invoices and refunds', () => {
@@ -66,7 +67,7 @@ test('separately taxed negative adjustments retain their signed base on invoices
     const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(inv.db, read(inv.db, 'account.move', inv.id)).db;
     const item = read(posted, 'account.move', inv.id).line_ids.find((l) => l.tax_name === name);
     assert.equal(item.tax_base, -20);
-    assert.deepEqual(taxesByTax(posted).find((r) => r.name === name), { side, name, base: -20 * sign, tax: -2.8 * sign }, type);
+    assert.deepEqual(taxesByTax(posted).find((r) => r.name === name && r.tax_id === tax.id), { side, tax_id: tax.id, name, base: -20 * sign, tax: -2.8 * sign }, type);
   }
 });
 
@@ -78,7 +79,7 @@ test('historical tax items retain their side after editing and archiving the tax
   const before = taxReport(tax.db, {});
   const changed = write(posted.db, 'account.tax', tax.id, { account_id: null, active: false });
   assert.equal(taxReport(changed, {}).output - before.output, 10);
-  assert.deepEqual(row(taxesByTax(changed), 'Custom historical tax'), { side: 'sale', name: 'Custom historical tax', base: 100, tax: 10 });
+  assert.deepEqual(row(taxesByTax(changed), 'Custom historical tax'), { side: 'sale', tax_id: tax.id, name: 'Custom historical tax', base: 100, tax: 10 });
 });
 
 test('sales and purchases using the same tax account remain on their own sides', () => {
@@ -97,7 +98,8 @@ test('the final cash-basis release clears the taxable base rounding remainder', 
   const posted = invoice(db, [line(db, 'VAT 14% (Cash Basis)', { price_unit: 100 })]);
   let paid = posted.db;
   for (let i = 0; i < 3; i++) paid = payMove(paid, posted.id, 38, today());
-  assert.deepEqual(row(taxesByTax(paid), 'VAT 14% (Cash Basis)'), { side: 'sale', name: 'VAT 14% (Cash Basis)', base: 100, tax: 14 });
+  const cashTax = search(db, 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)' && t.type_tax_use === 'sale');
+  assert.deepEqual(row(taxesByTax(paid), 'VAT 14% (Cash Basis)'), { side: 'sale', tax_id: cashTax.id, name: 'VAT 14% (Cash Basis)', base: 100, tax: 14 });
 });
 
 test('reversing a final cash-basis payment removes its exact rounded release', () => {
@@ -116,9 +118,9 @@ test('reversing a final cash-basis payment removes its exact rounded release', (
         db = confirm(payment.db, 'account.payment', payment.id);
         last = payment.id;
       }
-      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 100, tax: sign * 14 });
+      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: sign * 100, tax: sign * 14 });
       db = button('account.payment', 'Reverse').run(db, read(db, 'account.payment', last)).db;
-      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 66.66, tax: sign * 9.34 }, `${type}, direct=${direct}`);
+      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: sign * 66.66, tax: sign * 9.34 }, `${type}, direct=${direct}`);
     }
   }
 });
@@ -142,7 +144,7 @@ test('legacy final payment reversal removes the original rounded cash-basis rele
     return m;
   }) } };
   db = button('account.payment', 'Reverse').run(db, read(db, 'account.payment', last)).db;
-  assert.deepEqual(row(taxesByTax(db), 'Legacy cash rounding'), { side: 'sale', name: 'Legacy cash rounding', base: 66.67, tax: 9.33 });
+  assert.deepEqual(row(taxesByTax(db), 'Legacy cash rounding'), { side: 'sale', tax_id: tax.id, name: 'Legacy cash rounding', base: 66.67, tax: 9.33 });
 });
 
 test('legacy cash-basis reversals do not inflate the final release base', () => {
@@ -182,7 +184,7 @@ test('legacy cash-basis reversals do not inflate the final release base', () => 
         db = run(db, 'account.payment', second.id, 'Reverse');
       }
       pay(read(db, 'account.move', inv.id).amount_residual, false);
-      assert.deepEqual(taxesByTax(db).find((r) => r.name === name && r.side === side), { side, name, base: sign * 100, tax: sign * 14 }, `${type}: ${scenario}`);
+      assert.deepEqual(taxesByTax(db).find((r) => r.name === name && r.side === side), { side, tax_id: tax.id, name, base: sign * 100, tax: sign * 14 }, `${type}: ${scenario}`);
     }
   }
 });
@@ -204,7 +206,7 @@ test('rounded-to-zero cash-basis tax bases are released on payment for invoices 
     for (const [amount, expected] of [[0.03, 0.03], [0.07, 0.10]]) {
       const payment = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount, date: today(), partner_type: side === 'sale' ? 'customer' : 'supplier', payment_type: (side === 'sale') === (sign === 1) ? 'inbound' : 'outbound' });
       db = confirm(payment.db, 'account.payment', payment.id);
-      assert.deepEqual(taxesByTax(db).find((r) => r.name === `Micro cash ${type}`), { side, name: `Micro cash ${type}`, base: sign * expected, tax: 0 }, `${type}: released base`);
+      assert.deepEqual(taxesByTax(db).find((r) => r.name === `Micro cash ${type}`), { side, tax_id: tax.id, name: `Micro cash ${type}`, base: sign * expected, tax: 0 }, `${type}: released base`);
       const releases = search(db, 'account.move').filter((m) => m.ref === `Cash basis taxes ${posted.name}`);
       assert.ok(releases.some((m) => m.line_ids.some((l) => l.tax_name === `Micro cash ${type}` && l.tax_side === side && l.tax_base === sign * amount)), `${type}: posted release`);
     }
@@ -233,7 +235,7 @@ test('negative cash-basis groups release and reverse with signed bases on invoic
     const first = pay(38.60);
     db = confirm(first.db, 'account.payment', first.id);
     const check = (base, taxAmount) => {
-      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: base * sign || 0, tax: taxAmount * sign || 0 }, type);
+      assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: base * sign || 0, tax: taxAmount * sign || 0 }, type);
       const totals = delta(before, taxReport(db));
       assert.equal(totals[side === 'sale' ? 'output' : 'input'], taxAmount * sign || 0, type);
     };
@@ -264,12 +266,12 @@ test('cash-basis base survives a zero-tax partial release and payment reversal',
   db = button('account.move', 'Confirm').run(inv.db, read(inv.db, 'account.move', inv.id)).db;
   const payment = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount: 0.03, payment_type: 'outbound', date: today() });
   db = button('account.payment', 'Confirm').run(payment.db, read(payment.db, 'account.payment', payment.id)).db;
-  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', name: 'Small cash refund', base: -0.03, tax: 0 });
+  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', tax_id: tax.id, name: 'Small cash refund', base: -0.03, tax: 0 });
   db = button('account.payment', 'Reverse').run(db, read(db, 'account.payment', payment.id)).db;
-  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', name: 'Small cash refund', base: 0, tax: 0 });
+  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', tax_id: tax.id, name: 'Small cash refund', base: 0, tax: 0 });
   const final = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount: 0.11, payment_type: 'outbound', date: today() });
   db = button('account.payment', 'Confirm').run(final.db, read(final.db, 'account.payment', final.id)).db;
-  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', name: 'Small cash refund', base: -0.10, tax: -0.01 });
+  assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', tax_id: tax.id, name: 'Small cash refund', base: -0.10, tax: -0.01 });
 });
 
 test('zero-rate cash-basis tax reports its base only as payments are made and reversed', () => {
@@ -287,11 +289,11 @@ test('zero-rate cash-basis tax reports its base only as payments are made and re
     };
     const first = pay(40);
     assert.ok(read(db, 'account.move', inv.id).payments.at(-1).cash_basis_move_id, `${type}: release entry`);
-    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 40, tax: 0 }, `${type}: partial payment`);
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: sign * 40, tax: 0 }, `${type}: partial payment`);
     db = run(db, 'account.payment', first, 'Reverse');
-    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: 0, tax: 0 }, `${type}: reversal`);
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: 0, tax: 0 }, `${type}: reversal`);
     pay(100);
-    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 100, tax: 0 }, `${type}: final payment`);
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, tax_id: tax.id, name, base: sign * 100, tax: 0 }, `${type}: final payment`);
   }
 });
 
@@ -304,10 +306,12 @@ test('zero-rate invoice and cash-basis lines remain distinct even with the same 
     { qty: 1, price_unit: 40, ...taxSnapshot(read(cash.db, 'account.tax', cash.id)) },
   ] });
   let db = run(inv.db, 'account.move', inv.id, 'Confirm');
-  assert.deepEqual(row(taxesByTax(db), 'Shared zero label'), { side: 'sale', name: 'Shared zero label', base: 60, tax: 0 });
+  assert.deepEqual(taxesByTax(db).find((r) => r.tax_id === immediate.id), { side: 'sale', tax_id: immediate.id, name: 'Shared zero label', base: 60, tax: 0 });
+  assert.equal(taxesByTax(db).find((r) => r.tax_id === cash.id), undefined);
   const payment = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount: 100, date: today(), payment_type: 'inbound' });
   db = run(payment.db, 'account.payment', payment.id, 'Confirm');
-  assert.deepEqual(row(taxesByTax(db), 'Shared zero label'), { side: 'sale', name: 'Shared zero label', base: 100, tax: 0 });
+  assert.deepEqual(taxesByTax(db).find((r) => r.tax_id === immediate.id), { side: 'sale', tax_id: immediate.id, name: 'Shared zero label', base: 60, tax: 0 });
+  assert.deepEqual(taxesByTax(db).find((r) => r.tax_id === cash.id), { side: 'sale', tax_id: cash.id, name: 'Shared zero label', base: 40, tax: 0 });
 });
 
 test('zero-rated exports keep a durable taxable base without changing return totals', () => {
@@ -315,7 +319,7 @@ test('zero-rated exports keep a durable taxable base without changing return tot
   const tax = create(db, 'account.tax', { name: 'Zero export', amount: 0, type_tax_use: 'sale' });
   const posted = invoice(tax.db, [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }]);
   assert.deepEqual(taxReport(posted.db, {}), taxReport(tax.db, {}));
-  assert.deepEqual(row(taxesByTax(posted.db), 'Zero export'), { side: 'sale', name: 'Zero export', base: 100, tax: 0 });
+  assert.deepEqual(row(taxesByTax(posted.db), 'Zero export'), { side: 'sale', tax_id: tax.id, name: 'Zero export', base: 100, tax: 0 });
 });
 
 test('POS full refund reverses zero-rated and taxable bases in the tax report', () => {
@@ -326,10 +330,10 @@ test('POS full refund reverses zero-rated and taxable bases in the tax report', 
     { product_id: 1, qty: 1, price_unit: 10, ...taxSnapshot(read(db, 'account.tax', zero.id)) },
     line(db, 'VAT 14%', { price_unit: 50 }),
   ], method: 'cash' });
-  assert.deepEqual(row(taxesByTax(sale.db), 'POS zero export'), { side: 'sale', name: 'POS zero export', base: 10, tax: 0 });
+  assert.deepEqual(row(taxesByTax(sale.db), 'POS zero export'), { side: 'sale', tax_id: zero.id, name: 'POS zero export', base: 10, tax: 0 });
   const beforeVat = row(taxesByTax(db), 'VAT 14%') ?? { base: 0, tax: 0 };
   const refund = refundOrder(sale.db, read(sale.db, 'pos.order', sale.id));
-  assert.deepEqual(row(taxesByTax(refund.db), 'POS zero export'), { side: 'sale', name: 'POS zero export', base: 0, tax: 0 });
+  assert.deepEqual(row(taxesByTax(refund.db), 'POS zero export'), { side: 'sale', tax_id: zero.id, name: 'POS zero export', base: 0, tax: 0 });
   const afterVat = row(taxesByTax(refund.db), 'VAT 14%');
   assert.deepEqual([afterVat.base, afterVat.tax], [beforeVat.base, beforeVat.tax]);
   assert.deepEqual(taxReport(refund.db, {}), taxReport(db, {}));
@@ -409,17 +413,17 @@ test('unnamed zero-rated lines and small nonzero taxes rounded to zero retain ta
   const rows = taxesByTax(db, {});
   const zeroSaleRow = rows.find((r) => r.side === 'sale' && r.name === '0%');
   assert.ok(zeroSaleRow, 'unnamed 0% sale row should exist');
-  assert.deepEqual(zeroSaleRow, { side: 'sale', name: '0%', base: 60, tax: 0 });
+  assert.deepEqual(zeroSaleRow, { side: 'sale', tax_id: null, name: '0%', base: 60, tax: 0 });
 
   const zeroPurchRow = rows.find((r) => r.side === 'purchase' && r.name === '0%');
   assert.ok(zeroPurchRow, 'unnamed 0% purchase row should exist');
-  assert.deepEqual(zeroPurchRow, { side: 'purchase', name: '0%', base: 70, tax: 0 });
+  assert.deepEqual(zeroPurchRow, { side: 'purchase', tax_id: null, name: '0%', base: 70, tax: 0 });
 
   const microSaleRow = rows.find((r) => r.side === 'sale' && r.name === 'Micro Sale VAT');
   assert.ok(microSaleRow, 'Micro Sale VAT row should exist');
-  assert.deepEqual(microSaleRow, { side: 'sale', name: 'Micro Sale VAT', base: 0.06, tax: 0 });
+  assert.deepEqual(microSaleRow, { side: 'sale', tax_id: microSaleTax.id, name: 'Micro Sale VAT', base: 0.06, tax: 0 });
 
   const microPurchRow = rows.find((r) => r.side === 'purchase' && r.name === 'Micro Purchase VAT');
   assert.ok(microPurchRow, 'Micro Purchase VAT row should exist');
-  assert.deepEqual(microPurchRow, { side: 'purchase', name: 'Micro Purchase VAT', base: 0.07, tax: 0 });
+  assert.deepEqual(microPurchRow, { side: 'purchase', tax_id: microPurchTax.id, name: 'Micro Purchase VAT', base: 0.07, tax: 0 });
 });

@@ -519,7 +519,9 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
   return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
-const releasedTaxKey = (account, name, tags = []) => `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
+const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
+  ? JSON.stringify([account, taxId, [...tags].sort((a, b) => a - b)])
+  : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
 
 /** Tax already released for an invoice, per tax account code. */
 const releasedTaxes = (db, r) => {
@@ -528,7 +530,7 @@ const releasedTaxes = (db, r) => {
     if (m.ref !== `Cash basis taxes ${r.name}` || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = read(db, 'account.account', l.account_id)?.code;
-      const key = releasedTaxKey(code, l.tax_name, l.tax_tag_ids);
+      const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
       const previous = released.get(key) ?? { amount: 0, base: 0 };
       const zeroTax = !(Number(l.debit) || Number(l.credit));
       // Signed bases (and older zero-amount bases) include the refund direction.
@@ -558,7 +560,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_name, g.tax_tag_ids)) : null;
+    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids)) : null;
     const legacy = final ? released.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
@@ -569,9 +571,9 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   if (!due.length) return { db, id: null };
   const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
-  const lines = due.flatMap(({ account, amount, base, tax_name, tax_tag_ids }) => {
+  const lines = due.flatMap(({ account, amount, base, tax_id, tax_name, tax_tag_ids }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
+    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
