@@ -4,6 +4,7 @@ import { appAnalyses, recordAnalyses } from '../models/analysis.js';
 import { useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { PERIODS } from './Reports.jsx';
+import { companyViewDb } from '../companyView.js';
 
 // Ids in analysis results are shown by name when the key says which model they point at.
 const RELATIONS = {
@@ -15,7 +16,10 @@ const RELATIONS = {
 const label = (key) => t(String(key).replace(/_id$/, '').replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/\b\w/g, (c) => c.toUpperCase()));
 
 function Value({ db, k, v }) {
-  if (v == null || v === '') return <span className="muted">—</span>;
+  if (v == null || v === '') {
+    if (k === 'manager_id') return <span className="muted">{t('Unassigned')}</span>;
+    return <span className="muted">—</span>;
+  }
   if (Array.isArray(v) || typeof v === 'object') return <DataView db={db} value={v} />;
   if (typeof v === 'number') {
     const model = RELATIONS[k];
@@ -35,7 +39,7 @@ export function DataView({ db, value }) {
       // Skip ids that a readable sibling already names (product_id beside product) and columns empty in every row.
       const keys = [...new Set(value.flatMap(Object.keys))];
       const cols = keys.filter((c) => c !== 'id' && !(c.endsWith('_id') && keys.includes(c.slice(0, -3)))
-        && value.some((r) => r[c] != null && r[c] !== ''));
+        && (c === 'manager_id' || value.some((r) => r[c] != null && r[c] !== '')));
       return (
         <div className="list-wrap">
           <table className="list analysis">
@@ -57,9 +61,10 @@ export function DataView({ db, value }) {
   );
 }
 
-function Result({ db, run }) {
+export function AnalysisResult({ db, run }) {
   try {
-    return <DataView db={db} value={run()} />;
+    const view = companyViewDb(db);
+    return <DataView db={view} value={run(view)} />;
   } catch (e) {
     return <p className="alert" role="alert">{t(e.message)}</p>;
   }
@@ -76,7 +81,7 @@ export function RecordAnalysis({ db, model, rec }) {
       {list.map((a) => (
         <details key={a.label} onToggle={(e) => { const next = new Set(open); if (e.currentTarget.open) next.add(a.label); else next.delete(a.label); setOpen(next); }}>
           <summary>{t(a.label)}</summary>
-          {open.has(a.label) && <Result db={db} run={() => a.run(db, rec)} />}
+          {open.has(a.label) && <AnalysisResult db={db} run={(view) => a.run(view, rec)} />}
         </details>
       ))}
     </section>
@@ -105,7 +110,7 @@ export function AnalysisPage({ leaf }) {
           </label>
         )}
       </div>
-      <Result db={db} run={() => entry.run(db, PERIODS[periodKey]())} />
+      <AnalysisResult db={db} run={(view) => entry.run(view, PERIODS[periodKey]())} />
     </main>
   );
 }

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
+import { accountingCompany, assertEntryCompany } from './test-support/accounting-company.js';
+import { applyDiff, diffDb } from './sync.js';
 import { addDays, amounts, today } from './models/common.js';
 import { ecommerceModels } from './models/ecommerce.js';
 import { isBalanced } from './models/ledger.js';
@@ -95,6 +97,20 @@ test('prepayments use discounted tax-inclusive totals, round cents and treat req
   for (const p of [0, 100]) assert.equal(prepaymentAmount({ order_line: lines, require_payment: true, prepayment_percent: p }), total);
   assert.equal(prepaymentAmount({ order_line: lines, require_payment: false, prepayment_percent: 0 }), 0);
   assert.throws(() => prepaymentAmount({ prepayment_percent: 101 }), /between 0 and 100/);
+});
+
+test('quotation prepayment posts its payment and entry in the order company', () => {
+  const branch = accountingCompany(seed());
+  const q = create(branch.db, 'sale.order', { company_id: branch.id, partner_id: 1, require_payment: true, prepayment_percent: 100, order_line: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  const button = definition.form.buttons.find((b) => b.label === 'Register Prepayment');
+  const paid = button.run(q.db, read(q.db, 'sale.order', q.id), { amount: '100' }).db;
+  const payment = search(paid, 'account.payment').find((p) => p.sale_id === q.id);
+  assert.ok(payment);
+  assert.equal(payment.company_id, branch.id);
+  assertEntryCompany(assert, paid, read(paid, 'account.move', payment.move_id), branch.id);
+  const saved = applyDiff(q.db, diffDb(q.db, paid), { isAdmin: true });
+  assert.equal(read(saved, 'account.payment', payment.id).company_id, branch.id);
+  assertEntryCompany(assert, saved, read(saved, 'account.move', payment.move_id), branch.id);
 });
 
 test('payQuote refuses underpayments and books a balanced order-specific credit without settling unrelated invoices', () => {

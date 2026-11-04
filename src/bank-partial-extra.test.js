@@ -1,0 +1,31 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { create, read, search, write } from './orm.js';
+import { models } from './models/index.js';
+import { seed } from './seed.js';
+import { postMove } from './models/accounting.js';
+import { journalItems } from './models/ledger.js';
+import { applyRule } from './models/reconcile.js';
+
+const LINE = 'account.bank.statement.line';
+const run = (db, id, label) => models[LINE].form.buttons.find((b) => b.label === label).run(db, read(db, LINE, id)).db;
+for (const mode of ['Book to Account', 'rule']) test(`outbound oversized bill leaves suspense which can be closed by ${mode}`, () => {
+  let db = seed();
+  const inv = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'bill and fees', amount: -130, move_id: inv.id, counterpart: '690000' });
+  db = run(line.db, line.id, 'Match');
+  assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
+  assert.equal(read(db, LINE, line.id).open_amount, 30);
+  if (mode === 'rule') db = applyRule(db, { name: 'Fees', line_ids: [{ account_code: '690000', amount_type: 'percentage', amount: 100 }] }, read(db, LINE, line.id));
+  else db = run(db, line.id, mode);
+  assert.equal(read(db, LINE, line.id).state, 'reconciled');
+  assert.equal(read(db, LINE, line.id).open_amount, 0);
+  const bank = search(db, 'account.account').find((a) => a.code === '101401').id;
+  const suspense = search(db, 'account.account').find((a) => a.code === '101404').id;
+  const items = journalItems(db).filter((l) => !read(line.db, 'account.move', l.move_id));
+  assert.equal(items.filter((l) => l.account_id === bank).length, 1);
+  assert.equal(items.filter((l) => l.account_id === bank)[0].credit, 130);
+  assert.equal(items.filter((l) => l.account_id === suspense).reduce((sum, l) => sum + l.debit - l.credit, 0), 0);
+  assert.throws(() => write(db, LINE, line.id, { open_amount: 30 }), /cannot be changed/);
+});

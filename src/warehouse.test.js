@@ -73,11 +73,20 @@ test('two-step receipt values at Input only, then moves to Stock without another
   assert.equal(located(received, 7, wh.wh_input_stock_loc_id), 10);
   assert.equal(warehouseQty(received, 7, wh.id), 10);
   assert.equal(read(received, 'stock.picking', stock.id).state, 'ready');
+  assert.equal(countEntries(received), countEntries(db) + 1);
   const done = validate(received, stock.id);
   assert.equal(located(done, 7, wh.wh_input_stock_loc_id), 0);
   assert.equal(located(done, 7, wh.lot_stock_id), 10);
   assert.equal(countEntries(done), countEntries(db) + 1);
   assert.equal(read(done, 'product', 7).qty_available, read(db, 'product', 7).qty_available + 10);
+  const inputLayers = search(received, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  const doneLayers = search(done, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  assert.equal(inputLayers.length, 1);
+  assert.equal(inputLayers[0].quantity, 10);
+  assert.equal(inputLayers[0].value, 900);
+  assert.equal(doneLayers.length, 1);
+  assert.equal(doneLayers[0].quantity, 10);
+  assert.equal(doneLayers[0].value, 900);
 });
 
 test('three-step delivery releases pick/pack/ship in order and only shipment values stock', () => {
@@ -96,6 +105,14 @@ test('three-step delivery releases pick/pack/ship in order and only shipment val
   assert.equal(read(done, 'product', 7).qty_available, qty - 6);
   assert.equal(warehouseQty(done, 7, whId(db)), 4);
   assert.equal(countEntries(done), countEntries(db) + 1);
+  const dbLayers = search(db, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  const packedLayers = search(packed, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  const doneLayers = search(done, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  assert.equal(packedLayers.length, dbLayers.length);
+  assert.equal(doneLayers.length, dbLayers.length + 1);
+  const shipLayer = doneLayers.at(-1);
+  assert.equal(shipLayer.quantity, -6);
+  assert.equal(shipLayer.value, -540);
   assert.throws(() => validate(done, chain[2].id), /processed/);
 });
 
@@ -134,6 +151,10 @@ test('three-step receipts pass through quality and stock with one valuation', ()
   assert.equal(located(next, 7, wh.wh_qc_stock_loc_id), 0);
   assert.equal(located(next, 7, wh.lot_stock_id), 5);
   assert.equal(countEntries(next), countEntries(db) + 1);
+  const layers = search(next, 'stock.valuation.layer').filter((l) => l.product_id === 7 && !l.opening);
+  assert.equal(layers.length, 1);
+  assert.equal(layers[0].quantity, 5);
+  assert.equal(layers[0].value, 450);
 });
 
 test('the order hook reads its linked warehouse and only shipment updates sale delivered quantities', () => {
@@ -146,6 +167,69 @@ test('the order hook reads its linked warehouse and only shipment updates sale d
   assert.equal(Number(read(packed, 'sale.order', sale.id).order_line[0].qty_delivered) || 0, 0);
   const shipped = validate(packed, chain[2].id);
   assert.equal(read(shipped, 'sale.order', sale.id).order_line[0].qty_delivered, 2);
+});
+
+test('non-default company MTO orders receive and deliver through their own warehouse', () => {
+  let db = seed();
+  let company, wh, product, sale;
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Other Warehouse', code: 'OTHER', company_id: company, reception_steps: 'two_steps', delivery_steps: 'pick_ship' }));
+  ({ db, id: product } = create(db, 'product', { name: 'Company MTO', type: 'goods', route: 'mto_buy', vendor_id: 2, qty_available: 0, cost: 20 }));
+  ({ db, id: sale } = create(db, 'sale.order', { company_id: company, partner_id: 1, order_line: [{ product_id: product, qty: 3, price_unit: 40, tax: 0 }] }));
+  const run = (model, id, label) => { db = models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db; };
+  run('sale.order', sale, 'Confirm');
+  const po = search(db, 'purchase.order').find((p) => p.sale_id === sale);
+  assert.equal(po.company_id, company);
+  run('purchase.order', po.id, 'Confirm Order');
+  const receipt = search(db, 'stock.picking').filter((p) => p.purchase_id === po.id);
+  const delivery = search(db, 'stock.picking').filter((p) => p.sale_id === sale);
+  assert.deepEqual(receipt.map((p) => p.picking_type), ['incoming', 'internal']);
+  assert.deepEqual(delivery.map((p) => p.picking_type), ['internal', 'outgoing']);
+  for (const picking of [...receipt, ...delivery]) {
+    assert.equal(picking.company_id, company);
+    assert.equal(picking.warehouse_id, wh);
+    for (const loc of [picking.location_id, picking.location_dest_id]) assert.equal(read(db, 'stock.location', loc).company_id, company);
+  }
+  for (const picking of receipt) run('stock.picking', picking.id, 'Validate');
+  run('stock.picking', delivery[0].id, 'Check Availability');
+  for (const picking of delivery) run('stock.picking', picking.id, 'Validate');
+  assert.equal(read(db, 'purchase.order', po.id).receipt_done, true);
+  assert.equal(read(db, 'sale.order', sale).order_line[0].qty_delivered, 3);
+  assert.equal(read(db, 'stock.picking', delivery[1].id).state, 'done');
+  assert.equal((db.records['stock.quant'] ?? []).filter((q) => q.product_id === product && q.company_id === company).reduce((sum, q) => sum + q.quantity, 0), 0);
+});
+
+test('MTO purchase receipt follows the warehouse explicitly selected on the sale', () => {
+  let db = seed();
+  let company, wh, product, sale;
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db } = create(db, 'stock.warehouse', { name: 'First Warehouse', code: 'FIRST', company_id: company }));
+  ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Selected Warehouse', code: 'SECOND', company_id: company }));
+  ({ db, id: product } = create(db, 'product', { name: 'Ordered product', type: 'goods', route: 'mto_buy', vendor_id: 2, qty_available: 0, cost: 10 }));
+  ({ db, id: sale } = create(db, 'sale.order', { company_id: company, warehouse_id: wh, partner_id: 1, order_line: [{ product_id: product, qty: 1, price_unit: 20, tax: 0 }] }));
+  db = models['sale.order'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'sale.order', sale)).db;
+  const po = search(db, 'purchase.order').find((p) => p.sale_id === sale);
+  db = models['purchase.order'].form.buttons.find((b) => b.label === 'Confirm Order').run(db, po).db;
+  const receipt = search(db, 'stock.picking').find((p) => p.purchase_id === po.id);
+  const delivery = search(db, 'stock.picking').find((p) => p.sale_id === sale);
+  assert.equal(receipt.warehouse_id, wh);
+  assert.equal(delivery.warehouse_id, wh);
+  db = validate(db, receipt.id);
+  db = validate(db, delivery.id);
+  assert.equal(read(db, 'sale.order', sale).order_line[0].qty_delivered, 1);
+});
+
+test('order confirmation rejects a warehouse or warehouse location from another company', () => {
+  let db = seed();
+  let company, wh, sale;
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Other Warehouse', code: 'OTHER', company_id: company }));
+  ({ db, id: sale } = create(db, 'sale.order', { company_id: company, partner_id: 1, warehouse_id: whId(db), order_line: [{ product_id: 7, qty: 1, price_unit: 10, tax: 0 }] }));
+  const confirm = (state) => models['sale.order'].form.buttons.find((b) => b.label === 'Confirm').run(state, read(state, 'sale.order', sale)).db;
+  assert.throws(() => confirm(db), /warehouse.*company/i);
+  db = write(db, 'sale.order', sale, { warehouse_id: wh });
+  db = write(db, 'stock.warehouse', wh, { lot_stock_id: read(db, 'stock.warehouse', whId(db)).lot_stock_id });
+  assert.throws(() => confirm(db), /location.*company/i);
 });
 
 test('resupply validation moves per-location stock between warehouses without valuation or company quantity changes', () => {

@@ -2,6 +2,7 @@ import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
+import { models } from './models/index.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { confirmMo, produce } from './models/more.js';
 import { unbuild, validateScrap } from './models/mrp.js';
@@ -50,6 +51,29 @@ test('scrap writes stock off at cost with a balanced entry, and refuses more tha
   assert.throws(() => validateScrap(done, s), /already done/);
   const big = create(db, 'stock.scrap', { product_id: b, scrap_qty: 1000 });
   assert.throws(() => validateScrap(big.db, read(big.db, 'stock.scrap', big.id)), /in stock/);
+});
+
+test('scrap action records a virtual Scrap destination without appearing in deliveries', () => {
+  const { db, b } = setup();
+  const adjustment = create(db, 'stock.location', { name: 'Inventory Adjustment', usage: 'inventory', company_id: 1 });
+  const sc = create(adjustment.db, 'stock.scrap', { product_id: b, scrap_qty: 3 });
+  const action = models['stock.scrap'].form.buttons.find((button) => button.label === 'Validate');
+  const done = action.run(sc.db, read(sc.db, 'stock.scrap', sc.id)).db;
+  const scrap = read(done, 'stock.scrap', sc.id);
+  const movement = read(done, 'stock.picking', scrap.scrap_picking_id);
+  const destination = read(done, 'stock.location', movement.location_dest_id);
+  assert.deepEqual([destination.name, destination.usage, destination.company_id], ['Scrap', 'inventory', 1]);
+  assert.notEqual(destination.id, adjustment.id);
+  assert.equal(movement.move_ids[0].qty, 3);
+  const deliveries = models['stock.picking'].filters.flat().find((filter) => filter.id === 'deliveries');
+  assert.equal(deliveries.fn(movement), false);
+  assert.equal(search(done, 'stock.quant').find((q) => q.product_id === b && q.location_id === movement.location_id).quantity, 97);
+  const entry = read(done, 'account.move', scrap.move_id);
+  assert.equal(scrap.scrap_value, 60);
+  assert.ok(isBalanced(entry.line_ids));
+  assert.equal(entry.line_ids.find((l) => l.credit).account_id, accountId(done, '110100'));
+  assert.equal(entry.line_ids.find((l) => l.debit).account_id, accountId(done, '600000'));
+  assert.equal(entry.line_ids.find((l) => l.credit).credit, 60);
 });
 
 test('unbuild turns finished products back into their components', () => {

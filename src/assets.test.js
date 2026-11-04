@@ -1,11 +1,12 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { postMove } from './models/accounting.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, postDepreciation } from './models/assets.js';
 import { seed } from './seed.js';
+import { models } from './registry.js';
 
 const BASE = { name: 'Delivery Van', acquisition_date: '2026-03-15', original_value: 10000, salvage_value: 0, method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3 };
 const total = (board) => Math.round(board.reduce((s, l) => s + l.amount * 100, 0)) / 100;
@@ -71,14 +72,33 @@ test('only due lines are posted, each balanced on expense and accumulated deprec
   assert.equal(lineAmount(partly, moves[0], '152000'), -2000);
 });
 
+test('repeating depreciation with a stale record does not duplicate posted entries', () => {
+  const { db, id } = running();
+  const stale = read(db, 'account.asset', id);
+  const first = postDepreciation(db, stale, '2026-12-31');
+  const second = postDepreciation(first, stale, '2026-12-31');
+  const entries = search(second, 'account.move').filter((m) => m.ref === 'Delivery Van depreciation 2026-12-31');
+  assert.equal(entries.length, 1);
+  assert.ok(isBalanced(entries[0].line_ids));
+  assert.equal(read(second, 'account.asset', id).book_value, 8000);
+});
+
 test('a paused asset posts nothing and the asset closes when every line is posted', () => {
   const { db, id } = running();
-  const paused = postDepreciation(db, { ...read(db, 'account.asset', id), state: 'paused' }, '2099-12-31');
-  assert.equal(paused, db);
+  const pausedDb = write(db, 'account.asset', id, { state: 'paused' });
+  const paused = postDepreciation(pausedDb, read(db, 'account.asset', id), '2099-12-31');
+  assert.equal(paused, pausedDb);
   const done = postDepreciation(db, read(db, 'account.asset', id), '2099-12-31');
   const a = read(done, 'account.asset', id);
   assert.equal(a.state, 'close');
   assert.equal(a.book_value, 0);
+});
+
+test('depreciation uses persisted running state when the caller has a stale paused record', () => {
+  const { db, id } = running();
+  const stale = { ...read(db, 'account.asset', id), state: 'paused' };
+  const posted = postDepreciation(db, stale, '2026-12-31');
+  assert.equal(read(posted, 'account.asset', id).depreciation_ids[0].posted, true);
 });
 
 test('selling above book value books a gain with a balanced entry', () => {
@@ -89,6 +109,7 @@ test('selling above book value books a gain with a balanced entry', () => {
   assert.equal(a.depreciation_ids.length, 2);
   assert.equal(a.disposal_date, '2027-12-31');
   assert.equal(a.sale_value, 7000);
+  assert.equal(a.book_value, 0);
   const move = sold.records['account.move'].find((m) => m.ref === 'Delivery Van disposal');
   assert.ok(isBalanced(move.line_ids));
   assert.equal(lineAmount(sold, move, '151000'), -10000);
@@ -100,11 +121,31 @@ test('selling above book value books a gain with a balanced entry', () => {
 test('scrapping an asset books the remaining book value as a loss', () => {
   const { db, id } = running({ already_depreciated: 1000 });
   const scrapped = disposeAsset(db, read(db, 'account.asset', id), { date: '2026-12-31' });
+  assert.equal(read(scrapped, 'account.asset', id).book_value, 0);
   const move = scrapped.records['account.move'].find((m) => m.ref === 'Delivery Van disposal');
   assert.ok(isBalanced(move.line_ids));
   assert.equal(lineAmount(scrapped, move, '152000'), 2800); // 1800 posted + 1000 imported
   assert.equal(lineAmount(scrapped, move, '101401'), 0);
   assert.equal(lineAmount(scrapped, move, '690300'), 7200);
+});
+
+test('asset expense account labels distinguish override and model fallback used for posting', () => {
+  const fields = models['account.asset'].fields;
+  const visible = models['account.asset'].form.groups.flat();
+  assert.ok(visible.includes('account_expense_id'));
+  assert.ok(visible.includes('account_depreciation_expense_id'));
+  assert.notEqual(fields.account_expense_id.label, fields.account_depreciation_expense_id.label);
+  const base = seed();
+  const fallback = accountId(base, '600000');
+  const override = accountId(base, '680000');
+  const { db, id } = running({ account_expense_id: fallback, account_depreciation_expense_id: override });
+  const posted = postDepreciation(db, read(db, 'account.asset', id), '2026-12-31');
+  const move = read(posted, 'account.move', read(posted, 'account.asset', id).depreciation_ids[0].move_id);
+  assert.equal(move.line_ids.find((line) => line.debit).account_id, override);
+  const legacy = running({ account_expense_id: fallback });
+  const postedLegacy = postDepreciation(legacy.db, read(legacy.db, 'account.asset', legacy.id), '2026-12-31');
+  const legacyMove = read(postedLegacy, 'account.move', read(postedLegacy, 'account.asset', legacy.id).depreciation_ids[0].move_id);
+  assert.equal(legacyMove.line_ids.find((line) => line.debit).account_id, fallback);
 });
 
 test('invalid assets are refused on confirm', () => {
@@ -126,4 +167,102 @@ test('posting a bill line on a fixed-asset account creates one draft asset', () 
   assert.equal(assets[0].name, 'Forklift');
   assert.equal(assets[0].original_value, 30000);
   assert.equal(assets[0].state, 'draft');
+});
+
+test('foreign-currency bill asset depreciates and disposes its company-currency cost', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXA', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: [{ name: 'Foreign forklift', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: accountId(db, '151000') }],
+  });
+  db = postMove(bill.db, bill.id);
+  const asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  assert.equal(lineAmount(db, read(db, 'account.move', bill.id), '151000'), 50);
+  assert.equal(asset.original_value, 50);
+  db = confirmAsset(db, asset);
+  db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+  const depreciation = read(db, 'account.asset', asset.id).depreciation_ids[0];
+  assert.equal(depreciation.amount, 10);
+  assert.equal(lineAmount(db, read(db, 'account.move', depreciation.move_id), '680000'), 10);
+  db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  const disposal = search(db, 'account.move').find((m) => m.ref === 'Foreign forklift disposal');
+  assert.equal(lineAmount(db, disposal, '151000'), -50);
+  assert.equal(lineAmount(db, disposal, '152000'), 10);
+  assert.equal(lineAmount(db, disposal, '690300'), 40);
+});
+
+test('grouped foreign bill assets use the booked cents through depreciation and disposal', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXG', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: ['First machine', 'Second machine'].map((name) => ({ name, product_id: 1, qty: 1, price_unit: 0.03, tax: 0, account_id: accountId(db, '151000') })),
+  });
+  db = postMove(bill.db, bill.id);
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === bill.id);
+  assert.equal(assets.length, 2);
+  assert.equal(lineAmount(db, read(db, 'account.move', bill.id), '151000'), 0.03);
+  assert.equal(Math.round(assets.reduce((sum, a) => sum + a.original_value, 0) * 100), 3);
+  for (const asset of assets) {
+    db = confirmAsset(db, asset);
+    db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+    db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  }
+  const disposals = search(db, 'account.move').filter((m) => m.ref?.endsWith('machine disposal'));
+  assert.equal(disposals.length, 2);
+  assert.equal(Math.round(disposals.reduce((sum, m) => sum + lineAmount(db, m, '151000'), 0) * 100), -3);
+});
+
+test('one-cent grouped bill drafts only usable assets and disposes the booked value', () => {
+  let db = seed();
+  const currency = create(db, 'res.currency', { name: 'FXC', rate_ids: [{ date: '2026-01-01', rate: 2 }] });
+  db = currency.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', currency_id: currency.id,
+    invoice_line_ids: [1, 2].map((n) => ({ name: `Small asset ${n}`, product_id: 1, qty: 1, price_unit: 0.01, tax: 0, account_id: accountId(db, '151000') })),
+  });
+  db = postMove(bill.db, bill.id);
+  const assets = search(db, 'account.asset').filter((a) => a.bill_id === bill.id);
+  const booked = lineAmount(db, read(db, 'account.move', bill.id), '151000');
+  assert.equal(booked, 0.01);
+  assert.equal(assets.length, 1);
+  assert.ok(assets.every((asset) => asset.original_value > 0));
+  assert.equal(Math.round(assets.reduce((sum, a) => sum + a.original_value, 0) * 100), Math.round(booked * 100));
+  for (const asset of assets) {
+    db = confirmAsset(db, asset);
+    db = postDepreciation(db, read(db, 'account.asset', asset.id), '2026-12-31');
+    db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  }
+  const disposals = search(db, 'account.move').filter((m) => m.ref?.startsWith('Small asset ') && m.ref.endsWith(' disposal'));
+  assert.equal(disposals.length, assets.length);
+  assert.equal(Math.round(disposals.reduce((sum, m) => sum + lineAmount(db, m, '151000'), 0) * 100), -Math.round(booked * 100));
+});
+
+test('fiscal position mapped asset account is used for bill posting and disposal', () => {
+  let db = seed();
+  const source = accountId(db, '151000');
+  const mapped = create(db, 'account.account', { code: '151100', name: 'Mapped fixed assets', account_type: 'asset_fixed' });
+  db = mapped.db;
+  const position = create(db, 'account.fiscal.position', {
+    name: 'Asset mapping', account_ids: [{ account_src_id: source, account_dest_id: mapped.id }],
+  });
+  db = position.db;
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-06-01', fiscal_position_id: position.id,
+    invoice_line_ids: [{ name: 'Mapped machine', product_id: 1, qty: 1, price_unit: 100, tax: 0, account_id: source }],
+  });
+  db = postMove(bill.db, bill.id);
+  const posted = read(db, 'account.move', bill.id);
+  const asset = search(db, 'account.asset').find((a) => a.bill_id === bill.id);
+  assert.equal(lineAmount(db, posted, '151100'), 100);
+  assert.equal(lineAmount(db, posted, '151000'), 0);
+  assert.equal(asset.account_asset_id, mapped.id);
+  db = confirmAsset(db, asset);
+  db = disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2026-12-31' });
+  const disposal = search(db, 'account.move').find((m) => m.ref === 'Mapped machine disposal');
+  assert.equal(lineAmount(db, disposal, '151100'), -100);
+  assert.equal(lineAmount(db, disposal, '151000'), 0);
 });

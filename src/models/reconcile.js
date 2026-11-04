@@ -1,8 +1,8 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { accountId, postEntry } from './ledger.js';
+import { accountId, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith } from './bank.js';
-import { round } from '../money.js';
+import { allocateCents, round } from '../money.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -37,32 +37,34 @@ export function ruleMatches(rule, line) {
   return amountMatches(rule, amount) && labelMatches(rule, line.payment_ref);
 }
 
-/** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest; the last line absorbs rounding. */
+/** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest. */
 function splitCounterparts(lines, balance) {
   const fixed = lines.filter((l) => l.amount_type === 'fixed');
   const rest = round(balance - fixed.reduce((s, l) => s + (Number(l.amount) || 0), 0));
   const pct = lines.filter((l) => l.amount_type !== 'fixed').reduce((s, l) => s + (Number(l.amount) || 0), 0);
   if (rest < 0 || Math.abs(rest * (1 - pct / 100)) >= 0.005) throw new Error('The counterpart lines do not cover the whole amount');
-  const values = lines.map((l) => (l.amount_type === 'fixed' ? round(Number(l.amount) || 0) : round((rest * (Number(l.amount) || 0)) / 100)));
-  values[values.length - 1] = round(balance - values.slice(0, -1).reduce((s, v) => s + v, 0));
-  return lines.map((l, i) => ({ ...l, value: values[i] }));
+  const variable = lines.filter((l) => l.amount_type !== 'fixed');
+  const shares = variable.length && rest ? allocateCents(rest, variable.map((l) => Number(l.amount) || 0)) : variable.map(() => 0);
+  let index = 0;
+  return lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? round(Number(l.amount) || 0) : shares[index++] }));
 }
 
 function writeOff(db, rule, line) {
   const incoming = line.amount > 0;
-  const balance = round(Math.abs(line.amount));
+  const balance = round(line.open_amount ?? Math.abs(line.amount));
+  if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance).filter((l) => l.value);
-  const unknown = counterparts.find((l) => !accountId(db, l.account_code));
+  const unknown = counterparts.find((l) => !accountId(db, l.account_code, line.company_id ?? 1) && !accountId(db, l.account_code));
   if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
   const partner_id = line.partner_id ?? null;
   const { db: booked, id } = postEntry(db, {
-    journal: 'BNK1', date: line.date, ref: line.payment_ref,
+    journal: 'BNK1', journal_id: line.journal_id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [
-      { account: '101401', [incoming ? 'debit' : 'credit']: balance, partner_id },
+      { account: line.bank_move_id ? accountId(db, '101404', line.company_id ?? 1) : paymentJournal(db, line.journal_id).account, [incoming ? 'debit' : 'credit']: balance, partner_id },
       ...counterparts.map((l) => ({ account: l.account_code, [incoming ? 'credit' : 'debit']: l.value, partner_id, name: l.label || line.payment_ref })),
     ],
   });
-  return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id });
+  return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: balance }] });
 }
 
 /** Apply a rule to a statement line: match the first candidate invoice/bill, or post its write-off entry. */
@@ -71,7 +73,7 @@ export function applyRule(db, rule, line) {
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   if (rule.rule_type === 'invoice_matching') {
     // Only an exact amount match, and from the line's partner when it has one: never pay someone else's invoice.
-    const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && round(m.amount_residual) === round(Math.abs(line.amount)));
+    const match = candidates(db, line).find((m) => (!line.partner_id || m.partner_id === line.partner_id) && round(m.amount_residual) === round(line.open_amount ?? Math.abs(line.amount)));
     return match ? reconcileWith(db, line, match.id) : db;
   }
   return writeOff(db, rule, line);

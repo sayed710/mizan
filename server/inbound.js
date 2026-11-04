@@ -44,8 +44,8 @@ const page = (title, content) => `<!doctype html><html lang="en"><head><meta cha
  */
 export function sharePage(db, path, date, getBlob = () => undefined) {
   const m = /^\/share\/([\w-]{8,64})(?:\/(\d{1,9}))?$/.exec(path);
-  if (!m) return null;
   const html = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' };
+  if (!m) return path.startsWith('/share/') ? { status: 404, headers: html, body: page('Link expired', '<h1>This share link is invalid or expired</h1>') } : null;
   let docs;
   try { docs = shareDocuments(db, m[1], date); } catch { return { status: 404, headers: html, body: page('Link expired', '<h1>This share link is invalid or expired</h1>') }; }
   const share = search(db, 'documents.share').find((s) => s.token === m[1]);

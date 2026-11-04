@@ -84,13 +84,18 @@ import { warehouseModels } from './warehouse.js';
 import { quantModels } from './quant.js';
 import { consolidationModels } from './consolidation.js';
 import { documentsPlusModels } from './documentsplus.js';
+import { taxReturnModels } from './taxreturn.js';
+import { partnerBankModels } from './partnerbank.js';
+import { calendarModels } from './calendar.js';
 import { declareWorkflowFields } from './workflowFields.js';
 import { appAnalyses } from './analysis.js';
+import { orderpointModels } from './orderpoint.js';
+import { productConfigModels } from './productconfig.js';
 
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels };
+export const MODEL_MODULES = { crmModels, salesModels, accountingModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -102,7 +107,7 @@ for (const [name, model] of Object.entries(models)) {
     const run = b.run;
     b.run = Object.assign((db, rec, ...rest) => {
       const current = (rec?.id && read(db, name, rec.id)) || rec;
-      if (!b.when(current, db)) throw new Error(`${b.label} is not available for this record in its current state`);
+      if (!b.when(current, db)) throw new Error(b.unavailable || `${b.label} is not available for this record in its current state`);
       return run(db, current, ...rest);
     }, { checked: true });
   }
@@ -148,7 +153,9 @@ const allApps = [
         { key: 'forecast', label: 'Forecast', model: 'crm.lead', view: 'pivot' },
       ] },
       { label: 'Configuration', children: [
+        { key: 'stages', label: 'Stages', model: 'crm.stage' },
         { key: 'teams', label: 'Sales Teams', model: 'crm.team' },
+        { key: 'lost-reasons', label: 'Lost Reasons', model: 'crm.lost.reason' },
       ] },
     ],
   },
@@ -160,9 +167,10 @@ const allApps = [
         { key: 'orders', label: 'Orders', model: 'sale.order', domain: (r) => r.state === 'sale' },
         customers,
       ] },
-      { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' },
+      { key: 'to-invoice', label: 'To Invoice', model: 'sale.order', domain: (r) => r.state === 'sale' && r.invoice_status === 'to_invoice' },
       { label: 'Products', children: [products, { key: 'pricelists', label: 'Pricelists', model: 'product.pricelist' }, { key: 'quote-templates', label: 'Quotation Templates', model: 'sale.order.template' }, { key: 'loyalty', label: 'Discount & Loyalty', model: 'loyalty.program' }, { key: 'cards', label: 'Coupons & Cards', model: 'loyalty.card' }] },
       { key: 'marketplaces', label: 'Marketplaces', model: 'marketplace.connector' },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }] },
       { key: 'report', label: 'Reporting', model: 'sale.order', view: 'graph' },
     ],
   },
@@ -174,58 +182,123 @@ const allApps = [
         { key: 'invoices', label: 'Invoices', model: 'account.move', domain: (r) => r.move_type === 'out_invoice', defaults: { move_type: 'out_invoice' } },
         { key: 'credit-notes', label: 'Credit Notes', model: 'account.move', domain: (r) => r.move_type === 'out_refund', defaults: { move_type: 'out_refund' } },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' } },
+        { key: 'products', label: 'Products', model: 'product' },
         customers,
       ] },
       { label: 'Vendors', children: [
         { key: 'bills', label: 'Bills', model: 'account.move', domain: (r) => r.move_type === 'in_invoice', defaults: { move_type: 'in_invoice' } },
         { key: 'refunds', label: 'Refunds', model: 'account.move', domain: (r) => r.move_type === 'in_refund', defaults: { move_type: 'in_refund' } },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' } },
+        { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
+        { key: 'products', label: 'Products', model: 'product' },
         vendors,
       ] },
       { label: 'Accounting', children: [
-        { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
-        { key: 'entries', label: 'Journal Entries', model: 'account.move' },
-        { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
-        { key: 'assets', label: 'Assets', model: 'account.asset' },
-        { key: 'loans', label: 'Loans', model: 'account.loan' },
-        { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
-        { key: 'consolidations', label: 'Consolidations', model: 'consolidation.chart' },
-        { key: 'consolidation-periods', label: 'Consolidation Periods', model: 'consolidation.period' },
-        { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+                { label: 'Transactions', children: [
+          { key: 'entries', label: 'Journal Entries', model: 'account.move' },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
+          { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
+          { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
+          { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+        ] },
+                { label: 'Assets & Liabilities', children: [
+          { key: 'assets', label: 'Assets', model: 'account.asset' },
+          { key: 'loans', label: 'Loans', model: 'account.loan' },
+          { key: 'consolidations', label: 'Consolidations', model: 'consolidation.chart' },
+          { key: 'consolidation-periods', label: 'Consolidation Periods', model: 'consolidation.period' },
+        ] },
+                { label: 'Closing', children: [
+          { key: 'reconcile', label: 'Reconcile', model: 'account.bank.statement.line' },
+          { key: 'tax-returns', label: 'Tax Returns', model: 'account.return' },
+          { key: 'lock-dates', label: 'Lock Dates…', type: 'settings' },
+          { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
+        ] },
+      ] },
+      { label: 'Review', children: [
+                { label: 'Control', children: [
+          { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
+          { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
+          { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
+          { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
+        ] },
+                { label: 'Audit', children: [
+
+        ] },
+                { label: 'Inventory', children: [
+          { key: 'inventory-valuation', label: 'Inventory Valuation', type: 'report', report: 'valuation' },
+        ] },
+                { label: 'Regularization Entries', children: [
+          { key: 'unrealized-currencies', label: 'Unrealized Currencies', type: 'report', report: 'unrealizedCurrencies' },
+          { key: 'deferred-revenues', label: 'Deferred Revenues', model: 'account.deferral', domain: (r) => r.kind === 'revenue', defaults: { kind: 'revenue' } },
+          { key: 'deferred-expenses', label: 'Deferred Expenses', model: 'account.deferral', domain: (r) => r.kind === 'expense', defaults: { kind: 'expense' } },
+          { key: 'deferrals', label: 'Deferrals', model: 'account.deferral' },
+        ] },
+                { label: 'Sales', children: [
+          { key: 'invoices-to-be-issued', label: 'Invoices To Be Issued', type: 'report', report: 'invoicesToBeIssued' },
+          { key: 'invoiced-not-delivered', label: 'Invoiced Not Delivered', type: 'report', report: 'invoicedNotDelivered' },
+        ] },
       ] },
       { label: 'Reporting', children: [
-        { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
-        { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
-        { key: 'cash-flow', label: 'Cash Flow Statement', type: 'report', report: 'cashflow' },
-        { key: 'executive-summary', label: 'Executive Summary', type: 'report', report: 'executive' },
-        { key: 'trial-balance', label: 'Trial Balance', type: 'report', report: 'trial' },
-        { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
-        { key: 'depreciation-schedule', label: 'Depreciation Schedule', type: 'report', report: 'depreciation' },
-        { key: 'partner-ledger', label: 'Partner Ledger', type: 'report', report: 'partnerReceivable' },
-        { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
-        { key: 'tax-report', label: 'Tax Return', type: 'report', report: 'tax' },
-        { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
-        { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
-        { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
-        { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
-        { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
-        { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
-        { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
+                { label: 'Statement Reports', children: [
+          { key: 'cash-flow', label: 'Cash Flow Statement', type: 'report', report: 'cashflow' },
+          { key: 'pnl', label: 'Profit and Loss', type: 'report', report: 'pnl' },
+          { key: 'balance-sheet', label: 'Balance Sheet', type: 'report', report: 'balance' },
+          { key: 'depreciation-schedule', label: 'Depreciation Schedule', type: 'report', report: 'depreciation' },
+        ] },
+                { label: 'Ledgers', children: [
+          { key: 'general-ledger', label: 'General Ledger', type: 'report', report: 'ledger' },
+          { key: 'trial-balance', label: 'Trial Balance', type: 'report', report: 'trial' },
+        ] },
+                { label: 'Partner Reports', children: [
+          { key: 'partner-ledger', label: 'Partner Ledger', type: 'report', report: 'partnerReceivable' },
+          { key: 'customer-statement', label: 'Customer Statement', type: 'report', report: 'customerStatement' },
+          { key: 'aged-receivable', label: 'Aged Receivable', type: 'report', report: 'agedReceivable' },
+          { key: 'aged-payable', label: 'Aged Payable', type: 'report', report: 'agedPayable' },
+          { key: 'partner-ledger-payable', label: 'Partner Ledger (Payable)', type: 'report', report: 'partnerPayable' },
+          { key: 'follow-ups', label: 'Follow-up Reports', type: 'report', report: 'followups' },
+        ] },
+                { label: 'Taxes & Fiscal', children: [
+          { key: 'tax-report', label: 'Tax Report', type: 'report', report: 'tax' },
+        ] },
+                { label: 'Management', children: [
+          { key: 'invoice-analysis', label: 'Invoice Analysis', model: 'account.move', view: 'pivot', domain: (r) => r.move_type !== 'entry' },
+          { key: 'loans-analysis', label: 'Loans Analysis', type: 'report', report: 'loansAnalysis' },
+          { key: 'analytic-report', label: 'Analytic Report', type: 'report', report: 'analytic' },
+          { key: 'executive-summary', label: 'Executive Summary', type: 'report', report: 'executive' },
+          { key: 'budget-report', label: 'Budget vs Actual', type: 'report', report: 'budget' },
+        ] },
       ] },
       { label: 'Configuration', children: [
-        { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
-        { key: 'journals', label: 'Journals', model: 'account.journal' },
-        { key: 'taxes', label: 'Taxes', model: 'account.tax' },
-        { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
-        { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
-        { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
-        { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
-        { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
-        { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
-        { key: 'budgets', label: 'Budgets', model: 'account.budget' },
-        { key: 'currencies', label: 'Currencies', model: 'res.currency' },
-        { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
-        { key: 'followup-levels', label: 'Follow-up Levels', model: 'account.followup.level' },
+        { key: 'settings', label: 'Settings', type: 'settings' },
+                { label: 'Invoicing', children: [
+          { key: 'payment-terms', label: 'Payment Terms', model: 'account.payment.term' },
+          { key: 'incoterms', label: 'Incoterms', model: 'account.incoterm' },
+          { key: 'product-categories', label: 'Product Categories', model: 'product.category' },
+        ] },
+                { label: 'Accounting', children: [
+          { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
+          { key: 'taxes', label: 'Taxes', model: 'account.tax' },
+          { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
+          { key: 'journals', label: 'Journals', model: 'account.journal' },
+          { key: 'currencies', label: 'Currencies', model: 'res.currency' },
+          { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
+          { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
+          { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
+          { key: 'fiscal-years', label: 'Fiscal Years', model: 'account.fiscal.year' },
+          { key: 'depreciation-models', label: 'Depreciation Models', model: 'account.asset.model' },
+          { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
+          { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
+          { key: 'budgets', label: 'Financial Budgets', model: 'account.budget' },
+          { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
+          { key: 'followup-levels', label: 'Invoice Reminders', model: 'account.followup.level' },
+          { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
+        ] },
+                { label: 'Analytic Accounting', children: [
+          { key: 'analytic-distribution-models', label: 'Analytic Distribution Models', model: 'account.analytic.distribution.model' },
+          { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
+          { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
+        ] },
+        { key: 'online-payments', label: 'Online Payments', model: 'payment.provider' },
       ] },
     ],
   },
@@ -247,6 +320,7 @@ const allApps = [
     menus: [
       { label: 'Operations', children: [
         { key: 'transfers', label: 'Transfers', model: 'stock.picking' },
+        { key: 'replenishment', label: 'Replenishment', model: 'stock.warehouse.orderpoint' },
         { key: 'scrap', label: 'Scrap', model: 'stock.scrap' },
         { key: 'receipts', label: 'Receipts', model: 'stock.picking', domain: (r) => r.picking_type === 'incoming', defaults: { picking_type: 'incoming' } },
         { key: 'deliveries', label: 'Deliveries', model: 'stock.picking', domain: (r) => r.picking_type === 'outgoing', defaults: { picking_type: 'outgoing' } },
@@ -261,14 +335,14 @@ const allApps = [
       { key: 'packages', label: 'Packages', model: 'stock.quant.package' },
       { key: 'landed', label: 'Landed Costs', model: 'stock.landed.cost' },
       { key: 'valuation', label: 'Inventory Valuation', model: 'stock.valuation.layer' },
-      { label: 'Configuration', children: [{ key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'warehouses', label: 'Warehouses', model: 'stock.warehouse' }, { key: 'locations', label: 'Locations', model: 'stock.location' }, { key: 'uom-categories', label: 'UoM Categories', model: 'uom.category' }, { key: 'uoms', label: 'Units of Measure', model: 'uom.uom' }, { key: 'packagings', label: 'Packagings', model: 'product.packaging' }] },
+      { label: 'Configuration', children: [{ key: 'attributes', label: 'Attributes', model: 'product.attribute' }, { key: 'attribute-values', label: 'Attribute Values', model: 'product.attribute.value' }, { key: 'product-categories', label: 'Product Categories', model: 'product.category' }, { key: 'product-tags', label: 'Product Tags', model: 'product.tag' }, { key: 'carriers', label: 'Delivery Methods', model: 'delivery.carrier' }, { key: 'warehouses', label: 'Warehouses', model: 'stock.warehouse' }, { key: 'locations', label: 'Locations', model: 'stock.location' }, { key: 'routes', label: 'Routes', model: 'stock.route' }, { key: 'uom-categories', label: 'UoM Categories', model: 'uom.category' }, { key: 'uoms', label: 'Units of Measure', model: 'uom.uom' }, { key: 'packagings', label: 'Packagings', model: 'product.packaging' }] },
       { label: 'Reporting', children: [
         { key: 'report', label: 'Stock', model: 'product', view: 'pivot', domain: (r) => r.type === 'goods' },
         { key: 'valuation', label: 'Valuation', type: 'report', report: 'valuation' },
       ] },
     ],
   },
-  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }] },
+  { id: 'contacts', name: 'Contacts', color: ['#6366f1', '#4338ca'], menus: [{ key: 'contacts', label: 'Contacts', model: 'res.partner' }, { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' }] },
   { id: 'calendar', name: 'Calendar', color: ['#0ea5e9', '#1d4ed8'], menus: [{ key: 'meetings', label: 'Meetings', model: 'calendar.event' }] },
   {
     id: 'project', name: 'Project', color: ['#22c55e', '#15803d'],
@@ -279,6 +353,10 @@ const allApps = [
       { key: 'updates', label: 'Project Updates', model: 'project.update' },
       { key: 'recurring', label: 'Recurring Tasks', model: 'project.recurrence' },
       { key: 'report', label: 'Reporting', model: 'project.task', view: 'pivot' },
+      { label: 'Configuration', children: [
+        { key: 'stages', label: 'Task Stages', model: 'project.task.type' },
+        { key: 'tags', label: 'Tags', model: 'project.tags' },
+      ] },
     ],
   },
   {
@@ -294,6 +372,10 @@ const allApps = [
     menus: [
       { key: 'employees', label: 'Employees', model: 'hr.employee' },
       { key: 'departments', label: 'Departments', model: 'hr.department' },
+      { label: 'Configuration', children: [
+        { key: 'calendars', label: 'Working Schedules', model: 'resource.calendar' },
+        { key: 'public-holidays', label: 'Public Holidays', model: 'resource.calendar.leaves' },
+      ] },
     ],
   },
   {
@@ -316,7 +398,14 @@ const allApps = [
       { key: 'orders', label: 'Orders', model: 'pos.order' },
       { key: 'sessions', label: 'Sessions', model: 'pos.session' },
       { key: 'report', label: 'Reporting', model: 'pos.order', view: 'graph' },
-      { label: 'Configuration', children: [{ key: 'pos-config', label: 'Point of Sale', model: 'pos.config' }, { key: 'floors', label: 'Floors', model: 'restaurant.floor' }] },
+      { label: 'Configuration', children: [
+        { key: 'pos-config', label: 'Point of Sale', model: 'pos.config' },
+        { key: 'payment-methods', label: 'Payment Methods', model: 'pos.payment.method' },
+        { key: 'pos-categories', label: 'PoS Product Categories', model: 'pos.category' },
+        { key: 'presets', label: 'Presets', model: 'pos.preset' },
+        { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },
+        { key: 'floors', label: 'Floors', model: 'restaurant.floor' },
+      ] },
     ],
   },
   {
@@ -335,8 +424,11 @@ const allApps = [
       { key: 'leaves', label: 'My Time Off', model: 'hr.leave' },
       { key: 'to-approve', label: 'To Approve', model: 'hr.leave', view: 'list', domain: (r) => r.state === 'confirm' },
       { key: 'allocations', label: 'Allocations', model: 'hr.leave.allocation' },
-      { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
       { key: 'report', label: 'Reporting', model: 'hr.leave', view: 'pivot' },
+      { label: 'Configuration', children: [
+        { key: 'types', label: 'Time Off Types', model: 'hr.work.entry.type' },
+        { key: 'public-holidays', label: 'Public Holidays', model: 'resource.calendar.leaves' },
+      ] },
     ],
   },
   {
@@ -595,7 +687,10 @@ const withAnalyses = (app) => {
 };
 export const apps = [...allApps].map(withAnalyses).sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
 
-export const leavesOf = (app) => app.menus.flatMap((m) => m.children ?? [m]);
+export const leavesOf = (app) => {
+  const walk = (items) => (items ?? []).flatMap((m) => (m.children ? walk(m.children) : [m]));
+  return walk(app?.menus);
+};
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus may change them. */
@@ -615,7 +710,8 @@ const PRIVATE_FIELDS = {
 };
 
 /** Accounting configuration: every app may read it (products and documents point to it), only Accounting users change it. */
-export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year'];
+export const ACCOUNTING_CONFIG = ['account.account', 'account.tax', 'account.journal', 'account.fiscal.position', 'account.fiscal.year',
+  'account.incoterm', 'account.tax.unit', 'account.account.tag', 'account.asset.model'];
 
 /** Models a user restricted to `appIds` may read but not write (null when nothing is held back). */
 export const readOnlyForApps = (appIds) => (appIds.includes('accounting') ? null : new Set(ACCOUNTING_CONFIG));
@@ -679,3 +775,5 @@ export function targetOf(model, uninstalled = []) {
   return '#/';
 }
 export const findLeaf = (app, key) => leavesOf(app).find((l) => l.key === key) ?? leavesOf(app)[0];
+export const menusFor = (appId) => apps.find((a) => a.id === appId)?.menus ?? [];
+

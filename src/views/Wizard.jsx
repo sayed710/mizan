@@ -13,7 +13,7 @@ export const missingFields = (spec, values) => spec.fields
   .filter((f) => f.required && (values[f.name] == null || values[f.name] === '' || (Array.isArray(values[f.name]) && !values[f.name].length)))
   .map((f) => t(f.label));
 
-function WizardField({ db, field, value, onChange, id }) {
+function WizardField({ db, field, value, values, onChange, id }) {
   if (field.type === 'many2one' || field.type === 'many2many') {
     const candidates = viewRecords(db, field.relation).filter((r) => !field.domain || field.domain(r));
     if (field.type === 'many2one') {
@@ -39,10 +39,11 @@ function WizardField({ db, field, value, onChange, id }) {
     );
   }
   if (field.type === 'selection') {
+    const options = typeof field.options === 'function' ? field.options(db, values) : field.options;
     return (
       <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value || null)}>
         <option value="" />
-        {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
+        {options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
       </select>
     );
   }
@@ -81,7 +82,7 @@ export function Wizard({ db, spec, onConfirm, onCancel, error }) {
           <div className="field" key={f.name}>
             <label htmlFor={`w-${f.name}`}>{t(f.label)}{f.required && <span className="req" aria-hidden="true">*</span>}</label>
             <div className="field-value">
-              <WizardField db={db} field={f} id={`w-${f.name}`} value={values[f.name]} onChange={(v) => setValues((s) => ({ ...s, [f.name]: v }))} />
+              <WizardField db={db} field={f} id={`w-${f.name}`} value={values[f.name]} values={values} onChange={(v) => setValues((s) => ({ ...s, [f.name]: v, ...Object.fromEntries(spec.fields.filter((dependent) => dependent.dependsOn === f.name).map((dependent) => [dependent.name, null])) }))} />
             </div>
           </div>
         ))}

@@ -3,14 +3,14 @@ const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
 const SECRET_KEY = /token|secret|password|passwd|api_?key|access_?key|credential/i;
 /** Credentials stay out of the log: the entry says the field changed, not what it held (also inside lines and objects). */
-function redact(value, key = '') {
+function redact(value, key = '', model = '') {
   if (value === null || value === undefined) return null;
-  if (SECRET_KEY.test(key)) return '[redacted]';
-  if (Array.isArray(value)) return value.map((v) => redact(v, key));
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, k)]));
+  if (SECRET_KEY.test(key) || (model === 'hr.employee' && key === 'pin') || (model === 'loyalty.card' && key === 'code')) return '[redacted]';
+  if (Array.isArray(value)) return value.map((v) => redact(v, key, model));
+  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, k, model)]));
   return value;
 }
-const pair = (key, a, b) => [redact(a ?? null, key), redact(b ?? null, key)];
+const pair = (key, a, b, model) => [redact(a ?? null, key, model), redact(b ?? null, key, model)];
 
 /**
  * One entry per created, changed or deleted record between `prev` and `next`: the action and, per field, the old and
@@ -30,10 +30,10 @@ export function auditEntries(prev, next) {
       if (old === rec) continue;
       const fields = [...new Set([...Object.keys(old ?? {}), ...Object.keys(rec)])].filter((k) => k !== 'id' && !same(old?.[k], rec[k]));
       if (!fields.length) continue;
-      out.push({ model, res_id: id, action: old ? 'write' : 'create', changes: Object.fromEntries(fields.map((k) => [k, pair(k, old?.[k], rec[k])])) });
+      out.push({ model, res_id: id, action: old ? 'write' : 'create', changes: Object.fromEntries(fields.map((k) => [k, pair(k, old?.[k], rec[k], model)])) });
     }
     for (const [id, old] of before) {
-      if (!after.has(id)) out.push({ model, res_id: id, action: 'delete', changes: Object.fromEntries(Object.keys(old).filter((k) => k !== 'id').map((k) => [k, pair(k, old[k], null)])) });
+      if (!after.has(id)) out.push({ model, res_id: id, action: 'delete', changes: Object.fromEntries(Object.keys(old).filter((k) => k !== 'id').map((k) => [k, pair(k, old[k], null, model)])) });
     }
   }
   out.push(...settingsEntries(prev.settings, next.settings), ...noteEntries(prev.messages, next.messages));
@@ -53,7 +53,7 @@ function noteEntries(was = [], now = []) {
   const notes = (list) => new Map(list.filter((m) => m.kind === 'note').map((m) => [m.id, m]));
   const before = notes(was);
   const after = notes(now);
-  const entry = (m, action, a, b) => ({ model: 'mail.message', res_id: m.res_id, action, changes: { thread: [m.model, m.model], body: [a, b] } });
+  const entry = (m, action, a, b) => ({ model: 'mail.message', res_id: m.res_id, action, ...(m.company_id ? { company_id: m.company_id } : {}), changes: { thread: [m.model, m.model], body: [a, b] } });
   return [
     ...[...after].filter(([id, m]) => !before.has(id) || before.get(id).body !== m.body).map(([id, m]) => entry(m, before.has(id) ? 'write' : 'create', before.get(id)?.body ?? null, m.body)),
     ...[...before].filter(([id]) => !after.has(id)).map(([, m]) => entry(m, 'delete', m.body, null)),

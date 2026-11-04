@@ -16,9 +16,9 @@ test('requests are limited by the approved allocation; refused requests free the
   const { db: d0 } = allocate(base(), {});
   const { db: d1, id: first } = request(d0, '2026-11-02', '2026-11-04');
   assert.equal(remaining(d1, EMP, 'paid'), 7);
-  assert.throws(() => request(d1, '2026-12-01', '2026-12-08'), /Not enough Paid Time Off left: 7 day\(s\)/);
+  assert.throws(() => request(d1, '2026-12-01', '2026-12-10'), /Not enough Paid Time Off left: 7 day\(s\)/);
   const freed = write(d1, 'hr.leave', first, { state: 'refuse' });
-  assert.equal(request(freed, '2026-12-01', '2026-12-08').db.records['hr.leave'].at(-1).state, 'confirm');
+  assert.equal(request(freed, '2026-12-01', '2026-12-10').db.records['hr.leave'].at(-1).state, 'confirm');
 });
 
 test('sick time off needs no allocation; an end before the start is refused', () => {

@@ -3,6 +3,8 @@ import { read, search, write } from '../orm.js';
 import { nextName, today } from './common.js';
 import { payMove } from './accounting.js';
 import { cents, round } from '../money.js';
+import { resolveAndValidateRecipientBank } from './partnerbank.js';
+import { journalId } from './ledger.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -17,6 +19,7 @@ export function fillOpenInvoices(db, batch) {
 
 /** Validate the batch, pay each line, number the checks (outbound), assign the reference and post. */
 export function postBatch(db, batch) {
+  if (batch.state !== 'draft') throw new Error('Only draft batches can be validated');
   const lines = batch.lines ?? [];
   if (!lines.length) throw new Error('Add at least one invoice to the batch');
   const expected = MOVE_TYPE[batch.batch_type];
@@ -30,19 +33,38 @@ export function postBatch(db, batch) {
     if (!(amount > 0) || cents(amount) > cents(move.amount_residual)) {
       throw new Error(`${move.name}: the amount must be positive and at most the amount due (${round(move.amount_residual)})`);
     }
+    if (batch.batch_type === 'outbound' && move.partner_id) {
+      resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: move.company_id ?? 1 });
+    }
   }
-  if (batch.batch_type === 'outbound' && !(Number(batch.check_number_start) > 0)) throw new Error('Set the first check number to print');
+  const company = read(db, 'account.move', lines[0].move_id)?.company_id ?? 1;
+  const journal = batch.batch_type === 'outbound' ? read(db, 'account.journal', batch.journal_id ?? journalId(db, 'BNK1', company)) : null;
+  if (batch.batch_type === 'outbound' && (!journal || journal.type !== 'bank' || (journal.company_id != null && journal.company_id !== company) || lines.some((line) => (read(db, 'account.move', line.move_id)?.company_id ?? 1) !== company))) throw new Error('Checks require a bank journal and invoices in the same company');
+  const payments = search(db, 'account.payment');
+  const used = journal ? payments.filter((payment) => payment.journal_id === journal.id && Number.isSafeInteger(payment.check_number) && payment.check_number > 0).map((payment) => payment.check_number) : [];
+  if (journal) for (const prior of search(db, 'account.batch.payment')) for (const line of prior.lines ?? []) {
+    if (payments.some((payment) => payment.id === line.payment_id && payment.journal_id === journal.id) && Number.isSafeInteger(line.check_number) && line.check_number > 0) used.push(line.check_number);
+  }
+  const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
+  if (batch.batch_type === 'outbound' && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
+  const start = used.reduce((next, number) => Math.max(next, number + 1), requested);
+  if (batch.batch_type === 'outbound' && !Number.isSafeInteger(start + lines.length)) throw new Error('Check number is too large');
 
   let next = db;
-  for (const line of lines) next = payMove(next, line.move_id, Number(line.amount), batch.date);
+  const linked = lines.map((line, index) => {
+    next = payMove(next, line.move_id, Number(line.amount), batch.date, journal ? { journalId: journal.id, checkNumber: start + index } : {});
+    const entryId = read(next, 'account.move', line.move_id).payments.at(-1).move_id;
+    return { ...line, payment_id: search(next, 'account.payment').find((p) => p.move_id === entryId).id, cancelled: false };
+  });
+  if (journal) next = write(next, 'account.journal', journal.id, { check_next_number: start + lines.length });
   const prefix = batch.batch_type === 'inbound' ? 'BATCH-IN/' : 'BATCH-OUT/';
   const name = batch.name && batch.name !== 'New' ? batch.name : nextName(next, 'account.batch.payment', prefix);
   return write(next, 'account.batch.payment', batch.id, {
     name,
     state: 'posted',
-    lines: lines.map((line, index) => ({
+    lines: linked.map((line, index) => ({
       ...line,
-      check_number: batch.batch_type === 'outbound' ? Number(batch.check_number_start) + index : line.check_number ?? null,
+      check_number: batch.batch_type === 'outbound' ? start + index : line.check_number ?? null,
     })),
   });
 }
@@ -81,6 +103,7 @@ export const paymentModels = {
       batch_type: { type: 'selection', label: 'Batch Type', required: true, options: [['inbound', 'Inbound'], ['outbound', 'Outbound']] },
       date: { type: 'date', label: 'Date' },
       check_number_start: { type: 'integer', label: 'First Check Number' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted']] },
       lines: {
         type: 'one2many',
@@ -89,6 +112,8 @@ export const paymentModels = {
           move_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
           amount: { type: 'monetary', label: 'Amount' },
           check_number: { type: 'integer', label: 'Check Number', readonly: true },
+          payment_id: { type: 'many2one', relation: 'account.payment', label: 'Payment', readonly: true },
+          cancelled: { type: 'boolean', label: 'Cancelled', readonly: true },
         },
         newLine: () => ({ move_id: null, amount: 0 }),
         // Picking an invoice fills the amount with its residual unless one was already entered.
@@ -112,7 +137,7 @@ export const paymentModels = {
         { label: 'Print Checks', when: (r) => r.state === 'posted' && r.batch_type === 'outbound', run: (db, r) => ({ db, go: '#/print/account.batch.payment/' + r.id }) },
       ],
       title: 'name',
-      groups: [['batch_type'], ['date', 'check_number_start'], ['amount_total']],
+      groups: [['batch_type'], ['date', 'journal_id', 'check_number_start'], ['amount_total']],
       tabs: [{ label: 'Payment Lines', fields: ['lines'] }],
       chatter: true,
     },

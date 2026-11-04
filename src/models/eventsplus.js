@@ -135,11 +135,14 @@ export function invoiceSponsor(db, sponsorId) {
 }
 
 /** Create one draft invoice for each active registration with a priced ticket and no invoice. */
+const pricedRegistrations = (db, event) => search(db, 'event.registration').filter((r) => r.event_id === event.id
+  && !['cancel', 'cancelled'].includes(r.state) && (event.ticket_ids ?? []).some((t) => t.name === r.ticket && Number(t.price) > 0));
 export function invoiceRegistrations(db, eventId) {
   const event = read(db, 'event.event', eventId);
   if (!event) throw new Error('Event not found');
-  const registrations = search(db, 'event.registration')
-    .filter((r) => r.event_id === eventId && !['cancel', 'cancelled'].includes(r.state) && !r.invoice_id);
+  const registrations = pricedRegistrations(db, event).filter((r) => !r.invoice_id);
+  const missing = registrations.filter((r) => !read(db, 'res.partner', r.partner_id));
+  if (missing.length) throw new Error(`Set a contact before invoicing: ${missing.map((r) => r.name).join(', ')}`);
   let next = db;
   const invoices = [];
   for (const registration of registrations) {
@@ -190,7 +193,7 @@ export const eventsPlusModels = {
       ...baseEvent.form,
       buttons: [...(baseEvent.form.buttons ?? []), { label: 'Invoice Registrations', when: (r) => (r.ticket_ids ?? []).some((t) => Number(t.price) > 0), run: (db, r) => {
         const out = invoiceRegistrations(db, r.id);
-        if (!out.invoices.length) throw new Error('Every priced registration is already invoiced');
+        if (!out.invoices.length) throw new Error(pricedRegistrations(db, r).length ? 'Every priced registration is already invoiced' : 'No priced registrations to invoice');
         return { db: out.db };
       } }],
     },

@@ -1,18 +1,20 @@
-import { create, read, search, write } from '../orm.js';
+import { create, getActiveCompany, read, search, setActiveCompany, write } from '../orm.js';
 import { adjustQuantity, moveValued, revalue } from './valuation.js';
-import { addShipping, applyLots, shippingPrice } from './logistics.js';
-import { procure } from './routes.js';
+import { addShipping, applyLots, checkTrackedLine, shippingPrice } from './logistics.js';
+import { procure, routeAction } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { moveQuantStock } from './quant.js';
 import { checkCreditLimit } from './finance.js';
 import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
-import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes } from './loyalty.js';
+import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes, restoreOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
 import { fiscalPositionFor } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
+
+const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 
 /** Adjust on-hand quantity of stockable products by `sign` × line quantity. */
 export function moveStock(db, lines = [], sign) {
@@ -37,7 +39,6 @@ const sourceLine = (order, m) => (Number.isInteger(m.so_line) && order.order_lin
 /**
  * Add per-product quantities to the order lines' `field` (qty_delivered / qty_invoiced). A delivered move goes to the
  * line it came from; everything else fills the matching lines in order.
- * ponytail: invoices carry no line link, so two invoiced lines of the same product share the quantity first-come.
  */
 function addLineQty(db, model, order, field, moves) {
   const left = new Map();
@@ -115,7 +116,7 @@ export function overDeliveryError(db, picking) {
     const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
     return over ? `Returning ${over[1]} ${name(over[0])} is more than ${original?.name ?? 'the original transfer'} has left to return (${left.get(over[0]) ?? 0})` : null;
   }
-  const order = picking.picking_type === 'outgoing' && picking.sale_id && read(db, 'sale.order', picking.sale_id);
+  const order = ['outgoing', 'dropship'].includes(picking.picking_type) && !picking.return_of && picking.sale_id && read(db, 'sale.order', picking.sale_id);
   if (!order) return null;
   const left = undelivered(db, order);
   const over = [...done].find(([id, qty]) => qty > (left.get(id) ?? 0) + 1e-9);
@@ -128,21 +129,28 @@ export function overDeliveryError(db, picking) {
  * cancelled with it. Delivered or received goods must be returned, and posted invoices or bills credited, first.
  */
 export function cancelOrder(db, model, order) {
+  if (order.state === 'cancel') return db;
   const field = model === 'sale.order' ? 'sale_id' : 'purchase_id';
-  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0)) {
+  // Service delivery is historical work, not physical stock to return; posted service invoices still need credits.
+  if ((order.order_line ?? []).some((l) => Number(l.qty_delivered) > 0 && read(db, 'product', l.product_id)?.type !== 'service')) {
     throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
   }
-  const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
-  // Credit notes point at their invoice by name (invoice_origin), not at the order.
-  const invoices = moves.filter((m) => m.state === 'posted');
-  const names = new Set(invoices.map((m) => m.name));
-  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_refund', 'in_refund'].includes(m.move_type) && (m[field] === order.id || names.has(m.invoice_origin)));
-  const totalOf = (list) => list.reduce((sum, m) => sum + amounts(m.invoice_line_ids ?? []).total, 0);
-  const posted = totalOf(invoices.filter((m) => !['out_refund', 'in_refund'].includes(m.move_type))) - totalOf(refunds);
-  if (Math.abs(posted) > 0.005) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
+  const type = model === 'sale.order' ? 'out_invoice' : 'in_invoice';
+  const moves = search(db, 'account.move').filter((m) => m.move_type === type && m.partner_id === order.partner_id
+    && (m.company_id ?? 1) === (order.company_id ?? 1) && m.state !== 'cancel'
+    && (m[field] === order.id || (!m[field] && (m.origin || m.invoice_origin) === order.name)));
+  const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === (type === 'out_invoice' ? 'out_refund' : 'in_refund'));
+  const totalOf = (m) => amounts(m.invoice_line_ids ?? []).total;
+  const uncredited = moves.filter((m) => m.state === 'posted').some((m) => {
+    const credits = refunds.filter((n) => (n.reversed_entry_id ? n.reversed_entry_id === m.id : n.invoice_origin === m.name)
+      && n.partner_id === m.partner_id && (n.company_id ?? 1) === (m.company_id ?? 1) && (n.currency_id ?? null) === (m.currency_id ?? null));
+    return totalOf(m) - credits.reduce((sum, n) => sum + totalOf(n), 0) > 0.005;
+  });
+  if (uncredited) throw new Error(model === 'sale.order' ? 'Issue a credit note for the posted invoices before cancelling the order' : 'Issue a refund for the posted bills before cancelling the order');
   const open = search(db, 'stock.picking').filter((p) => p[field] === order.id && ['draft', 'waiting', 'ready'].includes(p.state));
   let next = open.reduce((acc, p) => write(acc, 'stock.picking', p.id, { state: 'cancel' }), db);
   next = moves.filter((m) => m.state === 'draft').reduce((acc, m) => write(acc, 'account.move', m.id, { state: 'cancel' }), next);
+  if (model === 'sale.order' && ['sale', 'done'].includes(order.state)) next = restoreOrderCodes(next, order);
   return write(next, model, order.id, { state: 'cancel' });
 }
 
@@ -151,17 +159,113 @@ export function syncInvoicedQty(db, move) {
   const order = model && read(db, model, move[field]);
   if (!order) return db;
   const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
-  const reset = write(db, model, order.id, { order_line: order.order_line.map((l) => ({ ...l, qty_invoiced: 0 })) });
-  return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', moves.flatMap((m) => m.invoice_line_ids ?? []));
+  const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
+  const byKey = new Map(lines.map((l, i) => [l.sale_line_key, i]).filter(([key]) => key));
+  const unlinked = [];
+  for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
+    if (l.down_payment_key) continue;
+    const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(l.qty) || 0);
+    const ix = model === 'sale.order' && l.sale_line_key ? byKey.get(l.sale_line_key) : undefined;
+    if (ix !== undefined && lines[ix].product_id === l.product_id) lines[ix].qty_invoiced += fromStock(db, lines[ix], toStock(db, l, qty));
+    else if (!l.sale_line_key) unlinked.push({ ...l, qty });
+  }
+  const reset = write(db, model, order.id, { order_line: lines });
+  return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', unlinked);
 }
 
+/** Undeducted posted advances, retaining their original tax and account snapshots. */
+function advanceDeductions(db, order, exceptId = null) {
+  const moves = search(db, 'account.move').filter((m) => m.sale_id === order.id && m.id !== exceptId && m.state !== 'cancel');
+  const balances = new Map();
+  for (const m of moves) for (const line of m.invoice_line_ids ?? []) {
+    if (!line.down_payment_key) continue;
+    if (m.move_type === 'out_invoice' && Number(line.qty) > 0 && m.state === 'posted') {
+      balances.set(line.down_payment_key, { line, qty: Number(line.qty) });
+    }
+  }
+  for (const m of moves) for (const line of m.invoice_line_ids ?? []) {
+    const balance = balances.get(line.down_payment_key);
+    if (!balance) continue;
+    if (m.move_type === 'out_refund' && m.state === 'posted') balance.qty -= Number(line.qty) || 0;
+    else if (m.move_type === 'out_invoice' && Number(line.qty) < 0) balance.qty += Number(line.qty);
+  }
+  return [...balances.values()].filter((b) => b.qty > 1e-9).map(({ line, qty }) => ({ ...line, qty: -qty }));
+}
+
+/** Whether advances or net billing exceed the order total. */
+export function downPaymentOvercommitted(order, moves) {
+  if (!order) return false;
+  const billed = (select) => moves.reduce((sum, m) => {
+    if (m.state === 'posted') return sum + (m.move_type === 'out_refund' ? -1 : 1) * amounts((m.invoice_line_ids ?? []).filter(select)).total;
+    if (m.state === 'draft' && m.move_type === 'out_invoice') return sum + amounts((m.invoice_line_ids ?? []).filter((l) => l.down_payment_key && Number(l.qty) > 0 && select(l))).total;
+    return sum;
+  }, 0);
+  const limit = Math.round(amounts(order.order_line).total * 100);
+  return Math.round(billed(() => true) * 100) > limit || Math.round(billed((l) => l.down_payment_key) * 100) > limit;
+}
+
+function downPaymentLines(db, order, method, input) {
+  const amount = parseAmount(input);
+  const total = amounts(order.order_line).total;
+  if (!(amount > 0) || !(total > 0) || (method === 'percentage' && amount > 100) || (method === 'fixed' && amount > total)) throw new Error('Enter a valid down payment amount');
+  const ratio = method === 'percentage' ? amount / 100 : amount / total;
+  const company = read(db, 'res.company', order.company_id ?? 1);
+  const configured = company?.down_payment_account_id;
+  const accountRecord = configured ? read(db, 'account.account', configured) : (db.records['account.account'] ?? [])
+    .find((a) => a.code === '212000' && a.active !== false && (!a.company_id || a.company_id === (order.company_id ?? 1)));
+  if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error('Set up the deferred revenue account before creating a down payment');
+  const account = accountRecord.id;
+  const lines = order.order_line.filter((l) => Number(l.qty) > 0).map(({ qty_invoiced, qty_delivered, sale_line_key, purchase_method, product_id, uom_id, ...line }) => ({
+    ...line, name: 'Down Payment', account_id: account, qty: Number(line.qty) * ratio, down_payment_key: crypto.randomUUID(),
+  }));
+  const moves = search(db, 'account.move')
+    .filter((m) => m.sale_id === order.id && ['out_invoice', 'out_refund'].includes(m.move_type));
+  if (downPaymentOvercommitted(order, [...moves, { state: 'draft', move_type: 'out_invoice', invoice_line_ids: lines }])) {
+    throw new Error('Down payment exceeds the remaining order amount');
+  }
+  return lines;
+}
+
+// Rebuild generated deductions against current credits and other invoices, preserving edited regular lines.
+export function refreshAdvanceDeductions(db, order, lines, exceptId = null) {
+  const regular = lines.filter((l) => !(l.down_payment_key && Number(l.qty) < 0));
+  const deductions = advanceDeductions(db, order, exceptId);
+  const total = amounts(regular).total;
+  const available = -amounts(deductions).total;
+  if (!(total > 0 && available > 0)) return regular;
+  const scaled = (ratio) => deductions.map((l) => ({ ...l, qty: l.qty * ratio }));
+  let ratio = Math.min(1, total / available);
+  if (amounts([...regular, ...scaled(ratio)]).total < 0) {
+    let low = 0; let high = ratio;
+    for (let i = 0; i < 50; i++) {
+      const mid = (low + high) / 2;
+      if (amounts([...regular, ...scaled(mid)]).total < 0) high = mid; else low = mid;
+    }
+    ratio = low;
+  }
+  return [...regular, ...scaled(ratio)];
+}
+
+const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invoice_policy === 'delivery' ? Number(line.qty_delivered) || 0 : Number(line.qty) || 0);
+
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
-function invoiceFrom(db, order, moveType, originField) {
-  const invoiceable = (l) => (read(db, 'product', l.product_id)?.invoice_policy === 'delivery' ? Number(l.qty_delivered) || 0 : Number(l.qty) || 0);
-  const lines = order.order_line
+function invoiceFrom(db, order, moveType, originField, options = {}) {
+  const method = options.method ?? 'regular';
+  if (!['regular', 'percentage', 'fixed'].includes(method)) throw new Error('Choose a valid invoicing method');
+  if (moveType === 'out_invoice' && order.order_line.some((l) => !l.sale_line_key)) {
+    db = write(db, 'sale.order', order.id, { order_line: order.order_line.map((l) => ({ ...l, sale_line_key: l.sale_line_key || crypto.randomUUID() })) });
+    order = read(db, 'sale.order', order.id);
+  }
+  const invoiceable = (l) => invoiceableQty(db, l);
+  let lines = order.order_line
     .map((l) => ({ ...l, qty: invoiceable(l) - (Number(l.qty_invoiced) || 0) }))
     .filter((l) => l.qty > 0)
     .map(({ qty_invoiced, qty_delivered, purchase_method, ...l }) => l);
+  if (method !== 'regular') lines = downPaymentLines(db, order, method, options.amount);
+  else if (lines.length && moveType === 'out_invoice') {
+    if (order.order_line.every((l) => invoiceable(l) >= (Number(l.qty) || 0)) && search(db, 'account.move').some((m) => m.sale_id === order.id && m.move_type === 'out_invoice' && m.state === 'draft' && (m.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0))) throw new Error('Post or cancel the draft down payment before creating the final invoice');
+    lines = refreshAdvanceDeductions(db, order, lines);
+  }
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {
@@ -172,6 +276,8 @@ function invoiceFrom(db, order, moveType, originField) {
     invoice_date_due: term ? dueDate(term, today()) : addDays(today(), 30),
     invoice_origin: order.name,
     fiscal_position_id: order.fiscal_position_id ?? null,
+    incoterm_id: order.incoterm_id ?? null,
+    incoterm_location: order.incoterm_location ?? null,
     ...(order.currency_id ? { currency_id: order.currency_id } : {}),
     [originField]: order.id,
     invoice_line_ids: lines,
@@ -181,11 +287,16 @@ function invoiceFrom(db, order, moveType, originField) {
 
 const orderLines = (label, priceField = 'list_price') => {
   const base = productLines(label, priceField);
-  return { ...base, fields: { ...base.fields, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true } } };
+  return { ...base, fields: { ...base.fields, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, qty_delivered: { type: 'float', label: 'Delivered', readonly: true }, qty_invoiced: { type: 'float', label: 'Invoiced', readonly: true }, route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' }, package_id: { type: 'many2one', relation: 'stock.quant.package', label: 'Package' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, readonly: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true } } };
 };
 const invoiceStatus = (r, confirmed) => {
   if (r.state !== confirmed) return 'no';
   return (r.order_line ?? []).every((l) => (Number(l.qty_invoiced) || 0) >= (Number(l.qty) || 0)) ? 'invoiced' : 'to_invoice';
+};
+const saleInvoiceStatus = (r, db) => {
+  if (r.state !== 'sale' || !r.order_line?.length) return 'no';
+  if (r.order_line.some((l) => invoiceableQty(db, l) > (Number(l.qty_invoiced) || 0) + 1e-9)) return 'to_invoice';
+  return r.order_line.every((l) => (Number(l.qty_invoiced) || 0) >= (Number(l.qty) || 0) - 1e-9) ? 'invoiced' : 'no';
 };
 const INVOICE_STATUS = [['no', 'Nothing to Invoice'], ['to_invoice', 'To Invoice'], ['invoiced', 'Fully Invoiced']];
 
@@ -196,13 +307,38 @@ export const parseAttributes = (text = '') => String(text).split(';')
 
 /** Create one product per combination of attribute values (skips combinations that already exist). */
 export function generateVariants(db, template) {
+  const lines = template.attribute_line_ids ?? [];
+  if (lines.length) {
+    const groups = [...lines].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map((line) => {
+      const values = (line.value_ids ?? []).map((id) => read(db, 'product.attribute.value', id));
+      if (!line.attribute_id || !values.length || values.some((v) => !v || v.attribute_id !== line.attribute_id)) throw new Error('Select values belonging to each attribute');
+      return values;
+    });
+    const combos = groups.reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
+    const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => [...(p.variant_value_ids ?? [])].sort((a, b) => a - b).join('|')));
+    return combos.reduce((acc, values) => {
+      const ids = values.map((v) => v.id).sort((a, b) => a - b);
+      if (existing.has(ids.join('|'))) return acc;
+      return create(acc, 'product', {
+        name: `${template.name} (${values.map((v) => v.name).join(', ')})`,
+        default_code: `${template.default_code || `VAR-${template.id}`}-${ids.join('-')}`,
+        type: template.type, categ: template.categ, categ_id: template.categ_id, uom: template.uom, uom_id: template.uom_id, uom_po_id: template.uom_po_id,
+        list_price: Math.round(((Number(template.list_price) || 0) + values.reduce((s, v) => s + (Number(v.default_extra_price) || 0), 0)) * 100) / 100,
+        cost: template.cost, cost_method: template.cost_method, valuation: template.valuation,
+        property_account_income_id: template.property_account_income_id, property_account_expense_id: template.property_account_expense_id,
+        property_stock_valuation_account_id: template.property_stock_valuation_account_id, property_stock_journal: template.property_stock_journal,
+        sale_ok: template.sale_ok, purchase_ok: template.purchase_ok, available_in_pos: template.available_in_pos, tag_ids: [...(template.tag_ids ?? [])],
+        qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values.map((v) => v.name), variant_value_ids: ids,
+      }).db;
+    }, db);
+  }
   const combos = parseAttributes(template.attributes).reduce((acc, values) => acc.flatMap((c) => values.map((v) => [...c, v])), [[]]);
   const existing = new Set((db.records.product ?? []).filter((p) => p.variant_of === template.id).map((p) => (p.variant_values ?? []).join('|')));
   return combos.filter((c) => !existing.has(c.join('|'))).reduce((acc, values, i) => create(acc, 'product', {
     name: `${template.name} (${values.join(', ')})`,
     default_code: template.default_code ? `${template.default_code}-${String(i + 1).padStart(2, '0')}` : '',
     type: template.type, categ: template.categ, uom: template.uom, ...(template.uom_id ? { uom_id: template.uom_id } : {}), ...(template.uom_po_id ? { uom_po_id: template.uom_po_id } : {}), list_price: template.list_price, cost: template.cost,
-    qty_available: 0, reorder_min: 0, variant_of: template.id, variant_values: values,
+    qty_available: 0, variant_of: template.id, variant_values: values,
   }).db, db);
 }
 
@@ -223,7 +359,7 @@ export const salesModels = {
     label: 'Transfers',
     fields: {
       name: { type: 'char', label: 'Reference', readonly: true },
-      picking_type: { type: 'selection', label: 'Operation Type', options: [['incoming', 'Receipt'], ['outgoing', 'Delivery'], ['internal', 'Internal Transfer']] },
+      picking_type: { type: 'selection', label: 'Operation Type', options: [['incoming', 'Receipt'], ['outgoing', 'Delivery'], ['internal', 'Internal Transfer'], ['dropship', 'Dropship']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Contact' },
       origin: { type: 'char', label: 'Source Document' },
       scheduled_date: { type: 'date', label: 'Scheduled Date' },
@@ -243,11 +379,18 @@ export const salesModels = {
         type: 'one2many',
         label: 'Operations',
         // qty is the demand; quantity is what was actually done (empty = all of the demand).
-        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, so_line: { type: 'integer', label: 'Order Line', hidden: true } },
+        fields: { product_id: { type: 'many2one', relation: 'product', label: 'Product' }, qty: { type: 'float', label: 'Demand' }, quantity: { type: 'float', label: 'Quantity' }, lot_name: { type: 'char', label: 'Lot/Serial Number' }, expiration_date: { type: 'date', label: 'Expiration Date' }, procurement_route: { type: 'selection', label: 'Route', hidden: true, options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] }, so_line: { type: 'integer', label: 'Order Line', hidden: true }, po_line: { type: 'integer', label: 'Order Line', hidden: true } },
         newLine: () => ({ product_id: null, qty: 1, quantity: null, lot_name: '' }),
       },
     },
     defaults: (id) => ({ name: `WH/${pad(id)}`, picking_type: 'outgoing', scheduled_date: today(), state: 'draft', move_ids: [] }),
+    protectDelete: (db, r) => {
+      if (r.state === 'done') return 'Completed transfers cannot be deleted; create a return instead';
+      if ((db.records['stock.picking'] ?? []).some((p) => p.move_orig_picking_id === r.id)) return 'Referenced transfers cannot be deleted';
+      return null;
+    },
+    guard: (db, before, r) => before?.state === 'done' && ['name', 'state', 'picking_type', 'company_id', 'partner_id', 'origin', 'scheduled_date', 'date_done', 'location_id', 'location_dest_id', 'move_ids', 'sale_id', 'purchase_id', 'return_of', 'backorder_id', 'move_orig_picking_id', 'warehouse_id', 'warehouse_route', 'carrier_id', 'carrier_tracking_ref'].some((key) => stableValue(before[key]) !== stableValue(r[key]))
+      ? 'Completed transfers cannot be changed; create a return instead' : null,
     filters: [
       [{ id: 'receipts', label: 'Receipts', fn: (r) => r.picking_type === 'incoming' }, { id: 'deliveries', label: 'Deliveries', fn: (r) => r.picking_type === 'outgoing' }],
       [{ id: 'ready', label: 'Ready', fn: (r) => r.state === 'ready' }, { id: 'waiting', label: 'Waiting', fn: (r) => r.state === 'waiting' }, { id: 'late', label: 'Late', fn: (r) => ['ready', 'waiting'].includes(r.state) && r.scheduled_date < today() }, { id: 'backorders', label: 'Backorders', fn: (r) => !!r.backorder_id }],
@@ -269,48 +412,99 @@ export const salesModels = {
           // Done quantities below the demand ask whether the rest becomes a backorder (Odoo's backorder wizard).
           label: 'Validate', primary: true, when: (r) => ['ready', 'waiting'].includes(r.state),
           run: (db, r) => {
-            const quality = canValidatePicking(db, r);
-            if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
-            const over = overDeliveryError(db, r);
-            if (over) throw new Error(over);
-            const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
-            const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
-            const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
-              const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
-              const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
-              // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
-              const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
-              const purchase = (po?.order_line ?? []).map((l) => {
-                const product = read(d, 'product', l.product_id);
-                const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
-                const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
-                return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
-                  price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
-              });
-              const lines = p.move_ids.map((m) => {
-                const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
-                const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
-                let left = Number(m.qty);
-                let value = 0;
-                for (const l of purchase.filter((l) => l.product_id === m.product_id)) {
-                  const take = Math.min(left, l.remaining);
-                  value += take * Number(l.price_unit);
-                  l.remaining -= take;
-                  left -= take;
+            const previousCompany = getActiveCompany();
+            if (previousCompany && previousCompany !== (r.company_id ?? 1)) throw new Error('Transfer is not accessible in this company');
+            setActiveCompany(r.company_id ?? 1);
+            try {
+              const quality = canValidatePicking(db, r);
+              if (!quality.ok) throw new Error(`${quality.pending} quality check(s) still to do before validating`);
+              const over = overDeliveryError(db, r);
+              if (over) throw new Error(over);
+              const partial = (r.move_ids ?? []).some((l) => l.quantity != null && l.quantity !== '' && Number(l.quantity) < Number(l.qty));
+              const backorder = !partial || typeof confirm !== 'function' || confirm('Create a backorder for the remaining quantities?');
+              const out = validatePicking(db, r, { backorder, apply: (d, p, sign) => {
+                const original = p.return_of ? read(d, 'stock.picking', p.return_of) : null;
+                if (p.picking_type === 'dropship') {
+                  let nextD = d;
+                  const company = p.company_id ?? getActiveCompany() ?? 1;
+                  const moveIds = [];
+                  for (const m of p.move_ids) {
+                    const product = read(nextD, 'product', m.product_id);
+                    checkTrackedLine(product, m);
+                    if (product?.tracking && product.tracking !== 'none') {
+                      let lot = (nextD.records['stock.lot'] ?? []).find((l) => l.product_id === product.id && l.name === m.lot_name && (l.company_id ?? 1) === company);
+                      if (!lot) {
+                        const createdLot = create(nextD, 'stock.lot', { name: m.lot_name, product_id: product.id, company_id: company, qty: 0, expiration_date: m.expiration_date || null });
+                        nextD = createdLot.db;
+                        lot = read(nextD, 'stock.lot', createdLot.id);
+                      }
+                      moveIds.push({ ...m, lot_id: lot.id });
+                    } else moveIds.push(m);
+                  }
+                  return { db: nextD, move_ids: moveIds };
                 }
-                const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
-                  : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
-              });
-              return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
-                stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
-            } });
-            let next = out.db;
-            if (r.purchase_id && !r.return_of && !out.backorderId) next = write(next, 'purchase.order', r.purchase_id, { receipt_done: true });
-            const order = r.sale_id ? read(next, 'sale.order', r.sale_id) : r.purchase_id ? read(next, 'purchase.order', r.purchase_id) : null;
-            // A return takes its quantities back off the order; anything else adds to what was delivered.
-            if (order) next = (r.return_of ? removeLineQty : addLineQty)(next, r.sale_id ? 'sale.order' : 'purchase.order', order, 'qty_delivered', out.done);
-            return { db: next };
+                const po = read(d, 'purchase.order', p.purchase_id) || search(d, 'purchase.order').find((o) => o.name === p.origin);
+                // Receipts are valued in the receiving company's currency, so a foreign purchase price is converted at the receipt date.
+                const poRate = po ? rateAt(d, po.currency_id, today(), po.company_id) : 1;
+                const purchase = (po?.order_line ?? []).map((l) => {
+                  const product = read(d, 'product', l.product_id);
+                  const stock = product?.uom_id ?? uomForLegacy(d, product?.uom ?? 'unit')?.id;
+                  const remaining = Math.max(0, Number(l.qty) - (Number(l.qty_delivered) || 0));
+                  return { ...l, remaining: l.uom_id ? convert(d, remaining, l.uom_id, stock, { round: false }) : remaining,
+                    price_unit: (l.uom_id ? convertPrice(d, l.price_unit, l.uom_id, stock) : Number(l.price_unit)) / poRate };
+                });
+                const billed = [];
+                if (po && sign > 0 && !original) for (const bill of (d.records['account.move'] ?? []).filter((b) => b.purchase_id === po.id && b.move_type === 'in_invoice' && b.state === 'posted' && (b.company_id ?? 1) === (p.company_id ?? 1)).sort((a, b) => a.id - b.id)) {
+                  const bound = new Map();
+                  for (const move of d.records['stock.move'] ?? []) for (const link of move.invoice_links ?? []) if (link.invoice_id === bill.id) bound.set(move.product_id, (bound.get(move.product_id) ?? 0) + Number(link.qty || 0));
+                  for (const allocation of bill.stock_allocations ?? []) {
+                    if (allocation.layer_id || !(allocation.qty > 0)) continue;
+                    const skip = Math.min(allocation.qty, bound.get(allocation.product_id) ?? 0);
+                    bound.set(allocation.product_id, (bound.get(allocation.product_id) ?? 0) - skip);
+                    if (allocation.qty > skip) billed.push({ product_id: allocation.product_id, remaining: allocation.qty - skip, unit_cost: allocation.value / allocation.qty });
+                  }
+                }
+                const lines = p.move_ids.map((m) => {
+                  const source = original && search(d, 'stock.valuation.layer').filter((l) => l.picking_id === original.id && l.product_id === m.product_id && !l.opening);
+                  const qty = source?.reduce((s, l) => s + Math.abs(l.quantity), 0);
+                  let left = Number(m.qty);
+                  let value = 0;
+                  for (const l of purchase.filter((l) => l.product_id === m.product_id)) {
+                    const take = Math.min(left, l.remaining);
+                    let unpriced = take;
+                    for (const allocation of billed.filter((a) => a.product_id === m.product_id && a.remaining > 0)) {
+                      const part = Math.min(unpriced, allocation.remaining);
+                      value += part * allocation.unit_cost;
+                      allocation.remaining -= part;
+                      unpriced -= part;
+                      if (unpriced <= 1e-8) break;
+                    }
+                    value += unpriced * Number(l.price_unit);
+                    l.remaining -= take;
+                    left -= take;
+                  }
+                  const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
+                    : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
+                  return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
+                });
+                return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
+                  stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
+              } });
+              let next = out.db;
+              const adjust = r.return_of ? removeLineQty : addLineQty;
+              if (r.sale_id) next = adjust(next, 'sale.order', read(next, 'sale.order', r.sale_id), 'qty_delivered', out.done);
+              if (r.purchase_id && (!r.sale_id || r.picking_type === 'dropship')) {
+                const po = read(next, 'purchase.order', r.purchase_id);
+                const moves = r.picking_type === 'dropship' ? out.done.map((m) => ({ ...m, so_line: m.po_line })) : out.done;
+                next = adjust(next, 'purchase.order', po, 'qty_delivered', moves);
+                const updated = read(next, 'purchase.order', r.purchase_id);
+                next = write(next, 'purchase.order', r.purchase_id, { receipt_done: updated.order_line.every((l) => Number(l.qty_delivered || 0) >= Number(l.qty || 0)) });
+                if (updated.sale_id && r.picking_type !== 'dropship') {
+                  for (const waiting of search(next, 'stock.picking').filter((p) => p.sale_id === updated.sale_id && p.state === 'waiting' && !p.move_orig_picking_id)) next = reservePicking(next, waiting);
+                }
+              }
+              return { db: next };
+            } finally { setActiveCompany(previousCompany); }
           },
         },
         { label: 'Return', when: (r) => r.state === 'done', run: (db, r) => { const out = returnPicking(db, r); return { db: out.db, go: `#/inventory/transfers/${out.id}` }; } },
@@ -344,7 +538,11 @@ export const salesModels = {
       description: { type: 'text', label: 'Internal Notes' },
       type: { type: 'selection', label: 'Product Type', options: [['goods', 'Goods'], ['service', 'Service']] },
       categ: { type: 'char', label: 'Category' },
+      pos_categ_ids: { type: 'many2many', relation: 'pos.category', label: 'Point of Sale Categories' },
+      route_id: { type: 'many2one', relation: 'stock.route', label: 'Route' },
       weight: { type: 'float', label: 'Weight (kg)' },
+      volume: { type: 'float', label: 'Volume' },
+      landed_cost_ok: { type: 'boolean', label: 'Landed Cost' },
       route: { type: 'selection', label: 'Route', options: [['stock', 'From Stock'], ['mto_buy', 'Buy on Order'], ['mto_make', 'Manufacture on Order'], ['dropship', 'Dropship']] },
       vendor_id: { type: 'many2one', relation: 'res.partner', label: 'Vendor' },
       tracking: { type: 'selection', label: 'Tracking', options: [['none', 'No Tracking'], ['lot', 'By Lots'], ['serial', 'By Unique Serial Number']] },
@@ -359,6 +557,7 @@ export const salesModels = {
       qty_available: { type: 'float', label: 'On Hand', readonly: true },
       reorder_min: { type: 'float', label: 'Min. Quantity' },
       reorder_max: { type: 'float', label: 'Max. Quantity' },
+      below_min: { type: 'boolean', label: 'Below Minimum', compute: (r, db) => (db.records['stock.warehouse.orderpoint'] ?? []).some((op) => op.product_id === r.id && op.active !== false && (op.qty_forecast < op.product_min_qty || Number(r.qty_available) < Number(op.product_min_qty))) },
       website_published: { type: 'boolean', label: 'Sold Online' },
     },
     guard: (db, before, r) => {
@@ -368,10 +567,10 @@ export const salesModels = {
       return !stock || !purchase ? 'Select existing stock and purchase units of measure'
         : stock.category_id !== purchase.category_id ? 'Stock and purchase units must belong to the same category' : null;
     },
-    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, reorder_min: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14 }),
+    defaults: () => ({ type: 'goods', uom: 'unit', list_price: 0, cost: 0, qty_available: 0, sale_ok: true, purchase_ok: true, invoice_policy: 'order', sale_tax: 14, purchase_tax: 14, pos_categ_ids: [] }),
     filters: [
       [{ id: 'goods', label: 'Goods', fn: (r) => r.type === 'goods' }, { id: 'services', label: 'Services', fn: (r) => r.type === 'service' }],
-      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && r.qty_available < r.reorder_min }],
+      [{ id: 'low', label: 'Below Minimum', fn: (r) => r.type === 'goods' && Boolean(r.below_min) }],
       [{ id: 'sale_ok', label: 'Can be Sold', fn: (r) => r.sale_ok !== false }, { id: 'purchase_ok', label: 'Can be Purchased', fn: (r) => r.purchase_ok !== false }, { id: 'pos', label: 'Available in POS', fn: (r) => r.available_in_pos }],
     ],
     groupBys: ['type', 'categ'],
@@ -399,11 +598,12 @@ export const salesModels = {
           ask: [{ label: 'New unit cost', type: 'number', default: (r) => String(r.cost ?? 0) }],
           run: (db, r, [cost]) => ({ db: revalue(db, r.id, cost) }),
         },
-        { label: 'Generate Variants', when: (r) => !r.variant_of && parseAttributes(r.attributes).length, run: (db, r) => ({ db: generateVariants(db, r) }) },
+        { label: 'Generate Variants', when: (r) => !r.variant_of && (r.attribute_line_ids?.length || parseAttributes(r.attributes).length), run: (db, r) => ({ db: generateVariants(db, r) }) },
       ],
       smart: [{ label: 'Variants', model: 'product', field: 'variant_of', target: 'inventory/products' },
-        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' }],
-      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'tracking'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'reorder_min', 'reorder_max', 'route', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
+        { label: 'On Hand', model: 'stock.quant', field: 'product_id', target: 'inventory/physical-inventory' },
+        { label: 'Reordering Rules', model: 'stock.warehouse.orderpoint', field: 'product_id', target: 'inventory/replenishment' }],
+      groups: [['sale_ok', 'purchase_ok', 'available_in_pos', 'pos_categ_ids', 'can_be_expensed'], ['default_code', 'barcode', 'type', 'categ', 'uom', 'uom_id', 'uom_po_id', 'weight', 'volume', 'tracking', 'landed_cost_ok'], ['list_price', 'sale_tax', 'cost', 'purchase_tax', 'invoice_policy', 'qty_available', 'route', 'route_id', 'vendor_id'], ['attributes', 'variant_of', 'variant_values']],
       tabs: [{ label: 'Accounting', fields: ['property_account_income_id', 'property_account_expense_id'] }, { label: 'Internal Notes', fields: ['description'] }],
       chatter: true,
     },
@@ -420,10 +620,12 @@ export const salesModels = {
       payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       carrier_id: { type: 'many2one', relation: 'delivery.carrier', label: 'Delivery Method' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
+      incoterm_location: { type: 'char', label: 'Incoterm Location' },
       date_order: { type: 'date', label: 'Order Date' },
       commitment_date: { type: 'date', label: 'Promised Delivery' },
       note: { type: 'text', label: 'Terms and Conditions' },
-      invoice_status: { type: 'selection', label: 'Invoice Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'sale') },
+      invoice_status: { type: 'selection', label: 'Invoice Status', options: INVOICE_STATUS, compute: saleInvoiceStatus },
       validity_date: { type: 'date', label: 'Expiration' },
       user: { type: 'char', label: 'Salesperson' },
       source: { type: 'selection', label: 'Source', readonly: true, options: [['backend', 'Backend'], ['website', 'Website'], ['marketplace', 'Marketplace']] },
@@ -500,11 +702,30 @@ export const salesModels = {
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
             checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
-            const { db: procured, stockLines } = procure(write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale' }), r);
+            const lines = (r.order_line ?? []).map((l) => {
+              const product = read(db, 'product', l.product_id);
+              return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
+            });
+            const confirmed = write(consumeOrderCodes(db, r), 'sale.order', r.id, { state: 'sale', order_line: lines });
+            const { db: procured, stockLines } = procure(confirmed, read(confirmed, 'sale.order', r.id));
             return { db: createPicking(procured, { type: 'outgoing', partner_id: r.partner_shipping_id ?? r.partner_id, origin: r.name, lines: stockLines, link: { sale_id: r.id }, carrier_id: r.carrier_id ?? null, scheduled_date: r.commitment_date }) };
           },
         },
-        { label: 'Create Invoice', primary: true, when: (r) => r.state === 'sale' && invoiceStatus(r, 'sale') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'out_invoice', 'sale_id') },
+        { label: 'Create Invoice', primary: true, unavailable: 'Nothing left to invoice: Create Invoice is not available for this record in its current state', when: (r, db) => r.state === 'sale' && (r.invoice_status ?? saleInvoiceStatus(r, db)) === 'to_invoice',
+          wizard: () => ({ title: 'Create Invoice', fields: [
+            { name: 'method', type: 'selection', label: 'Invoicing Method', required: true, default: 'regular', options: [['regular', 'Regular Invoice'], ['percentage', 'Down Payment (Percentage)'], ['fixed', 'Down Payment (Fixed Amount)']] },
+            { name: 'amount', type: 'float', label: 'Amount', default: 0 },
+          ] }),
+          run: (db, r, options = {}) => invoiceFrom(db, r, 'out_invoice', 'sale_id', options) },
+        { label: 'Down Payment', when: (r, db) => r.state === 'sale' && (r.invoice_status ?? saleInvoiceStatus(r, db)) === 'no' && r.order_line?.some((l) => (Number(l.qty_invoiced) || 0) < (Number(l.qty) || 0)),
+          wizard: () => ({ title: 'Down Payment', fields: [
+            { name: 'method', type: 'selection', label: 'Invoicing Method', required: true, default: 'percentage', options: [['percentage', 'Down Payment (Percentage)'], ['fixed', 'Down Payment (Fixed Amount)']] },
+            { name: 'amount', type: 'float', label: 'Amount', default: 0 },
+          ] }),
+          run: (db, r, options) => {
+            if (!['percentage', 'fixed'].includes(options?.method)) throw new Error('Choose a valid invoicing method');
+            return invoiceFrom(db, r, 'out_invoice', 'sale_id', options);
+          } },
         { label: 'Cancel', when: (r) => r.state !== 'cancel', run: (db, r) => ({ db: cancelOrder(db, 'sale.order', r) }) },
       ],
       smart: [
@@ -512,7 +733,7 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
-      groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
+      groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id', 'incoterm_id', 'incoterm_location'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }, { label: 'Notes', fields: ['note'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,
@@ -530,9 +751,12 @@ export const salesModels = {
       receipt_done: { type: 'boolean', label: 'Received', readonly: true },
       payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
+      incoterm_location: { type: 'char', label: 'Incoterm Location' },
       invoice_status: { type: 'selection', label: 'Billing Status', options: INVOICE_STATUS, compute: (r) => invoiceStatus(r, 'purchase') },
       origin: { type: 'char', label: 'Source Document', readonly: true },
       dropship_partner_id: { type: 'many2one', relation: 'res.partner', label: 'Dropship Address', readonly: true },
+      sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       order_line: orderLines('Products', 'cost'),
       ...amountFields('order_line'),
     },
@@ -559,8 +783,18 @@ export const salesModels = {
           label: 'Confirm Order', primary: true, when: (r) => ['draft', 'sent'].includes(r.state),
           // Dropship orders go vendor → customer directly: no receipt into our stock.
           run: (db, r) => {
-            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase', ...(r.dropship_partner_id ? { receipt_done: true } : {}) });
-            return { db: r.dropship_partner_id ? confirmed : createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
+            const confirmed = write(db, 'purchase.order', r.id, { state: 'purchase' });
+            if (!r.dropship_partner_id) return { db: createPicking(confirmed, { type: 'incoming', partner_id: r.partner_id, origin: r.name, lines: r.order_line, link: { purchase_id: r.id } }) };
+            const moves = r.order_line.map((l, i) => ({ product_id: l.product_id, qty: toStock(confirmed, l, Number(l.qty)), so_line: l.so_line, po_line: i }));
+            let next = confirmed;
+            const external = (name) => {
+              let location = (next.records['stock.location'] ?? []).find((l) => l.name === name && l.usage === 'view' && (l.company_id ?? 1) === (r.company_id ?? 1));
+              if (!location) { const made = create(next, 'stock.location', { name, usage: 'view', company_id: r.company_id ?? 1 }); next = made.db; location = read(next, 'stock.location', made.id); }
+              return location.id;
+            };
+            const source = external('Vendors');
+            const destination = external('Customers');
+            return { db: create(next, 'stock.picking', { picking_type: 'dropship', state: 'ready', partner_id: r.dropship_partner_id, origin: r.name, sale_id: r.sale_id, purchase_id: r.id, company_id: r.company_id, location_id: source, location_dest_id: destination, move_ids: moves }).db };
           },
         },
         { label: 'Create Bill', when: (r) => r.state === 'purchase' && invoiceStatus(r, 'purchase') === 'to_invoice', run: (db, r) => invoiceFrom(db, r, 'in_invoice', 'purchase_id') },
@@ -572,7 +806,7 @@ export const salesModels = {
       ],
       ribbon: (r) => (r.receipt_done ? 'Received' : null),
       title: 'name',
-      groups: [['partner_id', 'origin', 'dropship_partner_id'], ['date_order', 'date_planned']],
+      groups: [['partner_id', 'origin', 'dropship_partner_id', 'incoterm_id', 'incoterm_location'], ['date_order', 'date_planned', 'payment_term_id', 'fiscal_position_id']],
       tabs: [{ label: 'Products', fields: ['order_line'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],
       chatter: true,

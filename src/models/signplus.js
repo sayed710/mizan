@@ -19,7 +19,7 @@ export function migrateDocumentTags(db) {
   let seq = Math.max(db.seq?.['documents.tag'] ?? 0, ...tags.map((t) => t.id));
   const tagFor = (name) => tags.find((t) => t.name === name) ?? (tags.push({ id: ++seq, name, facet: '' }), tags.at(-1));
   const documents = docs.map((d) => (!(d.tag_ids ?? []).some((t) => typeof t === 'string') ? d : {
-    ...d, tag_ids: d.tag_ids.map((t) => (typeof t === 'string' ? { tag_id: tagFor(t).id, name: t } : t)),
+    ...d, tag_ids: d.tag_ids.filter((t) => typeof t !== 'string' || t.trim()).map((t) => (typeof t === 'string' ? { tag_id: tagFor(t).id, name: t } : t)),
   }));
   return { ...db, records: { ...db.records, 'documents.document': documents, 'documents.tag': tags }, seq: { ...db.seq, 'documents.tag': seq } };
 }

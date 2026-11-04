@@ -87,7 +87,13 @@ export const recordAnalyses = {
 
 /** App-level analyses, listed under an "Analysis" menu; `period` is { from, to } from the page's period picker. */
 export const appAnalyses = [
-  { app: 'appraisals', key: 'appraisal-analysis', label: 'Appraisal Analysis', run: (db, period) => appraisalAnalysis(db, period) },
+  {
+    app: 'appraisals', key: 'appraisal-analysis', label: 'Appraisal Analysis',
+    run: (db, period) => Object.entries(appraisalAnalysis(db, period)).map(([k, stats]) => ({
+      manager_id: k === 'null' || !k || k === 'undefined' ? null : Number(k),
+      ...stats,
+    })),
+  },
   { app: 'expenses', key: 'expense-analysis', label: 'Expense Analysis', run: (db, period) => expenseAnalysis(db, period) },
   { app: 'frontdesk', key: 'visitor-report', label: 'Visitor Report', run: (db, period) => visitorReport(db, boundedPeriod(period)) },
   { app: 'quality', key: 'quality-statistics', label: 'Quality Statistics', run: (db, period) => qualityStats(db, period) },

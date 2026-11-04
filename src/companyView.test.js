@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany, ensureMainCompany, setCompanies } from './models/company.js';
+import { createCompany, ensureMainCompany, setCompanies, visibleTo } from './models/company.js';
 import { actionRecords, companyViewDb, relationCandidates, viewRecords } from './companyView.js';
 import { journalCards } from './models/finance.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -55,6 +55,27 @@ test('company selection refreshes action records and counts while retaining doma
   assert.equal(viewRecords(both, 'crm.lead').length, viewRecords(main, 'crm.lead').length + 1);
 });
 
+test('legacy company-stamped configuration is available in list actions and relation choices', () => {
+  let db = fixture();
+  const cases = [['account.tax', 'Legacy tax'], ['account.payment.term', 'Legacy term'], ['account.fiscal.position', 'Legacy position']];
+  const created = [];
+  for (const [model, name] of cases) {
+    const record = create(db, model, { name, company_id: 1 });
+    db = record.db;
+    created.push({ model, id: record.id });
+  }
+  const branch = setCompanies(db, { current: 2, allowed: [2] });
+  const snapshot = companyViewDb(branch);
+  for (const { model, id } of created) {
+    assert.ok(search(snapshot, model).some((record) => record.id === id));
+    assert.ok(actionRecords(snapshot, { model }, null).some((record) => record.id === id));
+    assert.ok(relationCandidates(snapshot, model, null).some((record) => record.id === id));
+  }
+  const foreign = search(branch, 'product').find((record) => record.company_id === 1);
+  assert.ok(!viewRecords(branch, 'product').some((record) => record.id === foreign.id));
+  assert.ok(!relationCandidates(branch, 'product', null).some((record) => record.id === foreign.id));
+});
+
 test('related candidates retain only the current foreign or archived value without duplicates', () => {
   const db = setCompanies(fixture(), { current: 1, allowed: [1] });
   const foreign = search(db, 'product').find((r) => r.company_id === 2);
@@ -78,8 +99,11 @@ test('dashboard snapshot filters every model without changing the source databas
   db = setCompanies(db, { current: 2, allowed: [2] });
   const snapshot = structuredClone(db);
   const scoped = companyViewDb(db);
+  assert.ok(search(db, 'product').some((r) => visibleTo(new Set([2]), 'product', r, db) && r.qty_available > 0));
   for (const model of Object.keys(db.records)) {
-    assert.deepEqual(search(scoped, model), viewRecords(db, model));
+    const expected = search(db, model).filter((r) => visibleTo(new Set([2]), model, r, db));
+    // Company 1 owns legacy on-hand quantities, so they are hidden in this view.
+    assert.deepEqual(search(scoped, model), model === 'product' ? expected.map((r) => ({ ...r, qty_available: 0 })) : expected);
   }
   assert.ok(journalCards(scoped).every((c) => c.journal.company_id !== 1));
   assert.equal(journalCards(db).find((c) => c.journal.id === journal.id).draft, 2);

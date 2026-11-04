@@ -54,14 +54,14 @@ function computeBoard(db, loan) {
 /** Check the terms, book the money received from the lender and start the schedule. */
 export function confirmLoan(db, loan) {
   check(loan);
-  const { db: booked } = postEntry(db, {
-    journal: 'BNK1', date: loan.start_date, ref: `Loan received ${loan.name}`,
+  const { db: booked, id: receiptId } = postEntry(db, {
+    journal: 'BNK1', company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
       { account: '101401', debit: loan.amount, partner_id: loan.lender_id ?? undefined },
       { account: '260000', credit: loan.amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
-  return write(booked, 'account.loan', loan.id, { line_ids: board(loan), state: 'running' });
+  return write(booked, 'account.loan', loan.id, { receipt_move_id: receiptId, line_ids: board(loan), state: 'running' });
 }
 
 /** Post every unposted line dated on or before `upTo`; the loan closes once all lines are paid. */
@@ -69,7 +69,7 @@ export function postDueLines(db, loan, upTo = today()) {
   const { db: next, line_ids } = (loan.line_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, line_ids: [...acc.line_ids, l] };
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'BNK1', date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
+      journal: 'BNK1', company: loan.company_id, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
       lines: [
         { account: '260000', debit: l.principal, partner_id: loan.lender_id ?? undefined },
         { account: '690400', debit: l.interest, partner_id: loan.lender_id ?? undefined },
@@ -88,8 +88,8 @@ export function earlyRepayment(db, loan, { date, amount }) {
   const pay = cents(amount);
   if (!(pay > 0)) throw new Error('The repayment amount must be positive');
   if (pay > outstanding) throw new Error('The repayment cannot exceed the outstanding balance');
-  const { db: booked } = postEntry(db, {
-    journal: 'BNK1', date, ref: `Early repayment ${loan.name}`,
+  const { db: booked, id: repaymentId } = postEntry(db, {
+    journal: 'BNK1', company: loan.company_id, date, ref: `Early repayment ${loan.name}`,
     lines: [
       { account: '260000', debit: amount, partner_id: loan.lender_id ?? undefined },
       { account: '101401', credit: amount, partner_id: loan.lender_id ?? undefined },
@@ -97,10 +97,11 @@ export function earlyRepayment(db, loan, { date, amount }) {
   });
   const posted = (loan.line_ids ?? []).filter((l) => l.posted);
   const earlyRepaid = (cents(loan.early_repaid) + pay) / 100;
-  if (pay === outstanding) return write(booked, 'account.loan', loan.id, { line_ids: posted, state: 'closed', early_repaid: earlyRepaid });
+  const early_moves = [...(loan.early_moves ?? []), { move_id: repaymentId }];
+  if (pay === outstanding) return write(booked, 'account.loan', loan.id, { line_ids: posted, state: 'closed', early_repaid: earlyRepaid, early_moves });
   const fresh = instalments(outstanding - pay, pending.length, rateOf(loan), loan.method);
   return write(booked, 'account.loan', loan.id, {
-    early_repaid: earlyRepaid,
+    early_repaid: earlyRepaid, early_moves,
     line_ids: [...posted, ...pending.map((l, i) => ({
       ...l,
       principal: fresh[i].principal / 100,
@@ -141,13 +142,16 @@ export const loanModels = {
         type: 'monetary', label: 'Outstanding Balance',
         compute: (r) => cents((Number(r.amount) || 0) - (Number(r.early_repaid) || 0) - (r.line_ids ?? []).filter((l) => l.posted).reduce((s, l) => s + (Number(l.principal) || 0), 0)) / 100 || 0,
       },
+      receipt_move_id: { type: 'many2one', relation: 'account.move', label: 'Receipt Entry', readonly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      early_moves: { type: 'one2many', label: 'Early Repayment Entries', readonly: true, fields: { move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' } } },
       early_repaid: { type: 'monetary', label: 'Repaid Early', readonly: true },
       total_interest: {
         type: 'monetary', label: 'Total Interest',
         compute: (r) => cents((r.line_ids ?? []).reduce((s, l) => s + (Number(l.interest) || 0), 0)) / 100,
       },
     },
-    defaults: () => ({ start_date: today(), duration: 12, interest_rate: 5, method: 'annuity', state: 'draft', line_ids: [] }),
+    defaults: () => ({ start_date: today(), duration: 12, interest_rate: 5, method: 'annuity', state: 'draft', line_ids: [], company_id: 1 }),
     groupBys: ['state'],
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'closed' }]],
     kanban: { title: 'name', lines: ['lender_id', 'amount', 'duration'], badge: 'state' },

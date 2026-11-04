@@ -22,13 +22,13 @@ test('lines declare their columns and selections declare their options', () => {
   assert.deepEqual(bad, []);
 });
 
-test('defaults pick declared selection options and the statusbar is a selection field', () => {
+test('defaults pick declared selection options and the statusbar is a selection or stage field', () => {
   const bad = problems((model, def) => {
     const defaults = def.defaults?.(1) ?? {};
     const status = def.form?.statusbar;
     return [
       ...Object.entries(defaults).filter(([k, v]) => def.fields[k]?.type === 'selection' && v != null && !def.fields[k].options.some(([o]) => o === v)).map(([k, v]) => `${model}.${k} default ${v}`),
-      ...(status && def.fields[status]?.type !== 'selection' ? [`${model} statusbar ${status}`] : []),
+      ...(status && !['selection', 'many2one'].includes(def.fields[status]?.type) ? [`${model} statusbar ${status}`] : []),
     ];
   });
   assert.deepEqual(bad, []);

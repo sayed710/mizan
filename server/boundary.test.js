@@ -68,6 +68,37 @@ test('state-changing calls without the CSRF header or as a form post are refused
   assert.equal(form.status, 403);
 });
 
+test('browser diffs require the current generation even when its header is absent', async () => {
+  const current = await call('/api/db', { cookie: sales });
+  const headers = { 'Sec-Fetch-Site': 'same-origin' };
+  const missing = await call('/api/diff', { method: 'POST', cookie: sales, body: { upserts: {}, deletes: {} }, headers });
+  assert.equal(missing.status, 409);
+  assert.deepEqual(missing.data.db.records, current.data.records);
+  assert.equal(missing.headers.get('x-mizan-epoch'), current.headers.get('x-mizan-epoch'));
+  const valid = await call('/api/diff', { method: 'POST', cookie: sales, body: { upserts: {}, deletes: {} }, headers: { ...headers, 'X-Mizan-Epoch': current.headers.get('x-mizan-epoch') } });
+  assert.equal(valid.status, 200);
+});
+
+test('barcode counts require inventory entitlement independently of shared product access', async () => {
+  const body = { productId: 2, counted: 10, observed: 10, company: 1 };
+  assert.equal((await call('/api/barcode/count', { method: 'POST', cookie: sales, body })).status, 403);
+});
+
+test('barcode counts require an observed quantity and an existing active company', async () => {
+  const db = (await call('/api/db', { cookie: admin })).data;
+  const p = db.records.product.find((p) => p.type === 'goods');
+  const base = { productId: p.id, counted: p.qty_available + 1, company: db.records['res.company'][0].id };
+  for (const observed of [undefined, null, 'not-a-number']) {
+    const out = await call('/api/barcode/count', { method: 'POST', cookie: admin, body: { ...base, observed } });
+    assert.equal(out.status, 400, JSON.stringify(out.data));
+    assert.match(out.data.error, /observed quantity/i);
+  }
+  const invalid = await call('/api/barcode/count', { method: 'POST', cookie: admin, body: { ...base, observed: p.qty_available, company: 987654 } });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.data.error, /existing active company/i);
+  assert.equal((await call('/api/db', { cookie: admin })).data.records.product.find((r) => r.id === p.id).qty_available, p.qty_available);
+});
+
 test('admin-only routes refuse a regular user', async () => {
   assert.equal((await call('/api/users', { cookie: sales })).status, 403);
   assert.equal((await call('/api/users', { method: 'POST', cookie: sales, body: { login: 'x', password: 'whatever-password' } })).status, 403);

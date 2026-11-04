@@ -102,7 +102,7 @@ export function ActionView({ leaf, base, params }) {
   const importCsv = async (file) => {
     try {
       const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text) : importRows(getDb(), model, defaults, fromCsv(text));
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importRows(getDb(), model, defaults, fromCsv(text));
       // Report the import only once the server has accepted it (a refusal shows its own message).
       if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
@@ -136,7 +136,18 @@ export function ActionView({ leaf, base, params }) {
             if (name && !user) throw new Error(t('Select an existing counter'));
             options = { date, user_id: user?.id ?? null };
           }
-          commit(action.run(getDb(), ids, options));
+          if (action.label === 'Snooze') {
+            const duration = prompt(t('Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)'), '1 day');
+            if (duration == null) return;
+            options = duration;
+          }
+          const res = action.run(getDb(), ids, options);
+          if (res?.go) {
+            if (res.db) commit(res.db);
+            location.hash = res.go;
+            return;
+          }
+          if (res) commit(res.db ?? res);
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
@@ -156,7 +167,7 @@ export function ActionView({ leaf, base, params }) {
       {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
-      {view === 'calendar' && <CalendarView model={model} records={records} open={open} newHref={newHref} />}
+      {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}
       {view === 'gantt' && <Gantt db={db} model={model} records={records} open={open} />}
     </main>
   );

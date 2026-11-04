@@ -51,7 +51,8 @@ export function parseAmount(text) {
     .replace(/[\s\u00A0\u200E\u200F\u2066-\u2069]/g, '');
   if (s.includes(',') && !/^[-+]?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) return NaN;
   const plain = s.replace(/,/g, '');
-  return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(plain) ? Number(plain) : NaN;
+  const amount = /^[-+]?(\d+\.?\d*|\.\d+)$/.test(plain) ? Number(plain) : NaN;
+  return Number.isFinite(amount) ? amount : NaN;
 }
 
 /** Amount answered in a prompt: null when cancelled or left empty, otherwise a positive number or an error. */
