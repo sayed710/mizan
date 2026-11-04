@@ -14,6 +14,7 @@ const props = (node) => node[Object.keys(node).find((key) => key.startsWith('__r
 const press = (db, id) => models['account.report'].form.buttons.find((button) => button.label === 'Open Report').run(db, read(db, 'account.report', id));
 const line = (code, formula, sequence = 10) => ({ code, name: code, formula, sequence });
 
+const rendered = async (React, container, text) => { for (let i = 0; i < 200 && !container.textContent.includes(text); i++) await React.act(() => new Promise((resolve) => setTimeout(resolve, 50))); };
 test('report save rejects malformed formulas, missing codes and both formula and parent cycles', () => {
   const base = seed();
   for (const [lines, error] of [
@@ -55,14 +56,17 @@ test('accounting report menus and open button render selected-company ledger and
   const { App } = await import('./App.jsx'); const host = makeEl('div'); host.ownerDocument = document; const root = createRoot(host);
   try {
     await React.act(async () => root.render(React.createElement(App)));
+    await rendered(React, host, 'CUSTOM REPORT');
     assert.ok(host.textContent.includes('CUSTOM REPORT'));
     await React.act(async () => { location.hash = '#/accounting/horizontal-groups'; window.dispatchEvent(new Event('hashchange')); });
+    await rendered(React, host, 'PARTNERS');
     assert.ok(host.textContent.includes('PARTNERS'), host.textContent);
     await React.act(async () => { location.hash = `#/accounting/accounting-reports/${report.id}`; window.dispatchEvent(new Event('hashchange')); });
     const button = find(host, (node) => node.tagName === 'BUTTON' && node.textContent === 'Open Report'); assert.ok(button);
     await React.act(async () => props(button).onClick());
     assert.equal(location.hash, press(db, report.id).go);
     await React.act(async () => window.dispatchEvent(new Event('hashchange')));
+    await rendered(React, host, '120.00');
     assert.ok(host.textContent.includes('CUSTOM REPORT'));
     assert.ok(host.textContent.includes('120.00')); assert.ok(!host.textContent.includes('420.00'));
     const select = find(host, (node) => node.tagName === 'SELECT' && props(node)?.value === ''); assert.ok(select);
