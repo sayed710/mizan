@@ -5,7 +5,7 @@ import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
 import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
-import { TRANSITION } from './taxes.js';
+import { TRANSITION, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
@@ -494,7 +494,10 @@ export function taxAccounts(db, companyId) {
     accountId(db, code, companyId),
     ...search(db, 'account.tax')
       .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
-      .map((x) => x.account_id),
+      .flatMap((x) => [
+        ...taxRepartitionLines(x, 'invoice').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
+        ...taxRepartitionLines(x, 'refund').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
+      ]),
   ].filter(Boolean));
   return { sale: of('sale', '251000'), purchase: of('purchase', '131000') };
 }

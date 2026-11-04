@@ -1,4 +1,4 @@
-﻿import './models/index.js';
+import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -7,11 +7,12 @@ import { applyRule, autoReconcile } from './models/reconcile.js';
 import { partnerLedger } from './models/reports.js';
 import { postMove } from './models/accounting.js';
 import { importStatement } from './models/statements.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 test('reconciliation model posts tax and counterpart partner and maps a partner alone', () => {
   let db = seed();
   const taxAccount = search(db, 'account.account').find((a) => a.code === '131000');
-  const tax = create(db, 'account.tax', { name: 'Input tax', amount: 14, amount_type: 'percent', account_id: taxAccount.id, price_include: true }); db = tax.db;
+  const tax = create(db, 'account.tax', { name: 'Input tax', amount: 14, amount_type: 'percent', price_include: true, ...defaultTaxRepartitionLines(taxAccount.id, []) }); db = tax.db;
   const line = create(db, 'account.bank.statement.line', { date: '2025-01-01', amount: -114, payment_ref: 'fee' }); db = line.db;
   db = applyRule(db, { name: 'fee', line_ids: [{ account_code: '600000', amount_type: 'percentage', amount: 100, tax_ids: [tax.id], partner_id: 3 }] }, read(db, 'account.bank.statement.line', line.id));
   const items = read(db, 'account.move', read(db, 'account.bank.statement.line', line.id).move_id).line_ids;

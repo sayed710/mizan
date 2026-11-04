@@ -5,8 +5,9 @@ import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { taxSnapshot } from './models/taxes.js';
 import { taxesByGrid } from './models/finance.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
 import { accountId } from './models/ledger.js';
+import { applyDiff, assignIds, diffDb } from './sync.js';
 
 test('account.tax validation: requires exactly one base row per side', () => {
   let db = seed();
@@ -284,7 +285,7 @@ test('schema migration: upgrades legacy taxes with default repartition lines and
   let db = seed();
   const oldDb = {
     ...db,
-    schema_version: 24,
+    schema_version: 25,
     records: {
       ...db.records,
       'account.tax': [
@@ -298,15 +299,27 @@ test('schema migration: upgrades legacy taxes with default repartition lines and
           tag_ids: [1],
         },
       ],
+      'account.move': [
+        {
+          id: 501,
+          move_type: 'out_invoice',
+          invoice_line_ids: [
+            { id: 1, product_id: 1, qty: 1, price_unit: 100, tax_id: 999, tax: 14, tax_account_id: accountId(db, '251000'), tax_tag_ids: [1] },
+          ],
+        },
+      ],
     },
   };
 
   const migrated = migrate(oldDb);
-  assert.equal(migrated.schema_version, 25);
-  assert.equal(SCHEMA_VERSION, 26);
+  assert.equal(migrated.schema_version, MIGRATIONS.at(-1).version);
+  assert.equal(SCHEMA_VERSION, MIGRATIONS.at(-1).version);
 
   const migratedTax = migrated.records['account.tax'].find((t) => t.id === 999);
   assert.ok(migratedTax);
+  assert.equal(migratedTax.account_id, undefined);
+  assert.equal(migratedTax.tag_ids, undefined);
+  assert.equal(migratedTax.base_tag_ids, undefined);
   assert.equal(migratedTax.invoice_repartition_line_ids.length, 2);
   assert.equal(migratedTax.invoice_repartition_line_ids[0].repartition_type, 'base');
   assert.equal(migratedTax.invoice_repartition_line_ids[1].repartition_type, 'tax');
@@ -318,4 +331,30 @@ test('schema migration: upgrades legacy taxes with default repartition lines and
   assert.equal(migratedTax.refund_repartition_line_ids[0].repartition_type, 'base');
   assert.equal(migratedTax.refund_repartition_line_ids[1].repartition_type, 'tax');
   assert.equal(migratedTax.refund_repartition_line_ids[1].factor_percent, 100);
+  assert.equal(migratedTax.refund_repartition_line_ids[1].account_id, accountId(db, '251000'));
+  assert.deepEqual(migratedTax.refund_repartition_line_ids[1].tag_ids, [1]);
+
+  const migratedMove = migrated.records['account.move'].find((m) => m.id === 501);
+  assert.ok(migratedMove);
+  const [line] = migratedMove.invoice_line_ids;
+  assert.equal(line.tax_account_id, undefined);
+  assert.equal(line.tax_tag_ids, undefined);
+  assert.equal(line.invoice_repartition_line_ids.length, 2);
+  assert.equal(line.refund_repartition_line_ids.length, 2);
+});
+
+test('server remaps accounts inside invoice line tax repartition snapshots for queued creates', () => {
+  const db = seed();
+  const queuedId = (db.seq['account.account'] ?? 0) + 1;
+  const account = create(db, 'account.account', { name: 'Queued VAT', code: 'QVAT', account_type: 'liability_current', company_id: 1 });
+  const rows = [{ repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] }, { repartition_type: 'tax', factor_percent: 100, account_id: queuedId, tag_ids: [] }];
+  const invoice = create(account.db, 'account.move', { move_type: 'out_invoice', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 10, invoice_repartition_line_ids: rows, refund_repartition_line_ids: rows }] });
+  const collision = create(db, 'account.account', { name: 'Other', code: 'OTHER', account_type: 'liability_current', company_id: 1 }).db;
+  const assigned = assignIds(collision, diffDb(db, invoice.db));
+  const saved = applyDiff(collision, assigned.diff, { isAdmin: true });
+  const remappedId = assigned.remapped['account.account'][queuedId];
+  assert.notEqual(remappedId, queuedId);
+  const line = read(saved, 'account.move', assigned.remapped['account.move']?.[invoice.id] ?? invoice.id).invoice_line_ids[0];
+  assert.equal(line.invoice_repartition_line_ids[1].account_id, remappedId);
+  assert.equal(line.refund_repartition_line_ids[1].account_id, remappedId);
 });

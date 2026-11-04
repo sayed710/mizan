@@ -7,7 +7,7 @@ import { accountId, isBalanced, journalId, postEntry } from './models/ledger.js'
 import { postMove } from './models/accounting.js';
 import { duplicateBillWarning } from './models/finance.js';
 import { reverseEntry } from './models/pay.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { applyDiff, diffDb } from './sync.js';
 import { seed } from './seed.js';
 
@@ -187,7 +187,7 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
     type_tax_use: 'sale',
     price_include: false,
     include_base_amount: true,
-    account_id: levyAccount,
+    ...defaultTaxRepartitionLines(levyAccount, []),
   });
   db = ecoTax.db;
 
@@ -200,7 +200,7 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
     type_tax_use: 'sale',
     price_include: false,
     is_base_affected: true,
-    account_id: vatAccount,
+    ...defaultTaxRepartitionLines(vatAccount, []),
   });
   db = vat10.db;
 
@@ -276,7 +276,7 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
     type_tax_use: 'sale',
     price_include: true,
     include_base_amount: true,
-    account_id: levyAccount,
+    ...defaultTaxRepartitionLines(levyAccount, []),
   });
   const incl2 = create(incl1.db, 'account.tax', {
     name: 'Sales Tax 5% Incl',
@@ -286,7 +286,7 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
     type_tax_use: 'sale',
     price_include: true,
     is_base_affected: true,
-    account_id: vatAccount,
+    ...defaultTaxRepartitionLines(vatAccount, []),
   });
   db = incl2.db;
   const compoundLine = lineDef.onchange({ product_id: 1, qty: 1, price_unit: 115.5, discount: 0, tax_ids: [incl1.id, incl2.id] }, 'tax_ids', db, {});
@@ -296,7 +296,7 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
   // Two lines of 10.05 with 5% tax:
   // Per line: 10.05 * 5% = 0.5025 -> rounds to 0.50 per line -> sum of 2 lines = 1.00 tax (total 21.10).
   // Globally: (0.5025 + 0.5025) = 1.005 -> rounds globally to 1.01 tax (total 21.11).
-  const tax5 = create(db, 'account.tax', { name: 'VAT 5%', amount_type: 'percent', amount: 5, type_tax_use: 'sale', account_id: vatAccount });
+  const tax5 = create(db, 'account.tax', { name: 'VAT 5%', amount_type: 'percent', amount: 5, type_tax_use: 'sale', ...defaultTaxRepartitionLines(vatAccount, []) });
   db = tax5.db;
   const snap5 = taxSnapshot(read(db, 'account.tax', tax5.id), db);
   const twoLines = [
@@ -326,9 +326,9 @@ test('Area 3 (Taxes): price-included, include_base_amount (tax-on-tax), group ta
 
   // Rule 4: Several small distinct tax groups under both rounding modes: computed total === posted receivable and amount_tax === sum(tax lines)
   const receivableAcc = accountId(db, '121000');
-  const smallA = create(db, 'account.tax', { name: 'Small Tax A 5%', amount_type: 'percent', amount: 5, type_tax_use: 'sale', account_id: vatAccount });
-  const smallB = create(smallA.db, 'account.tax', { name: 'Small Tax B 7%', amount_type: 'percent', amount: 7, type_tax_use: 'sale', account_id: levyAccount });
-  const smallC = create(smallB.db, 'account.tax', { name: 'Small Tax C 3%', amount_type: 'percent', amount: 3, type_tax_use: 'sale', account_id: vatAccount });
+  const smallA = create(db, 'account.tax', { name: 'Small Tax A 5%', amount_type: 'percent', amount: 5, type_tax_use: 'sale', ...defaultTaxRepartitionLines(vatAccount, []) });
+  const smallB = create(smallA.db, 'account.tax', { name: 'Small Tax B 7%', amount_type: 'percent', amount: 7, type_tax_use: 'sale', ...defaultTaxRepartitionLines(levyAccount, []) });
+  const smallC = create(smallB.db, 'account.tax', { name: 'Small Tax C 3%', amount_type: 'percent', amount: 3, type_tax_use: 'sale', ...defaultTaxRepartitionLines(vatAccount, []) });
   db = smallC.db;
   const snapA = taxSnapshot(read(db, 'account.tax', smallA.id), db);
   const snapB = taxSnapshot(read(db, 'account.tax', smallB.id), db);

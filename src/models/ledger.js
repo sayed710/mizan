@@ -2,7 +2,7 @@
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel } from './taxes.js';
+import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
 import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
@@ -145,21 +145,15 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
     const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
     const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
-    const sideKey = isRefund ? 'refund_repartition_line_ids' : 'invoice_repartition_line_ids';
     const baseTagsOf = (taxObj) => {
-      const taxRec = taxObj?.tax_id ? read(db, 'account.tax', taxObj.tax_id) : null;
-      const rows = (taxObj?.[sideKey]?.length ? taxObj[sideKey] : null)
-        ?? (l?.[sideKey]?.length ? l[sideKey] : null)
-        ?? (taxRec?.[sideKey]?.length ? taxRec[sideKey] : null)
-        ?? [];
-      const baseRow = rows.find((r) => r.repartition_type === 'base');
-      return baseRow ? (baseRow.tag_ids ?? []) : (taxObj?.tax_tag_ids ?? l?.tax_tag_ids ?? []);
+      const baseRow = taxRepartitionLine(taxObj ?? l, isRefund ? 'refund' : 'invoice', 'base');
+      return baseRow?.tag_ids ?? [];
     };
 
     if (!computed.tax && !cashBasis) {
       const zeroTaxes = computed.taxes.length
         ? computed.taxes
-        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), tax_tag_ids: l.tax_tag_ids ?? [] }];
+        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), invoice_repartition_line_ids: l.invoice_repartition_line_ids, refund_repartition_line_ids: l.refund_repartition_line_ids }];
       for (const [compIndex, t] of zeroTaxes.entries()) {
         const zero = taxLabel(t);
         const zeroTaxId = t.tax_id ?? null;
@@ -221,9 +215,8 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
+  const side = isRefund ? 'refund' : 'invoice';
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const repartitionField = isRefund ? 'refund_repartition_line_ids' : 'invoice_repartition_line_ids';
-  const defaultTaxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
   const by = new Map();
 
   for (const l of move.invoice_line_ids ?? []) {
@@ -231,16 +224,11 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
     for (const t of computed.taxes) {
       if (t.amount === 0 && !t.tax_cash_basis) continue;
-      const taxRec = t.tax_id ? read(db, 'account.tax', t.tax_id) : null;
-      const repartLines = (t[repartitionField]?.length ? t[repartitionField] : null)
-        ?? (l[repartitionField]?.length ? l[repartitionField] : null)
-        ?? (taxRec?.[repartitionField]?.length ? taxRec[repartitionField] : null)
-        ?? [];
-      const hasExplicitRepart = repartLines.some((r) => r.repartition_type === 'tax');
-      let taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
-      if (!taxRows.length) {
-        taxRows = [{ factor_percent: 100, account_id: t.tax_account_id ?? taxRec?.account_id ?? null, tag_ids: t.tax_tag_ids ?? taxRec?.tag_ids ?? [] }];
-      }
+      const repartLines = taxRepartitionLines(t, side).length
+        ? taxRepartitionLines(t, side)
+        : taxRepartitionLines(l, side);
+      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
+      if (!taxRows.length) continue;
       const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
       const splitAmounts = taxRows.length === 1
         ? [t.amount]
@@ -261,10 +249,8 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
           const resolved = resolveCompanyAccount(db, mapped, move.company_id);
           if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
           account_id = resolved;
-        } else if (hasExplicitRepart) {
-          account_id = invoiceLineAccount(db, move, l);
         } else {
-          account_id = defaultTaxAcc;
+          account_id = invoiceLineAccount(db, move, l);
         }
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;

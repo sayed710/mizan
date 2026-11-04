@@ -10,7 +10,7 @@ import { models } from './registry.js';
 import { createCompany } from './models/company.js';
 import { addDays, today } from './models/common.js';
 import { postMove, payMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { journalAudit } from './models/journal_audit.js';
 import { checkRegisterRows } from './models/payments.js';
 
@@ -166,8 +166,8 @@ test('journal audit and ledger tax lines preserve distinct tax IDs when display 
   const taxAccountId = search(db, 'account.return.type').find((type) => type.category === 'account_return').tax_payable_account_id;
   const income = create(db, 'account.account', { code: 'R8B-TAX-REV', name: 'R8B Taxable Income', account_type: 'income' });
   db = income.db;
-  const firstTax = create(db, 'account.tax', { name: 'Same display label', type_tax_use: 'sale', amount_type: 'percent', amount: 10, account_id: taxAccountId });
-  const secondTax = create(firstTax.db, 'account.tax', { name: 'Same display label', type_tax_use: 'sale', amount_type: 'percent', amount: 10, account_id: taxAccountId });
+  const firstTax = create(db, 'account.tax', { name: 'Same display label', type_tax_use: 'sale', amount_type: 'percent', amount: 10, ...defaultTaxRepartitionLines(taxAccountId, []) });
+  const secondTax = create(firstTax.db, 'account.tax', { name: 'Same display label', type_tax_use: 'sale', amount_type: 'percent', amount: 10, ...defaultTaxRepartitionLines(taxAccountId, []) });
   db = secondTax.db;
   const invoiceIds = [];
   for (const taxId of [firstTax.id, secondTax.id]) {

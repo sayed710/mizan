@@ -243,7 +243,11 @@ function remapRefs(model, rec, remapped) {
         const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
           ? { analytic_distribution: remapDistribution(distribution, remapped) }
           : null;
-        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...analytic } : line;
+        // JSON rows (e.g. tax repartition snapshots) declare which of their keys hold record ids.
+        const rows = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'json' && s.refs && Array.isArray(line[k]))
+          .map(([k, s]) => [k, line[k].map((row) => (row && typeof row === 'object' ? { ...row, ...Object.fromEntries(Object.entries(s.refs).filter(([rk]) => rk in row)
+            .map(([rk, rel]) => [rk, Array.isArray(row[rk]) ? row[rk].map((id) => to(rel, id)) : to(rel, row[rk])])) } : row))]);
+        return subs.length || analytic || rows.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic } : line;
       });
     }
   }

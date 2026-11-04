@@ -13,6 +13,7 @@ import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -88,8 +89,8 @@ export function seed() {
     return res.id;
   };
   const set = (model, id, vals) => { db = write(db, model, id, vals); };
-  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
-  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
+  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
+  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
   const cashFlowTags = {
     operating: add('account.account.tag', { name: 'Operating Activities', cash_flow_activity: 'operating' }),
@@ -115,7 +116,6 @@ export function seed() {
       type_tax_use,
       amount,
       amount_type: 'percent',
-      account_id: accId,
       tax_exigibility: 'on_invoice',
       price_include: false,
       active: true,
@@ -128,7 +128,6 @@ export function seed() {
         { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
         { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
       ],
-      tag_ids: [],
       ...vals,
     });
   };

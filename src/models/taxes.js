@@ -5,6 +5,28 @@ import { roundCurrency } from '../money.js';
 /** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
 export const TRANSITION = { sale: '251100', purchase: '131100' };
 
+/** Repartition lines of a tax or line snapshot for the requested side ('invoice' or 'refund'). */
+export function taxRepartitionLines(tax, side = 'invoice') {
+  if (!tax) return [];
+  const isRefund = side === 'refund' || ['out_refund', 'in_refund'].includes(side);
+  const key = isRefund ? 'refund_repartition_line_ids' : 'invoice_repartition_line_ids';
+  return tax[key] ?? [];
+}
+
+/** The applicable repartition line for a tax or line snapshot (defaults to the tax row on invoice side). */
+export function taxRepartitionLine(tax, side = 'invoice', type = 'tax') {
+  if (!tax) return null;
+  if (tax.repartition_type) return tax;
+  if (side === 'base' || side === 'tax') {
+    type = side;
+    side = 'invoice';
+  } else if (typeof side === 'object' && side !== null) {
+    type = side.type ?? 'tax';
+    side = side.side ?? 'invoice';
+  }
+  return taxRepartitionLines(tax, side).find((l) => l.repartition_type === type) ?? null;
+}
+
 /** Default 1 base row and 1 100% tax row per side. */
 export const defaultTaxRepartitionLines = (accountId = null, tagIds = [], baseTagIds = null) => {
   const baseTags = baseTagIds ? [...baseTagIds] : [...tagIds];
@@ -23,29 +45,15 @@ export const defaultTaxRepartitionLines = (accountId = null, tagIds = [], baseTa
 
 /** What an order/invoice line keeps of its tax, so totals never need the db. */
 export const taxSnapshot = (tax, db = null, fpId = null) => {
-  if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_tag_ids: [], tax_account_id: null, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
-  let invRepart = (tax.invoice_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
-  let refRepart = (tax.refund_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
-  if (!invRepart.length && !refRepart.length) {
-    const def = defaultTaxRepartitionLines(tax.account_id ?? tax.tax_account_id, tax.tag_ids ?? tax.tax_tag_ids);
-    invRepart = def.invoice_repartition_line_ids;
-    refRepart = def.refund_repartition_line_ids;
-  } else if (tax.tag_ids?.length && invRepart.every((l) => !l.tag_ids?.length)) {
-    invRepart = invRepart.map((l) => ({ ...l, tag_ids: [...tax.tag_ids] }));
-    if (refRepart.every((l) => !l.tag_ids?.length)) {
-      refRepart = refRepart.map((l) => ({ ...l, tag_ids: [...tax.tag_ids] }));
-    }
-  }
-  const taxAccount = invRepart.find((l) => l.repartition_type === 'tax')?.account_id ?? tax.account_id ?? null;
-  const taxTags = invRepart.find((l) => l.repartition_type === 'tax')?.tag_ids ?? [...(tax.tag_ids ?? [])];
+  if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
+  const invRepart = (tax.invoice_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
+  const refRepart = (tax.refund_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
   const base = {
     tax_id: tax.id,
     tax: Number(tax.amount) || 0,
     tax_type: tax.amount_type || 'percent',
     tax_include: !!tax.price_include,
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
-    tax_tag_ids: taxTags,
-    tax_account_id: taxAccount,
     tax_name: tax.name,
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
@@ -108,15 +116,13 @@ export function resolveLineTaxes(l) {
   if (Array.isArray(l.tax_breakdown) && l.tax_breakdown.length) {
     return [...l.tax_breakdown].sort((a, b) => (Number(a.tax_sequence ?? 1) - Number(b.tax_sequence ?? 1)) || ((a.tax_id ?? 0) - (b.tax_id ?? 0)));
   }
-  if (l.tax_id || l.tax_name || (Number(l.tax) || 0) !== 0 || l.tax_cash_basis || l.tax_tag_ids?.length || l.invoice_repartition_line_ids?.length) {
+  if (l.tax_id || l.tax_name || (Number(l.tax) || 0) !== 0 || l.tax_cash_basis || l.invoice_repartition_line_ids?.length || l.refund_repartition_line_ids?.length) {
     return [{
       tax_id: l.tax_id ?? null,
       tax: Number(l.tax) || 0,
       tax_type: l.tax_type || 'percent',
       tax_include: !!l.tax_include,
       tax_cash_basis: !!l.tax_cash_basis,
-      tax_tag_ids: [...(l.tax_tag_ids ?? [])],
-      tax_account_id: l.tax_account_id ?? null,
       tax_name: l.tax_name || '',
       tax_include_base_amount: !!l.tax_include_base_amount,
       tax_is_base_affected: l.tax_is_base_affected !== false,
@@ -245,7 +251,7 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
 }
 
 /** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
-export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null, taxFilter = () => true } = {}) {
+export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null, taxFilter = () => true, side = 'invoice' } = {}) {
   const by = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
@@ -256,7 +262,8 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
       const account_id = accountOf({ ...l, ...t });
       const tax_name = taxLabel(t);
       const tax_id = t.tax_id ?? null;
-      const tax_tag_ids = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b);
+      const repart = taxRepartitionLine(t, side);
+      const tax_tag_ids = [...(repart?.tag_ids ?? [])].sort((a, b) => a - b);
       const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
       const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
       by.set(key, { ...g, document_base: g.document_base + t.base, document_amount: g.document_amount + t.amount });
@@ -270,15 +277,17 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
 }
 
 /** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
-export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) =>
-  taxGroups(
+export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) => {
+  const side = options.side ?? 'invoice';
+  return taxGroups(
     (lines ?? []).filter((l) => resolveLineTaxes(l).some((t) => t.tax_cash_basis)),
-    (l) => l.tax_account_id,
+    (l) => taxRepartitionLine(l, side)?.account_id ?? null,
     rate,
     documentCurrency,
     companyCurrency,
-    { ...options, taxFilter: (t) => t.tax_cash_basis },
+    { ...options, side, taxFilter: (t) => t.tax_cash_basis },
   ).filter((g) => g.amount || g.base);
+};
 
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
 export function lineTaxOf(l) {
@@ -350,10 +359,8 @@ export const taxModels = {
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
-      account_id: { type: 'many2one', relation: 'account.account', label: 'Tax Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
-      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'taxes' },
       invoice_repartition_line_ids: {
         type: 'one2many',
         label: 'Distribution for Invoices',
@@ -390,61 +397,24 @@ export const taxModels = {
       is_base_affected: true,
       active: true,
       tax_group: 'VAT',
-      tag_ids: [],
-      account_id: null,
       ...defaultTaxRepartitionLines(null, []),
     }),
     createDefaults: (db, vals) => {
-      const acc = vals.account_id ?? null;
-      const tags = vals.tag_ids ?? [];
       const invLines = vals.invoice_repartition_line_ids;
       const refLines = vals.refund_repartition_line_ids;
       if (!invLines && !refLines) {
-        return {
-          ...defaultTaxRepartitionLines(acc, tags),
-          account_id: acc,
-          tag_ids: tags,
-        };
+        return defaultTaxRepartitionLines(null, []);
       }
-      const invTaxRow = (invLines ?? []).find((l) => l.repartition_type === 'tax');
-      const refTaxRow = (refLines ?? []).find((l) => l.repartition_type === 'tax');
-      const resolvedAcc = invTaxRow?.account_id ?? refTaxRow?.account_id ?? acc;
-      const resolvedTags = invTaxRow?.tag_ids ?? refTaxRow?.tag_ids ?? tags;
       return {
-        ...(invLines ? {} : { invoice_repartition_line_ids: defaultTaxRepartitionLines(resolvedAcc, resolvedTags).invoice_repartition_line_ids }),
-        ...(refLines ? {} : { refund_repartition_line_ids: defaultTaxRepartitionLines(resolvedAcc, resolvedTags).refund_repartition_line_ids }),
-        account_id: resolvedAcc,
-        tag_ids: resolvedTags,
+        ...(invLines ? {} : { invoice_repartition_line_ids: defaultTaxRepartitionLines(null, []).invoice_repartition_line_ids }),
+        ...(refLines ? {} : { refund_repartition_line_ids: defaultTaxRepartitionLines(null, []).refund_repartition_line_ids }),
       };
     },
-    onchange: (r, k) => {
-      if (k === 'tag_ids' && r.tag_ids) {
-        const updateRows = (lines) => (lines ?? []).map((l) => ({ ...l, tag_ids: [...r.tag_ids] }));
-        return {
-          invoice_repartition_line_ids: updateRows(r.invoice_repartition_line_ids),
-          refund_repartition_line_ids: updateRows(r.refund_repartition_line_ids),
-        };
-      }
-      if (k === 'account_id') {
-        const updateRows = (lines) => (lines ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: r.account_id } : l));
-        return {
-          invoice_repartition_line_ids: updateRows(r.invoice_repartition_line_ids),
-          refund_repartition_line_ids: updateRows(r.refund_repartition_line_ids),
-        };
-      }
-      if (k === 'invoice_repartition_line_ids') {
-        const taxRow = (r.invoice_repartition_line_ids ?? []).find((l) => l.repartition_type === 'tax');
-        return {
-          account_id: taxRow?.account_id ?? null,
-          tag_ids: taxRow?.tag_ids ?? [],
-        };
-      }
-      return {};
-    },
+    onchange: () => ({}),
     groupBys: ['type_tax_use', 'tax_group'],
     filters: [[{ id: 'sale', label: 'Sales', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchases', fn: (r) => r.type_tax_use === 'purchase' }]],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
-    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'include_base_amount', 'tax_exigibility', 'tag_ids'],
+    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'include_base_amount', 'tax_exigibility'],
     form: {
       title: 'name',
       groups: [

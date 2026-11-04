@@ -4,6 +4,7 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id));
 
@@ -229,7 +230,7 @@ test('finding 15: taxes with foreign configured account reject posting when comp
   // Tax configured with an account belonging only to Company 1 (code 259999)
   const taxAccC1 = create(db, 'account.account', { name: 'C1 Only Tax Acc', code: '259999', account_type: 'liability_current', company_id: 1 });
   db = taxAccC1.db;
-  const tax = create(db, 'account.tax', { name: 'C1 Tax', amount: 10, amount_type: 'percent', type_tax_use: 'sale', account_id: taxAccC1.id });
+  const tax = create(db, 'account.tax', { name: 'C1 Tax', amount: 10, amount_type: 'percent', type_tax_use: 'sale', ...defaultTaxRepartitionLines(taxAccC1.id, []) });
   db = tax.db;
 
   // Invoice in Company 2 using this tax
@@ -239,7 +240,7 @@ test('finding 15: taxes with foreign configured account reject posting when comp
     journal_id: j2.id,
     partner_id: 1,
     invoice_date: '2026-11-01',
-    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax_id: tax.id, tax: 10, tax_account_id: taxAccC1.id }],
+    invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, ...taxSnapshot(read(db, 'account.tax', tax.id)) }],
   });
   db = inv.db;
 

@@ -606,7 +606,8 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const companyCurrency = companyCurrencyRecord(db, r.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const roundingMethod = companyRoundingMethod(db, r.company_id);
-  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, { roundingMethod })
+  const side = refund ? 'refund' : 'invoice';
+  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, { roundingMethod, side })
     .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
@@ -1314,7 +1315,14 @@ Object.assign(accountingModels, {
 
   'account.account.tag': {
     label: 'Account Tags',
-    guard: (db, before, after) => before && before.applicability !== after.applicability && ['account.account', 'account.tax'].some((model) => (db.records[model] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id))) ? 'A tag in use cannot change applicability' : null,
+    guard: (db, before, after) => {
+      if (!before || before.applicability === after.applicability) return null;
+      const inAccounts = (db.records['account.account'] ?? []).some((r) => (r.tag_ids ?? []).includes(after.id));
+      const inTaxes = (db.records['account.tax'] ?? []).some((r) =>
+        [...(r.invoice_repartition_line_ids ?? []), ...(r.refund_repartition_line_ids ?? [])].some((l) => (l.tag_ids ?? []).includes(after.id)),
+      );
+      return inAccounts || inTaxes ? 'A tag in use cannot change applicability' : null;
+    },
     fields: {
       name: { type: 'char', label: 'Tag Name', required: true },
       applicability: {

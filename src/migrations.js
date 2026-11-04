@@ -565,32 +565,72 @@ MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migr
 MIGRATIONS.push({
   version: 26,
   name: 'Taxes: repartition lines for invoice and refund documents',
-  up: (db) => ({
-    ...db,
-    records: {
-      ...db.records,
-      'account.tax': (db.records['account.tax'] ?? []).map((t) => {
-        const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
-        const taxTags = [...(t.tag_ids ?? [])];
-        const accountId = t.account_id ?? null;
-        return {
-          ...t,
-          invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
-            ? t.invoice_repartition_line_ids
-            : [
-                { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-                { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-              ],
-          refund_repartition_line_ids: t.refund_repartition_line_ids?.length
-            ? t.refund_repartition_line_ids
-            : [
-                { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-                { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-              ],
-        };
-      }),
-    },
-  }),
+  up: (db) => {
+    const taxMap = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, t]));
+    const convertLine = (l) => {
+      if (!l) return l;
+      const { tax_account_id, tax_tag_ids, ...rest } = l;
+      let invLines = l.invoice_repartition_line_ids;
+      let refLines = l.refund_repartition_line_ids;
+      if (!invLines?.length && !refLines?.length && (tax_account_id !== undefined || tax_tag_ids !== undefined || l.tax_id)) {
+        const taxRec = l.tax_id ? taxMap.get(l.tax_id) : null;
+        const acc = tax_account_id ?? taxRec?.account_id ?? null;
+        const tags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
+        invLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+        ];
+        refLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+        ];
+      }
+      let breakdown = rest.tax_breakdown;
+      if (Array.isArray(breakdown) && breakdown.length) {
+        breakdown = breakdown.map(convertLine);
+      }
+      return {
+        ...rest,
+        ...(invLines?.length ? { invoice_repartition_line_ids: invLines } : {}),
+        ...(refLines?.length ? { refund_repartition_line_ids: refLines } : {}),
+        ...(breakdown ? { tax_breakdown: breakdown } : {}),
+      };
+    };
+
+    const convertModelLines = (recs, fieldName) =>
+      (recs ?? []).map((r) => r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r);
+
+    const nextRecords = { ...db.records };
+    nextRecords['account.tax'] = (db.records['account.tax'] ?? []).map((t) => {
+      const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
+      const taxTags = [...(t.tag_ids ?? [])];
+      const accountId = t.account_id ?? null;
+      const { account_id, tag_ids, base_tag_ids, ...restTax } = t;
+      return {
+        ...restTax,
+        invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
+          ? t.invoice_repartition_line_ids
+          : [
+              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+            ],
+        refund_repartition_line_ids: t.refund_repartition_line_ids?.length
+          ? t.refund_repartition_line_ids
+          : [
+              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+            ],
+      };
+    });
+
+    nextRecords['account.move'] = convertModelLines(nextRecords['account.move'], 'invoice_line_ids');
+    nextRecords['sale.order'] = convertModelLines(nextRecords['sale.order'], 'order_line');
+    nextRecords['purchase.order'] = convertModelLines(nextRecords['purchase.order'], 'order_line');
+    nextRecords['pos.order'] = convertModelLines(nextRecords['pos.order'], 'lines');
+    nextRecords['sale.subscription'] = convertModelLines(nextRecords['sale.subscription'], 'order_line');
+
+    return { ...db, records: nextRecords };
+  },
 });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

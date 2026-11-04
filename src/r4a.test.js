@@ -6,6 +6,7 @@ import { postMove } from './models/accounting.js';
 import { seed } from './seed.js';
 import { models } from './registry.js';
 import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { closeSession, payCart, refundOrder, sessionTotals, startSession } from './models/pos.js';
 import { createPortal } from '../server/portal.js';
 
@@ -13,7 +14,7 @@ test('priced invoice lines changed to sections and notes never affect posting', 
   let { db, id } = create(seed(), 'account.move', {
     move_type: 'out_invoice', partner_id: 1,
     invoice_line_ids: [
-      { name: 'Product', qty: 1, price_unit: 100, tax: 10 },
+      { name: 'Product', qty: 1, price_unit: 100, tax: 10, ...defaultTaxRepartitionLines(1) },
       { name: 'Section', qty: 2, price_unit: 50, tax: 10 },
       { name: 'Note', qty: 1, price_unit: 75, tax: 20, tax_cash_basis: true },
     ],
