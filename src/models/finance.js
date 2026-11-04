@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, paymentJournal, postEntry } from './ledger.js';
+import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -314,7 +314,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const fx = read(db, 'account.move', p.payment_fx_move_id);
   const uses = moves.reduce((count, m) => count + (m.payments ?? []).filter((x) => x.payment_fx_move_id === p.payment_fx_move_id).length, 0);
   if (uses > 1) return 'Exchange entry is already used by another settlement';
-  const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+  const account = invoiceCounterpartAccount(db, invoice);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && (l.partner_id === invoice.partner_id || sameCommercialPartner(db, l.partner_id, invoice.partner_id))).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const configured = exchangeAccount(db, invoice.company_id, difference);
   const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
@@ -348,7 +348,7 @@ export function fxProvenanceError(db, entry) {
     if (!gap) return 'An exchange entry is not required for this settlement';
     const sale = !['in_invoice', 'in_refund'].includes(invoice.move_type);
     const clearsDebit = sale ? gap < 0 : gap > 0;
-    const account = accountId(db, ['in_invoice', 'in_refund'].includes(invoice.move_type) ? '211000' : '121000', invoice.company_id);
+    const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
     const lines = entry.line_ids ?? [];
     const openLine = lines.find((l) => l.account_id === account && l.partner_id === invoice.partner_id);
@@ -376,11 +376,11 @@ export function paymentInvariant(db, after) {
   if (!after.partner_id || !Number.isFinite(Number(after.amount)) || !(Number(after.amount) > 0)) return 'A posted payment needs a partner and a positive amount';
   if ((entry.company_id ?? 1) !== (after.company_id ?? 1)) return 'The journal entry does not belong to this payment';
   const inbound = after.payment_type === 'inbound';
-  const account = accountId(db, after.partner_type === 'supplier' ? '211000' : '121000', after.company_id);
+  const invoice = after.invoice_id ? read(db, 'account.move', after.invoice_id) : null;
+  const account = invoice ? invoiceCounterpartAccount(db, invoice) : partnerAccount(db, after.partner_id, after.company_id, after.partner_type === 'supplier' ? 'payable' : 'receivable');
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const invoice = (db.records['account.move'] ?? []).find((m) => m.id === after.invoice_id);
   const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
   const bank = after.outstanding_account_id ?? accountId(db, paymentJournal(db, after.journal_id).account, after.company_id);
   const counterpart = (inbound ? -1 : 1) * net(account);
@@ -870,6 +870,18 @@ export function journalCards(db, at = today()) {
   });
 }
 
+function followUpSummary(invoices) {
+  const byCurrency = new Map();
+  for (const invoice of invoices) {
+    const currency = invoice.followup_currency;
+    if (!currency) throw new Error('Configure an invoice currency before preparing follow-ups');
+    const previous = byCurrency.get(currency.id) ?? { currency, amount: 0 };
+    byCurrency.set(currency.id, { currency, amount: roundCurrency(previous.amount + invoice.amount_residual, currency) });
+  }
+  const totals = [...byCurrency.values()];
+  return { totals, total: totals.length === 1 ? totals[0].amount : null };
+}
+
 /** Partners with overdue invoices, for payment reminders. */
 export function followUps(db, at = today(), { ignoreNextActionDate = false } = {}) {
   const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
@@ -888,8 +900,8 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false } = {
     return [{ ...m, invoice_date_due: dues[0].date, amount_residual: amount }];
   });
   const by = new Map();
-  for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push(m);
-  return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
+  for (const m of overdue) (by.get(m.partner_id) ?? by.set(m.partner_id, []).get(m.partner_id)).push({ ...m, followup_currency: documentCurrency(db, m) });
+  return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, ...followUpSummary(invoices), oldest: invoices.map((m) => m.invoice_date_due).sort()[0] }));
 }
 
 // A shared contact can have invoices in several companies; never combine their private notes.
@@ -901,7 +913,7 @@ export const followUpCompanies = (f) => {
     groups.get(cId).push(invoice);
   }
   return [...groups.entries()].map(([company_id, invoices]) => ({
-    ...f, company_id, invoices, total: round(invoices.reduce((s, m) => s + m.amount_residual, 0)), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
+    ...f, company_id, invoices, ...followUpSummary(invoices), oldest: invoices.map((m) => m.invoice_date_due).sort()[0],
   }));
 };
 const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, company_id: f.company_id ?? f.invoices[0].company_id ?? 1 });
@@ -997,7 +1009,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(nextDb, 'res.partner', partner.id,
-        `${level.name}: ${round(f.total)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+        `${level.name}: ${formatFollowUpTotals(f)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
       const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
@@ -1037,10 +1049,15 @@ export function followUpLevel(db, reminder, at = today()) {
     .sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0))[0];
 }
 
-const currencyOf = (db, move) => read(db, 'res.currency', move.currency_id)?.name ?? db.settings?.currency ?? '';
+const currencyOf = (db, move) => {
+  const currency = documentCurrency(db, move);
+  if (!currency) throw new Error('Configure an invoice currency before preparing follow-ups');
+  return currency.name;
+};
 
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
-export const followUpText = (db, f) => f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n');
+export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${amount} ${currency.name}`).join(', ');
+export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));

@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { accountId, ensureBankSuspense, journalId, paymentJournal, postEntry } from './ledger.js';
+import { accountId, ensureBankSuspense, invoiceCounterpartAccount, journalId, paymentJournal, postEntry } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -83,7 +83,7 @@ export function reconcileWith(db, line, moveId) {
     if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
     writeoffValue = docRound(amount * rate);
     if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
-    const receivable = accountId(db, ['in_invoice', 'in_refund'].includes(move.move_type) ? '211000' : '121000', company);
+    const receivable = invoiceCounterpartAccount(db, move);
     const bankAccount = accountId(db, paymentJournal(db, line.journal_id).account, company);
     if (account.id === receivable || account.id === bankAccount || account.id === accountId(db, '101404', company)) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
   }
@@ -192,11 +192,13 @@ function paymentOutstandingItem(db, payment, line, via) {
   if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
     throw new Error('Payment entry must be posted in the same company');
   }
+  const bankAccountId = accountId(db, via.account, company);
   const outstanding = payment.outstanding_account_id;
-  const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === outstanding && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
-  if (!outstanding || liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
-  if (read(db, 'account.account', outstanding)?.code === via.account) throw new Error('Outstanding and bank accounts must differ');
-  return { account: outstanding, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref };
+  const targetAccount = outstanding ?? bankAccountId;
+  const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === targetAccount && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
+  if (liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
+  if (outstanding && read(db, 'account.account', outstanding)?.code === via.account) throw new Error('Outstanding and bank accounts must differ');
+  return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding };
 }
 
 function matchPayment(db, line) {
@@ -231,6 +233,23 @@ function matchPayment(db, line) {
     }
     const forbidden = new Set([accountId(db, via.account, company), accountId(db, '101404', company), ...outstandingItems.map((item) => item.account)]);
     if (forbidden.has(writeoffAccount.id)) throw new Error('Write-off account must differ from the bank, suspense and outstanding accounts');
+  }
+  const allDirect = outstandingItems.every((item) => item.isDirect);
+  if (allDirect && !needsWriteoff && !difference) {
+    const primaryMoveId = payments[0].move_id;
+    return {
+      db: write(db, 'account.bank.statement.line', line.id, {
+        state: 'reconciled',
+        move_id: primaryMoveId,
+        bank_move_id: primaryMoveId,
+        open_amount: 0,
+        allocations: [{ payment_move_id: primaryMoveId, amount }],
+        payment_move_id: payments.length === 1 ? payments[0].move_id : null,
+        payment_id: payments.length === 1 ? payments[0].id : null,
+        payment_ids: payments.map((p) => p.id),
+        batch_payment_id: line.batch_payment_id ?? null,
+      }),
+    };
   }
   const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
   const bankLine = incoming ? { account: via.account, debit: amount, ...fx(Math.abs(line.amount)) } : { account: via.account, credit: amount, ...fx(-Math.abs(line.amount)) };
@@ -302,7 +321,8 @@ function unreconcileError(db, before, after) {
   const bankId = before.bank_move_id ?? (before.payment_id ? before.move_id : null);
   if (!bankId) return 'Cannot unreconcile a transaction without its bank entry link';
   const allocations = before.allocations ?? [];
-  const sources = new Set([bankId, ...allocations.flatMap((a) => [a.payment_move_id, a.writeoff_move_id]).filter(Boolean)]);
+  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
+  const sources = new Set([bankId, ...allocations.flatMap((a) => [a.payment_move_id, a.writeoff_move_id]).filter(Boolean)].filter((id) => !isDirectPayment(id)));
   for (const id of sources) {
     const source = read(db, 'account.move', id);
     const mirrors = (db.records['account.move'] ?? []).filter((m) => m.state === 'posted' && m.reversed_entry_id === id);
@@ -338,18 +358,19 @@ function unreconcile(db, line) {
   const original = db.records['account.bank.statement.line'].find((l) => l.id === line.id);
   const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_ids: [], batch_payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };
   let current = { ...db, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => l.id === line.id ? cleared : l) } };
+  const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
   for (const allocation of allocations) {
     if (allocation.invoice_id) {
       const payment = (current.records['account.payment'] ?? []).find((p) => p.move_id === allocation.payment_move_id);
       if (!payment) throw new Error('Cannot unreconcile: the generated payment link is missing');
       current = reversePayment(current, payment, date);
       if (allocation.writeoff_move_id) current = reverseWriteoff(current, allocation.invoice_id, allocation.writeoff_move_id, date);
-    } else {
+    } else if (!isDirectPayment(allocation.payment_move_id)) {
       const made = reverseEntry(current, read(current, 'account.move', allocation.payment_move_id), date);
       current = made.db;
     }
   }
-  if (!(current.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === bankId)) current = reverseEntry(current, read(current, 'account.move', bankId), date).db;
+  if (!isDirectPayment(bankId) && !(current.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === bankId)) current = reverseEntry(current, read(current, 'account.move', bankId), date).db;
   const error = unreconcileError(current, line, cleared);
   if (error) throw new Error(error);
   return { db: current };

@@ -69,6 +69,20 @@ export const isBalanced = (lines = [], currency = null) =>
     return Number.isFinite(value) && Math.abs(value - roundCurrency(value, currency)) < 1e-9;
   })) && lines.reduce((s, l) => s + currencyUnits(l.debit, currency) - currencyUnits(l.credit, currency), 0) === 0;
 
+/** A partner's receivable or payable account for a company: its valid property, else the company default. */
+export function partnerAccount(db, partnerId, companyId, kind) {
+  const company = read(db, 'res.company', companyId ?? 1);
+  const type = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
+  const valid = (id) => {
+    const account = read(db, 'account.account', id);
+    return account?.company_id === company?.id && account?.account_type === type && account?.active !== false;
+  };
+  const property = read(db, 'res.partner', partnerId)?.[`property_account_${kind}_id`];
+  const id = valid(property) ? property : company?.[`account_default_${kind}_id`];
+  if (!valid(id)) throw new Error(`Configure the default ${kind} account for ${company?.name ?? 'the company'}`);
+  return id;
+}
+
 /** The receivable or payable account actually booked on an invoice. */
 export function invoiceCounterpartAccount(db, invoice) {
   const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
@@ -243,7 +257,7 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = accountId(db, sale ? '121000' : '211000', move.company_id);
+  const counterpart = partnerAccount(db, move.partner_id, move.company_id, sale ? 'receivable' : 'payable');
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.

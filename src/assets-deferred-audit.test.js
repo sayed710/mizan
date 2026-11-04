@@ -7,6 +7,7 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { analyticBalance } from './models/analyticplus.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
+import { createCompany } from './models/company.js';
 
 const button = (model, label, db, id) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -128,12 +129,11 @@ test('resetting deferred invoices and bills offsets recognition analytic actuals
 
 test('manual company bill recognition respects hard lock without disturbing earlier periods', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Other company' });
+  const company = createCompany(db, { name: 'Other company' });
   db = company.db;
   const deferred = create(db, 'account.account', { name: 'Prepaid', code: '132000', account_type: 'asset_current', company_id: company.id });
   const expense = create(deferred.db, 'account.account', { name: 'Expense', code: '600000', account_type: 'expense', company_id: company.id });
-  const payable = create(expense.db, 'account.account', { name: 'Payable', code: '211000', account_type: 'liability_payable', company_id: company.id });
-  const billJournal = create(payable.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id });
+  const billJournal = create(expense.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id });
   const journal = create(billJournal.db, 'account.journal', { name: 'Misc', code: 'MISC', type: 'general', company_id: company.id });
   db = write(journal.db, 'res.company', company.id, { deferred_expense_account_id: deferred.id, deferred_generation_method: 'manual' });
   const bill = create(db, 'account.move', { company_id: company.id, move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Rent', qty: 1, price_unit: 90, tax: 0, account_id: expense.id, deferred_start_date: '2026-01-01', deferred_end_date: '2026-03-31' }] });
@@ -177,7 +177,7 @@ test('deferred invoice and recognition provenance survive server synchronization
 
 test('second company disposal uses its own sale and gain accounts', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Branch' }); db = company.db;
+  const company = createCompany(db, { name: 'Branch' }); db = company.db;
   const saleAccount = create(db, 'account.account', { name: 'Sale proceeds', code: 'S2', account_type: 'income', company_id: company.id }); db = saleAccount.db;
   const gainAccount = create(db, 'account.account', { name: 'Disposal gains', code: 'G2', account_type: 'income_other', company_id: company.id }); db = gainAccount.db;
   const invoice = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Asset sale', qty: 1, price_unit: 150, tax: 0, account_id: saleAccount.id }] });
@@ -195,7 +195,7 @@ test('second company disposal uses its own sale and gain accounts', () => {
 
 test('disposal wizard selects posted company invoice lines and rejects another company', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Other' }); db = company.db;
+  const company = createCompany(db, { name: 'Other' }); db = company.db;
   const sale = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Machine proceeds', qty: 1, price_unit: 150, tax: 0, account_id: accountId(db, '410000') }] });
   db = button('account.move', 'Confirm', sale.db, sale.id);
   const other = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other sale', qty: 1, price_unit: 150, tax: 0 }] });

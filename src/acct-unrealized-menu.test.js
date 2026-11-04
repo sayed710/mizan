@@ -18,7 +18,7 @@ test('Unrealized Currencies menu renders dated invoice and bank positions and re
   const bank = create(db, 'account.move', { name: 'BANK-FX-TEST', move_type: 'entry', state: 'posted', journal_id: journalId(db, 'MISC'), invoice_date: '2026-01-01', line_ids: [{ account_id: accountId(db, '101401'), debit: 50, credit: 0, currency_id: currency.id, amount_currency: 100 }, { account_id: accountId(db, '301000'), debit: 0, credit: 50 }] });
   const second = createCompany(bank.db, { name: 'Other company', currency_id: bank.db.settings.base_currency_id });
   db = second.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: second.id }).db;
+  for (const [code, type] of [['400000', 'income'], ['450100', 'income_other'], ['650100', 'expense_other']]) db = create(db, 'account.account', { code, name: code, account_type: type, company_id: second.id }).db;
   db = create(db, 'account.journal', { code: 'MISC', name: 'Other journal', type: 'general', company_id: second.id }).db;
   const other = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: second.id, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   db = updateSettings(postMove(other.db, other.id), { current_company_id: 1, allowed_company_ids: [1] });

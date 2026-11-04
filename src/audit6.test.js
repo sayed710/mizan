@@ -23,11 +23,10 @@ test('foreign credit settlement uses the document company and booked counterpart
     let db = seed();
     const company = createCompany(db, { name: 'Other company', currency_id: db.settings.base_currency_id });
     db = updateSettings(company.db, { current_company_id: 1, allowed_company_ids: [1, company.id] });
-    let counterpart;
-    for (const [code, accountType] of [['121000', 'asset_receivable'], ['211000', 'liability_payable'], ['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
+    const counterpart = read(db, 'res.company', company.id)[counterpartType === 'asset_receivable' ? 'account_default_receivable_id' : 'account_default_payable_id'];
+    for (const [code, accountType] of [['FXGAIN', 'income_other'], ['FXLOSS', 'expense_other']]) {
       const account = create(db, 'account.account', { company_id: company.id, code, name: code, account_type: accountType });
       db = account.db;
-      if (accountType === counterpartType) counterpart = account.id;
       if (code === 'FXGAIN') db = write(db, 'res.company', company.id, { income_currency_exchange_account_id: account.id });
       if (code === 'FXLOSS') db = write(db, 'res.company', company.id, { expense_currency_exchange_account_id: account.id });
     }
