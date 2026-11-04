@@ -126,7 +126,6 @@ export function isPaymentMatched(db, payment, excludeLineId = null) {
 
 function resolveAndValidatePayments(db, line) {
   const company = line.company_id ?? 1;
-  const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   let payments = [];
   if (line.batch_payment_id) {
     const batch = read(db, 'account.batch.payment', line.batch_payment_id);
@@ -157,26 +156,19 @@ function resolveAndValidatePayments(db, line) {
   const journal = read(db, 'account.journal', line.journal_id ?? payments[0].journal_id ?? journalId(db, via.code, company));
   if (journal && !['bank', 'cash'].includes(journal.type)) throw new Error('Bank transactions need a bank or cash journal');
   if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
-  const journalCurrency = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id;
-  for (const payment of payments) {
-    if (payment.currency_id && journalCurrency && payment.currency_id !== journalCurrency) {
-      throw new Error('Payment currency must match the bank journal currency');
-    }
-  }
-
-  return { payments, via, journal, journalCurrency };
+  // Amounts are compared in company currency; only a foreign-currency bank journal fixes the payment currency.
+  const companyCurrency = read(db, 'res.company', company)?.currency_id;
+  if (journal?.currency_id && payments.some((p) => (p.currency_id ?? companyCurrency) !== journal.currency_id)) throw new Error('Payment currency must match the bank journal currency');
+  return { payments, via, journal };
 }
 
-function paymentOutstandingItem(db, payment, line, via, journalCurrency) {
+function paymentOutstandingItem(db, payment, line, via) {
   const company = line.company_id ?? 1;
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
   const incoming = line.amount > 0;
   const entry = read(db, 'account.move', payment.move_id);
   if (!entry || entry.state !== 'posted' || (entry.company_id ?? 1) !== company) {
     throw new Error('Payment entry must be posted in the same company');
-  }
-  if (entry.currency_id && journalCurrency && entry.currency_id !== journalCurrency) {
-    throw new Error('Payment currency must match the bank journal currency');
   }
   const outstanding = payment.outstanding_account_id;
   const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === outstanding && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
@@ -189,8 +181,8 @@ function matchPayment(db, line) {
   if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
   const company = line.company_id ?? 1;
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
-  const { payments, via, journal, journalCurrency } = resolveAndValidatePayments(db, line);
-  const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via, journalCurrency));
+  const { payments, via, journal } = resolveAndValidatePayments(db, line);
+  const outstandingItems = payments.map((p) => paymentOutstandingItem(db, p, line, via));
   const amount = round(Math.abs(line.amount));
   const paymentsTotal = round(outstandingItems.reduce((sum, item) => sum + item.amount, 0));
   if (paymentsTotal !== amount) throw new Error('The selected payments must total the bank transaction amount');
