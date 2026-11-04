@@ -79,20 +79,22 @@ function matches(db, account, selectors) {
 /** Preserve the posted invoice source allocations when one journal item combines invoice lines. */
 function analyticWeights(db, item) {
   const move = read(db, 'account.move', item.move_id);
+  // Fallback distributions resolve against the document company.
+  const lineContext = { ...move, company_id: move?.company_id ?? item.company_id ?? 1 };
   const sources = item.invoice_sources ?? [];
   const total = sources.reduce((sum, source) => sum + Math.abs(Number(source.amount) || 0), 0);
   const weights = new Map();
-  const add = (line, share) => {
-    for (const [id, percent] of Object.entries(normalizeDistribution(distributionOfLine(line), db))) {
+  const add = (line, share, ctxMove) => {
+    for (const [id, percent] of Object.entries(normalizeDistribution(distributionOfLine(line, db, ctxMove), db))) {
       weights.set(Number(id), (weights.get(Number(id)) ?? 0) + share * percent / 100);
     }
   };
   if (total && sources.length) {
     for (const source of sources) {
       const line = move?.invoice_line_ids?.[source.index];
-      if (line) add(line, Math.abs(Number(source.amount) || 0) / total);
+      if (line) add(line, Math.abs(Number(source.amount) || 0) / total, lineContext);
     }
-  } else add(item, 1);
+  } else add(item, 1, lineContext);
   // Independent analytic plans can each allocate 100%; partition the item across their combined weights.
   const totalWeight = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
   if (totalWeight > 1) for (const [id, weight] of weights) weights.set(id, weight / totalWeight);

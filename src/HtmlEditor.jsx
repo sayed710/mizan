@@ -143,6 +143,9 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
   const handleInput = () => {
     const raw = editorRef.current?.innerHTML ?? '';
     const clean = sanitizeHtml(raw) ?? '';
+    if (raw !== clean && editorRef.current) {
+      editorRef.current.innerHTML = clean;
+    }
     lastEmittedRef.current = clean;
     onChange?.(clean);
     updateToolbar();
@@ -163,18 +166,16 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
     handleInput();
   };
 
-  const handlePaste = (e) => {
-    e.preventDefault();
-    const clip = e.clipboardData;
-    if (!clip) return;
-    const rawHtml = clip.getData('text/html');
-    const rawText = clip.getData('text/plain');
-    let clean = '';
-    if (rawHtml) {
-      clean = sanitizeHtml(rawHtml) ?? '';
-    } else if (rawText) {
-      clean = sanitizeHtml(escapeTextForHtml(rawText)) ?? '';
-    }
+  const extractCleanPayload = (data) => {
+    if (!data) return '';
+    const rawHtml = data.getData('text/html');
+    const rawText = data.getData('text/plain');
+    if (rawHtml) return sanitizeHtml(rawHtml) ?? '';
+    if (rawText) return sanitizeHtml(escapeTextForHtml(rawText)) ?? '';
+    return '';
+  };
+
+  const insertCleanHtml = (clean) => {
     if (!clean) return;
 
     if (document.execCommand?.('insertHTML', false, clean)) {
@@ -183,7 +184,7 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
     }
 
     const sel = window.getSelection?.();
-    if (sel?.rangeCount > 0) {
+    if (sel?.rangeCount > 0 && editorRef.current?.contains(sel.anchorNode)) {
       const range = sel.getRangeAt(0);
       range.deleteContents();
       const el = document.createElement('div');
@@ -203,6 +204,38 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
       editorRef.current.innerHTML = (editorRef.current.innerHTML || '') + clean;
       handleInput();
     }
+  };
+
+  const handlePaste = (e) => {
+    e.preventDefault();
+    const clean = extractCleanPayload(e.clipboardData);
+    if (clean) insertCleanHtml(clean);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const clean = extractCleanPayload(e.dataTransfer);
+    if (!clean) return;
+
+    let range = null;
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(e.clientX, e.clientY);
+    } else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos) {
+        range = document.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+        range.collapse(true);
+      }
+    }
+
+    const sel = window.getSelection?.();
+    if (range && editorRef.current?.contains(range.startContainer)) {
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+
+    insertCleanHtml(clean);
   };
 
   const buttons = [
@@ -303,6 +336,7 @@ export function HtmlEditor({ id, label, required, value, placeholder, onChange }
         dangerouslySetInnerHTML={{ __html: content }}
         onInput={handleInput}
         onPaste={handlePaste}
+        onDrop={handleDrop}
         onKeyUp={updateToolbar}
         onMouseUp={updateToolbar}
         onFocus={updateToolbar}

@@ -35,6 +35,7 @@ const ar = {
   'Audit Status': 'حالة التدقيق',
   'Responsible Users': 'المستخدمون المسؤولون',
   'Refresh': 'تحديث',
+  'Refresh Checks': 'تحديث الفحوصات',
   'Warning': 'تحذير',
   'Report content…': 'محتوى التقرير…',
   'Heading (H2)': 'عنوان (H2)',

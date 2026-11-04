@@ -21,59 +21,59 @@ export function renderAnnualReportHtml(db, { start_date, end_date, company_id })
   const bs = balanceSheet(db, { to, company_id: company });
 
   const renderRows = (items) => (items && items.length > 0
-    ? items.map((r) => `<tr><td>${escapeHtml(r.account?.code ?? '')} ${escapeHtml(r.account?.name ?? '')}</td><td style="text-align: right;">${formatMoney(r.balance)}</td></tr>`).join('\n')
-    : '<tr><td colspan="2" style="color: #666; font-style: italic;">No items</td></tr>');
+    ? items.map((r) => `<tr><td>${escapeHtml(r.account?.code ?? '')} ${escapeHtml(r.account?.name ?? '')}</td><td class="text-right">${formatMoney(r.balance)}</td></tr>`).join('\n')
+    : '<tr><td colspan="2" class="empty-row">No items</td></tr>');
 
   return `<div class="annual-report-body">
   <h2>Balance Sheet</h2>
-  <table class="table report-table balance-sheet-table" border="1" cellpadding="6" cellspacing="0" style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+  <table class="report-table balance-sheet-table">
     <thead>
-      <tr style="background: #f8fafc;">
-        <th style="text-align: left;">Account</th>
-        <th style="text-align: right;">Balance</th>
+      <tr>
+        <th class="text-left">Account</th>
+        <th class="text-right">Balance</th>
       </tr>
     </thead>
     <tbody>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Assets</strong></td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Assets</strong></td></tr>
       ${renderRows(bs.assets)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Assets</td><td style="text-align: right;">${formatMoney(bs.totalAssets)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Liabilities</strong></td></tr>
+      <tr class="total-row"><td>Total Assets</td><td class="text-right">${formatMoney(bs.totalAssets)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Liabilities</strong></td></tr>
       ${renderRows(bs.liabilities)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Liabilities</td><td style="text-align: right;">${formatMoney(bs.totalLiabilities)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Equity</strong></td></tr>
+      <tr class="total-row"><td>Total Liabilities</td><td class="text-right">${formatMoney(bs.totalLiabilities)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Equity</strong></td></tr>
       ${renderRows(bs.equity)}
-      <tr><td>Current Year Earnings</td><td style="text-align: right;">${formatMoney(bs.earnings)}</td></tr>
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Equity</td><td style="text-align: right;">${formatMoney(bs.totalEquity)}</td></tr>
-      <tr style="font-weight: bold; background: #cbd5e1;"><td>Total Liabilities &amp; Equity</td><td style="text-align: right;">${formatMoney(round(bs.totalLiabilities + bs.totalEquity))}</td></tr>
+      <tr><td>Current Year Earnings</td><td class="text-right">${formatMoney(bs.earnings)}</td></tr>
+      <tr class="total-row"><td>Total Equity</td><td class="text-right">${formatMoney(bs.totalEquity)}</td></tr>
+      <tr class="grand-total-row"><td>Total Liabilities &amp; Equity</td><td class="text-right">${formatMoney(round(bs.totalLiabilities + bs.totalEquity))}</td></tr>
     </tbody>
   </table>
 
   <h2>Profit and Loss</h2>
-  <table class="table report-table pnl-table" border="1" cellpadding="6" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+  <table class="report-table pnl-table">
     <thead>
-      <tr style="background: #f8fafc;">
-        <th style="text-align: left;">Account</th>
-        <th style="text-align: right;">Total</th>
+      <tr>
+        <th class="text-left">Account</th>
+        <th class="text-right">Total</th>
       </tr>
     </thead>
     <tbody>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Income</strong></td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Income</strong></td></tr>
       ${renderRows(pnl.detail.revenue)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Income</td><td style="text-align: right;">${formatMoney(pnl.revenue)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>
+      <tr class="total-row"><td>Total Income</td><td class="text-right">${formatMoney(pnl.revenue)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>
       ${renderRows(pnl.detail.cost)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Gross Profit</td><td style="text-align: right;">${formatMoney(pnl.gross)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Expenses</strong></td></tr>
+      <tr class="total-row"><td>Gross Profit</td><td class="text-right">${formatMoney(pnl.gross)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Expenses</strong></td></tr>
       ${renderRows(pnl.detail.expense)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Expenses</td><td style="text-align: right;">${formatMoney(pnl.expense)}</td></tr>
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Net Operating Income</td><td style="text-align: right;">${formatMoney(pnl.operating)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Other Income</strong></td></tr>
+      <tr class="total-row"><td>Total Expenses</td><td class="text-right">${formatMoney(pnl.expense)}</td></tr>
+      <tr class="total-row"><td>Net Operating Income</td><td class="text-right">${formatMoney(pnl.operating)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Other Income</strong></td></tr>
       ${renderRows(pnl.detail.otherIncome)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Other Income</td><td style="text-align: right;">${formatMoney(pnl.otherIncome)}</td></tr>
-      <tr style="background: #f1f5f9;"><td colspan="2"><strong>Other Expenses</strong></td></tr>
+      <tr class="total-row"><td>Total Other Income</td><td class="text-right">${formatMoney(pnl.otherIncome)}</td></tr>
+      <tr class="section-header"><td colspan="2"><strong>Other Expenses</strong></td></tr>
       ${renderRows(pnl.detail.otherExpense)}
-      <tr style="font-weight: bold; background: #e2e8f0;"><td>Total Other Expenses</td><td style="text-align: right;">${formatMoney(pnl.otherExpense)}</td></tr>
-      <tr style="font-weight: bold; background: #cbd5e1;"><td>Net Income</td><td style="text-align: right;">${formatMoney(pnl.net)}</td></tr>
+      <tr class="total-row"><td>Total Other Expenses</td><td class="text-right">${formatMoney(pnl.otherExpense)}</td></tr>
+      <tr class="grand-total-row"><td>Net Income</td><td class="text-right">${formatMoney(pnl.net)}</td></tr>
     </tbody>
   </table>
 </div>`;
