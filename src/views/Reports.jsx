@@ -14,7 +14,7 @@ import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
-import { balanceColumns, periodsFor, pnlColumns } from './reportCompare.js';
+import { balanceAnalyticColumns, balanceColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
 import { SalesReview } from './SalesReview.jsx';
@@ -521,10 +521,28 @@ function ReportPage({ leaf }) {
   const [comparison, setComparison] = useState('none');
   const [companyId, setCompanyId] = useState('all');
   const [ledgerId, setLedgerId] = useState('');
-  const ledgerReports = ['pnl', 'balance', 'ledger', 'trial'];
+  const [journalId, setJournalId] = useState('');
+  const [horizontalGroupId, setHorizontalGroupId] = useState('');
+  const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
-  const db = ledger ? { ...companyDb, records: { ...companyDb.records, 'account.move': (companyDb.records['account.move'] ?? []).filter((move) => (move.company_id ?? 1) === ledger.company_id && (ledger.journal_ids ?? []).includes(move.journal_id)) } } : companyDb;
+  const availableJournals = ledger ? search(companyDb, 'account.journal').filter((j) => (ledger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal');
+  const targetJournalIds = journalId
+    ? [Number(journalId)]
+    : ledger
+      ? (ledger.journal_ids ?? [])
+      : null;
+  const db = targetJournalIds
+    ? {
+        ...companyDb,
+        records: {
+          ...companyDb.records,
+          'account.move': (companyDb.records['account.move'] ?? []).filter((move) =>
+            (!ledger || (move.company_id ?? 1) === ledger.company_id) && targetJournalIds.includes(move.journal_id)
+          ),
+        },
+      }
+    : companyDb;
   const selectedCompany = leaf.report === 'customerStatement' && (companyId === 'all' || !allowedSet.has(Number(companyId)))
     ? String(currentCompany(sourceDb))
     : (companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all');
@@ -532,8 +550,16 @@ function ReportPage({ leaf }) {
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance'].includes(leaf.report) && periodKey !== 'all';
+  const horizontalGroups = comparable ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
+    (g.company_id ?? 1) === (selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany))
+  ) : [];
+  const horizontalGroup = comparable ? horizontalGroups.find((g) => g.id === Number(horizontalGroupId)) : null;
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
-  const data = periods ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods)) : null;
+  const data = horizontalGroup
+    ? (leaf.report === 'pnl' ? pnlAnalyticColumns(db, horizontalGroup, period) : balanceAnalyticColumns(db, horizontalGroup, period))
+    : periods
+      ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods))
+      : null;
   return (
     <main className="action report-page">
       <div className="control-panel">
@@ -550,12 +576,18 @@ function ReportPage({ leaf }) {
         </label>}
         {periodKey === 'custom' && <><label>{t('From')}<input type="date" value={customPeriod.from} onChange={(e) => setCustomPeriod({ ...customPeriod, from: e.target.value })} /></label><label>{t('To')}<input type="date" value={customPeriod.to} onChange={(e) => setCustomPeriod({ ...customPeriod, to: e.target.value })} /></label></>}
         {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
-          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => setLedgerId(e.target.value)}>
-            <option value="">{t('All Journals')}</option>
+          <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalId(''); }}>
+            <option value="">{t('All Ledgers')}</option>
             {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+        {ledgerReports.includes(leaf.report) && <label className="inline-select">{t('Journals')}
+          <select aria-label={t('Journals')} value={journalId} onChange={(e) => setJournalId(e.target.value)}>
+            <option value="">{t('All Journals')}</option>
+            {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
+          </select>
+        </label>}
+        {(['journalAudit', 'inalterability', 'cashflow'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
           <label className="inline-select">
             {t('Company')}
             <select aria-label={t('Company')} value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
@@ -566,11 +598,18 @@ function ReportPage({ leaf }) {
         )}
         {comparable && <label className="inline-select">
           {t('Comparison')}
-          <select value={comparison} onChange={(e) => setComparison(e.target.value)}>
+          <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
             <option value="none">{t('No comparison')}</option>
             <option value="previous">{t('Previous Period')}</option>
             <option value="lastYear">{t('Same Period Last Year')}</option>
             <option value="last3">{t('Last 3 Periods')}</option>
+          </select>
+        </label>}
+        {comparable && horizontalGroups.length > 0 && <label className="inline-select">
+          {t('Horizontal Group')}
+          <select aria-label={t('Horizontal Group')} value={horizontalGroupId} onChange={(e) => { setHorizontalGroupId(e.target.value); if (e.target.value) setComparison('none'); }}>
+            <option value="">{t('None')}</option>
+            {horizontalGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
         </label>}
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>

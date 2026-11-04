@@ -101,16 +101,12 @@ function analyticWeights(db, item) {
   return weights;
 }
 
-/** Compute every column from the same posted journal items as the general ledger. */
-export function configurableReport(db, report, period, group = null) {
-  report = { ...report, company_id: report.company_id ?? currentCompany(db) };
-  const error = reportError(db, null, report);
-  if (error) throw new Error(error);
-  if (group && ((group.company_id ?? 1) !== (report.company_id ?? 1) || !(group.report_ids ?? []).includes(report.id))) throw new Error('Horizontal group is not available for this report');
-  const items = journalItems(db, { ...period, company_id: report.company_id });
-  const analytic = group?.rule_ids.some((rule) => rule.field === 'analytic') ? new Map(items.map((item) => [item, analyticWeights(db, item)])) : null;
-  const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
-  const buckets = group ? group.rule_ids.flatMap((rule, index) => {
+/** One column per matched partner or analytic account of each horizontal group rule, plus the unmatched share. */
+export function groupBuckets(db, group, items) {
+  // Weights are memoised per item and computed on demand, so callers may pass rebuilt copies of the items.
+  const cache = new WeakMap();
+  const analytic = { get: (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item)).get(item) };
+  return group.rule_ids.flatMap((rule, index) => {
     const domain = idsFor(rule);
     const model = rule.field === 'partner' ? 'res.partner' : 'account.analytic.account';
     const used = new Set();
@@ -122,7 +118,18 @@ export function configurableReport(db, report, period, group = null) {
     const fraction = (item, id) => rule.field === 'partner' ? Number(item.partner_id === id) : analytic.get(item).get(id) ?? 0;
     return [...ids.map((id) => ({ key: `${index}:${id}`, label: read(db, model, id).name, weight: (item) => fraction(item, id) })),
       { key: `${index}:other`, label: 'Others', weight: (item) => Math.max(0, 1 - ids.reduce((sum, id) => sum + fraction(item, id), 0)) }];
-  }) : [{ key: 'all', label: '', weight: () => 1 }];
+  });
+}
+
+/** Compute every column from the same posted journal items as the general ledger. */
+export function configurableReport(db, report, period, group = null) {
+  report = { ...report, company_id: report.company_id ?? currentCompany(db) };
+  const error = reportError(db, null, report);
+  if (error) throw new Error(error);
+  if (group && ((group.company_id ?? 1) !== (report.company_id ?? 1) || !(group.report_ids ?? []).includes(report.id))) throw new Error('Horizontal group is not available for this report');
+  const items = journalItems(db, { ...period, company_id: report.company_id });
+  const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
+  const buckets = group ? groupBuckets(db, group, items) : [{ key: 'all', label: '', weight: () => 1 }];
   const definitions = new Map(report.line_ids.map((line) => [line.code, { ...line, parsed: parseFormula(line.formula) }]));
   const ordered = [];
   const appendChildren = (parent, depth) => {

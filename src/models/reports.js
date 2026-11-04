@@ -136,17 +136,20 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-export function cashFlow(db, { from, to } = {}) {
+export function cashFlow(db, { from, to, company_id } = {}) {
+  const targetCompany = company_id;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
-  const all = journalItems(db);
-  const opening = sum(itemsBefore(db, from));
+  const all = journalItems(db, { company_id: targetCompany });
+  const opening = sum(itemsBefore(db, from, targetCompany));
   const closing = sum(all.filter((l) => !to || l.date <= to));
   const totals = { operating: 0, investing: 0, financing: 0, unclassified: 0 };
   const attributed = new Map();
   const byMove = new Map();
-  for (const l of journalItems(db, { from, to })) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
-  const documents = search(db, 'account.move').filter((m) => m.state === 'posted' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
+  for (const l of journalItems(db, { from, to, company_id: targetCompany })) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
+  const documents = search(db, 'account.move').filter((m) => m.state === 'posted'
+    && (!targetCompany || (m.company_id ?? 1) === targetCompany)
+    && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
   const add = (account, amount) => {
     const section = accountCashFlowActivity(db, account);
     totals[section] += amount;
@@ -228,6 +231,7 @@ export function cashFlow(db, { from, to } = {}) {
       const account = read(db, 'account.account', id);
       return { section: accountCashFlowActivity(db, account), account, amount: round(amount) };
     })
+    .filter((l) => l.account && Math.abs(l.amount) > 1e-6)
     .sort((a, b) => ORDER.indexOf(a.section) - ORDER.indexOf(b.section) || a.account.code.localeCompare(b.account.code));
   return {
     opening, closing, net: round(closing - opening),
