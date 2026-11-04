@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { read, search } from '../orm.js';
 import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, trialBalance } from '../models/reports.js';
+import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 
@@ -62,11 +63,12 @@ export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }
   );
 };
 
-export function CustomerStatement({ db, period }) {
+export function CustomerStatement({ db, period, companyId }) {
   const [partnerId, setPartnerId] = useState('');
   const partners = search(db, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   const selected = partners.some((p) => p.id === Number(partnerId)) ? Number(partnerId) : null;
-  const statement = selected ? customerStatement(db, selected, period) : null;
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : (period?.company_id ?? currentCompany(db));
+  const statement = selected ? customerStatement(db, selected, { ...period, company_id: currentCo }) : null;
   return <tbody>
     <tr><td colSpan={4}><label>{t('Customer')} <select aria-label={t('Customer')} value={selected ?? ''} onChange={(e) => setPartnerId(e.target.value)}>
       <option value="">{t('Select a customer')}</option>

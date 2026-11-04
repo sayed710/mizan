@@ -24,6 +24,7 @@ import { applicantScore, duplicateApplicants, jobPipeline } from './recruitplus.
 import { bestPrice, rentalHours, rentalSchedule } from './rentalplus.js';
 import { repairAnalysis, repairTotal } from './repairplus.js';
 import { customerStatement } from './reports.js';
+import { currentCompany } from './company.js';
 import { certificationsExpiring, employeesWithSkill, points, skillMatrix } from './skillsplus.js';
 import { employeeUtilization, weeklyGrid } from './timesheetplus.js';
 import { packagingSuggestion } from './uom.js';
@@ -62,7 +63,7 @@ export const recordAnalyses = {
   'hr.job': [{ label: 'Recruitment Pipeline', run: (db, r) => jobPipeline(db, r.id) }],
   'hr.applicant': [{ label: 'Applicant Score', when: (r) => !!r.job_id, run: (db, r) => applicantScore(r, read(db, 'hr.job', r.job_id) ?? {}) }],
   'repair.order': [{ label: 'Repair Total', run: (db, r) => repairTotal(db, r.id) }],
-  'res.partner': [{ label: 'Customer Statement This Year', run: (db, r) => customerStatement(db, r.id, yearOf()) }],
+  'res.partner': [{ label: 'Customer Statement This Year', run: (db, r) => customerStatement(db, r.id, { ...yearOf(), company_id: currentCompany(db) }) }],
   'hr.skill.type': [
     { label: 'Skill Matrix', run: (db, r) => skillMatrix(db, r.id) },
     { label: 'Employees per Skill', run: (db, r) => (r.skill_ids ?? []).map((s) => ({ skill: s.name, employees: employeesWithSkill(db, { typeId: r.id, skill: s.name }).map((e) => e.name).join(', ') })) },
