@@ -39,6 +39,37 @@ test('delivered goods and posted invoices must be returned or credited before ca
   assert.equal(read(run(refunded, 'sale.order', id, 'Cancel'), 'sale.order', id).state, 'cancel');
 });
 
+test('an invoice for a separate billing contact must be credited before cancelling its sales order', () => {
+  const order = create(seed(), 'sale.order', { partner_id: 3, partner_invoice_id: 2, order_line: [{ product_id: 7, qty: 2, price_unit: 100, tax: 0 }] });
+  let db = run(order.db, 'sale.order', order.id, 'Confirm');
+  db = run(db, 'sale.order', order.id, 'Create Invoice');
+  const invoice = search(db, 'account.move').find((move) => move.sale_id === order.id && move.move_type === 'out_invoice');
+  assert.equal(invoice.partner_id, 2);
+  db = run(db, 'account.move', invoice.id, 'Confirm');
+  assert.throws(() => run(db, 'sale.order', order.id, 'Cancel'), /credit note/i);
+  assert.equal(read(db, 'sale.order', order.id).state, 'sale');
+  db = run(db, 'account.move', invoice.id, 'Credit Note');
+  const refund = search(db, 'account.move').find((move) => move.reversed_entry_id === invoice.id);
+  assert.ok(refund);
+  if (refund.state !== 'posted') {
+    assert.throws(() => run(db, 'sale.order', order.id, 'Cancel'), /credit note/i);
+    db = run(db, 'account.move', refund.id, 'Confirm');
+  }
+  db = run(db, 'sale.order', order.id, 'Cancel');
+  assert.equal(read(db, 'sale.order', order.id).state, 'cancel');
+});
+
+test('cancelling an order also cancels its draft invoice for a separate billing contact', () => {
+  const order = create(seed(), 'sale.order', { partner_id: 3, partner_invoice_id: 2, order_line: [{ product_id: 7, qty: 1, price_unit: 100, tax: 0 }] });
+  let db = run(order.db, 'sale.order', order.id, 'Confirm');
+  db = run(db, 'sale.order', order.id, 'Create Invoice');
+  const invoice = search(db, 'account.move').find((move) => move.sale_id === order.id && move.move_type === 'out_invoice');
+  assert.equal(invoice.partner_id, 2);
+  db = run(db, 'sale.order', order.id, 'Cancel');
+  assert.equal(read(db, 'sale.order', order.id).state, 'cancel');
+  assert.equal(read(db, 'account.move', invoice.id).state, 'cancel');
+});
+
 test('a confirmed purchase order cancels with its open receipt', () => {
   const { db: db0, id } = create(seed(), 'purchase.order', { partner_id: 3, order_line: [{ product_id: 7, qty: 3, price_unit: 40, tax: 0 }] });
   const confirmed = run(db0, 'purchase.order', id, 'Confirm Order');
@@ -69,6 +100,15 @@ test('credits in a different currency cannot cover an invoice during cancellatio
   const a = postedDocument(sale.db, { name: 'INV/CANCEL/FX', sale_id: sale.id, currency_id: currencies[0].id });
   const refund = postedDocument(a.db, { move_type: 'out_refund', invoice_origin: 'INV/CANCEL/FX', currency_id: currencies[1].id });
   assert.throws(() => cancelOrder(refund.db, 'sale.order', read(refund.db, 'sale.order', sale.id)), /credit note/);
+});
+
+test('an unlinked invoice for a different partner does not prevent order cancellation', () => {
+  const sale = confirmedSale();
+  const order = read(sale.db, 'sale.order', sale.id);
+  const invoice = postedDocument(sale.db, { partner_id: 2, invoice_origin: order.name });
+  const cancelled = run(invoice.db, 'sale.order', sale.id, 'Cancel');
+  assert.equal(read(cancelled, 'sale.order', sale.id).state, 'cancel');
+  assert.equal(read(cancelled, 'account.move', invoice.id).state, 'posted');
 });
 
 test('origin-matched vendor bills must be credited before cancelling their purchase', () => {

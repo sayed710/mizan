@@ -272,6 +272,44 @@ test('cash-basis base survives a zero-tax partial release and payment reversal',
   assert.deepEqual(row(taxesByTax(db), 'Small cash refund'), { side: 'sale', name: 'Small cash refund', base: -0.10, tax: -0.01 });
 });
 
+test('zero-rate cash-basis tax reports its base only as payments are made and reversed', () => {
+  const run = (db, model, id, action) => models[model].form.buttons.find((b) => b.label === action).run(db, read(db, model, id)).db;
+  for (const [type, side, sign] of [['out_invoice', 'sale', 1], ['out_refund', 'sale', -1], ['in_invoice', 'purchase', 1], ['in_refund', 'purchase', -1]]) {
+    const name = `Zero cash ${type}`;
+    const tax = create(seed(), 'account.tax', { name, amount: 0, type_tax_use: side, tax_exigibility: 'on_payment' });
+    const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
+    let db = run(inv.db, 'account.move', inv.id, 'Confirm');
+    assert.equal(taxesByTax(db).find((r) => r.name === name), undefined, `${type}: unpaid`);
+    const pay = (amount) => {
+      const payment = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount, date: today(), partner_type: side === 'sale' ? 'customer' : 'supplier', payment_type: (side === 'sale') === (sign === 1) ? 'inbound' : 'outbound' });
+      db = run(payment.db, 'account.payment', payment.id, 'Confirm');
+      return payment.id;
+    };
+    const first = pay(40);
+    assert.ok(read(db, 'account.move', inv.id).payments.at(-1).cash_basis_move_id, `${type}: release entry`);
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 40, tax: 0 }, `${type}: partial payment`);
+    db = run(db, 'account.payment', first, 'Reverse');
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: 0, tax: 0 }, `${type}: reversal`);
+    pay(100);
+    assert.deepEqual(taxesByTax(db).find((r) => r.name === name), { side, name, base: sign * 100, tax: 0 }, `${type}: final payment`);
+  }
+});
+
+test('zero-rate invoice and cash-basis lines remain distinct even with the same tax label', () => {
+  const run = (db, model, id, action) => models[model].form.buttons.find((b) => b.label === action).run(db, read(db, model, id)).db;
+  const immediate = create(seed(), 'account.tax', { name: 'Shared zero label', amount: 0, type_tax_use: 'sale' });
+  const cash = create(immediate.db, 'account.tax', { name: 'Shared zero label', amount: 0, type_tax_use: 'sale', tax_exigibility: 'on_payment' });
+  const inv = create(cash.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: today(), invoice_line_ids: [
+    { qty: 1, price_unit: 60, ...taxSnapshot(read(cash.db, 'account.tax', immediate.id)) },
+    { qty: 1, price_unit: 40, ...taxSnapshot(read(cash.db, 'account.tax', cash.id)) },
+  ] });
+  let db = run(inv.db, 'account.move', inv.id, 'Confirm');
+  assert.deepEqual(row(taxesByTax(db), 'Shared zero label'), { side: 'sale', name: 'Shared zero label', base: 60, tax: 0 });
+  const payment = create(db, 'account.payment', { partner_id: 1, invoice_id: inv.id, amount: 100, date: today(), payment_type: 'inbound' });
+  db = run(payment.db, 'account.payment', payment.id, 'Confirm');
+  assert.deepEqual(row(taxesByTax(db), 'Shared zero label'), { side: 'sale', name: 'Shared zero label', base: 100, tax: 0 });
+});
+
 test('zero-rated exports keep a durable taxable base without changing return totals', () => {
   const db = seed();
   const tax = create(db, 'account.tax', { name: 'Zero export', amount: 0, type_tax_use: 'sale' });

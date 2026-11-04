@@ -80,7 +80,7 @@ export function invoiceBaseGroups(db, move) {
     const account = deferred ? (company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] ?? accountId(db, sale ? '212000' : '132000', move.company_id)) : original;
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
-    const zero = !lineTaxOf(l) ? (l.tax_name || taxLabel(l)) : '';
+    const zero = !lineTaxOf(l) && !l.tax_cash_basis ? (l.tax_name || taxLabel(l)) : '';
     const key = `${account}:${zero}`;
     const group = byAccount.get(key) ?? { account, zero, amount: 0, lines: [] };
     group.amount += subtotal(l);

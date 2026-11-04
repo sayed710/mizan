@@ -17,6 +17,13 @@ export function isRotting(db, model, r) {
   return diffDays > stage.rotting_threshold_days;
 }
 
+/** First active stage available to the selected team or project, or no stage. */
+export function defaultStage(db, stageModel, scopeField, scopeId) {
+  return (db.records?.[stageModel] ?? [])
+    .filter((stage) => stage.active !== false && (!stage[scopeField]?.length || (scopeId && stage[scopeField].includes(scopeId))))
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)[0]?.id ?? null;
+}
+
 export function stageColumnsFor(db, model, context = {}) {
   const stageModel = model === 'crm.lead' ? 'crm.stage' : model === 'project.task' ? 'project.task.type' : null;
   if (!stageModel) return [];
@@ -239,7 +246,8 @@ export const crmModels = {
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
       return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
     },
-    defaults: () => ({ type: 'opportunity', stage_id: 1, probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today(), date_last_stage_update: today() }),
+    defaults: () => ({ type: 'opportunity', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today(), date_last_stage_update: today() }),
+    createDefaults: (db, vals) => ({ stage_id: defaultStage(db, 'crm.stage', 'team_ids', vals.team_id) }),
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],
       [

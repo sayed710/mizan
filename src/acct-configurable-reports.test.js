@@ -49,8 +49,8 @@ test('accounting report menus and open button render selected-company ledger and
   const group = create(db, 'account.report.horizontal.group', { name: 'PARTNERS', company_id: 1, report_ids: [report.id], rule_ids: [{ field: 'partner', ids: '1' }] }); db = group.db;
   const analyticGroup = create(db, 'account.report.horizontal.group', { name: 'ANALYTIC SPLIT', company_id: 1, report_ids: [report.id], rule_ids: [{ field: 'analytic', ids: String(analytic.id) }] }); db = analyticGroup.db;
   const baseline = configurableReport(db, read(db, 'account.report', report.id), { from: date, to: date });
-  assert.deepEqual(baseline.rows.map((row) => row.values[0]), [420, 400, 100, 720]);
-  assert.equal(baseline.rows.find((row) => row.code === 'A').values[0], journalItems(db, { from: date, to: date }).filter((item) => [account.id, excluded.id, otherAccount.id].includes(item.account_id)).reduce((sum, item) => sum + item.debit - item.credit, 0));
+  assert.deepEqual(baseline.rows.map((row) => row.values[0]), [120, 100, 100, 120]);
+  assert.equal(baseline.rows.find((row) => row.code === 'A').values[0], journalItems(db, { from: date, to: date, company_id: 1 }).filter((item) => [account.id, excluded.id].includes(item.account_id)).reduce((sum, item) => sum + item.debit - item.credit, 0));
   await React.act(async () => commit(db));
   const { App } = await import('./App.jsx'); const host = makeEl('div'); host.ownerDocument = document; const root = createRoot(host);
   try {
@@ -76,7 +76,7 @@ test('accounting report menus and open button render selected-company ledger and
     await React.act(async () => props(dates[0]).onChange({ target: { value: `${today().slice(0, 4)}-01-01` } }));
     await React.act(async () => props(select).onChange({ target: { value: String(group.id) } }));
     await React.act(async () => commit(updateSettings(db, { current_company_id: 1, allowed_company_ids: [1, other.id] })));
-    assert.ok(host.textContent.includes('400.00'));
+    assert.ok(host.textContent.includes('100.00')); assert.ok(!host.textContent.includes('400.00'));
   } finally { await React.act(async () => root.unmount()); }
 });
 

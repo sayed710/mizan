@@ -136,9 +136,9 @@ export function cancelOrder(db, model, order) {
     throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
   }
   const type = model === 'sale.order' ? 'out_invoice' : 'in_invoice';
-  const moves = search(db, 'account.move').filter((m) => m.move_type === type && m.partner_id === order.partner_id
+  const moves = search(db, 'account.move').filter((m) => m.move_type === type
     && (m.company_id ?? 1) === (order.company_id ?? 1) && m.state !== 'cancel'
-    && (m[field] === order.id || (!m[field] && (m.origin || m.invoice_origin) === order.name)));
+    && (m[field] === order.id || (!m[field] && m.partner_id === order.partner_id && (m.origin || m.invoice_origin) === order.name)));
   const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === (type === 'out_invoice' ? 'out_refund' : 'in_refund'));
   const totalOf = (m) => amounts(m.invoice_line_ids ?? []).total;
   const uncredited = moves.filter((m) => m.state === 'posted').some((m) => {

@@ -101,10 +101,11 @@ function analyticWeights(db, item) {
 
 /** Compute every column from the same posted journal items as the general ledger. */
 export function configurableReport(db, report, period, group = null) {
+  report = { ...report, company_id: report.company_id ?? currentCompany(db) };
   const error = reportError(db, null, report);
   if (error) throw new Error(error);
   if (group && ((group.company_id ?? 1) !== (report.company_id ?? 1) || !(group.report_ids ?? []).includes(report.id))) throw new Error('Horizontal group is not available for this report');
-  const items = journalItems(db, period);
+  const items = journalItems(db, { ...period, company_id: report.company_id });
   const analytic = group?.rule_ids.some((rule) => rule.field === 'analytic') ? new Map(items.map((item) => [item, analyticWeights(db, item)])) : null;
   const columns = ['balance', ...(report.show_debit ? ['debit'] : []), ...(report.show_credit ? ['credit'] : [])];
   const buckets = group ? group.rule_ids.flatMap((rule, index) => {

@@ -2,7 +2,7 @@
 import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { assignTicket, mergeTickets, rateTicket, slaDeadline, slaStatus, ticketExtraFields } from './helpdesk.js';
-import { isRotting } from './crm.js';
+import { defaultStage, isRotting } from './crm.js';
 
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
 
@@ -207,7 +207,8 @@ export const workModels = {
         newLine: () => ({ task_id: null }),
       },
     },
-    defaults: () => ({ stage_id: 1, state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [], date_last_stage_update: today() }),
+    defaults: () => ({ state: 'in_progress', priority: 0, tag_ids: [], planned_hours: 0, depend_on: [], date_last_stage_update: today() }),
+    createDefaults: (db, vals) => ({ stage_id: defaultStage(db, 'project.task.type', 'project_ids', vals.project_id) }),
     // Customer follows the project; a task blocked by open tasks waits and cannot be closed.
     onchange: (r, key, db) => {
       const updates = {};
