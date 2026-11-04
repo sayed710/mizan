@@ -112,7 +112,8 @@ export function checkBillMatch(db, bill) {
 
 /** Compute the review recommendation from current receipts and other posted bills. */
 export function shouldBePaid(db, bill) {
-  if (bill.move_type !== 'in_invoice' || !db.settings?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
+  const company = read(db, 'res.company', bill.company_id ?? 1);
+  if (bill.move_type !== 'in_invoice' || !company?.three_way_matching || bill.force_post || !orderFor(db, bill)) return 'yes';
   return matches(db, bill).some((l) => l.status === 'qty_exceeds_received' && method(read(db, 'product', l.product_id)) === 'receive') ? 'exception' : 'yes';
 }
 

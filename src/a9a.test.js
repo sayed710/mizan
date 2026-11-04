@@ -8,6 +8,7 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { confirmAsset, depreciationBoard, disposeAsset, modifyAsset, postDepreciation } from './models/assets.js';
 import { discountAvailable, payWithDiscount, postMove } from './models/accounting.js';
 import { postBatch } from './models/payments.js';
+import { taxSnapshot } from './models/taxes.js';
 import { followUps, partnerFollowUp, updatePartnerFollowUp } from './models/finance.js';
 
 test('asset modification: value increase posts adjusting entry, updates original value and recomputes remaining board', () => {
@@ -168,7 +169,7 @@ test('early payment discount with tax reduction on invoice (mixed): reduces tax 
     partner_id: 1,
     invoice_date: '2026-01-01',
     invoice_payment_term_id: term.id,
-    invoice_line_ids: [{ qty: 1, price_unit: 100, tax_id: tax.id, tax: 14 }],
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(tax) }],
   });
 
   db = postMove(invoice.db, invoice.id);
@@ -226,7 +227,7 @@ test('early payment discount (mixed): late payment after discount date receives 
     partner_id: 1,
     invoice_date: '2026-01-01',
     invoice_payment_term_id: term.id,
-    invoice_line_ids: [{ qty: 1, price_unit: 100, tax_id: tax.id, tax: 14 }],
+    invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(tax) }],
   });
   db = postMove(invoice.db, invoice.id);
   const posted = read(db, 'account.move', invoice.id);
@@ -397,7 +398,7 @@ test('mixed early discount: posted total, amount_tax and the posted tax and rece
   const term = create(db, 'account.payment.term', { name: '3% 7 mixed', early_discount: true, discount_percent: 3, discount_days: 7, discount_tax_computation: 'mixed' });
   db = term.db;
   const tax = search(db, 'account.tax').find((t) => t.type_tax_use === 'sale' && t.amount === 14 && !t.price_include && t.tax_exigibility === 'on_invoice');
-  const invoice = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2026-01-01', invoice_payment_term_id: term.id, invoice_line_ids: [{ qty: 3, price_unit: 33.33, tax_id: tax.id, tax: 14 }] });
+  const invoice = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2026-01-01', invoice_payment_term_id: term.id, invoice_line_ids: [{ qty: 3, price_unit: 33.33, ...taxSnapshot(tax) }] });
   db = postMove(invoice.db, invoice.id);
   const posted = read(db, 'account.move', invoice.id);
   const taxCredit = posted.line_ids.filter((l) => l.tax_name && !l.tax_zero).reduce((s, l) => s + l.credit, 0);

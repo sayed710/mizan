@@ -73,7 +73,7 @@ export function currencyUnits(amount, currency) {
 export const cents = (n) => Math.round(round(n) * 100);
 
 /** Split rounded cents proportionally, with stable largest-remainder ties and the total's sign. */
-export function allocateCents(amount, weights, currency = null) {
+export function allocateCents(amount, weights, currency = null, { tieBreak = 'first' } = {}) {
   const step = Number(currency?.rounding ?? 0.01);
   const total = currencyUnits(amount, currency);
   const basis = weights.reduce((sum, weight) => sum + weight, 0);
@@ -83,7 +83,7 @@ export function allocateCents(amount, weights, currency = null) {
     const whole = Math.floor(exact);
     return { index, whole, fraction: exact - whole };
   });
-  const ranked = [...shares].sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+  const ranked = [...shares].sort((a, b) => b.fraction - a.fraction || (tieBreak === 'last' ? b.index - a.index : a.index - b.index));
   const leftover = Math.abs(total) - shares.reduce((sum, share) => sum + share.whole, 0);
   for (let i = 0; i < leftover; i++) ranked[i].whole++;
   return shares.map((share) => Number((Math.sign(total) * share.whole * step).toPrecision(15)) || 0);

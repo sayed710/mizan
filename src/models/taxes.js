@@ -5,18 +5,58 @@ import { roundCurrency } from '../money.js';
 /** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
 export const TRANSITION = { sale: '251100', purchase: '131100' };
 
+/** Repartition lines of a tax or line snapshot for the requested side ('invoice' or 'refund'). */
+export function taxRepartitionLines(tax, side = 'invoice') {
+  if (!tax) return [];
+  const isRefund = side === 'refund' || ['out_refund', 'in_refund'].includes(side);
+  const key = isRefund ? 'refund_repartition_line_ids' : 'invoice_repartition_line_ids';
+  return tax[key] ?? [];
+}
+
+/** The applicable repartition line for a tax or line snapshot (defaults to the tax row on invoice side). */
+export function taxRepartitionLine(tax, side = 'invoice', type = 'tax') {
+  if (!tax) return null;
+  if (tax.repartition_type) return tax;
+  if (side === 'base' || side === 'tax') {
+    type = side;
+    side = 'invoice';
+  } else if (typeof side === 'object' && side !== null) {
+    type = side.type ?? 'tax';
+    side = side.side ?? 'invoice';
+  }
+  return taxRepartitionLines(tax, side).find((l) => l.repartition_type === type) ?? null;
+}
+
+/** Default 1 base row and 1 100% tax row per side. */
+export const defaultTaxRepartitionLines = (accountId = null, tagIds = [], baseTagIds = null) => {
+  const baseTags = baseTagIds ? [...baseTagIds] : [...tagIds];
+  const taxTags = [...tagIds];
+  return {
+    invoice_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+      { repartition_type: 'tax', factor_percent: 100, account_id: accountId ?? null, tag_ids: taxTags },
+    ],
+    refund_repartition_line_ids: [
+      { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+      { repartition_type: 'tax', factor_percent: 100, account_id: accountId ?? null, tag_ids: taxTags },
+    ],
+  };
+};
+
 /** What an order/invoice line keeps of its tax, so totals never need the db. */
 export const taxSnapshot = (tax, db = null, fpId = null) => {
-  if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_tag_ids: [], tax_account_id: null, tax_name: '' };
+  if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
+  const invRepart = (tax.invoice_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
+  const refRepart = (tax.refund_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
   const base = {
     tax_id: tax.id,
     tax: Number(tax.amount) || 0,
     tax_type: tax.amount_type || 'percent',
     tax_include: !!tax.price_include,
     tax_cash_basis: tax.tax_exigibility === 'on_payment',
-    tax_tag_ids: [...(tax.tag_ids ?? [])],
-    tax_account_id: tax.account_id ?? null,
     tax_name: tax.name,
+    invoice_repartition_line_ids: invRepart,
+    refund_repartition_line_ids: refRepart,
     ...(tax.include_base_amount ? { tax_include_base_amount: true } : {}),
     ...(tax.is_base_affected === false ? { tax_is_base_affected: false } : {}),
     ...(tax.sequence != null && Number(tax.sequence) !== 1 ? { tax_sequence: Number(tax.sequence) } : {}),
@@ -31,7 +71,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
 
 /** The tax a fiscal position substitutes for `taxId` (the same tax when unmapped; null when mapped to no tax). */
 export function mapTax(db, fpId, taxId) {
@@ -76,19 +116,19 @@ export function resolveLineTaxes(l) {
   if (Array.isArray(l.tax_breakdown) && l.tax_breakdown.length) {
     return [...l.tax_breakdown].sort((a, b) => (Number(a.tax_sequence ?? 1) - Number(b.tax_sequence ?? 1)) || ((a.tax_id ?? 0) - (b.tax_id ?? 0)));
   }
-  if (l.tax_id || l.tax_name || (Number(l.tax) || 0) !== 0 || l.tax_cash_basis || l.tax_tag_ids?.length) {
+  if (l.tax_id || l.tax_name || (Number(l.tax) || 0) !== 0 || l.tax_cash_basis || l.invoice_repartition_line_ids?.length || l.refund_repartition_line_ids?.length) {
     return [{
       tax_id: l.tax_id ?? null,
       tax: Number(l.tax) || 0,
       tax_type: l.tax_type || 'percent',
       tax_include: !!l.tax_include,
       tax_cash_basis: !!l.tax_cash_basis,
-      tax_tag_ids: [...(l.tax_tag_ids ?? [])],
-      tax_account_id: l.tax_account_id ?? null,
       tax_name: l.tax_name || '',
       tax_include_base_amount: !!l.tax_include_base_amount,
       tax_is_base_affected: l.tax_is_base_affected !== false,
       tax_sequence: Number(l.tax_sequence ?? 1),
+      invoice_repartition_line_ids: [...(l.invoice_repartition_line_ids ?? [])],
+      refund_repartition_line_ids: [...(l.refund_repartition_line_ids ?? [])],
     }];
   }
   return [];
@@ -211,7 +251,7 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
 }
 
 /** Tax and base per (account, tax) in company currency; `accountOf(line)` picks each line's tax account. */
-export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null, taxFilter = () => true } = {}) {
+export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, companyCurrency = null, { roundingMethod = null, taxFilter = () => true, side = 'invoice' } = {}) {
   const by = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
@@ -222,7 +262,8 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
       const account_id = accountOf({ ...l, ...t });
       const tax_name = taxLabel(t);
       const tax_id = t.tax_id ?? null;
-      const tax_tag_ids = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b);
+      const repart = taxRepartitionLine(t, side);
+      const tax_tag_ids = [...(repart?.tag_ids ?? [])].sort((a, b) => a - b);
       const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
       const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
       by.set(key, { ...g, document_base: g.document_base + t.base, document_amount: g.document_amount + t.amount });
@@ -236,15 +277,17 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
 }
 
 /** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
-export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) =>
-  taxGroups(
+export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) => {
+  const side = options.side ?? 'invoice';
+  return taxGroups(
     (lines ?? []).filter((l) => resolveLineTaxes(l).some((t) => t.tax_cash_basis)),
-    (l) => l.tax_account_id,
+    (l) => taxRepartitionLine(l, side)?.account_id ?? null,
     rate,
     documentCurrency,
     companyCurrency,
-    { ...options, taxFilter: (t) => t.tax_cash_basis },
+    { ...options, side, taxFilter: (t) => t.tax_cash_basis },
   ).filter((g) => g.amount || g.base);
+};
 
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
 export function lineTaxOf(l) {
@@ -254,6 +297,25 @@ export function lineTaxOf(l) {
 export const lineUntaxed = (l) => isSectionOrNote(l) ? 0 : computeLineTaxes(l).untaxed;
 
 const TAX_TYPES = [['sale', 'Sales'], ['purchase', 'Purchases'], ['none', 'None']];
+
+function validateRepartitionSide(lines, sideName) {
+  if (!Array.isArray(lines) || !lines.length) {
+    return `A tax must have repartition lines for ${sideName}`;
+  }
+  const baseRows = lines.filter((l) => l.repartition_type === 'base');
+  if (baseRows.length !== 1) {
+    return `A tax must have exactly one base row for ${sideName}`;
+  }
+  const taxRows = lines.filter((l) => l.repartition_type === 'tax');
+  if (taxRows.length < 1) {
+    return `A tax must have at least one tax row for ${sideName}`;
+  }
+  const factorSum = taxRows.reduce((sum, l) => sum + (Number(l.factor_percent) || 0), 0);
+  if (Math.abs(factorSum - 100) > 1e-4) {
+    return `Tax repartition factors must sum to 100 for ${sideName}`;
+  }
+  return null;
+}
 
 export const taxModels = {
   'account.tax.group': {
@@ -267,11 +329,21 @@ export const taxModels = {
   'account.tax': {
     label: 'Taxes',
     guard: (db, before, after) => {
-      if ((after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes')) return 'Select only tax tags';
+      const allTags = [
+        ...(after.tag_ids ?? []),
+        ...(after.invoice_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
+        ...(after.refund_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
+      ];
+      if (allTags.some((id) => read(db, 'account.account.tag', id)?.applicability !== 'taxes')) return 'Select only tax tags';
       if (after.amount_type === 'group') {
         const children = after.children_tax_ids ?? [];
         if (after.id && children.includes(after.id)) return 'A group tax cannot include itself';
         if (children.some((id) => !read(db, 'account.tax', id))) return 'Select existing child taxes';
+      } else {
+        const invErr = validateRepartitionSide(after.invoice_repartition_line_ids, 'invoices');
+        if (invErr) return invErr;
+        const refErr = validateRepartitionSide(after.refund_repartition_line_ids, 'refunds');
+        if (refErr) return refErr;
       }
       return null;
     },
@@ -287,20 +359,72 @@ export const taxModels = {
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
-      account_id: { type: 'many2one', relation: 'account.account', label: 'Tax Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
-      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'taxes' },
+      invoice_repartition_line_ids: {
+        type: 'one2many',
+        label: 'Distribution for Invoices',
+        fields: {
+          repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
+          factor_percent: { type: 'float', label: '%', required: true },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
+          tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
+        },
+        newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
+      },
+      refund_repartition_line_ids: {
+        type: 'one2many',
+        label: 'Distribution for Refunds',
+        fields: {
+          repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
+          factor_percent: { type: 'float', label: '%', required: true },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
+          tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
+        },
+        newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
+      },
       active: { type: 'boolean', label: 'Active' },
     },
-    defaults: () => ({ sequence: 1, amount_type: 'percent', amount: 14, children_tax_ids: [], type_tax_use: 'sale', tax_exigibility: 'on_invoice', price_include: false, include_base_amount: false, is_base_affected: true, active: true, tax_group: 'VAT', tag_ids: [] }),
+    defaults: () => ({
+      sequence: 1,
+      amount_type: 'percent',
+      amount: 14,
+      children_tax_ids: [],
+      type_tax_use: 'sale',
+      tax_exigibility: 'on_invoice',
+      price_include: false,
+      include_base_amount: false,
+      is_base_affected: true,
+      active: true,
+      tax_group: 'VAT',
+      ...defaultTaxRepartitionLines(null, []),
+    }),
+    createDefaults: (db, vals) => {
+      const invLines = vals.invoice_repartition_line_ids;
+      const refLines = vals.refund_repartition_line_ids;
+      if (!invLines && !refLines) {
+        return defaultTaxRepartitionLines(null, []);
+      }
+      return {
+        ...(invLines ? {} : { invoice_repartition_line_ids: defaultTaxRepartitionLines(null, []).invoice_repartition_line_ids }),
+        ...(refLines ? {} : { refund_repartition_line_ids: defaultTaxRepartitionLines(null, []).refund_repartition_line_ids }),
+      };
+    },
+    onchange: () => ({}),
     groupBys: ['type_tax_use', 'tax_group'],
     filters: [[{ id: 'sale', label: 'Sales', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchases', fn: (r) => r.type_tax_use === 'purchase' }]],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
-    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'include_base_amount', 'tax_exigibility', 'tag_ids'],
+    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'include_base_amount', 'tax_exigibility'],
     form: {
       title: 'name',
-      groups: [['amount_type', 'amount', 'children_tax_ids', 'sequence', 'description', 'type_tax_use', 'tag_ids'], ['account_id', 'tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'active']],
+      groups: [
+        ['amount_type', 'amount', 'children_tax_ids', 'sequence', 'description', 'type_tax_use'],
+        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'active'],
+      ],
+      tabs: [
+        { label: 'Distribution for Invoices', fields: ['invoice_repartition_line_ids'] },
+        { label: 'Distribution for Refunds', fields: ['refund_repartition_line_ids'] },
+      ],
       chatter: true,
     },
   },

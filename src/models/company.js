@@ -211,6 +211,7 @@ export function withCompany(models) {
 
 function companyGuard(db, before, r) {
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
+  if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);
@@ -343,8 +344,7 @@ function purchaseLine(db, line, fpId, companyId) {
   const price_unit = !tax.tax_include ? net
     : tax.tax_type === 'fixed' ? Math.round((net + (kept_share > 0 ? (Number(tax.tax) || 0) / kept_share : 0)) * 1e6) / 1e6
       : Math.round(net * (1 + tax.tax / 100) * 1e6) / 1e6;
-  const { tax_tag_ids, ...taxFields } = tax;
-  return { ...kept, price_unit, ...taxFields, ...(tax_tag_ids?.length ? { tax_tag_ids } : {}) };
+  return { ...kept, price_unit, ...tax };
 }
 
 /** Draft one linked purchase in the enabled customer company after sale confirmation. */
@@ -412,6 +412,8 @@ export const companyModels = {
       tax_start_date: { type: 'date', label: 'Tax Period Start' },
       account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
       account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
+      audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
     },
     defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly', deferred_amount_computation_method: 'days' }),
     guard: companyGuard,

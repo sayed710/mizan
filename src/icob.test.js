@@ -69,6 +69,7 @@ test('company-restricted users cannot read or change foreign accounting configur
   );
 
   // User with access to Company 2 can read and update Company 2 configuration
-  const updated = applyDiff(db, { upserts: { 'account.tax': [{ id: branchTax.id, name: 'Branch Tax Updated', company_id: 2, amount: 16 }] } }, { companies: branchUser });
+  const branchTaxRec = read(db, 'account.tax', branchTax.id);
+  const updated = applyDiff(db, { upserts: { 'account.tax': [{ ...branchTaxRec, name: 'Branch Tax Updated', company_id: 2, amount: 16 }] } }, { companies: branchUser });
   assert.equal(read(updated, 'account.tax', branchTax.id).name, 'Branch Tax Updated');
 });

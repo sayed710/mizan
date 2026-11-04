@@ -584,16 +584,44 @@ MIGRATIONS.push({ version: 26, name: 'Lock dates and payment QR settings live on
   };
 } });
 
+MIGRATIONS.push({ version: 27, name: 'Accounting settings (three-way matching and audit trail) live on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const threeWayMatching = settings.three_way_matching;
+  const auditTrail = settings.audit_trail;
+
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    const updated = { ...c };
+    if (threeWayMatching !== undefined && updated.three_way_matching == null) {
+      updated.three_way_matching = threeWayMatching;
+    }
+    if (auditTrail !== undefined && updated.audit_trail == null) {
+      updated.audit_trail = auditTrail;
+    }
+    return updated;
+  });
+
+  const nextSettings = { ...settings };
+  delete nextSettings.three_way_matching;
+  delete nextSettings.audit_trail;
+
+  return {
+    ...db,
+    settings: nextSettings,
+    records: { ...db.records, 'res.company': companies },
+  };
+} });
+
 function migrateCashBasisOrigins(db) {
-  const moves = db.records['account.move'] ?? [];
-  const invoices = moves.filter((move) => ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type));
-  let next = db;
-  for (const move of moves) {
-    if (move.move_type !== 'entry' || move.cash_basis_origin_move_id != null || !move.ref?.startsWith('Cash basis taxes ')) continue;
-    const candidates = invoices.filter((invoice) => (invoice.company_id ?? 1) === (move.company_id ?? 1) && move.ref === `Cash basis taxes ${invoice.name}`);
-    if (candidates.length === 1) {
-      next = { ...next, records: { ...next.records, 'account.move': next.records['account.move'].map((entry) => entry.id === move.id ? { ...entry, cash_basis_origin_move_id: candidates[0].id } : entry) } };
-    } else {
+  // Each release is linked through the invoice payment that recorded it; unlinked releases are flagged for review.
+  const origins = new Map();
+  for (const invoice of db.records['account.move'] ?? []) {
+    for (const payment of invoice.payments ?? []) if (payment.cash_basis_move_id) origins.set(payment.cash_basis_move_id, invoice.id);
+  }
+  let next = { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).map((move) => (
+    move.cash_basis_origin_move_id == null && origins.has(move.id) ? { ...move, cash_basis_origin_move_id: origins.get(move.id) } : move
+  )) } };
+  for (const move of next.records['account.move']) {
+    if (move.move_type === 'entry' && move.cash_basis_origin_move_id == null && move.ref?.startsWith('Cash basis taxes ')) {
       next = postNote(next, 'account.move', move.id, 'Cash-basis origin invoice could not be determined; review this entry.');
     }
   }
@@ -602,8 +630,78 @@ function migrateCashBasisOrigins(db) {
   return { ...next, settings };
 }
 
+MIGRATIONS.push({
+  version: 28,
+  name: 'Taxes: repartition lines for invoice and refund documents',
+  up: (db) => {
+    const taxMap = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, t]));
+    const convertLine = (l) => {
+      if (!l) return l;
+      const { tax_account_id, tax_tag_ids, ...rest } = l;
+      let invLines = l.invoice_repartition_line_ids;
+      let refLines = l.refund_repartition_line_ids;
+      if (!invLines?.length && !refLines?.length && (tax_account_id !== undefined || tax_tag_ids !== undefined || l.tax_id)) {
+        const taxRec = l.tax_id ? taxMap.get(l.tax_id) : null;
+        const acc = tax_account_id ?? taxRec?.account_id ?? null;
+        const tags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
+        invLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+        ];
+        refLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+        ];
+      }
+      let breakdown = rest.tax_breakdown;
+      if (Array.isArray(breakdown) && breakdown.length) {
+        breakdown = breakdown.map(convertLine);
+      }
+      return {
+        ...rest,
+        ...(invLines?.length ? { invoice_repartition_line_ids: invLines } : {}),
+        ...(refLines?.length ? { refund_repartition_line_ids: refLines } : {}),
+        ...(breakdown ? { tax_breakdown: breakdown } : {}),
+      };
+    };
 
-MIGRATIONS.push({ version: 27, name: 'Explicit company stock accounts', up: (db) => ({
+    const convertModelLines = (recs, fieldName) =>
+      (recs ?? []).map((r) => r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r);
+
+    const nextRecords = { ...db.records };
+    nextRecords['account.tax'] = (db.records['account.tax'] ?? []).map((t) => {
+      const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
+      const taxTags = [...(t.tag_ids ?? [])];
+      const accountId = t.account_id ?? null;
+      const { account_id, tag_ids, base_tag_ids, ...restTax } = t;
+      return {
+        ...restTax,
+        invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
+          ? t.invoice_repartition_line_ids
+          : [
+              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+            ],
+        refund_repartition_line_ids: t.refund_repartition_line_ids?.length
+          ? t.refund_repartition_line_ids
+          : [
+              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+            ],
+      };
+    });
+
+    nextRecords['account.move'] = convertModelLines(nextRecords['account.move'], 'invoice_line_ids');
+    nextRecords['sale.order'] = convertModelLines(nextRecords['sale.order'], 'order_line');
+    nextRecords['purchase.order'] = convertModelLines(nextRecords['purchase.order'], 'order_line');
+    nextRecords['pos.order'] = convertModelLines(nextRecords['pos.order'], 'lines');
+    nextRecords['sale.subscription'] = convertModelLines(nextRecords['sale.subscription'], 'order_line');
+
+    return { ...db, records: nextRecords };
+  },
+});
+
+MIGRATIONS.push({ version: 29, name: 'Explicit company stock accounts', up: (db) => ({
   ...db, records: { ...db.records, 'res.company': (db.records['res.company'] ?? []).map((company) => {
     const values = {};
     for (const [field, [code, type]] of Object.entries(STOCK_CHART_ROLES)) {

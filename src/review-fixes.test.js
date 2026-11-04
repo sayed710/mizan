@@ -20,7 +20,7 @@ test('the server stores a lock date sent by an admin', () => {
 });
 
 test('a diff cannot renumber a posted entry and delete it under the audit trail', () => {
-  const { db, id } = bill(updateSettings(seed(), { audit_trail: true }));
+  const { db, id } = bill(write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true }));
   const move = read(db, 'account.move', id);
   assert.throws(() => applyDiff(db, { upserts: { 'account.move': [{ ...move, name: '/' }] }, deletes: { 'account.move': [id] } }), /audit trail/);
 });

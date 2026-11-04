@@ -307,15 +307,15 @@ export function Settings() {
         <div className="field">
           <label htmlFor="three_way_matching">{t('Three-Way Matching')}</label>
           <div className="field-value">
-            <input id="three_way_matching" type="checkbox" checked={!!db.settings?.three_way_matching} disabled={readOnly}
-              onChange={(e) => commit(updateSettings(getDb(), { three_way_matching: e.target.checked }))} />
+            <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
+              onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { three_way_matching: e.target.checked }))} />
           </div>
         </div>
         <div className="field">
           <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
           <div className="field-value">
-            <input id="audit_trail" type="checkbox" checked={!!db.settings?.audit_trail} disabled={readOnly || !!db.settings?.audit_trail}
-              onChange={(e) => e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && commit(updateSettings(getDb(), { audit_trail: true }))} />
+            <input id="audit_trail" type="checkbox" checked={!!company?.audit_trail} disabled={readOnly || !company || !!company?.audit_trail}
+              onChange={(e) => company && e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && commit(write(getDb(), 'res.company', company.id, { audit_trail: true }))} />
           </div>
         </div>
         <h3>{t('Data')}</h3>

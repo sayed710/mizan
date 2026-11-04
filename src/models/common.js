@@ -1,10 +1,13 @@
 import { read } from '../orm.js';
 import { priceFor } from './pricelist.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
-import { computeLineTaxes, expandTaxIds, lineUntaxed, mapTax, productTax, replaceTaxSnapshot, taxLabel, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, lineUntaxed, mapTax, productTax, replaceTaxSnapshot, taxLabel, taxRepartitionLine, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { cashRound, documentCurrency, roundCurrency } from '../money.js';
 import { mixedDiscountFactor } from './terms.js';
 import { invoiceTaxGroups } from './ledger.js';
+
+/** Record ids inside a line's tax repartition snapshot rows, so id remaps follow them. */
+const REPARTITION_REFS = { account_id: 'account.account', tag_ids: 'account.account.tag' };
 
 /** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
 export function sameCommercialPartner(db, leftId, rightId) {
@@ -108,8 +111,9 @@ export function amounts(lines = [], currency = null, { roundingMethod = null } =
     untaxed += c.untaxed;
     lineTaxSum += c.tax;
     for (const t of c.taxes) {
-      const tags = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b).join(',');
-      const key = `${t.tax_account_id ?? ''}|${taxLabel(t)}|${tags}`;
+      const repart = taxRepartitionLine(t);
+      const tags = [...(repart?.tag_ids ?? [])].sort((a, b) => a - b).join(',');
+      const key = `${repart?.account_id ?? ''}|${taxLabel(t)}|${tags}`;
       byTax.set(key, (byTax.get(key) ?? 0) + t.amount);
     }
   }
@@ -182,8 +186,8 @@ export const productLines = (label, priceField) => ({
     tax_sequence: { type: 'integer', label: 'Tax Sequence', hidden: true },
     tax_breakdown: { type: 'json', label: 'Tax Breakdown', hidden: true },
     tax_cash_basis: { type: 'boolean', label: 'Cash Basis', hidden: true },
-    tax_tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Tags', hidden: true },
-    tax_account_id: { type: 'integer', ref: 'account.account', label: 'Tax Account', hidden: true }, // ref: id remaps follow it
+    invoice_repartition_line_ids: { type: 'json', label: 'Distribution for Invoices', hidden: true, refs: REPARTITION_REFS },
+    refund_repartition_line_ids: { type: 'json', label: 'Distribution for Refunds', hidden: true, refs: REPARTITION_REFS },
     tax_name: { type: 'char', label: 'Tax Name', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },

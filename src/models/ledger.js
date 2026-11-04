@@ -2,8 +2,8 @@
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
 import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, computeLineTaxes, isSectionOrNote, lineTaxOf, mapAccount, taxGroups, taxLabel } from './taxes.js';
-import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
+import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
+import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
@@ -123,7 +123,8 @@ export function resolveDocumentJournal(db, move, { required = false } = {}) {
   const companyId = move.company_id ?? db.settings?.current_company_id ?? 1;
   const posContext = Boolean(move.session_id || move.pos_config_id || move.config_id);
   let journalId = move.journal_id;
-  if (!journalId && move.id) journalId = read(db, 'account.move', move.id)?.journal_id;
+  // Raw record: reading the computed move would resolve its journal again.
+  if (!journalId && move.id) journalId = (db.records?.['account.move'] ?? []).find((m) => m.id === move.id)?.journal_id;
   if (!journalId && (move.session_id || move.pos_config_id || move.config_id)) {
     const session = move.session_id ? read(db, 'pos.session', move.session_id) : null;
     const configId = move.config_id ?? move.pos_config_id ?? session?.config_id;
@@ -197,15 +198,20 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
     const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
     const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
+    const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
+    const baseTagsOf = (taxObj) => {
+      const baseRow = taxRepartitionLine(taxObj ?? l, isRefund ? 'refund' : 'invoice', 'base');
+      return baseRow?.tag_ids ?? [];
+    };
 
     if (!computed.tax && !cashBasis) {
       const zeroTaxes = computed.taxes.length
         ? computed.taxes
-        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), tax_tag_ids: l.tax_tag_ids ?? [] }];
+        : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), invoice_repartition_line_ids: l.invoice_repartition_line_ids, refund_repartition_line_ids: l.refund_repartition_line_ids }];
       for (const [compIndex, t] of zeroTaxes.entries()) {
         const zero = taxLabel(t);
         const zeroTaxId = t.tax_id ?? null;
-        const tags = [...(t.tax_tag_ids ?? [])].sort((a, b) => a - b);
+        const tags = [...new Set(baseTagsOf(t))].sort((a, b) => a - b);
         const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
         const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
         if (compIndex === 0) {
@@ -219,8 +225,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       const zero = '';
       const zeroTaxId = null;
       const tags = [...new Set(computed.taxes.length
-        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => t.tax_tag_ids ?? [])
-        : cashBasis ? [] : (l.tax_tag_ids ?? []))].sort((a, b) => a - b);
+        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => baseTagsOf(t))
+        : cashBasis ? [] : baseTagsOf(null))].sort((a, b) => a - b);
       const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
       const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
@@ -234,7 +240,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
 
 /** Resolve the same account used by the journal grouping. */
 export function invoiceLineAccount(db, move, line) {
-  return invoiceBaseGroups(db, { ...move, invoice_line_ids: [line] })[0]?.account ?? null;
+  const journal = resolveDocumentJournal(db, move);
+  return invoiceBaseGroups(db, { ...move, journal_id: journal?.id ?? move.journal_id, invoice_line_ids: [line] })[0]?.account ?? null;
 }
 
 /** Split a posted journal item's company units across its contributing lines. */
@@ -254,21 +261,6 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
-/** Tax account for an invoice line; cash-basis taxes wait on a transition account until payment. */
-function invoiceTaxAccountFor(db, move) {
-  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
-  const taxAcc = accountId(db, sale ? '251000' : '131000', move.company_id);
-  return (l) => {
-    if (l.tax_cash_basis) return accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
-    if (l.tax_account_id) {
-      const resolved = resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, l.tax_account_id), move.company_id);
-      if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
-      return resolved;
-    }
-    return taxAcc;
-  };
-}
-
 /** Tax groups for an invoice/bill, applying mixed early-payment discount rounding per group when present. */
 export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
@@ -276,11 +268,64 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const taxes = taxGroups((move.invoice_line_ids ?? []).filter((l) => lineTaxOf(l) !== 0), invoiceTaxAccountFor(db, move), rate, docCurrency, ownCurrency, { roundingMethod });
+  const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
+  const side = isRefund ? 'refund' : 'invoice';
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const by = new Map();
+
+  for (const l of move.invoice_line_ids ?? []) {
+    if (isSectionOrNote(l)) continue;
+    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
+    for (const t of computed.taxes) {
+      if (t.amount === 0 && !t.tax_cash_basis) continue;
+      const repartLines = taxRepartitionLines(t, side).length
+        ? taxRepartitionLines(t, side)
+        : taxRepartitionLines(l, side);
+      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
+      if (!taxRows.length) continue;
+      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
+      const splitAmounts = taxRows.length === 1
+        ? [t.amount]
+        : allocateCents(t.amount, weights, docCurrency, { tieBreak: 'last' });
+      const splitBases = taxRows.length === 1
+        ? [t.base]
+        : allocateCents(t.base, weights, docCurrency, { tieBreak: 'last' });
+
+      for (let i = 0; i < taxRows.length; i++) {
+        const row = taxRows[i];
+        const docAmt = splitAmounts[i];
+        const docBase = splitBases[i];
+        let account_id;
+        if (t.tax_cash_basis) {
+          account_id = accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
+        } else if (row.account_id) {
+          const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
+          const resolved = resolveCompanyAccount(db, mapped, move.company_id);
+          if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
+          account_id = resolved;
+        } else {
+          account_id = invoiceLineAccount(db, move, l);
+        }
+        const tax_name = taxLabel(t);
+        const tax_id = t.tax_id ?? null;
+        const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
+        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
+        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
+        by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
+      }
+    }
+  }
+
+  const rawTaxes = [...by.values()].map(({ document_base, document_amount, ...group }) => {
+    const tax = docRound(document_amount);
+    const base = docRound(document_base);
+    return { ...group, document_amount: tax, amount: companyRound(tax / rate), base: companyRound(base / rate) };
+  });
+
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
-  if (discountFactor === 1) return taxes;
-  return taxes.map((g) => {
+  if (discountFactor === 1) return rawTaxes;
+  return rawTaxes.map((g) => {
     const docBase = docRound(g.base * rate * discountFactor);
     const docAmt = docRound(g.document_amount * discountFactor);
     return { ...g, document_amount: docAmt, amount: companyRound(docAmt / rate), base: companyRound(docBase / rate) };

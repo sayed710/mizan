@@ -9,6 +9,7 @@ import { importStatement } from './models/statements.js';
 import { cashflowAnalysis } from './models/reports.js';
 import { taxesByGrid } from './models/finance.js';
 import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 const LINE = 'account.bank.statement.line';
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 const fxSetup = (rate = 0.8, rounding = 0.01) => {
@@ -98,7 +99,7 @@ test('write-off splits in journal currency units', () => {
 
 test('taxed bank write-offs reach sale and purchase grids', () => {
   let db = seed(); const tag = create(db, 'account.account.tag', { name: 'Q6 grid', applicability: 'taxes' }); db = tag.db;
-  const tax = create(db, 'account.tax', { name: 'Q6 tax', amount: 10, amount_type: 'percent', account_id: accountId(db, '131000'), tag_ids: [tag.id] }); db = tax.db;
+  const tax = create(db, 'account.tax', { name: 'Q6 tax', amount: 10, amount_type: 'percent', ...defaultTaxRepartitionLines(accountId(db, '131000'), [tag.id]) }); db = tax.db;
   const rule = create(db, 'account.reconcile.model', { name: 'tax', sequence: -100, rule_type: 'writeoff_suggestion', line_ids: [{ account_code: '600000', amount: 100, tax_ids: [tax.id] }] }); db = rule.db;
   for (const amount of [110, -110]) {
     const line = create(db, LINE, { payment_ref: 'Q6', date: '2025-01-02', amount });

@@ -1,18 +1,19 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { create, read, search, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
+import { accountId } from './models/ledger.js';
 import * as finance from './models/finance.js';
 import { importStatement } from './models/statements.js';
 
 test('tax grids follow posted base and tax items including refunds', () => {
   let db = seed();
   const tag = create(db, 'account.account.tag', { name: 'Grid A', applicability: 'taxes' });
-  const tax = create(tag.db, 'account.tax', { name: 'Grid tax', amount: 10, type_tax_use: 'sale', tag_ids: [tag.id] });
+  const tax = create(tag.db, 'account.tax', { name: 'Grid tax', amount: 10, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(db, '251000'), [tag.id]) });
   db = tax.db;
   for (const [move_type, price_unit] of [['out_invoice', 100], ['out_refund', 20]]) {
     const move = create(db, 'account.move', { move_type, partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit, ...taxSnapshot(read(db, 'account.tax', tax.id)) }] });
@@ -48,7 +49,7 @@ test('statement import deduplicates within the bank journal and company', () => 
 
 test('cash basis grids report the paid share in the payment period', () => {
   const tag = create(seed(), 'account.account.tag', { name: 'Cash grid', applicability: 'taxes' });
-  const tax = create(tag.db, 'account.tax', { name: 'Cash grid VAT', amount: 10, type_tax_use: 'sale', tax_exigibility: 'on_payment', tag_ids: [tag.id] });
+  const tax = create(tag.db, 'account.tax', { name: 'Cash grid VAT', amount: 10, type_tax_use: 'sale', tax_exigibility: 'on_payment', ...defaultTaxRepartitionLines(accountId(tag.db, '251000'), [tag.id]) });
   const move = create(tax.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = postMove(move.db, move.id);
   db = payMove(db, move.id, 55, '2025-02-01');
@@ -58,8 +59,8 @@ test('cash basis grids report the paid share in the payment period', () => {
 test('distinct grids on same named taxes keep their separate bases', () => {
   const a = create(seed(), 'account.account.tag', { name: 'A', applicability: 'taxes' });
   const b = create(a.db, 'account.account.tag', { name: 'B', applicability: 'taxes' });
-  const ta = create(b.db, 'account.tax', { name: 'Same VAT', amount: 10, type_tax_use: 'sale', tag_ids: [a.id] });
-  const tb = create(ta.db, 'account.tax', { name: 'Same VAT', amount: 10, type_tax_use: 'sale', tag_ids: [b.id] });
+  const ta = create(b.db, 'account.tax', { name: 'Same VAT', amount: 10, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(b.db, '251000'), [a.id]) });
+  const tb = create(ta.db, 'account.tax', { name: 'Same VAT', amount: 10, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(ta.db, '251000'), [b.id]) });
   const move = create(tb.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [
     { qty: 1, price_unit: 100, ...taxSnapshot(read(tb.db, 'account.tax', ta.id)) },
     { qty: 1, price_unit: 200, ...taxSnapshot(read(tb.db, 'account.tax', tb.id)) },

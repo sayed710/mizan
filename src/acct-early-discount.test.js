@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { discountAvailable, payWithDiscount, postMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { taxRepartitionLine, taxSnapshot } from './models/taxes.js';
 
 test('untaxed early discount settles to the configured account in each invoice company', () => {
   const base = seed();
@@ -41,6 +41,6 @@ test('tax-inclusive early discount reduces both revenue and invoice-basis VAT', 
   const move = read(paid, 'account.move', invoice.id);
   assert.equal(move.amount_residual, 0);
   const entry = read(paid, 'account.move', move.payments.at(-1).move_id);
-  assert.equal(entry.line_ids.find((line) => line.account_id === tax.account_id)?.debit, 0.28);
+  assert.equal(entry.line_ids.find((line) => line.account_id === taxRepartitionLine(tax)?.account_id)?.debit, 0.28);
   assert.equal(entry.line_ids.find((line) => read(paid, 'account.account', line.account_id)?.code === '690200')?.debit, 2);
 });

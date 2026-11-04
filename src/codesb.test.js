@@ -82,7 +82,7 @@ test('stock account migration matches company chart accounts by code and type on
   const valuation = create(db, 'account.account', { code: '110100', name: 'Branch stock', account_type: 'asset_current', company_id: 2 }); db = valuation.db;
   const wrong = create(db, 'account.account', { code: '110200', name: 'Wrong type', account_type: 'expense', company_id: 2 }); db = wrong.db;
   const company = create(db, 'res.company', { name: 'Legacy branch' }); db = company.db;
-  const migrated = migrate({ ...db, schema_version: 26 });
+  const migrated = migrate({ ...db, schema_version: 28 });
   assert.equal(read(migrated, 'res.company', company.id).account_stock_valuation_id, valuation.id);
   assert.equal(read(migrated, 'res.company', company.id).account_stock_input_id, undefined);
 });

@@ -5,11 +5,13 @@ import { create, read, search, updateSettings, write } from './orm.js';
 import { models } from './models/index.js';
 import { agedBalance, analyticActuals, followUps, journalCards, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
 import { addDays, today } from './models/common.js';
+import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { seed } from './seed.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 const invoice = (db, vals) => {
-  const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14 }], ...vals });
+  const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }], ...vals });
   return { db: run(next, 'account.move', id, 'Confirm'), id };
 };
 
@@ -49,7 +51,7 @@ test('aged receivable buckets by days overdue and follow-ups list overdue partne
 test('analytic actuals sum posted lines tagged with an analytic account', () => {
   const db0 = seed();
   const office = search(db0, 'account.analytic.account')[0].id;
-  const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, analytic_account_id: office }] });
+  const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, ...defaultTaxRepartitionLines(accountId(db0, '251000')), analytic_account_id: office }] });
   assert.equal(analyticActuals(db).get(office), 900);
 });
 
@@ -67,7 +69,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
 test('the audit trail logs every change, keeps numbered entries and cannot be switched off', async () => {
   const { applyDiff } = await import('./sync.js');
   const { unlink } = await import('./orm.js');
-  const db0 = updateSettings(seed(), { audit_trail: true });
+  const db0 = write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true });
   const { db, id } = invoice(db0, {});
   const noted = write(db, 'account.move', id, { ref: 'PO-77' });
   assert.ok(noted.messages.some((m) => m.res_id === id && m.model === 'account.move' && /Reference/.test(m.body)));
