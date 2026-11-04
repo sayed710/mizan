@@ -115,7 +115,16 @@ const POSTED_FIELDS = ['name', 'line_ids', 'invoice_line_ids', 'partner_id', 'cu
 
 /** Workflow rules for posted entries that the browser's buttons follow and a forged change must follow too. */
 function postedMoveRule(db, before, after) {
-  if (before?.state === 'posted' && after.state === 'posted' && changedFields(before, after, POSTED_FIELDS)) return 'Posted entries cannot be edited; reset them to draft first';
+  if (before?.state === 'posted' && after.state === 'posted') {
+    const nonLineFields = POSTED_FIELDS.filter((k) => k !== 'line_ids');
+    if (changedFields(before, after, nonLineFields)) return 'Posted entries cannot be edited; reset them to draft first';
+    if (before.line_ids !== after.line_ids) {
+      const strip = (lines) => (lines ?? []).map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => k !== 'blocked')));
+      if (JSON.stringify(strip(before.line_ids)) !== JSON.stringify(strip(after.line_ids))) {
+        return 'Posted entries cannot be edited; reset them to draft first';
+      }
+    }
+  }
   if (before?.state === 'posted' && after.state !== 'posted') {
     // A sync may collapse the two reset steps; the return retains its link to the cancelled closing.
     const ret = before.tax_return_id && read(db, 'account.return', before.tax_return_id);
@@ -284,7 +293,7 @@ export function fxProvenanceError(db, entry) {
 
 /** A posted payment must have its own posted journal entry, booked for its partner. */
 export function paymentInvariant(db, after) {
-  if (after.check_number != null && (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound' || (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && p.check_number === after.check_number))) return 'Check number must be unique within its journal';
+  if (after.check_number != null && (!Number.isSafeInteger(after.check_number) || after.check_number < 1 || !after.journal_id || after.payment_type !== 'outbound' || (after.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number) || (db.records['account.payment'] ?? []).some((p) => p.id !== after.id && p.journal_id === after.journal_id && (p.check_number === after.check_number || (p.voided_check_numbers ?? []).some((v) => v.check_number === after.check_number))))) return 'Check number must be unique within its journal';
   if (after.state !== 'posted') return null;
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === after.move_id);
   if (entry?.state !== 'posted' || entry.move_type !== 'entry') return 'A posted payment needs its posted journal entry';
@@ -614,11 +623,13 @@ export function taxesByGrid(db, period = {}) {
 }
 
 /** Open installments in company currency, using the schedule recorded when the document was posted. */
-function openInstallments(db, m, kind, at) {
+function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
-  const items = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+  const allItems = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+  const items = includeBlocked ? allItems : allItems.filter((l) => !l.blocked);
+  if (!items.length && allItems.length > 0) return [];
   const counterpart = items.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
   const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
@@ -719,10 +730,17 @@ export function journalCards(db, at = today()) {
 }
 
 /** Partners with overdue invoices, for payment reminders. */
-export function followUps(db, at = today()) {
+export function followUps(db, at = today(), { ignoreNextActionDate = false } = {}) {
   const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
+    if (m.exclude_from_followup) return [];
+    const partner = read(db, 'res.partner', m.partner_id);
+    if (!partner) return [];
+    const compLine = partnerFollowUp(partner, m.company_id ?? 1);
+    if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') return [];
+    if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) return [];
+
     if (!m.invoice_date || !(m.line_ids ?? []).length) return m.amount_residual > 0 && m.invoice_date_due < at ? [m] : [];
-    const dues = openInstallments(db, m, 'receivable', at).filter((due) => due.date < at);
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false }).filter((due) => due.date < at);
     if (!dues.length) return [];
     const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
     const amount = round(dues.reduce((sum, due) => sum + due.amount, 0) * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1));
@@ -769,6 +787,8 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_last_level: vals.followup_last_level !== undefined ? vals.followup_last_level : current?.followup_last_level ?? null,
     followup_channel: vals.followup_channel !== undefined ? vals.followup_channel : current?.followup_channel ?? null,
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
+    followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
+    no_followup: vals.no_followup !== undefined ? vals.no_followup : current?.no_followup ?? false,
   };
   if (idx >= 0) existing[idx] = updated;
   else existing.push(updated);
@@ -779,10 +799,10 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
   };
 }
 
-function reminderDetails(levels, level, date, channel) {
+function reminderDetails(levels, level, date, channel, oldest = null) {
   const delay = Number(level?.delay) || 0;
   const next = levels.filter((candidate) => Number(candidate.delay) > delay).sort((a, b) => Number(a.delay) - Number(b.delay))[0];
-  return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? addDays(date, Number(next.delay) - delay) : null };
+  return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? (oldest ? addDays(oldest, Number(next.delay)) : addDays(date, Number(next.delay) - delay)) : null };
 }
 
 /**
@@ -794,7 +814,7 @@ export function runFollowUps(db, at = today()) {
   if (!levels.length) return db;
   const overdue = followUps(db, at);
   const overdueGroups = overdue.flatMap(followUpCompanies);
-  const activeLate = new Set(overdueGroups.map((f) => `${f.partner_id}:${f.invoices[0].company_id ?? 1}`));
+  const activeLate = new Set( followUps(db, at, { ignoreNextActionDate: true }).flatMap(followUpCompanies).map((f) => `${f.partner_id}:${f.invoices[0].company_id ?? 1}`));
 
   const partners = new Map((db.records['res.partner'] ?? []).map((p) => [p.id, p]));
   const partnerUpdates = new Map();
@@ -831,7 +851,7 @@ export function runFollowUps(db, at = today()) {
       followup_level_delay: Number(level.delay),
       followup_date: at,
       followup_level: level.id,
-      ...reminderDetails(levels, level, at, 'internal'),
+      ...reminderDetails(levels, level, at, 'internal', f.oldest),
     });
     partnerUpdates.set(partner.id, updated);
   }

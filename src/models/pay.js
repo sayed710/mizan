@@ -218,12 +218,41 @@ export function reversePayment(db, p, date = today()) {
   return postNote(next, 'account.payment', p.id, `Reversed by ${reversal.name}`);
 }
 
+/** Every check number a journal has ever consumed: issued, printed on a batch line, or voided by a reprint. */
+const consumedCheckNumbers = (db, journalId) => {
+  const payments = (db.records['account.payment'] ?? []).filter((p) => p.journal_id === journalId);
+  const ids = new Set(payments.map((p) => p.id));
+  const fromBatches = (db.records['account.batch.payment'] ?? []).flatMap((b) => (b.lines ?? []).filter((l) => ids.has(l.payment_id)).map((l) => l.check_number));
+  return [...payments.map((p) => p.check_number), ...payments.flatMap((p) => (p.voided_check_numbers ?? []).map((v) => v.check_number)), ...fromBatches]
+    .filter((n) => Number.isSafeInteger(n) && n > 0);
+};
+
+/** First check number a journal may print next: its "Next Check Number" setting, pushed past every number already consumed. */
+export function nextCheckNumber(db, journalId, requested = 0) {
+  const journal = read(db, 'account.journal', journalId);
+  return consumedCheckNumbers(db, journalId).reduce((next, n) => Math.max(next, n + 1), Number(requested || journal?.check_next_number || 1));
+}
+
+/** Reprint an issued check on a fresh number: the old number is voided (kept on the payment, never reused). */
+export function reprintCheck(db, payment) {
+  const p = read(db, 'account.payment', payment.id) ?? payment;
+  if (p.check_number == null || p.payment_type !== 'outbound') throw new Error('Only issued checks can be reprinted');
+  if (p.state !== 'posted') throw new Error('Only posted checks can be reprinted');
+  const number = nextCheckNumber(db, p.journal_id);
+  let next = write(db, 'account.payment', p.id, { check_number: number, voided_check_numbers: [...(p.voided_check_numbers ?? []), { check_number: p.check_number, date: today() }] });
+  for (const batch of (next.records['account.batch.payment'] ?? []).filter((b) => b.lines?.some((l) => l.payment_id === p.id))) {
+    next = write(next, 'account.batch.payment', batch.id, { lines: batch.lines.map((l) => l.payment_id === p.id ? { ...l, check_number: number } : l) });
+  }
+  next = write(next, 'account.journal', p.journal_id, { check_next_number: number + 1 });
+  return postNote(next, 'account.payment', p.id, `Check ${p.check_number} voided, reprinted as ${number}`);
+}
+
 const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'], ['reversed', 'Reversed']];
 
 export const payModels = {
   'account.payment': {
     label: 'Payments',
-    guard: (db, before, after, ctx) => (before?.check_number != null && (before.check_number !== after.check_number || before.journal_id !== after.journal_id) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
+    guard: (db, before, after, ctx) => (before?.check_number != null && (before.journal_id !== after.journal_id || (before.check_number !== after.check_number && !(after.voided_check_numbers ?? []).some((v) => v.check_number === before.check_number) )) ? 'Issued check numbers cannot be changed' : null) ?? datedLockGuard(['name', 'amount', 'currency_id', 'date', 'state', 'partner_id', 'partner_bank_id', 'partner_type', 'journal_id', 'move_id', 'invoice_id', 'payment_type', 'memo', 'unapplied', 'company_id', 'active'], (p) => p.state === 'posted')(db, before, after, ctx),
     protectDelete: (db, payment, staged) => payment.check_number != null ? 'Issued checks cannot be deleted' : datedLockDelete((p) => p.state === 'posted')(db, payment, staged),
     invariant: paymentInvariant,
     fields: {
@@ -236,6 +265,7 @@ export const payModels = {
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
+      voided_check_numbers: { type: 'one2many', label: 'Voided Checks', readonly: true, fields: { check_number: { type: 'integer', label: 'Check Number' }, date: { type: 'date', label: 'Date' } } },
       date: { type: 'date', label: 'Date' },
       memo: { type: 'char', label: 'Memo' },
       destination_account_id: { type: 'many2one', relation: 'account.account', label: 'Destination Account' },
@@ -262,6 +292,7 @@ export const payModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
         { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
+        { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r) }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',

@@ -55,6 +55,12 @@ export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = 
   return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
 }
 
+/** Share of the invoice's tax kept when the term reduces tax for its early-payment discount (1 when it does not). */
+export function mixedDiscountFactor(term) {
+  const percent = Number(term?.discount_percent) || 0;
+  return term?.early_discount && term.discount_tax_computation === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
+}
+
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
 
 export const termModels = {
@@ -65,7 +71,7 @@ export const termModels = {
       early_discount: { type: 'boolean', label: 'Early Discount' },
       discount_percent: { type: 'float', label: 'Discount %' },
       discount_days: { type: 'integer', label: 'Discount Days' },
-      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax']] },
+      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax'], ['mixed', 'Always (tax reduction on invoice)']] },
       line_ids: {
         type: 'one2many',
         label: 'Due Terms',

@@ -5,7 +5,7 @@ import { creditWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvena
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { TRANSITION, cashBasisTaxes, fiscalPositionFor } from './taxes.js';
-import { dueDate, earlyDiscount } from './terms.js';
+import { dueDate, earlyDiscount, mixedDiscountFactor } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
@@ -31,15 +31,29 @@ const isRefund = (r) => ['out_refund', 'in_refund'].includes(r.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r.move_type);
+export function invoiceTaxAmount(r, db) {
+  const docCurr = documentCurrency(db, r);
+  const rawTax = amounts(r.invoice_line_ids, docCurr).tax;
+  const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
+  return roundCurrency(rawTax * mixedDiscountFactor(term), docCurr);
+}
+
 const total = (r, db) => {
   if (!isInvoice(r)) return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
-  const base = !db && r.amount_total != null ? r.amount_total : amounts(r.invoice_line_ids, documentCurrency(db, r)).total;
+  const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
+  const mixed = mixedDiscountFactor(term) !== 1;
+  const docCurr = documentCurrency(db, r);
+  const base = !db && r.amount_total != null
+    ? r.amount_total
+    : mixed
+      ? roundCurrency(amounts(r.invoice_line_ids, docCurr).untaxed + invoiceTaxAmount(r, db), docCurr)
+      : amounts(r.invoice_line_ids, docCurr).total;
   if (r.invoice_cash_rounding_id && r.state === 'posted') {
     const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
     if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
   }
   const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
-  if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), documentCurrency(db, r));
+  if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), docCurr);
   return base;
 };
 const residual = (r, db) => (isInvoice(r) ? Math.max(0, db ? roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), documentCurrency(db, r)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)))) : 0);
@@ -526,7 +540,7 @@ export function correctCreditNote(db, note) {
 export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
   const currency = documentCurrency(db, r);
-  const base = term?.discount_tax_computation === 'excluded' ? amounts(r.invoice_line_ids, currency).untaxed : total(r, db);
+  const base = ['excluded', 'mixed'].includes(term?.discount_tax_computation) ? amounts(r.invoice_line_ids, currency).untaxed : total(r, db);
   return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, base, r.invoice_date, date, currency) : 0;
 }
 
@@ -604,6 +618,11 @@ const lineItem = {
     currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
     amount_currency: { type: 'monetary', label: 'Amount in Currency' },
     date_maturity: { type: 'date', label: 'Due Date' },
+    discount_date: { type: 'date', label: 'Discount Date', hidden: true },
+    discount_amount_currency: { type: 'monetary', label: 'Discount Amount Currency', hidden: true },
+    discount_balance: { type: 'monetary', label: 'Discount Balance', currency: 'company', hidden: true },
+    discount_percentage: { type: 'float', label: 'Discount Percentage', hidden: true },
+    blocked: { type: 'boolean', label: 'Blocked / In Dispute', hidden: true },
     invoice_sources: { type: 'one2many', label: 'Invoice Sources', hidden: true, fields: {
       index: { type: 'integer', label: 'Line' }, amount: { type: 'monetary', label: 'Amount' },
       original_account_id: { type: 'many2one', relation: 'account.account', label: 'Recognition Account' },
@@ -782,7 +801,7 @@ export const accountingModels = {
       },
       line_ids: lineItem,
       amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).untaxed },
-      amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r)).tax },
+      amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },
@@ -812,6 +831,7 @@ export const accountingModels = {
       secure_sequence_number: { type: 'integer', label: 'Inalterability Sequence Number', readonly: true },
       incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
+      exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
