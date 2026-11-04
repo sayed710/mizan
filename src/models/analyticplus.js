@@ -92,16 +92,89 @@ export function distributionOfLine(line, db, move) {
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
 
+/** Whether a line is a section or note line. */
+export const isSectionOrNote = (line) =>
+  Boolean(line && ['line_section', 'line_note'].includes(line.display_type));
+
+/** Determine the winning applicability for a plan on a given move line context. */
+export function planApplicability(db, plan, line, move = null) {
+  const targetCompany = (move && 'company_id' in move ? move.company_id : line?.company_id) ?? 1;
+  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type);
+  const domain = isInvoiceDoc
+    ? (['out_invoice', 'out_refund'].includes(move.move_type) ? 'invoice' : 'bill')
+    : move?.move_type === 'entry' ? 'general' : null;
+
+  const accountId = line?.account_id || (isInvoiceDoc ? invoiceLineAccount(db, move, line) : null);
+  const code = accountId ? read(db, 'account.account', accountId)?.code || '' : '';
+
+  const product = line?.product_id ? read(db, 'product', line.product_id) : null;
+  const categories = new Set();
+  let catId = product?.categ_id;
+  while (catId && !categories.has(catId)) {
+    categories.add(catId);
+    catId = read(db, 'product.category', catId)?.parent_id;
+  }
+
+  const matched = [];
+  for (const r of plan?.applicability_ids ?? []) {
+    let score = 0;
+    let prefixLen = 0;
+    if (r.company_id) {
+      if (r.company_id !== targetCompany) continue;
+      score += 1;
+    }
+    if (r.business_domain) {
+      if (r.business_domain !== domain) continue;
+      score += 1;
+    }
+    const prefixStr = String(r.account_prefix ?? '').trim();
+    if (prefixStr) {
+      const prefixes = prefixStr.split(',').map((p) => p.trim()).filter((p) => p && code.startsWith(p));
+      if (!prefixes.length) continue;
+      prefixLen = Math.max(...prefixes.map((p) => p.length));
+      score += 1;
+    }
+    if (r.product_categ_id) {
+      if (!categories.has(r.product_categ_id)) continue;
+      score += 1;
+    }
+    matched.push({ rule: r, score: score * 100 + prefixLen });
+  }
+
+  if (matched.length) {
+    matched.sort((a, b) => b.score - a.score);
+    return matched[0].rule.applicability || 'optional';
+  }
+  return plan?.default_applicability || 'optional';
+}
+
 /** Require a positive product-line allocation for every mandatory plan. */
 export function checkMandatoryPlans(db, move) {
-  if (!['out_invoice', 'in_invoice'].includes(move.move_type)) return;
+  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type);
+  const isEntry = move.move_type === 'entry';
+  if (!isInvoiceDoc && !isEntry) return;
+
   const plans = search(db, 'account.analytic.plan');
-  for (const line of move.invoice_line_ids ?? []) {
+  if (!plans.length) return;
+
+  const lines = isInvoiceDoc ? (move.invoice_line_ids ?? []) : (move.line_ids ?? []);
+  for (const line of lines) {
+    if (isSectionOrNote(line)) continue;
     const distribution = normalizeDistribution(distributionOfLine(line, db, move), db);
-    const allocated = new Set(Object.entries(distribution).filter(([, n]) => n > 0).map(([id]) => read(db, 'account.analytic.account', Number(id))?.plan_id));
+    const allocated = new Set(
+      Object.entries(distribution)
+        .filter(([, n]) => n > 0)
+        .map(([id]) => read(db, 'account.analytic.account', Number(id))?.plan_id)
+        .filter(Boolean)
+    );
     for (const plan of plans) {
-      if (line.product_id && plan.default_applicability === 'mandatory' && !allocated.has(plan.id)) throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
-      if (plan.default_applicability === 'unavailable' && allocated.has(plan.id)) throw new Error(`Analytic plan is unavailable: ${plan.name}`);
+      const applicability = planApplicability(db, plan, line, move);
+      if (applicability === 'mandatory' && !allocated.has(plan.id)) {
+        throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
+      }
+      if (applicability === 'unavailable' && allocated.has(plan.id)) {
+        throw new Error(`Analytic plan is unavailable: ${plan.name}`);
+      }
     }
   }
 }
@@ -127,6 +200,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
     for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id, deferred: Boolean(source.original_account_id) });
   }
   return (move.invoice_line_ids ?? []).flatMap((line, index) => {
+    if (isSectionOrNote(line)) return [];
     const product = read(db, 'product', line.product_id);
     const allocation = allocations.get(index);
     if (allocation?.deferred) return [];
@@ -215,11 +289,28 @@ export const analyticPlusModels = {
       parent_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Parent Plan' },
       default_applicability: { type: 'selection', label: 'Default Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
       color: { type: 'integer', label: 'Color' },
+      applicability_ids: {
+        type: 'one2many',
+        label: 'Applicability',
+        fields: {
+          business_domain: { type: 'selection', label: 'Domain', options: [['general', 'General'], ['invoice', 'Invoice'], ['bill', 'Bill']] },
+          account_prefix: { type: 'char', label: 'Accounts Prefix' },
+          product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
+          applicability: { type: 'selection', label: 'Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+        },
+        newLine: () => ({ business_domain: null, account_prefix: '', product_categ_id: null, applicability: 'mandatory', company_id: null }),
+      },
     },
-    defaults: () => ({ default_applicability: 'optional', color: 0 }),
+    defaults: () => ({ default_applicability: 'optional', color: 0, applicability_ids: [] }),
     list: ['name', 'parent_id', 'default_applicability'],
     kanban: { title: 'name', lines: ['parent_id', 'default_applicability'] },
-    form: { title: 'name', groups: [['parent_id'], ['default_applicability', 'color']], chatter: true },
+    form: {
+      title: 'name',
+      groups: [['parent_id'], ['default_applicability', 'color']],
+      tabs: [{ label: 'Applicability', fields: ['applicability_ids'] }],
+      chatter: true,
+    },
   },
   'account.analytic.account': {
     ...accountModel,

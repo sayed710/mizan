@@ -150,7 +150,7 @@ test('mandatory plans require positive allocations per product line; unavailable
     assert.throws(() => checkMandatoryPlans(db, { ...move, invoice_line_ids: [{ ...move.invoice_line_ids[0], analytic_distribution: distribution }] }), /mandatory.*Projects/);
   }
   assert.throws(() => checkMandatoryPlans(db, { ...move, invoice_line_ids: [...move.invoice_line_ids, { product_id: 1 }] }), /mandatory/);
-  assert.doesNotThrow(() => checkMandatoryPlans(db, { ...move, invoice_line_ids: [{ name: 'Description' }] }));
+  assert.doesNotThrow(() => checkMandatoryPlans(db, { ...move, invoice_line_ids: [{ name: 'Description', display_type: 'line_note' }] }));
   assert.throws(() => checkMandatoryPlans(write(db, 'account.analytic.plan', plan.id, { default_applicability: 'unavailable' }), move), /unavailable/);
 });
 
