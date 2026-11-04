@@ -7,6 +7,8 @@ import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, roun
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 
+export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_fixed', 'Fixed Assets'],
   ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['equity', 'Equity'],
@@ -115,8 +117,10 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
     const zero = !computed.tax && !cashBasis ? (l.tax_name || taxLabel(l)) : '';
     const tags = [...new Set([...(l.tax_tag_ids ?? []), ...computed.taxes.flatMap((t) => t.tax_tag_ids ?? [])])].sort((a, b) => a - b);
-    const key = `${account}:${zero}:${tags.join(',')}:${cashBasis}`;
-    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis, amount: 0, lines: [] };
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
+    const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
+    const key = `${account}:${zero}:${tags.join(',')}:${cashBasis}:${distributionKey}`;
+    const group = byAccount.get(key) ?? { account, zero, tags, cashBasis, distribution, amount: 0, lines: [] };
     group.amount += computed.untaxed;
     group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
     byAccount.set(key, group);
@@ -193,7 +197,7 @@ export function invoiceLines(db, move) {
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
-  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, zero, lines, tags, cashBasis }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis]);
+  const bases = invoiceBaseGroups(db, move, roundingMethod).map(({ account, amount, zero, lines, tags, cashBasis, distribution }) => [account, companyRound(docRound(amount) / rate), docRound(amount), zero, lines, tags, cashBasis, distribution]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
   const mixedDiscount = discountFactor !== 1;
@@ -281,7 +285,7 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, cashBasis]) => ({ account_id, partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: !cashBasis } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, cashBasis, distribution]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_name: zero, tax_base: refund ? -amount : amount, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: !cashBasis } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);

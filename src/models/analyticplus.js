@@ -3,7 +3,7 @@ import { create, read, search, unlink, write } from '../orm.js';
 import { today } from './common.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
+import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
 import { round } from '../money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
@@ -166,7 +166,7 @@ export function checkMandatoryPlans(db, move) {
     }
     for (const plan of plans) {
       const applicability = planApplicability(db, plan, line, move);
-      if (applicability === 'mandatory' && Math.abs((allocated.get(plan.id) ?? 0) - 100) > 0.00001) {
+      if (applicability === 'mandatory' && (isInvoiceDoc || analyticEligibleAccount(read(db, 'account.account', line.account_id)) || allocated.has(plan.id)) && Math.abs((allocated.get(plan.id) ?? 0) - 100) > 0.00001) {
         throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
       }
       if (applicability === 'unavailable' && (allocated.get(plan.id) ?? 0) > 0) {
@@ -205,7 +205,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
     const lineAmount = allocation?.amount ?? 0;
     return allocatedShares(db, distributionOfLine(line, db, move), lineAmount).map(([id, amount]) => {
       return {
-        name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
+        name: line.name || product?.name || move.name || '/', date: move.date ?? move.invoice_date ?? today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
         general_account: read(db, 'account.account', account)?.code || (purchase ? '600000' : '400000'),
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,

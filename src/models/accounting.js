@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
+import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, journalId, outstandingAccount, paymentJournal, postEntry, postedBillLine } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
@@ -244,8 +244,7 @@ export function postMove(db, id) {
       }
     }
     const line_ids = (r.line_ids ?? []).map((line) => {
-      const type = read(db, 'account.account', line.account_id)?.account_type;
-      const eligible = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(type);
+      const eligible = analyticEligibleAccount(read(db, 'account.account', line.account_id));
       const distribution = line.analytic_distribution ?? (line.analytic_account_id ? { [line.analytic_account_id]: 100 } : eligible ? findAnalyticDistribution(db, {
         partner_id: line.partner_id ?? r.partner_id, product_id: line.product_id, account_id: line.account_id, company_id: r.company_id ?? 1,
       }) : null);
