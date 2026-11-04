@@ -309,7 +309,7 @@ export function profitAndLoss(db, period, { includeClosing = false } = {}) {
   return {
     revenue, cost, gross: round(revenue - cost), expense, operating: round(revenue - cost - expense),
     otherIncome, otherExpense, net: round(revenue - cost - expense + otherIncome - otherExpense),
-    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense'], 1) },
+    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense'], 1), otherIncome: lines(['income_other'], -1), otherExpense: lines(['expense_other'], 1) },
   };
 }
 

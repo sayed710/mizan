@@ -971,7 +971,7 @@ const ar = {
   Plan: 'الخطة', Regions: 'المناطق', 'Budget Name': 'اسم الموازنة', 'Budget Lines': 'بنود الموازنة', 'Planned Amount': 'المبلغ المخطط',
   Team: 'الفريق', 'Round Robin': 'بالتناوب', 'Balanced Workload': 'توزيع متوازن للعمل', 'Team Members': 'أعضاء الفريق',
   'Automatic Closing': 'إغلاق تلقائي', 'Close After (Days)': 'الإغلاق بعد (أيام)', 'Customer Ratings': 'تقييمات العملاء',
-  High: 'عالية', Duration: 'المدة', Bill: 'فاتورة مورد', 'Bill Line': 'بند فاتورة المورد', 'Paid/Received': 'مدفوع/مستلم',
+  High: 'عالية', Duration: 'المدة', Bill: 'فاتورة مورد', 'Bill Line': 'بند فاتورة المورد', 'Sale Invoice': 'فاتورة بيع', 'Sale Invoice Line': 'بند فاتورة البيع', 'Paid/Received': 'مدفوع/مستلم',
   Any: 'أي', 'Is Lower Than': 'أقل من', 'Is Greater Than': 'أكبر من', 'Is Between': 'بين', Contains: 'يحتوي على', 'Not Contains': 'لا يحتوي على',
   'Match Regex': 'يطابق التعبير النمطي', 'Percentage of balance': 'نسبة من الرصيد', Purchases: 'المشتريات', Joined: 'انضم',
   'Published on': 'نُشر في', 'Fixed Payments (annuity)': 'دفعات ثابتة (قسط ثابت)', 'Fixed Principal': 'أصل ثابت', Periodic: 'دوري',
