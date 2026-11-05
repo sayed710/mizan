@@ -289,7 +289,8 @@ function restoreScheduledReversals(db, scheduledReversalsBefore, autoPostMoveFn)
   let next = db;
   for (const { prior, reversal, sourceMove, date } of restorations) {
     next = write(next, 'account.move', reversal.id, { state: prior.state, auto_post: prior.auto_post });
-    next = write(next, 'account.move', sourceMove.id, { reversal_move_id: reversal.id });
+    // A secured (hashed) source keeps its fields; the reversal still points at it through reversed_entry_id.
+    if (!sourceMove.inalterable_hash) next = write(next, 'account.move', sourceMove.id, { reversal_move_id: reversal.id });
     if (prior.state === 'draft' && prior.auto_post === 'at_date' && date <= currentDate) {
       next = autoPostMoveFn(next, reversal.id);
     }

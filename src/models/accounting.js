@@ -281,10 +281,11 @@ function spawnRecurringMove(db, move) {
   }).db;
 }
 
-function attemptAutoPostMove(db, moveId) {
+function attemptAutoPostMove(db, moveId, onError = null) {
   try {
     return postMove(db, moveId);
   } catch (e) {
+    onError?.(`auto-post move ${moveId}`, e);
     const body = `Auto-post failed: ${e.message}`;
     return (db.messages ?? []).some((message) => message.model === 'account.move' && message.res_id === moveId && message.body === body)
       ? db
@@ -293,7 +294,7 @@ function attemptAutoPostMove(db, moveId) {
 }
 
 /** Auto-post draft entries scheduled on or before `at`, generating each next recurring entry once up to its end date. */
-export function postAutoPostMoves(db, at = today()) {
+export function postAutoPostMoves(db, at = today(), { onError = null } = {}) {
   if (!validDate(at)) throw new Error('Enter a valid date');
   let next = db;
   const attempted = new Set();
@@ -306,7 +307,7 @@ export function postAutoPostMoves(db, at = today()) {
     if (!due.length) break;
     for (const { move } of due) {
       attempted.add(move.id);
-      next = attemptAutoPostMove(next, move.id);
+      next = attemptAutoPostMove(next, move.id, onError);
     }
   }
   return next;
