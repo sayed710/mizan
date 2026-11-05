@@ -541,7 +541,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db);
       if (err) throw new Error(err);
     }
   }

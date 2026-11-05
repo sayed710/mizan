@@ -12,7 +12,8 @@ export function cashBasisTransitionAccount(db, taxId, company) {
 }
 
 export function cashBasisTransitionAccounts(db, company) {
-  return search(db, 'account.tax').filter((tax) => tax.tax_exigibility === 'on_payment' && (!company || !tax.company_id || tax.company_id === company))
+  // Only configured taxes can have booked a transition line; an incomplete tax must not block reports and locks.
+  return search(db, 'account.tax').filter((tax) => tax.tax_exigibility === 'on_payment' && tax.cash_basis_transition_account_id && (!company || !tax.company_id || tax.company_id === company))
     .map((tax) => cashBasisTransitionAccount(db, tax.id, company ?? tax.company_id));
 }
 
@@ -340,7 +341,8 @@ export const taxModels = {
   'account.tax': {
     label: 'Taxes',
     guard: (db, before, after) => {
-      if (after.cash_basis_transition_account_id) {
+      // An on-payment tax cannot post without its transition account, so it is required when saving.
+      if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
         try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
       }
       const allTags = [

@@ -773,7 +773,7 @@ MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding 
   };
   const structures = (db.records['hr.payroll.structure'] ?? []).map((structure) => {
     const company = structure.company_id ?? 1;
-    const journals = (db.records['account.journal'] ?? []).filter((j) => j.company_id === company && j.code === 'SAL' && j.type === 'general');
+    const journals = (db.records['account.journal'] ?? []).filter((j) => (j.company_id ?? 1) === company && j.code === 'SAL' && j.type === 'general');
     return { ...structure, company_id: company, journal_id: structure.journal_id ?? (journals.length === 1 ? journals[0].id : null),
       salary_expense_account_id: structure.salary_expense_account_id ?? find(company, '620000'),
       salary_payable_account_id: structure.salary_payable_account_id ?? find(company, '230000'),

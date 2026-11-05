@@ -545,7 +545,8 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
       const before = new Set((stocked.records['stock.valuation.layer'] ?? []).map((layer) => layer.id));
-      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, counterpart: stockAccount(stocked, p, 'cogs', session.company_id), company_id: session.company_id });
+      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, // Periodic goods move quantities only, so they need no cost-of-goods-sold account.
+        counterpart: periodic ? null : stockAccount(stocked, p, 'cogs', session.company_id), company_id: session.company_id });
       if (!original && qty < 0) {
         const layer = (stocked.records['stock.valuation.layer'] ?? []).find((item) => !before.has(item.id) && item.kind === 'in' && item.product_id === p.id);
         returnLayers.push({ index, layer_id: layer?.id ?? null });
