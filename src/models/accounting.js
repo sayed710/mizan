@@ -337,10 +337,12 @@ function intercompanyBill(db, move) {
     const fallback = read(db, 'account.account', journal.default_account_id);
     const account = configured && (!configured.company_id || configured.company_id === buyer.id) ? configured : fallback;
     if (!account || (account.company_id && account.company_id !== buyer.id)) throw new Error(`Configure a product expense account or purchase journal default account for ${buyer.name}`);
-    const tax = productTax(db, product, 'purchase', null);
-    if (tax?.tax_id) {
-      const taxRecord = read(db, 'account.tax', tax.tax_id);
-      if (taxRecord?.company_id && taxRecord.company_id !== buyer.id) throw new Error(`Configure purchase taxes for ${buyer.name}`);
+    let tax;
+    try {
+      tax = productTax(db, product, 'purchase', null, buyer.id);
+      if (tax?.tax_id) validateTaxCompany(db, [tax.tax_id, ...(tax.tax_ids ?? [])], buyer.id);
+    } catch {
+      throw new Error(`Configure purchase taxes for ${buyer.name}`);
     }
     return { name: line.name, product_id: line.product_id, qty: line.qty, price_unit: line.price_unit, discount: line.discount, account_id: account.id, ...(tax ?? { tax: 0 }) };
   });
@@ -1528,8 +1530,8 @@ Object.assign(accountingModels, {
       const submittedReturns = unitReturns.filter((ret) => ['submitted', 'paid'].includes(ret.state));
       if (before && submittedReturns.length) {
         if (JSON.stringify([...new Set(before.company_ids ?? [])].sort()) !== JSON.stringify([...new Set(companies)].sort())) return 'Cannot change companies of a tax unit with submitted returns';
-        if (before.main_company_id !== after.main_company_id
-          || JSON.stringify(before.member_return_type_ids ?? []) !== JSON.stringify(after.member_return_type_ids ?? [])) return 'Cannot change member return types of a tax unit with submitted returns';
+        if (before.main_company_id !== after.main_company_id) return 'Cannot change main company of a tax unit with submitted returns';
+        if (JSON.stringify(before.member_return_type_ids ?? []) !== JSON.stringify(after.member_return_type_ids ?? [])) return 'Cannot change member return types of a tax unit with submitted returns';
       }
       if (new Set(companies).size < 2) return 'A tax unit must contain at least 2 companies';
       if (!after.main_company_id || !companies.includes(after.main_company_id)) return 'The main company must be one of the tax unit companies';

@@ -14,6 +14,7 @@ import { rateAt } from './currency.js';
 import { fiscalPositionFor, isSectionOrNote, productTax, replaceTaxSnapshot, taxSnapshot } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
 import { resolveDocumentJournal } from './ledger.js';
+import { productProperty } from './productconfig-helpers.js';
 import { documentCurrency, roundCurrency } from '../money.js';
 
 const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
@@ -506,7 +507,9 @@ export const salesModels = {
                   }
                   const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
                     : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                  return { ...m, unit_cost, valuation_options: original ? { counterpart_role: sign > 0 ? 'cogs' : 'input' } : {} };
+                  const prod = read(d, 'product', m.product_id);
+                  const hasOutput = Boolean(prod && productProperty(d, prod, 'property_stock_account_output_categ_id', p.company_id ?? 1));
+                  return { ...m, unit_cost, valuation_options: original ? { counterpart_role: sign > 0 ? (hasOutput ? 'output' : 'cogs') : 'input' } : {} };
                 });
                 return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
                   stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });

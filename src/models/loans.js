@@ -136,10 +136,10 @@ export const loanModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       lender_id: { type: 'many2one', relation: 'res.partner', label: 'Lender' },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
-      bank_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Account' },
-      principal_account_id: { type: 'many2one', relation: 'account.account', label: 'Principal Liability Account' },
-      interest_account_id: { type: 'many2one', relation: 'account.account', label: 'Interest Expense Account' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', readonly: (r) => r?.state && r.state !== 'draft' },
+      bank_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Account', readonly: (r) => r?.state && r.state !== 'draft' },
+      principal_account_id: { type: 'many2one', relation: 'account.account', label: 'Principal Liability Account', readonly: (r) => r?.state && r.state !== 'draft' },
+      interest_account_id: { type: 'many2one', relation: 'account.account', label: 'Interest Expense Account', readonly: (r) => r?.state && r.state !== 'draft' },
       amount: { type: 'monetary', label: 'Amount Borrowed' },
       start_date: { type: 'date', label: 'Start Date' },
       duration: { type: 'integer', label: 'Duration (months)' },
@@ -174,6 +174,16 @@ export const loanModels = {
       },
     },
     defaults: () => ({ start_date: today(), duration: 12, interest_rate: 5, method: 'annuity', state: 'draft', line_ids: [], company_id: 1 }),
+    guard: (db, before, r) => {
+      if (before?.receipt_move_id) {
+        for (const f of ['journal_id', 'bank_account_id', 'principal_account_id', 'interest_account_id']) {
+          if (before[f] && r[f] !== before[f]) {
+            return 'Cannot change loan accounts or journal once money is booked';
+          }
+        }
+      }
+      return null;
+    },
     groupBys: ['state'],
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'closed' }]],
     kanban: { title: 'name', lines: ['lender_id', 'amount', 'duration'], badge: 'state' },

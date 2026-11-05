@@ -5,3 +5,4 @@ dist/
 .env.*
 mizan.sqlite*
 .claude/settings.local.json
+.codex-task-artifacts/

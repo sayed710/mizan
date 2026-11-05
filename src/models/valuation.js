@@ -114,7 +114,8 @@ export function postValuation(db, layerId, counterpartRole) {
   const compId = l.company_id ?? getActiveCompany() ?? 1;
   const line = (account, amount) => ({ account, ...(amount >= 0 ? { debit: amount } : { credit: -amount }) });
   const p = product(db, l.product_id);
-  const counterpart = l.counterpart ?? stockAccount(db, p, counterpartRole || (l.kind === 'in' ? 'input' : l.kind === 'out' ? 'cogs' : 'price_difference'), compId);
+  const defaultOutRole = productProperty(db, p, 'property_stock_account_output_categ_id', compId) ? 'output' : 'cogs';
+  const counterpart = l.counterpart ?? stockAccount(db, p, counterpartRole || (l.kind === 'in' ? 'input' : l.kind === 'out' ? defaultOutRole : 'price_difference'), compId);
   const { account: valuation, journal } = valuationAccounts(db, p, compId);
   const lines = [line(valuation, l.value), line(counterpart, -round(l.value + diff)), ...(diff ? [line(stockAccount(db, p, 'price_difference', compId), diff)] : [])];
   const entry = postEntry(db, { journal, company: compId, date: l.date, ref: l.reference || l.description, lines });

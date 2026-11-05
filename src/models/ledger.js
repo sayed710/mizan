@@ -693,6 +693,55 @@ export function filterByAnalytic(items, analyticAccountIds) {
     : selected.has(Number(l.analytic_account_id)));
 }
 
+/** Journal items for balance sheet filtering: retains items touching selected analytic accounts, and scales untagged counterparts within the same move by the move's matching analytic share. */
+export function filterBalanceSheetByAnalytic(items, analyticAccountIds) {
+  if (!analyticAccountIds?.length) return items;
+  const selected = new Set(analyticAccountIds.map(Number));
+  const isTagged = (l) => Boolean(l.analytic_account_id || (l.analytic_distribution && Object.keys(l.analytic_distribution).length > 0));
+  const matches = (l) => (l.analytic_distribution
+    ? Object.keys(l.analytic_distribution).some((key) => key.split(',').some((id) => selected.has(Number(id))))
+    : selected.has(Number(l.analytic_account_id)));
+
+  const byMove = new Map();
+  for (const item of items) {
+    const key = item.move_id ?? `solo:${item.id ?? Math.random()}`;
+    let group = byMove.get(key);
+    if (!group) {
+      group = [];
+      byMove.set(key, group);
+    }
+    group.push(item);
+  }
+
+  const out = [];
+  for (const moveItems of byMove.values()) {
+    let matchingTaggedSum = 0;
+    let allTaggedSum = 0;
+    for (const l of moveItems) {
+      const amt = Math.max(Number(l.debit) || 0, Number(l.credit) || 0);
+      if (isTagged(l)) {
+        allTaggedSum += amt;
+        if (matches(l)) matchingTaggedSum += amt;
+      }
+    }
+    if (!matchingTaggedSum) continue;
+    const ratio = allTaggedSum > 0 ? Math.min(1, matchingTaggedSum / allTaggedSum) : 1;
+    for (const l of moveItems) {
+      if (isTagged(l)) {
+        if (matches(l)) out.push(l);
+      } else {
+        out.push({
+          ...l,
+          debit: round((Number(l.debit) || 0) * ratio),
+          credit: round((Number(l.credit) || 0) * ratio),
+          ...(l.amount_currency != null ? { amount_currency: round((Number(l.amount_currency) || 0) * ratio) } : {}),
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
 const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
@@ -718,7 +767,8 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
 export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const rows = balances(db, weighted(filterByAnalytic(journalItems(db, filter), analyticAccountIds), weight));
+  const items = filterBalanceSheetByAnalytic(journalItems(db, filter), analyticAccountIds);
+  const rows = balances(db, weighted(items, weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);

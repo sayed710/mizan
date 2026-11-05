@@ -104,13 +104,20 @@ function computeBoard(db, asset) {
 
 /** Report values as of a cutoff, excluding subsequent recorded adjustments. */
 export function depreciationReport(db, period, companyId = 'all') {
-  const rows = search(db, 'account.asset').filter((a) => (companyId === 'all' || (a.company_id ?? 1) === Number(companyId)) && a.state !== 'cancel' && a.state !== 'draft' && (!a.acquisition_date || a.acquisition_date <= period.to) && (!a.disposal_date || a.disposal_date > period.to)).map((a) => {
+  const hasInPeriod = (a) => (a.depreciation_ids ?? []).some((l) => l.posted && (!period.from || l.date >= period.from) && l.date <= period.to);
+  const rows = search(db, 'account.asset').filter((a) => (
+    (companyId === 'all' || (a.company_id ?? 1) === Number(companyId))
+    && a.state !== 'cancel' && a.state !== 'draft'
+    && (!a.acquisition_date || a.acquisition_date <= period.to)
+    && (!a.disposal_date || a.disposal_date > period.to || hasInPeriod(a))
+  )).map((a) => {
     const original = (cents(a.original_value) - (a.revaluation_ids ?? []).filter((r) => r.date > period.to).reduce((s, r) => s + cents(r.amount), 0)) / 100;
     const posted = (a.depreciation_ids ?? []).filter((l) => l.posted);
     const sum = (list) => list.reduce((s, l) => s + cents(l.amount), 0);
     const accumulated = (cents(a.already_depreciated) + sum(posted.filter((l) => l.date <= period.to))) / 100;
     const inPeriod = sum(posted.filter((l) => (!period.from || l.date >= period.from) && l.date <= period.to)) / 100;
-    return { a, original, accumulated, inPeriod, book: (cents(original) - cents(accumulated)) / 100 };
+    const book = a.disposal_date && a.disposal_date <= period.to ? 0 : (cents(original) - cents(accumulated)) / 100;
+    return { a, original, accumulated, inPeriod, book };
   });
   const totals = Object.fromEntries(['original', 'inPeriod', 'accumulated', 'book'].map((key) => [key, rows.reduce((s, row) => s + cents(row[key]), 0) / 100]));
   return { rows, totals };

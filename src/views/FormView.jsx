@@ -54,10 +54,11 @@ function Field({ db, model, name, value, onChange, readonly, record }) {
   const id = `f-${name}`;
   const label = field.custom ? field.label : t(field.label);
   const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
+  const isReadonly = readonly || (typeof field.readonly === 'function' ? field.readonly(record, db) : field.readonly);
   return (
     <div className="field">
-      {isLabelable(field, readonly) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} record={record} /></div>
+      {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
+      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
     </div>
   );
 }

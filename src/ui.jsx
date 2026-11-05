@@ -259,8 +259,10 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 }
 
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
-export const isLabelable = (field, readonly) =>
-  !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
+export const isLabelable = (field, readonly, record, db) => {
+  const isReadonly = readonly || (typeof field?.readonly === 'function' ? field.readonly(record, db) : field?.readonly);
+  return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type);
+};
 
 function DistributionInput({ value, onChange, ...props }) {
   const [draft, setDraft] = useState(() => typeof value === 'string' ? value : JSON.stringify(value ?? {}));
@@ -273,8 +275,9 @@ function DistributionInput({ value, onChange, ...props }) {
 }
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
-  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly || field.readonly} record={record} />;
-  if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
+  const isReadonly = readonly || (typeof field.readonly === 'function' ? field.readonly(record, db) : field.readonly);
+  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
+  if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
       const related = read(db, field.relation, valId);
       return <span key={valId}>{i > 0 && ', '}<a href={`#/open/${field.relation}/${valId}`}>{related?.display_name ?? related?.name ?? `#${valId}`}</a></span>;
@@ -282,7 +285,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   }
   if (field.type === 'many2many') {
     const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
-    const locked = readonly || field.readonly || field.compute;
+    const locked = isReadonly || field.compute;
     const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
     const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record)));
     return (
@@ -305,7 +308,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       </div>
     );
   }
-  if (readonly || field.readonly || field.compute) {
+  if (isReadonly || field.compute) {
     if (field.type === 'html') return <SafeHtml html={value} />;
     return <span className="readonly">{display(db, field, value, record)}</span>;
   }

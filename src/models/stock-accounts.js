@@ -4,7 +4,7 @@ import { productProperty } from './productconfig-helpers.js';
 export const STOCK_CHART_ROLES = {
   account_stock_valuation_id: ['110100', 'asset_current', 'Stock Valuation'],
   account_stock_input_id: ['110200', 'asset_current', 'Stock Interim (Received)'],
-  account_stock_output_id: ['110200', 'asset_current', 'Stock Interim (Received)'],
+  account_stock_output_id: ['110200', 'asset_current', 'Stock Interim (Delivered)'],
   account_cogs_id: ['500000', 'expense_direct_cost', 'Cost of Goods Sold'],
   account_price_difference_id: ['600000', 'expense', 'Expenses'],
   account_production_id: ['600000', 'expense', 'Expenses'],
