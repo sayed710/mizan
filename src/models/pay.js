@@ -602,7 +602,7 @@ const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
   const nextVoided = after.voided_check_numbers ?? [];
   if (!before) return !nextVoided.length && (after.check_number == null || after.state === 'posted');
-  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (before.state === 'draft' && after.state === 'posted'));
+  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (after.state === 'posted' && after.payment_type === 'outbound'));
   if (before.journal_id !== after.journal_id) return false;
   if (before.check_number === after.check_number) return JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
   if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;

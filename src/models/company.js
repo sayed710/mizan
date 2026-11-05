@@ -26,8 +26,19 @@ export const currentCompany = (db) => db.settings?.current_company_id ?? 1;
 
 /** Resolve the company for a document or a single-company batch without consulting the active UI company. */
 export function documentCompany(db, document) {
-  const companyIds = document?.company_id ? new Set([document.company_id]) : new Set((document?.lines ?? [])
-    .map((line) => read(db, 'account.move', line.move_id)?.company_id).filter(Boolean));
+  if (!document) return null;
+  let companyIds;
+  if (document.company_id != null) {
+    companyIds = new Set([document.company_id]);
+  } else if (Array.isArray(document.lines)) {
+    companyIds = new Set(document.lines.map((line) => {
+      const move = line.move_id ? read(db, 'account.move', line.move_id) : null;
+      const payment = line.payment_id ? read(db, 'account.payment', line.payment_id) : null;
+      return move?.company_id ?? payment?.company_id ?? 1;
+    }));
+  } else {
+    companyIds = new Set([1]);
+  }
   if (companyIds.size !== 1) return null;
   const company = read(db, 'res.company', [...companyIds][0]);
   if (!company) return null;

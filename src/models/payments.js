@@ -148,7 +148,11 @@ export function postBatch(db, batch) {
   // A journal without its own currency accepts any currency; a fixed one only its own.
   if (journal.currency_id && currency.id !== journal.currency_id) throw new Error('Batch currency must match the journal currency');
   const requested = Number(batch.check_number_start || journal?.check_next_number || 0);
-  if (batch.batch_type === 'outbound' && invoiceIds.length && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
+  const unnumberedPaymentLines = batch.batch_type === 'outbound'
+    ? lines.filter((l) => l.payment_id && read(db, 'account.payment', l.payment_id)?.check_number == null)
+    : [];
+  const needsCheckCount = batch.batch_type === 'outbound' ? invoiceIds.length + unnumberedPaymentLines.length : 0;
+  if (batch.batch_type === 'outbound' && needsCheckCount > 0 && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
   if (!['bank', 'cash'].includes(journal.type) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
     throw new Error(batch.batch_type === 'outbound' ? 'Checks require a bank journal' : 'Inbound batches require a bank or cash journal');
   }
@@ -160,15 +164,20 @@ export function postBatch(db, batch) {
       resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: company });
     }
   }
-  const start = batch.batch_type === 'outbound' && invoiceIds.length ? nextCheckNumber(db, journal.id, requested) : requested;
-  if (batch.batch_type === 'outbound' && invoiceIds.length && !Number.isSafeInteger(start + invoiceIds.length)) throw new Error('Check number is too large');
+  const start = batch.batch_type === 'outbound' && needsCheckCount > 0 ? nextCheckNumber(db, journal.id, requested) : requested;
+  if (batch.batch_type === 'outbound' && needsCheckCount > 0 && !Number.isSafeInteger(start + needsCheckCount)) throw new Error('Check number is too large');
 
   let next = db;
   let issued = 0;
   const linked = lines.map((line) => {
     if (line.payment_id) {
       const payment = read(next, 'account.payment', line.payment_id);
-      return { ...line, check_number: payment.check_number ?? null, cancelled: false };
+      let checkNumber = payment.check_number ?? null;
+      if (batch.batch_type === 'outbound' && checkNumber == null) {
+        checkNumber = start + issued++;
+        next = write(next, 'account.payment', payment.id, { check_number: checkNumber });
+      }
+      return { ...line, check_number: checkNumber, cancelled: false };
     }
     const checkNumber = batch.batch_type === 'outbound' ? start + issued++ : null;
     const invoice = read(next, 'account.move', line.move_id);

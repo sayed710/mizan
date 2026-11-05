@@ -7,7 +7,7 @@ import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalIt
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
-import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 
@@ -894,7 +894,7 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
       return sum + (m.payments ?? []).filter((p) => p.move_id === payment.move_id && applicationActiveAt(db, p, m, at)).reduce((n, p) => n + appliedValue(db, m, p), 0);
     }, 0);
     const remaining = round(Math.abs(bookedCredit) - applied);
-    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining, null, entry);
+    if (remaining > 0) add(payment.partner_id, payment.date, sign * remaining, entry, entry);
   }
 }
 
@@ -985,7 +985,7 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false } = {
     const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false }).filter((due) => due.date < at);
     if (!dues.length) return [];
     const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-    const amount = round(dues.reduce((sum, due) => sum + due.amount, 0) * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1));
+    const amount = roundCurrency(dues.reduce((sum, due) => sum + due.amount, 0) * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), documentCurrency(db, m));
     return [{ ...m, invoice_date_due: dues[0].date, amount_residual: amount }];
   });
   const by = new Map();
@@ -1091,9 +1091,10 @@ export function runFollowUps(db, at = today(), deliver = null) {
     const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
 
     if (currentDelay >= Number(level.delay)) return nextDb;
-    if (!deliver && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
-
     const channel = level.channel;
+    const canDeliverEmail = channel === 'email' && Boolean(partner.email?.trim()) && Boolean(deliver);
+    if (!canDeliverEmail && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+
     const recordFailure = (reason) => {
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
@@ -1145,8 +1146,8 @@ const currencyOf = (db, move) => {
 };
 
 /** Reminder text for one customer's overdue invoices, each amount with its currency. */
-export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${amount} ${currency.name}`).join(', ');
-export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${round(m.amount_residual)} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
+export const formatFollowUpTotals = (f) => f.totals.map(({ currency, amount }) => `${formatCurrency(amount, currency, '')} ${currency.name}`).join(', ');
+export const followUpText = (db, f) => `${f.invoices.map((m) => `${m.name} (${m.invoice_date_due}): ${formatCurrency(m.amount_residual, documentCurrency(db, m), '')} ${currencyOf(db, m)}`.trim()).join('\n')}\nTotal: ${formatFollowUpTotals(f)}`;
 
 const manualFollowUpGroups = (db, scope, partnerId, at, reminder, companyId) => {
   const allowed = new Set(search(scope, 'account.move').map((move) => move.id));
