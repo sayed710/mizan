@@ -1,13 +1,32 @@
 // Deferred revenue/expense: an invoiced amount recognised month by month over a period.
 import { create, read, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, today } from './common.js';
-import { postEntry } from './ledger.js';
+import { invoiceLineAccount, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { closedYearLock, lockDateFor } from './finance.js';
 import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const DAY = 86400000;
+
+function postedReversalIds(moves) {
+  return new Set(moves.filter((move) => move.state === 'posted' && move.reversed_entry_id).map((move) => move.reversed_entry_id));
+}
+
+function groupedBoardLines(schedule, date, method, currency) {
+  return (schedule.board ?? []).map((line, index) => {
+    const amount = line.posted || line.cancelled ? 0 : recognitionTargetThroughDate(schedule, index, date, method, currency);
+    return { line, index, amount };
+  }).filter(({ amount }) => amount !== 0)
+    .map(({ line, index, amount }) => ({ index, date: line.date, amount }));
+}
+
+function adjustedRecognitionOutstanding(line, currency) {
+  const amount = roundCurrency(Math.abs(Number(line.amount) || 0), currency);
+  const adjusted = roundCurrency(Math.abs(Number(line.credit_adjusted_amount) || 0), currency);
+  if (adjusted > amount) throw new Error('Deferred recognition credit adjustments exceed the posted amount');
+  return roundCurrency(amount - adjusted, currency);
+}
 
 function scheduleAccounts(db, schedule) {
   const company = schedule.company_id ?? 1;
@@ -115,9 +134,10 @@ export function validateInvoiceDeferralCredit(db, note, invoice = read(db, 'acco
     const sourceLine = matches[0];
     const currentAmount = documentLineAmount(db, note, line);
     if (currentAmount < 0) throw new Error('A credit note line linked to an invoice line cannot have a negative untaxed amount');
-    const group = groups.get(sourceLineId) ?? { sourceLine, currentAmount: 0, creditLineIds: [] };
+    const group = groups.get(sourceLineId) ?? { sourceLine, currentAmount: 0, creditLineIds: [], creditLines: [] };
     group.currentAmount = roundCurrency(group.currentAmount + currentAmount, currency);
     if (line.line_id != null && line.line_id !== '') group.creditLineIds.push(String(line.line_id));
+    group.creditLines.push(line);
     groups.set(sourceLineId, group);
   }
 
@@ -149,6 +169,17 @@ export function validateInvoiceDeferralCredit(db, note, invoice = read(db, 'acco
       throw new Error('The deferred source invoice line must have exactly one explicitly linked recognition schedule');
     }
     if (!Array.isArray(schedules[0].board)) throw new Error('The linked deferral schedule has no recognition board');
+    for (const creditLine of group.creditLines) {
+      let lineAccount;
+      try {
+        lineAccount = invoiceLineAccount(db, note, creditLine);
+      } catch {
+        lineAccount = null;
+      }
+      if (lineAccount !== schedules[0].deferred_account_id) {
+        throw new Error("A credit note line linked to a deferred invoice must book against the source schedule's deferred account");
+      }
+    }
     plan.push({
       schedule: schedules[0],
       sourceLineId,
@@ -203,60 +234,125 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
   for (const item of plan) {
     const schedule = read(next, 'account.deferral', item.schedule.id);
     const currency = companyCurrencyRecord(next, schedule.company_id);
-    const board = [...(schedule.board ?? [])];
-    const groupedIds = new Set(board.map((line) => line.move_id).filter((moveId) => read(next, 'account.move', moveId)?.is_deferred_grouped));
-    const reversalByDate = new Map();
+    const board_before = structuredClone(schedule.board ?? []);
+    const state_before = schedule.state;
+    const board = structuredClone(board_before);
+    const adjustmentMoveIds = [];
+    const groupedContributionsBefore = [];
 
-    for (const moveId of groupedIds) {
-      const sourceMove = read(next, 'account.move', moveId);
+    const groupedMoves = (next.records['account.move'] ?? []).filter((m) =>
+      m.is_deferred_grouped &&
+      !m.reversed_entry_id &&
+      m.state === 'posted' &&
+      (m.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id)
+    );
+    const groupedIds = new Set(groupedMoves.map((m) => m.id));
+
+    for (const sourceMove of groupedMoves) {
+      groupedContributionsBefore.push({
+        move_id: sourceMove.id,
+        deferred_contributions: structuredClone(sourceMove.deferred_contributions),
+      });
+      if (sourceMove.reversal_move_id) {
+        const revMove = read(next, 'account.move', sourceMove.reversal_move_id);
+        if (revMove) {
+          groupedContributionsBefore.push({
+            move_id: revMove.id,
+            deferred_contributions: structuredClone(revMove.deferred_contributions),
+          });
+        }
+      }
       const contribution = (sourceMove.deferred_contributions ?? []).find((entry) => entry.schedule_id === schedule.id);
       if (!contribution || !Array.isArray(contribution.board_lines)) throw new Error('Cannot safely adjust a grouped deferral contribution');
       const contributedAmount = roundCurrency(contribution.board_lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency);
-      const adjustmentAmount = roundCurrency(contributedAmount * item.currentShare, currency);
+      const remainingInvoiceAmount = roundCurrency(item.originalAmount - item.previousAmount, currency);
+      const share = item.full || remainingInvoiceAmount <= 0 ? 1 : item.currentAmount / remainingInvoiceAmount;
+      const adjustmentAmount = roundCurrency(contributedAmount * share, currency);
       if (!adjustmentAmount) continue;
       const sourceDate = sourceMove.invoice_date ?? sourceMove.date ?? note.invoice_date;
       const sourceCorrection = postRecognitionCorrection(next, schedule, sourceMove, adjustmentAmount, sourceDate, note, true);
       next = sourceCorrection.db;
+      if (sourceCorrection.id) adjustmentMoveIds.push(sourceCorrection.id);
+
       const reversal = read(next, 'account.move', sourceMove.reversal_move_id);
       const reversedContribution = reversal && (reversal.deferred_contributions ?? []).find((entry) => entry.schedule_id === schedule.id);
       if (!reversal || reversal.state !== 'posted' || !reversedContribution) {
         throw new Error('The grouped deferral entry is missing its posted reversal contribution');
       }
       const reversedAmount = roundCurrency(reversedContribution.board_lines.reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency);
-      if (roundCurrency(reversedAmount * item.currentShare, currency) !== adjustmentAmount) {
+      if (roundCurrency(reversedAmount * share, currency) !== adjustmentAmount) {
         throw new Error('The grouped deferral reversal no longer matches its source contribution');
       }
       const reversalDate = reversal.invoice_date ?? reversal.date ?? note.invoice_date;
-      next = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, reversalDate, note, false).db;
+      const revCorrection = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, reversalDate, note, false);
+      next = revCorrection.db;
+      if (revCorrection.id) adjustmentMoveIds.push(revCorrection.id);
     }
 
-    for (const line of board) {
+    const reversed = postedReversalIds(next.records['account.move'] ?? []);
+    const reversalByDate = new Map();
+    const eligiblePosted = [];
+
+    for (let index = 0; index < board.length; index++) {
+      const line = board[index];
       if (!line.posted || !line.move_id || groupedIds.has(line.move_id)) continue;
+      if (line.reversal_move_id || reversed.has(line.move_id)) continue;
       const recognitionMove = read(next, 'account.move', line.move_id);
       if (!recognitionMove || recognitionMove.state !== 'posted' || recognitionMove.move_type !== 'entry') {
         throw new Error('A posted deferral board line is missing its recognition entry');
       }
-      const adjustmentAmount = roundCurrency((Number(line.amount) || 0) * item.currentShare, currency);
-      if (!adjustmentAmount) continue;
-      const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
-      const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
-      if (item.full && item.previousAmount === 0) {
-        if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse posted recognition entries');
+      const outstanding = adjustedRecognitionOutstanding(line, currency);
+      if (outstanding <= 0) continue;
+      eligiblePosted.push({ line, index, recognitionMove, outstanding });
+    }
+
+    if (item.full && item.previousAmount === 0) {
+      if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse posted recognition entries');
+      for (const { line, recognitionMove } of eligiblePosted) {
+        const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
+        const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
         const reversal = reverseEntryFn(next, recognitionMove, { date, reason: `Credit note ${note.name}` });
         next = reversal.db;
         reversalByDate.set(line.date, reversal.id);
-      } else {
-        next = postRecognitionCorrection(next, schedule, recognitionMove, adjustmentAmount, date, note, true).db;
+        if (reversal.id) adjustmentMoveIds.push(reversal.id);
+      }
+    } else if (eligiblePosted.length) {
+      const totalOutstanding = roundCurrency(eligiblePosted.reduce((sum, lineItem) => sum + lineItem.outstanding, 0), currency);
+      const remainingInvoiceAmount = roundCurrency(item.originalAmount - item.previousAmount, currency);
+      const targetTotalCorrection = item.full || remainingInvoiceAmount <= 0
+        ? totalOutstanding
+        : roundCurrency(totalOutstanding * (item.currentAmount / remainingInvoiceAmount), currency);
+      if (targetTotalCorrection > 0) {
+        const allocatedAmounts = allocateCents(targetTotalCorrection, eligiblePosted.map((lineItem) => lineItem.outstanding), currency);
+        for (let i = 0; i < eligiblePosted.length; i++) {
+          const adjustmentAmount = allocatedAmounts[i];
+          if (!adjustmentAmount) continue;
+          const { line, recognitionMove } = eligiblePosted[i];
+          const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
+          const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
+          const correction = postRecognitionCorrection(next, schedule, recognitionMove, adjustmentAmount, date, note, true);
+          next = correction.db;
+          if (correction.id) adjustmentMoveIds.push(correction.id);
+          line.credit_adjusted_amount = roundCurrency((Number(line.credit_adjusted_amount) || 0) + adjustmentAmount, currency);
+          line.credit_adjustment_move_ids = [...(line.credit_adjustment_move_ids ?? []), correction.id];
+        }
       }
     }
 
     const activeUnposted = board.filter((line) => !line.posted && !line.cancelled);
     const updatedBoard = board.map((line) => {
-      const reversed = reversalByDate.has(line.date) ? { ...line, reversal_move_id: reversalByDate.get(line.date) } : line;
-      if (line.posted || line.cancelled) return reversed;
-      if (item.full) return { ...reversed, amount: 0, cancelled: true };
-      return reversed;
+      let updatedLine = reversalByDate.has(line.date)
+        ? { ...line, reversal_move_id: reversalByDate.get(line.date), credit_adjusted_amount: roundCurrency(Math.abs(Number(line.amount) || 0), currency) }
+        : line;
+      if (reversed.has(line.move_id) && !updatedLine.reversal_move_id) {
+        const revMove = (next.records['account.move'] ?? []).find((m) => m.state === 'posted' && m.reversed_entry_id === line.move_id);
+        if (revMove) updatedLine = { ...updatedLine, reversal_move_id: revMove.id };
+      }
+      if (updatedLine.posted || updatedLine.cancelled) return updatedLine;
+      if (item.full) return { ...updatedLine, amount: 0, cancelled: true };
+      return updatedLine;
     });
+
     if (!item.full && activeUnposted.length) {
       const currentTotal = roundCurrency(activeUnposted.reduce((sum, line) => sum + (Number(line.amount) || 0), 0), currency);
       const previousRemainingShare = 1 - item.previousShare;
@@ -274,8 +370,77 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         updatedBoard[index] = amount ? { ...line, amount } : { ...line, amount: 0, cancelled: true };
       }
     }
+
+    const method = read(next, 'res.company', schedule.company_id)?.deferred_amount_computation_method ?? 'days';
+    for (const sourceMove of groupedMoves) {
+      const newBoardLines = groupedBoardLines({ ...schedule, board: updatedBoard }, sourceMove.deferral_date, method, currency);
+      const updateContributions = (contributions) => {
+        if (!newBoardLines.length) {
+          return contributions.filter((c) => c.schedule_id !== schedule.id);
+        }
+        return contributions.map((c) => (c.schedule_id === schedule.id ? { ...c, board_lines: newBoardLines } : c));
+      };
+      next = write(next, 'account.move', sourceMove.id, {
+        deferred_contributions: updateContributions(sourceMove.deferred_contributions ?? []),
+      });
+      if (sourceMove.reversal_move_id) {
+        const rev = read(next, 'account.move', sourceMove.reversal_move_id);
+        if (rev) {
+          next = write(next, 'account.move', rev.id, {
+            deferred_contributions: updateContributions(rev.deferred_contributions ?? []),
+          });
+        }
+      }
+    }
+
     const state = item.full ? 'cancel' : updatedBoard.every((line) => line.posted || line.cancelled) ? 'done' : 'running';
-    next = write(next, 'account.deferral', schedule.id, { board: updatedBoard, state });
+    const credit_adjustments = [
+      ...(schedule.credit_adjustments ?? []),
+      {
+        note_id: note.id,
+        board_before,
+        state_before,
+        move_ids: adjustmentMoveIds,
+        grouped_contributions_before: groupedContributionsBefore,
+      },
+    ];
+    next = write(next, 'account.deferral', schedule.id, { board: updatedBoard, state, credit_adjustments });
+  }
+  return next;
+}
+
+/** Revert deferral schedule and move adjustments when a linked credit note leaves posted. */
+export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn) {
+  if (!isRefund(note)) return db;
+  const schedules = (db.records['account.deferral'] ?? []).filter((s) =>
+    (s.credit_adjustments ?? []).some((adj) => adj.note_id === note.id)
+  );
+  if (!schedules.length) return db;
+  let next = db;
+  for (const schedule of schedules) {
+    const adjustments = schedule.credit_adjustments ?? [];
+    const adjustment = adjustments.find((adj) => adj.note_id === note.id);
+    if (!adjustment) continue;
+    // The board snapshot predates later credit notes, so only the latest adjustment can be undone.
+    if (adjustments[adjustments.length - 1] !== adjustment) throw new Error('Reset the later credit notes for this deferred invoice line first');
+    if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse deferral corrections');
+    for (const moveId of adjustment.move_ids ?? []) {
+      const move = read(next, 'account.move', moveId);
+      if (!move || move.state !== 'posted') continue;
+      next = reverseEntryFn(next, move, { date: correctionDate(next, move), reason: `Reset of credit note ${note.name}` }).db;
+    }
+    for (const entry of adjustment.grouped_contributions_before ?? []) {
+      const m = read(next, 'account.move', entry.move_id);
+      if (m) {
+        next = write(next, 'account.move', m.id, { deferred_contributions: entry.deferred_contributions });
+      }
+    }
+    const remainingAdjustments = (schedule.credit_adjustments ?? []).filter((adj) => adj.note_id !== note.id);
+    next = write(next, 'account.deferral', schedule.id, {
+      board: adjustment.board_before,
+      state: adjustment.state_before,
+      credit_adjustments: remainingAdjustments,
+    });
   }
   return next;
 }
@@ -547,7 +712,13 @@ function cancelDeferralError(db, schedule, { grouped = false } = {}) {
   // next-day reversal is part of its period snapshot, so grouped recognition still blocks until it is handled.
   const reversed = new Set(moves.filter((m) => m.state === 'posted' && m.reversed_entry_id).map((m) => m.reversed_entry_id));
   const openGrouped = grouped && moves.some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id));
-  return openGrouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id && !reversed.has(line.move_id)) ? 'Reverse the recognition entries before cancelling this deferral' : null;
+  const currency = companyCurrencyRecord(db, schedule.company_id);
+  const unreversedBoard = (schedule.board ?? []).some((line) => {
+    if (!line.move_id) return false;
+    if (line.reversal_move_id || reversed.has(line.move_id)) return false;
+    return adjustedRecognitionOutstanding(line, currency) > 0;
+  });
+  return openGrouped || unreversedBoard ? 'Reverse the recognition entries before cancelling this deferral' : null;
 }
 
 export const deferredModels = {
@@ -585,6 +756,7 @@ export const deferredModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['running', 'Running'], ['done', 'Done'], ['cancel', 'Cancelled']] },
+      credit_adjustments: { type: 'json', readonly: true, hidden: true },
       board: {
         type: 'one2many',
         label: 'Recognition Board',
@@ -595,6 +767,8 @@ export const deferredModels = {
           cancelled: { type: 'boolean', label: 'Cancelled' },
           move_id: { type: 'many2one', relation: 'account.move', label: 'Entry' },
           reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' },
+          credit_adjusted_amount: { type: 'monetary', readonly: true, hidden: true },
+          credit_adjustment_move_ids: { type: 'json', readonly: true, hidden: true },
         },
         newLine: () => ({ date: today(), amount: 0, posted: false, move_id: null }),
       },

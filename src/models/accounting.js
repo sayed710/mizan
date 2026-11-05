@@ -15,7 +15,7 @@ import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
 import { t } from '../i18n.js';
-import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, reverseInvoiceDeferrals, validateInvoiceDeferralCredit } from './deferred.js';
+import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
@@ -1241,7 +1241,10 @@ export const accountingModels = {
         const bill = read(db, 'account.move', before.intercompany_move_id);
         if (bill?.state === 'draft') db = write(db, 'account.move', bill.id, { state: 'cancel' });
       }
-      if (before.state === 'posted' && after.state !== 'posted') db = reverseInvoiceDeferrals(db, before);
+      if (before.state === 'posted' && after.state !== 'posted') {
+        db = reverseInvoiceDeferrals(db, before);
+        db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry);
+      }
       if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
       return syncInvoicedQty(syncInvoicedQty(db, before), after);
     },
