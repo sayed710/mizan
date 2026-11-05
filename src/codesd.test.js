@@ -55,7 +55,9 @@ test('codesd 2: cash basis uses each tax transition id and repartition id after 
   assert.equal(release.line_ids.find((line) => line.account_id === transition.id).debit, 10);
   assert.equal(release.line_ids.find((line) => line.account_id === final.id).credit, 10);
   assert.ok(taxAccounts(db, 1).sale.has(final.id));
-  const missing = write(draft.db, 'account.tax', tax.id, { cash_basis_transition_account_id: null });
+  // Saving an on-payment tax without the account is refused (Qodo 16); legacy stored data still fails at posting.
+  assert.throws(() => write(draft.db, 'account.tax', tax.id, { cash_basis_transition_account_id: null }), /Configure the cash basis transition account/);
+  const missing = { ...draft.db, records: { ...draft.db.records, 'account.tax': draft.db.records['account.tax'].map((t) => (t.id === tax.id ? { ...t, cash_basis_transition_account_id: null } : t)) } };
   assert.throws(() => postMove(missing, draft.id), /Configure the cash basis transition account/);
 });
 

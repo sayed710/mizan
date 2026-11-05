@@ -359,7 +359,7 @@ export const moreModels = {
         { label: 'Refuse', vals: { state: 'refused' }, when: (r) => r.state === 'submitted' },
         { label: 'Post Journal Entries', primary: true, when: (r) => r.state === 'approved', run: (db, r) => ({ db: postExpense(db, r) }) },
         { label: 'Register Payment', primary: true, when: (r) => r.state === 'posted', run: (db, r) => ({ db: reimburse(db, r) }) },
-        { label: 'Reset to Draft', vals: { state: 'draft' }, when: (r) => r.state === 'refused' },
+        { label: 'Reset to Draft', vals: { state: 'draft' }, when: (r) => ['refused', 'approved'].includes(r.state) },
       ],
       title: 'name',
       groups: [['employee_id', 'date', 'category', 'product_id', 'payment_mode'], ['quantity', 'unit_amount', 'tax', 'tax_id', 'total_amount', 'move_id', 'receipt']],

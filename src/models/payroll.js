@@ -140,7 +140,8 @@ function compute(db, slip) {
   const companyId = emp.company_id ?? 1;
   const structureId = contract?.structure_id ?? slip.structure_id ?? read(db, 'res.company', companyId)?.default_payroll_structure_id;
   const structure = read(db, 'hr.payroll.structure', structureId);
-  const rules = structure?.rules?.length ? structure.rules : DEFAULT_RULES;
+  if (structure && !structure.rules?.length) throw new Error(`Add salary rules to ${structure.name}`);
+  const rules = structure ? structure.rules : DEFAULT_RULES;
   const worked = workedDays(db, slip);
   const calendar = calendarFor(db, slip.employee_id, slip.date_to);
   const hoursPerDay = Number(calendar?.hours_per_day) || 8;
@@ -191,6 +192,9 @@ function confirm(db, slip) {
   if (!structure) throw new Error(`Configure a payroll structure on ${read(next, 'res.company', read(next, 'hr.employee', s.employee_id)?.company_id ?? 1)?.name ?? 'the company'}`);
   const companyId = read(next, 'hr.employee', s.employee_id)?.company_id ?? structure.company_id ?? 1;
   if (structure.company_id && structure.company_id !== companyId) throw new Error(`Salary structure ${structure.name} belongs to another company`);
+  const netRule = (structure.rules ?? []).find((rule) => rule.category === 'net');
+  if (!netRule) throw new Error(`Configure a net salary rule on ${structure.name}`);
+  const payable = ruleAccount(next, structure, netRule, 'credit', companyId);
   const journal = read(next, 'account.journal', structure.journal_id);
   if (!journal || journal.type !== 'general' || (journal.company_id && journal.company_id !== companyId)) throw new Error(`Configure the payroll journal on ${structure.name}`);
   const { db: booked } = postEntry(next, {
@@ -198,7 +202,7 @@ function confirm(db, slip) {
     date: s.date_to, ref: `${s.name} — ${read(next, 'hr.employee', s.employee_id)?.name}`,
     lines: payrollLines(next, s, structure, companyId),
   });
-  return write(booked, 'hr.payslip', s.id, { state: 'done' });
+  return write(booked, 'hr.payslip', s.id, { state: 'done', payable_account_id: payable });
 }
 
 function pay(db, slip) {
@@ -209,7 +213,10 @@ function pay(db, slip) {
   if (!structure) throw new Error(`Configure a payroll structure on ${company?.name ?? companyId}`);
   const netRule = (structure.rules ?? []).find((rule) => rule.category === 'net');
   if (!netRule) throw new Error(`Configure a net salary rule on ${structure.name}`);
-  const payable = ruleAccount(db, structure, netRule, 'credit', companyId);
+  // The payable booked at confirmation; slips confirmed before it was recorded fall back to the current net rule.
+  const payable = slip.payable_account_id
+    ? configuredAccount(db, slip.payable_account_id, companyId, 'salaries payable', slip.name)
+    : ruleAccount(db, structure, netRule, 'credit', companyId);
   const via = paymentJournal(db, null, companyId);
   const { db: booked } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, ref: `Salary payment ${slip.name}`,
@@ -251,6 +258,8 @@ export const payrollModels = {
         if (!after[field]) continue;
         try { configuredAccount(db, after[field], companyId, field === 'salary_expense_account_id' ? 'salary expense' : 'salaries payable', after.name); } catch (error) { return error.message; }
       }
+      // Each net rule recomputes the whole net pay, so a second one would double it.
+      if ((after.rules ?? []).filter((rule) => rule.category === 'net').length !== 1) return `Salary structure ${after.name} needs exactly one net rule`;
       for (const rule of after.rules ?? []) {
         for (const [field, label] of [['account_debit_id', 'debit'], ['account_credit_id', 'credit']]) {
           if (!rule[field]) continue;
@@ -362,6 +371,7 @@ export const payrollModels = {
       basic_wage: { type: 'monetary', label: 'Basic Wage', compute: (r) => amountOf(r, 'BASIC') },
       gross_wage: { type: 'monetary', label: 'Gross Wage', compute: grossOf },
       net_wage: { type: 'monetary', label: 'Net Wage', compute: netOf },
+      payable_account_id: { type: 'many2one', relation: 'account.account', label: 'Salaries Payable Account', readonly: true },
     },
     defaults: (id) => ({ name: 'SLIP/' + pad(id), state: 'draft', line_ids: [], input_line_ids: [], worked_days_ids: [], ...monthBounds() }),
     filters: [[{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'done', label: 'Done', fn: (r) => r.state === 'done' }]],

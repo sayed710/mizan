@@ -8,7 +8,7 @@ import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documen
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
-import { currentYearEarningsAccount } from './earnings.js';
+import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
@@ -726,7 +726,8 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
-  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
+  // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
+  const earningsAccount = configuredEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,

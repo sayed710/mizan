@@ -749,7 +749,8 @@ MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral a
     const withJournal = journalId ? { ...line, journal_id: journalId } : line;
     if (counterpart == null || line.counterpart_account_id) return withJournal;
     const matches = accounts.filter((a) => a.code === counterpart && (a.company_id ?? 1) === company);
-    return matches.length === 1 ? { ...withJournal, counterpart_account_id: matches[0].id } : withJournal;
+    // An unresolved code stays on the line so the user's choice is not lost (Qodo 40).
+    return matches.length === 1 ? { ...withJournal, counterpart_account_id: matches[0].id } : { ...withJournal, counterpart };
   });
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
 } });
@@ -803,7 +804,7 @@ MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding 
   };
   const structures = (db.records['hr.payroll.structure'] ?? []).map((structure) => {
     const company = structure.company_id ?? 1;
-    const journals = (db.records['account.journal'] ?? []).filter((j) => j.company_id === company && j.code === 'SAL' && j.type === 'general');
+    const journals = (db.records['account.journal'] ?? []).filter((j) => (j.company_id ?? 1) === company && j.code === 'SAL' && j.type === 'general');
     return { ...structure, company_id: company, journal_id: structure.journal_id ?? (journals.length === 1 ? journals[0].id : null),
       salary_expense_account_id: structure.salary_expense_account_id ?? find(company, '620000'),
       salary_payable_account_id: structure.salary_payable_account_id ?? find(company, '230000'),
