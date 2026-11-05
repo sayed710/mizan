@@ -255,6 +255,13 @@ export function moveInvariant(db, after, before) {
     const current = now[i];
     if (JSON.stringify(current) === JSON.stringify(p)) return false;
     if (p.reversed || !current?.reversed) return true;
+    // Unreconcile removes a credit application: the payment entry stays posted, so no reversing entry exists.
+    if (current.unapplied) {
+      const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
+      const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || !payment
+        || !unappliedOn || (p.date && unappliedOn < p.date);
+    }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
     const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
     const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
