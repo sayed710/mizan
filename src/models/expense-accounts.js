@@ -1,7 +1,7 @@
 import { read } from '../orm.js';
 import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
-import { taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { taxRepartitionLine, taxRepartitionSplits, taxRowsFactor } from './taxes.js';
 
 export function expenseReportJournal(db, report) {
   const company = report.company_id ?? 1;
@@ -25,11 +25,26 @@ export function expenseDebits(db, report, expenses, postingJournal = null) {
     const tax = Number(line.tax) && line.tax_id ? read(db, 'account.tax', line.tax_id) : null;
     if (Number(line.tax) && !tax) throw new Error(`Configure the expense tax on ${line.name || 'the expense'}`);
     if (tax && (tax.type_tax_use !== 'purchase' || tax.amount_type !== 'percent' || Number(tax.amount) !== Number(line.tax) || (tax.company_id && tax.company_id !== company))) throw new Error('Configure the expense tax and its account');
-    const rows = tax ? taxRepartitionLines(tax, 'invoice').filter((row) => row.repartition_type === 'tax') : [];
-    const factor = rows.reduce((sum, row) => sum + (Number(row.factor_percent) || 0), 0) / 100;
-    const base = round(Number(line.total_amount) / (1 + (Number(line.tax) || 0) * factor / 100));
-    const taxAmount = round(base * (Number(line.tax) || 0) / 100);
+    const factor = tax ? taxRowsFactor(tax, 'invoice') : 0;
+    const total = round(Number(line.total_amount) || 0);
+    const rate = Number(line.tax) || 0;
+    let base;
+    let taxAmount;
+    if (factor === 0) {
+      base = total;
+      taxAmount = round(base * rate / 100);
+    } else {
+      base = round(total / (1 + rate * factor / 100));
+      const netTax = round(total - base);
+      taxAmount = netTax / factor;
+    }
     const splits = tax ? taxRepartitionSplits({ ...tax, amount: taxAmount, base }, {}, 'invoice', null).splits : [];
+    if (tax && factor !== 0) {
+      const splitSum = round(splits.reduce((sum, s) => sum + s.amount, 0));
+      if (round(base + splitSum - total) !== 0) {
+        base = round(total - splitSum);
+      }
+    }
     const taxLines = splits.map(({ row, amount, base: taxBase }) => {
       const taxAccount = read(db, 'account.account', row.account_id ?? account.id);
       if (!taxAccount || taxAccount.active === false || (taxAccount.company_id && taxAccount.company_id !== company)) throw new Error('Configure the expense tax and its account');

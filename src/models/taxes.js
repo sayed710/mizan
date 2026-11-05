@@ -330,7 +330,7 @@ export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, company
   const by = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
-    for (const t of computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null }).taxes) {
+    for (const t of computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null, side }).taxes) {
       if (!t.tax_cash_basis) continue;
       const { explicit, splits } = taxRepartitionSplits(t, l, side, documentCurrency);
       for (const { row, amount, base } of splits) {

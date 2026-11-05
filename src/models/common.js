@@ -135,8 +135,8 @@ export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(d
   const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
   if (rounding && rounding.strategy === 'biggest_tax' && baseTax !== 0) {
     const rawTotal = mixedDiscountFactor(term) !== 1
-      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).untaxed + baseTax, docCurr)
-      : amounts(r.invoice_line_ids, docCurr, { roundingMethod }).total;
+      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).untaxed + baseTax, docCurr)
+      : amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).total;
     const roundedTotal = roundCurrency(cashRound(rawTotal, rounding.rounding, rounding.rounding_method), docCurr);
     const diff = roundCurrency(roundedTotal - rawTotal, docCurr);
     return roundCurrency(baseTax + diff, docCurr);
@@ -155,7 +155,7 @@ export function total(r, db) {
   const base = !db && r.amount_total != null
     ? r.amount_total
     : mixed
-      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod }).untaxed + invoiceTaxAmount(r, db, roundingMethod), docCurr)
+      ? roundCurrency(amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).untaxed + invoiceTaxAmount(r, db, roundingMethod), docCurr)
       : amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).total;
   if (r.invoice_cash_rounding_id && r.state === 'posted') {
     const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
