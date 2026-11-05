@@ -238,6 +238,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
+  'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -457,6 +458,8 @@ export function reverseDepreciation(db, move, options = {}) {
   if ((db.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === move.id)) throw new Error('This depreciation has already been reversed');
   const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
   const revDate = opts.date ?? today();
+  // A reversal cannot be booked before the depreciation it reverses (Qodo 52).
+  if (!validDate(revDate) || revDate < (move.date ?? move.invoice_date)) throw new Error('The reversal date cannot be before the depreciation entry date');
   const revJournal = opts.journal_id ?? move.journal_id;
   const reason = String(opts.reason ?? '').trim();
   const ref = reason ? `Reversal of ${move.name}, ${reason}` : `Reversal of ${move.name}`;
@@ -872,8 +875,9 @@ export function debitNote(db, r, options = {}) {
     currency_id: r.currency_id ?? null,
     fiscal_position_id: r.fiscal_position_id ?? null,
     ...(r.invoice_cash_rounding_id ? { invoice_cash_rounding_id: r.invoice_cash_rounding_id } : {}),
+    // Order and rental links stay on the source: a debit note never counts as a billed rental charge (Qodo 62).
     invoice_line_ids: copyLines
-      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, ...line }) => ({ ...line }))
+      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, rental_id, rental_charge, ...line }) => ({ ...line }))
       : [],
     ref,
   });

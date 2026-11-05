@@ -257,7 +257,7 @@ function postedPurchaseQuantities(db, order) {
   const byKey = new Map(keyedLines.map((line) => [line.purchase_line_key, line]));
   if (byKey.size !== keyedLines.length) throw new Error('Configure a unique purchase order line link for each line');
   for (const move of search(db, 'account.move').filter((move) => move.purchase_id === order.id && move.state === 'posted' && ['in_invoice', 'in_refund'].includes(move.move_type))) {
-    if (move.company_id !== order.company_id) throw new Error('Purchase order and posted bill must belong to the same company');
+    if ((move.company_id ?? 1) !== (order.company_id ?? 1)) throw new Error('Purchase order and posted bill must belong to the same company');
     for (const line of move.invoice_line_ids ?? []) {
       if (isSectionOrNote(line)) continue;
       const source = byKey.get(line.purchase_line_key);
@@ -275,7 +275,7 @@ function postedPurchaseQuantities(db, order) {
 
 /** Unbilled confirmed purchase allocations in company currency (costs negative), derived on every report. */
 function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
-  return search(db, 'purchase.order').filter((order) => ['purchase', 'done'].includes(order.state) && order.company_id === company_id
+  return search(db, 'purchase.order').filter((order) => ['purchase', 'done'].includes(order.state) && (order.company_id ?? 1) === company_id
     && inPeriod({ date: dayOf(order.date_order) }, from, to)).flatMap((order) => {
     const billed = postedPurchaseQuantities(db, order);
     return (order.order_line ?? []).flatMap((line) => {

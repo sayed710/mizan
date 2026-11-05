@@ -335,8 +335,12 @@ export function postCompanyDeferrals(db, companyId, upTo = today()) {
  * block (manual cancel); resetting the source document instead corrects grouped contributions with adjustment entries.
  */
 function cancelDeferralError(db, schedule, { grouped = false } = {}) {
-  const openGrouped = grouped && (db.records['account.move'] ?? []).some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id));
-  return openGrouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id) ? 'Reverse the recognition entries before cancelling this deferral' : null;
+  const moves = db.records['account.move'] ?? [];
+  // A board entry reversed through the journal-entry action counts as reversed (Qodo 48). A grouped entry's own
+  // next-day reversal is part of its period snapshot, so grouped recognition still blocks until it is handled.
+  const reversed = new Set(moves.filter((m) => m.state === 'posted' && m.reversed_entry_id).map((m) => m.reversed_entry_id));
+  const openGrouped = grouped && moves.some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id));
+  return openGrouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id && !reversed.has(line.move_id)) ? 'Reverse the recognition entries before cancelling this deferral' : null;
 }
 
 export const deferredModels = {

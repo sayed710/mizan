@@ -28,7 +28,7 @@ const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?
  * Apply every installed app's scheduled action due at `at`; returns the same db object when nothing changed. A job that throws
  * (e.g. a locked period) leaves db unchanged so the other jobs still run, and is reported through `onError`.
  */
-export function runScheduledJobs(db, at = today(), { onError = () => {}, deliverFollowUp = null } = {}) {
+export function runScheduledJobs(db, at = today(), { onError = () => {}, deliverFollowUp = null, commitFollowUps = null } = {}) {
   const tolerant = (step) => (d, ...args) => {
     try {
       return step(d, ...args);
@@ -51,7 +51,13 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
     ['inventory', (db, at) => replenish(db, at)],
-    ['accounting', (db, at) => runFollowUps(db, at, deliverFollowUp)],
+    // Sent reminders are saved at once (commitFollowUps returns the db to continue from), so a later failing job
+    // or conflict cannot leave an already-emailed follow-up eligible again (Qodo 11).
+    ['accounting', (db, at) => {
+      const sent = runFollowUps(db, at, deliverFollowUp);
+      const save = (state) => (commitFollowUps && state !== db ? commitFollowUps(db, state) : state);
+      return sent && typeof sent.then === 'function' ? sent.then(save) : save(sent);
+    }],
     ['accounting', (db) => autoReconcile(db)],
     ['automation', tolerant(processDue)],
     ['social', publishDue],

@@ -4,6 +4,7 @@ import { addDays, today } from './common.js';
 import { journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
+import { configuredAccount } from './configured-account.js';
 
 /** Depreciation settings of an asset without a model. */
 export const ASSET_DEPRECIATION_DEFAULTS = { method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false };
@@ -152,7 +153,9 @@ export function pauseAsset(db, asset, date = today()) {
 /** Shift remaining periods by the paused days and recompute their residual amounts. */
 export function resumeAsset(db, asset, date = today()) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
-  if (asset.state !== 'paused' || !asset.pause_date) throw new Error('The asset needs a recorded pause date before it can be resumed');
+  if (asset.state !== 'paused') throw new Error('Only a paused asset can be resumed');
+  // Paused before pause dates were recorded: no pause period is known, so the board resumes unshifted, as it then did.
+  if (!asset.pause_date) return write(db, 'account.asset', asset.id, { state: 'open' });
   if (date < asset.pause_date) throw new Error('Resume date cannot precede the pause date');
   const days = dayNumber(date) - dayNumber(asset.pause_date);
   const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
@@ -250,6 +253,8 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
       counterpartAcc = accountId ?? asset.account_depreciation_expense_id;
       if (!counterpartAcc) throw new Error('Configure a loss or expense account on the asset (or select a counterpart account) for the impairment');
     }
+    // A selected counterpart must be active and belong to the asset company, like the asset's own accounts (Qodo 39).
+    counterpartAcc = configuredAccount(nextDb, counterpartAcc, company, 'counterpart', asset.name || 'the asset');
     const lines = delta > 0
       ? [
           { account: assetAcc, debit: delta / 100 },

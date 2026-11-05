@@ -1183,7 +1183,9 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     const level = followUpLevel(scope, part, at);
 
     const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-    const detail = `${level?.name ?? 'Payment reminder'}: ${round(part.total)} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
+    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
+    const overdue = part.total == null ? 'Amounts' : round(part.total);
+    const detail = `${level?.name ?? 'Payment reminder'}: ${overdue} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
     const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
 

@@ -1101,8 +1101,13 @@ const runJobs = async () => {
   if (jobsRunning) return;
   jobsRunning = true;
   try {
-    const base = db;
-    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null });
+    let base = db;
+    const commitFollowUps = (before, after) => {
+      commitDb(applyDiff(db, diffDb(before, after), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+      base = db;
+      return db;
+    };
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null, commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });

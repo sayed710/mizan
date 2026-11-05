@@ -734,7 +734,8 @@ MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral a
   const lines = (db.records['account.bank.statement.line'] ?? []).map(({ counterpart, ...line }) => {
     if (counterpart == null || line.counterpart_account_id) return line;
     const matches = accounts.filter((a) => a.code === counterpart && (a.company_id ?? 1) === (line.company_id ?? 1));
-    return matches.length === 1 ? { ...line, counterpart_account_id: matches[0].id } : line;
+    // An unresolved code stays on the line so the user's choice is not lost (Qodo 40).
+    return matches.length === 1 ? { ...line, counterpart_account_id: matches[0].id } : { ...line, counterpart };
   });
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
 } });
