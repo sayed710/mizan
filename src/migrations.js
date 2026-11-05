@@ -845,6 +845,31 @@ MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding 
   } };
 } });
 
+MIGRATIONS.push({ version: 34, name: 'Default general journal for companies with a single general journal', up: (db) => {
+  const journals = db.records?.['account.journal'] ?? [];
+  const reports = [...(db.migration_reports ?? [])];
+  const companies = (db.records?.['res.company'] ?? []).map((company) => {
+    if (company.default_general_journal_id) return company;
+    const candidates = journals.filter((j) => j.type === 'general' && (j.company_id ?? 1) === company.id);
+    if (candidates.length === 1) {
+      return { ...company, default_general_journal_id: candidates[0].id };
+    }
+    reports.push({
+      company_id: company.id,
+      name: company.name,
+      company: company.name,
+      journal_count: candidates.length,
+      message: `Company ${company.name} has ${candidates.length} general journals; set default general journal in the company settings`,
+    });
+    return company;
+  });
+  return {
+    ...db,
+    records: { ...db.records, 'res.company': companies },
+    ...(db.migration_reports || reports.length ? { migration_reports: reports } : {}),
+  };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

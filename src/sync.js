@@ -104,8 +104,9 @@ function generatedRevaluationMoves(seen, original, changed) {
       && candidate.reversal_move_id === reversal.id
     ));
     if (reversalLinks.length !== 1 || reversalLinks[0].id !== reversal.id
-      || adjustmentLinks.length !== 1 || adjustmentLinks[0].id !== adjustment.id
-      || !isRevaluationMovePair(original, adjustment, reversal)) continue;
+      || adjustmentLinks.length !== 1 || adjustmentLinks[0].id !== adjustment.id) continue;
+    // isRevaluationMovePair recomputes the pair from the staged snapshot without the submitted pair itself.
+    if (!isRevaluationMovePair(seen, adjustment, reversal)) continue;
     generated.add(adjustment.id);
     generated.add(reversal.id);
   }
@@ -649,7 +650,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
-  const staged = { ...db, records };
+  const stagedSeq = { ...db.seq };
+  for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
+  const staged = { ...db, records, seq: stagedSeq };
   const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
   const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
     model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed, revaluationMoves) ? [rec.id] : []

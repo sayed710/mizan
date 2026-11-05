@@ -260,7 +260,7 @@ function revaluationJournalId(db, company) {
     ? read(db, 'account.journal', settings.default_general_journal_id)
     : null;
   if (!journal || journal.type !== 'general' || (journal.company_id && journal.company_id !== company)) {
-    throw new Error(`Configure a default general journal for company ${company} before revaluing foreign balances`);
+    throw new Error(`Configure a default general journal for company ${company} in the company settings before revaluing foreign balances`);
   }
   return journal.id;
 }
@@ -341,8 +341,15 @@ export function isRevaluationMovePair(db, adjustment, reversal) {
     || adjustment.reversal_move_id !== reversal.id || reversal.reversed_entry_id !== adjustment.id
     || (reversal.company_id ?? 1) !== company) return false;
 
-  const expected = revalueForeignBalances(db, date, { companyId: company });
-  const existingIds = new Set((db.records['account.move'] ?? []).map((move) => move.id));
+  const moves = (db.records['account.move'] ?? []).filter((m) => m.id !== adjustment.id && m.id !== reversal.id);
+  const maxMoveId = Math.max(0, db.seq?.['account.move'] ?? 0, ...moves.map((m) => m.id ?? 0));
+  const snapshot = {
+    ...db,
+    records: { ...db.records, 'account.move': moves },
+    seq: { ...db.seq, 'account.move': maxMoveId },
+  };
+  const expected = revalueForeignBalances(snapshot, date, { companyId: company });
+  const existingIds = new Set((snapshot.records['account.move'] ?? []).map((move) => move.id));
   const newAdjustments = (expected.records['account.move'] ?? []).filter((move) => (
     !existingIds.has(move.id) && move.revaluation_date === date
     && (move.company_id ?? 1) === company && move.reversal_move_id
