@@ -204,7 +204,8 @@ function foreignJournalPositions(db, date, { accountTypes = revaluableTypes, exc
       groups.set(key, row);
     });
   }
-  return [...groups.values()].filter((row) => row.foreign).map((row) => {
+  // A zero foreign balance can still carry a company-currency balance from different rates; it revalues to zero.
+  return [...groups.values()].filter((row) => row.foreign || row.booked).map((row) => {
     const own = companyCurrencyRecord(db, row.company_id);
     const value = roundCurrency(toCompany(db, row.currency_id, row.foreign, date, row.company_id), own);
     return { ...row, residual: row.foreign, value, difference: roundCurrency(value - row.booked, own) };
@@ -230,29 +231,30 @@ export function foreignBalanceReport(db, date, { companyId = null, companyScoped
   return [...invoices, ...manual];
 }
 
-function sameRevaluation(entry, expected) {
-  const totals = (items) => {
-    const map = new Map();
-    for (const line of items) {
-      const account = line.account_id;
-      if (!account) return null;
-      const key = `${account}:${line.partner_id ?? ''}`;
-      map.set(key, round((map.get(key) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0)));
-    }
-    return [...map].filter(([, amount]) => amount).sort(([a], [b]) => a.localeCompare(b));
-  };
-  const wanted = totals(expected);
-  const actual = totals(entry.line_ids ?? []);
-  return wanted && actual && JSON.stringify(wanted) === JSON.stringify(actual);
+/** Net company-currency amount per account and partner; rejects lines without an account. */
+function revaluationTotals(lines, totals = new Map()) {
+  for (const line of lines) {
+    if (!line.account_id) throw new Error('A foreign currency revaluation line has no account');
+    const key = `${line.account_id}:${line.partner_id ?? ''}`;
+    const row = totals.get(key) ?? { account_id: line.account_id, partner_id: line.partner_id ?? null, amount: 0 };
+    totals.set(key, { ...row, amount: round(row.amount + (Number(line.debit) || 0) - (Number(line.credit) || 0)) });
+  }
+  return totals;
 }
 
-/** Post one exchange adjustment and its next-day reversal, once per date. */
+/**
+ * Post the exchange adjustment for a date, with its next-day reversal. Adjustments already posted for that
+ * company and date count towards the target, so a rerun posts only the change (nothing when unchanged), and a
+ * position that moved or vanished after an earlier run is corrected instead of left stale.
+ */
 export function revalueForeignBalances(db, date, { companyScoped = false, companyId = null } = {}) {
   checkDate(date);
   const rows = foreignBalanceReport(db, date, { companyId, companyScoped }).filter((r) => r.difference);
+  const visible = search(companyId || !companyScoped ? db : companyViewDb(db), 'account.move')
+    .filter((m) => (!companyId || (m.company_id ?? 1) === companyId) && m.revaluation_date === date && m.state === 'posted');
   const plans = [];
   // Validate every company and any existing adjustment before constructing entries.
-  for (const company of [...new Set(rows.map((r) => r.company_id))]) {
+  for (const company of [...new Set([...rows.map((r) => r.company_id), ...visible.map((m) => m.company_id ?? 1)])]) {
     const settings = read(db, 'res.company', company);
     if (!settings) throw new Error('A revaluation company no longer exists');
     let gain = 0;
@@ -269,14 +271,15 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
     const expected = [...lines];
     if (gain) expected.push({ account_id: exchangeAccount(db, company, 1), credit: gain });
     if (loss) expected.push({ account_id: exchangeAccount(db, company, -1), debit: loss });
-    const prior = search(db, 'account.move').find((m) => (m.company_id ?? 1) === company && m.revaluation_date === date && m.state === 'posted');
-    if (prior) {
-      if (!sameRevaluation(prior, expected)) {
-        throw new Error(`Company ${settings.name || company} already has a foreign currency revaluation dated ${date}; reverse it before regenerating the updated position`);
-      }
-      continue;
-    }
-    plans.push({ company, expected });
+    const booked = visible.filter((m) => (m.company_id ?? 1) === company)
+      .reduce((totals, m) => revaluationTotals(m.line_ids ?? [], totals), new Map());
+    const wanted = revaluationTotals(expected);
+    const delta = [...new Set([...wanted.keys(), ...booked.keys()])].map((key) => {
+      const row = wanted.get(key) ?? booked.get(key);
+      const amount = companyRound((wanted.get(key)?.amount ?? 0) - (booked.get(key)?.amount ?? 0));
+      return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
+    }).filter((line) => line.debit || line.credit);
+    if (delta.length) plans.push({ company, expected: delta });
   }
 
   let next = db;

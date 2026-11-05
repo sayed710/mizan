@@ -357,10 +357,27 @@ export function fxProvenanceError(db, entry) {
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
+    let offset;
+    try {
+      offset = exchangeAccount(db, invoice.company_id, clearsDebit ? amount : -amount);
+    } catch (error) {
+      return error.message;
+    }
+    // Exactly the open-item line and the configured gain/loss line, both for this amount (as offsetCreditNote posts it).
     const lines = entry.line_ids ?? [];
+    const side = (l, field) => companyRound(Number(l[field]) || 0);
     const openLine = lines.find((l) => l.account_id === account && l.partner_id === invoice.partner_id);
-    if (!openLine || companyRound(Number(clearsDebit ? openLine.debit : openLine.credit)) !== amount) {
+    const fxLine = lines.find((l) => l !== openLine && l.account_id === offset && !l.partner_id);
+    const [open, close] = clearsDebit ? ['debit', 'credit'] : ['credit', 'debit'];
+    if (entry.state !== 'posted' || entry.move_type !== 'entry' || (entry.company_id ?? 1) !== (invoice.company_id ?? 1) || entry.invoice_date !== invRow.date
+      || lines.length !== 2 || !openLine || !fxLine || side(openLine, open) !== amount || side(openLine, close) || side(fxLine, close) !== amount || side(fxLine, open)) {
       return 'A dedicated posted exchange entry must match the settlement';
+    }
+    // One settlement books its exchange difference once; a reversed earlier entry no longer counts.
+    const moves = db.records['account.move'] ?? [];
+    const live = (m) => m.state === 'posted' && !m.reversal_move_id && !moves.some((r) => r.state === 'posted' && r.reversed_entry_id === m.id);
+    if (moves.some((m) => m.id !== entry.id && m.fx_payment_move_id === source.id && m.fx_invoice_id === invoice.id && live(m))) {
+      return 'Exchange entry is already used by another settlement';
     }
     return null;
   }

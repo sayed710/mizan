@@ -160,7 +160,15 @@ test('a changed exposure cannot be silently skipped by a repeated revaluation', 
   const firstInvoice = invoice(currency.db, { partner: 3, currency: currency.id, date: '2030-01-15', amount: 100 });
   const first = revalueForeignBalances(firstInvoice.db, '2030-02-28', { companyId: 1 });
   const lateInvoice = invoice(first, { partner: 3, currency: currency.id, date: '2030-01-20', amount: 100 });
-  const snapshot = JSON.stringify(lateInvoice.db);
-  assert.throws(() => revalueForeignBalances(lateInvoice.db, '2030-02-28', { companyId: 1 }), /reverse it before regenerating the updated position/);
-  assert.equal(JSON.stringify(lateInvoice.db), snapshot);
+  // Qodo 32: the rerun posts the change on top of the earlier adjustment instead of skipping or blocking the date.
+  const second = revalueForeignBalances(lateInvoice.db, '2030-02-28', { companyId: 1 });
+  const adjustments = search(second, 'account.move').filter((m) => m.revaluation_date === '2030-02-28');
+  assert.equal(adjustments.length, 2);
+  const receivable = accountId(second, '121000');
+  const net = (moves) => moves.flatMap((m) => m.line_ids).filter((l) => l.account_id === receivable).reduce((sum, l) => sum + l.debit - l.credit, 0);
+  const once = net(search(first, 'account.move').filter((m) => m.revaluation_date === '2030-02-28'));
+  assert.notEqual(once, 0);
+  // Both invoices are identical, so the date's adjustments together must cover twice the first exposure.
+  assert.equal(net(adjustments), 2 * once);
+  assert.equal(revalueForeignBalances(second, '2030-02-28', { companyId: 1 }), second);
 });
