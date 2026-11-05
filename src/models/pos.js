@@ -5,7 +5,7 @@ import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valu
 import { roundingAccount } from './configured-account.js';
 import { stockAccount } from './stock-accounts.js';
 import { assertCompanyAccount, invoiceLineAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
-import { fiscalPositionFor, productTax } from './taxes.js';
+import { fiscalPositionFor, productTax, resolveLineTaxes } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
@@ -274,6 +274,17 @@ function validateRefundSource(db, { lines, refund_of, config_id, session }) {
   if (refund_of) {
     if (search(db, 'pos.order').some((o) => o.refund_of === original.id)) throw new Error('This order was already refunded');
     if (original.state !== 'paid') throw new Error('Only paid orders can be refunded');
+    for (const line of original.lines) {
+      if (resolveLineTaxes(line).some((tax) => (tax.tax_id || tax.invoice_repartition_line_ids.length) && !tax.refund_repartition_line_ids.some((row) => row.repartition_type === 'tax'))) {
+        throw new Error('The original order is missing its refund tax snapshot; a manual refund is required');
+      }
+    }
+    const currency = companyCurrencyRecord(db, session.company_id);
+    const invoiced = amounts(original.lines, currency, { side: 'invoice' });
+    const refunded = amounts(original.lines, currency, { side: 'refund' });
+    if (invoiced.tax !== refunded.tax || invoiced.untaxed !== refunded.untaxed) {
+      throw new Error('Refund tax amounts differ from the original order; a manual refund is required');
+    }
     const origCompany = orderCompany(db, original);
     if ((session.company_id ?? 1) !== origCompany) {
       throw new Error('POS session company does not match the order company');
@@ -580,10 +591,18 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
   if (entries.some((m) => !m || m.state !== 'posted' || (m.company_id ?? 1) !== (session.company_id ?? 1) || valuationMoveIds.has(m.id))) throw new Error('Original POS entries are invalid');
   let reversed = stocked;
   const reversedIds = [];
+  const hasSnapshotTaxes = original.lines.some((line) => resolveLineTaxes(line).some((tax) => tax.refund_repartition_line_ids.length));
+  const saleEntry = entries.find((entry) => entry.journal_id === (read(db, 'pos.session', original.session_id)?.journal_id));
+  const refundTaxes = hasSnapshotTaxes ? invoiceLines(db, {
+    move_type: 'out_refund', journal_id: saleEntry?.journal_id, company_id: session.company_id,
+    partner_id: original.partner_id, fiscal_position_id: original.preset_snapshot?.fiscal_position_id,
+    name, invoice_line_ids: original.lines.map((line) => ({ ...line, tax_cash_basis: false })),
+  }).filter((line) => line.tax_side && !line.tax_zero && !line.tax_grid_base) : [];
   for (const entry of entries) {
     const journal = read(db, 'account.journal', entry.journal_id);
     if (!journal) throw new Error('Original POS journal was not found');
-    const lines = entry.line_ids.map((l) => ({ ...l, debit: l.credit, credit: l.debit, ...(l.tax_zero ? { tax_base: -(Number(l.tax_base) || 0) } : {}) }));
+    const lines = entry.line_ids.filter((l) => !(hasSnapshotTaxes && entry.id === saleEntry?.id && l.tax_side && !l.tax_zero && !l.tax_grid_base)).map((l) => ({ ...l, debit: l.credit, credit: l.debit, ...(l.tax_zero ? { tax_base: -(Number(l.tax_base) || 0) } : {}) }));
+    if (entry.id === saleEntry?.id) lines.push(...refundTaxes);
     const result = postEntry(reversed, { journal: journal.code, journal_id: journal.id, company: session.company_id, ref: name, lines });
     reversed = result.db;
     reversedIds.push(result.id);
