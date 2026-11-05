@@ -302,6 +302,7 @@ function restoreScheduledReversals(db, scheduledReversalsBefore, autoPostMoveFn)
 export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
   const plan = validateInvoiceDeferralCredit(db, note);
   if (!plan.length) return db;
+  const noteDate = note.date ?? note.invoice_date ?? today();
   let next = db;
   for (const item of plan) {
     const schedule = read(next, 'account.deferral', item.schedule.id);
@@ -341,8 +342,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       const share = item.full || remainingInvoiceAmount <= 0 ? 1 : item.currentAmount / remainingInvoiceAmount;
       const adjustmentAmount = roundCurrency(contributedAmount * share, currency);
       if (!adjustmentAmount) continue;
-      const sourceDate = sourceMove.invoice_date ?? sourceMove.date ?? note.invoice_date;
-      const sourceCorrection = postRecognitionCorrection(next, schedule, sourceMove, adjustmentAmount, sourceDate, note, true);
+      const sourceCorrection = postRecognitionCorrection(next, schedule, sourceMove, adjustmentAmount, noteDate, note, true);
       next = sourceCorrection.db;
       if (sourceCorrection.id) adjustmentMoveIds.push(sourceCorrection.id);
 
@@ -355,8 +355,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       if (roundCurrency(reversedAmount * share, currency) !== adjustmentAmount) {
         throw new Error('The grouped deferral reversal no longer matches its source contribution');
       }
-      const reversalDate = reversal.invoice_date ?? reversal.date ?? note.invoice_date;
-      const revCorrection = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, reversalDate, note, false);
+      const revCorrection = postRecognitionCorrection(next, schedule, reversal, adjustmentAmount, noteDate, note, false);
       next = revCorrection.db;
       if (revCorrection.id) adjustmentMoveIds.push(revCorrection.id);
     }
@@ -383,8 +382,8 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     if (item.full && item.previousAmount === 0) {
       if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse posted recognition entries');
       for (const { line, recognitionMove, outstanding } of eligiblePosted) {
-        const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
-        const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
+        const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? noteDate;
+        const date = noteDate < moveDate ? moveDate : noteDate;
         const cancelledReversals = cancelScheduledReversals(next, recognitionMove);
         next = cancelledReversals.db;
         scheduledReversalsBefore.push(...cancelledReversals.scheduled_reversals_before);
@@ -410,8 +409,8 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
           const adjustmentAmount = allocatedAmounts[i];
           if (!adjustmentAmount) continue;
           const { line, recognitionMove } = eligiblePosted[i];
-          const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
-          const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
+          const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? noteDate;
+          const date = noteDate < moveDate ? moveDate : noteDate;
           const correction = postRecognitionCorrection(next, schedule, recognitionMove, adjustmentAmount, date, note, true);
           next = correction.db;
           if (correction.id) adjustmentMoveIds.push(correction.id);
