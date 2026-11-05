@@ -469,7 +469,7 @@ test('Cashflow Analysis menu groups statement amounts by month and pivots by jou
   line(cash.id, 1, '2026-03-01', 20, 'Cash in');
   line(bank.id, 1, '2026-01-31', 900, 'Outside period');
   line(foreign.id, other.id, '2026-02-03', 250, 'Foreign');
-  db = create(db, 'account.bank.statement.line', { company_id: 1, date: '2026-02-05', amount: 800, payment_ref: 'No journal' }).db;
+  db = { ...db, records: { ...db.records, 'account.bank.statement.line': [...(db.records['account.bank.statement.line'] ?? []), { id: 99999, company_id: 1, date: '2026-02-05', amount: 800, payment_ref: 'No journal', state: 'to_check' }] } };
   db = updateSettings(db, { current_company_id: 1, allowed_company_ids: [1] });
   await commit(db);
   location.hash = '#/accounting/cashflow-analysis';

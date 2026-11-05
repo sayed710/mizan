@@ -43,7 +43,9 @@ test('Finding 5: bank statement reconciliation matching payments created without
   const pEntry = read(db, 'account.move', p.move_id);
   assert.ok(pEntry.line_ids.some((l) => l.account_id === bankAcc && l.debit === 100));
 
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank').id;
   const stmtLine = create(db, 'account.bank.statement.line', {
+    journal_id: bankJournal,
     date: '2026-01-03',
     payment_ref: 'Direct bank match',
     amount: 100,

@@ -39,9 +39,10 @@ export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
   const lines = camt ? parseCamt(text) : parseOfx(text);
   if (!lines.length) throw new Error('No transactions found in this file');
-  const journal = defaults.journal_id ? read(db, 'account.journal', defaults.journal_id) : null;
-  if (defaults.journal_id && !journal) throw new Error('The bank journal does not exist');
-  if (journal && defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
+  if (!defaults.journal_id) throw new Error('Bank Journal is required');
+  const journal = read(db, 'account.journal', defaults.journal_id);
+  if (!journal) throw new Error('The bank journal does not exist');
+  if (defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);

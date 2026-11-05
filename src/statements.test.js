@@ -32,14 +32,17 @@ test('CAMT.053 entries parse with debit sign, date-time and escaped references',
 });
 
 test('importing creates lines to reconcile and skips transactions already imported', () => {
-  const before = search(seed(), 'account.bank.statement.line').length;
-  const first = importStatement(seed(), 'may.ofx', OFX);
+  const initial = seed();
+  const bankJournal = search(initial, 'account.journal').find((j) => j.type === 'bank').id;
+  const defaults = { journal_id: bankJournal };
+  const before = search(initial, 'account.bank.statement.line').length;
+  const first = importStatement(initial, 'may.ofx', OFX, defaults);
   assert.equal(first.count, 2);
-  const again = importStatement(first.db, 'may.ofx', OFX);
+  const again = importStatement(first.db, 'may.ofx', OFX, defaults);
   assert.equal(again.count, 0);
   const lines = search(again.db, 'account.bank.statement.line');
   assert.equal(lines.length, before + 2);
   assert.ok(lines.slice(-2).every((l) => l.state === 'to_check'));
-  assert.equal(importStatement(seed(), 'stmt.xml', CAMT.replaceAll('Ccy="EUR"', 'Ccy="USD"')).count, 2);
-  assert.throws(() => importStatement(seed(), 'x.ofx', 'nothing'), /No transactions/);
+  assert.equal(importStatement(initial, 'stmt.xml', CAMT.replaceAll('Ccy="EUR"', 'Ccy="USD"'), defaults).count, 2);
+  assert.throws(() => importStatement(initial, 'x.ofx', 'nothing', defaults), /No transactions/);
 });

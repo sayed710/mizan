@@ -15,6 +15,7 @@ import { portalPayQuote } from '../server/portal.js';
 import { postBatch } from './models/payments.js';
 
 const reverse = (db, id) => models['account.payment'].form.buttons.find((b) => b.label === 'Reverse').run(db, read(db, 'account.payment', id)).db;
+const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 const balanceOf = (db, code) => Math.round(journalItems(db).filter((l) => l.account_id === accountId(db, code)).reduce((s, l) => s + l.debit - l.credit, 0) * 100) / 100;
 const invoice = (db, price, vals = {}) => {
   const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: price, discount: 0, tax: 0 }], ...vals });
@@ -68,7 +69,7 @@ test('cash-basis tax released by the payment goes back to the transition account
 
 test('a payment made by a bank reconciliation is not reversed from the payment form', () => {
   const { db, id } = invoice(seed(), 250);
-  const { db: lined, id: lineId } = create(db, 'account.bank.statement.line', { date: '2026-03-07', payment_ref: 'INV', amount: 250, partner_id: 1 });
+  const { db: lined, id: lineId } = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2026-03-07', payment_ref: 'INV', amount: 250, partner_id: 1 });
   const matched = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Reconcile').run(lined, read(lined, 'account.bank.statement.line', lineId)).db;
   const payment = search(matched, 'account.payment').find((p) => p.invoice_id === id);
   assert.throws(() => reverse(matched, payment.id), /reconciled bank transaction/);
@@ -78,7 +79,7 @@ test('an unrelated bank reconciliation does not block reversing a matching manua
   const inv = invoice(seed(), 500);
   const manual = payMove(inv.db, inv.id, 250, '2026-03-07');
   const payment = search(manual, 'account.payment').find((p) => p.invoice_id === inv.id);
-  const line = create(manual, 'account.bank.statement.line', { date: '2026-03-07', payment_ref: 'Bank portion', amount: 250, partner_id: 1 });
+  const line = create(manual, 'account.bank.statement.line', { journal_id: bankJournalId(manual), date: '2026-03-07', payment_ref: 'Bank portion', amount: 250, partner_id: 1 });
   const matched = reconcileWith(line.db, read(line.db, 'account.bank.statement.line', line.id), inv.id);
   const reversed = reverse(matched, payment.id);
   assert.equal(read(reversed, 'account.move', inv.id).amount_residual, 250);
@@ -88,7 +89,7 @@ test('an unrelated bank reconciliation does not block reversing a matching manua
 
 test('legacy bank reconciliations without payment identity fail closed during reversal', () => {
   const inv = invoice(seed(), 100);
-  const line = create(inv.db, 'account.bank.statement.line', { date: '2026-03-07', payment_ref: 'Legacy', amount: 100, partner_id: 1 });
+  const line = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournalId(inv.db), date: '2026-03-07', payment_ref: 'Legacy', amount: 100, partner_id: 1 });
   const matched = reconcileWith(line.db, read(line.db, 'account.bank.statement.line', line.id), inv.id);
   const legacy = { ...matched, records: { ...matched.records, 'account.bank.statement.line': matched.records['account.bank.statement.line'].map(({ payment_move_id, ...l }) => l) } };
   const payment = search(legacy, 'account.payment').find((p) => p.invoice_id === inv.id);

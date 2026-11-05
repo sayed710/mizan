@@ -10,6 +10,7 @@ import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
+const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 
 function invoice(db, company, amount) {
   const move = create(db, 'account.move', { company_id: company, move_type: 'out_invoice', partner_id: 3, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit: amount, tax: 0 }] });
@@ -24,12 +25,12 @@ test('journal-less inbound batch matches a statement in its payments company', (
   const batch = create(inv.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: inv.id, amount: 100 }] });
   db = run(batch.db, 'account.batch.payment', batch.id, 'Validate');
   assert.equal(read(db, 'account.batch.payment', batch.id).journal_id, undefined);
-  const statement = create(db, 'account.bank.statement.line', { company_id: branch.id, date: '2025-01-03', amount: 100, payment_ref: 'Branch receipt' });
+  const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: branch.id, date: '2025-01-03', amount: 100, payment_ref: 'Branch receipt' });
   db = write(statement.db, 'account.bank.statement.line', statement.id, { batch_payment_id: batch.id });
   db = run(db, 'account.bank.statement.line', statement.id, 'Match Payment');
   assert.equal(read(db, 'account.bank.statement.line', statement.id).state, 'reconciled');
   assert.equal(read(db, 'account.move', read(db, 'account.bank.statement.line', statement.id).bank_move_id).company_id, branch.id);
-  assert.throws(() => create(db, 'account.bank.statement.line', { company_id: 1, date: '2025-01-03', amount: 100, payment_ref: 'Wrong company', batch_payment_id: batch.id }), /another company/);
+  assert.throws(() => create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: 1, date: '2025-01-03', amount: 100, payment_ref: 'Wrong company', batch_payment_id: batch.id }), /another company/);
 });
 
 test('journal-less inbound batch rejects mixed-company invoices before posting', () => {
@@ -53,7 +54,7 @@ test('matching rejects an existing journal-less batch with payments from differe
     db = run(batch.db, 'account.batch.payment', batch.id, 'Validate');
     batches.push(read(db, 'account.batch.payment', batch.id));
   }
-  const statement = create(db, 'account.bank.statement.line', { company_id: 1, date: '2025-01-03', amount: 100, payment_ref: 'Mixed batch', batch_payment_id: batches[0].id });
+  const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: 1, date: '2025-01-03', amount: 100, payment_ref: 'Mixed batch', batch_payment_id: batches[0].id });
   db = write(statement.db, 'account.batch.payment', batches[0].id, { lines: [...batches[0].lines, ...batches[1].lines] });
   assert.throws(() => write(db, 'account.bank.statement.line', statement.id, { batch_payment_id: batches[0].id }), /another company/);
   assert.throws(() => run(db, 'account.bank.statement.line', statement.id, 'Match Payment'), /another company/);
@@ -76,8 +77,8 @@ test('matching foreign invoice payments clears each booked company-currency outs
     assert.equal(payment.amount, 100);
     paymentIds.push(payment.id);
   }
-  const statement = create(db, 'account.bank.statement.line', { company_id: 1, date: '2025-01-04', amount: 75, payment_ref: 'Foreign receipts', payment_ids: paymentIds });
-  const wrong = create(statement.db, 'account.bank.statement.line', { company_id: 1, date: '2025-01-04', amount: 200, payment_ref: 'Wrong value', payment_ids: paymentIds });
+  const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: 1, date: '2025-01-04', amount: 75, payment_ref: 'Foreign receipts', payment_ids: paymentIds });
+  const wrong = create(statement.db, 'account.bank.statement.line', { journal_id: bankJournalId(statement.db), company_id: 1, date: '2025-01-04', amount: 200, payment_ref: 'Wrong value', payment_ids: paymentIds });
   assert.throws(() => run(wrong.db, 'account.bank.statement.line', wrong.id, 'Match Payment'), /total the bank transaction amount/);
   db = run(statement.db, 'account.bank.statement.line', statement.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', statement.id);
@@ -104,7 +105,7 @@ for (const selection of ['single-item list', 'multiple-item list', 'batch']) {
     const batch = create(db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: batchLines });
     db = run(batch.db, 'account.batch.payment', batch.id, 'Validate');
     const selected = read(db, 'account.batch.payment', batch.id).lines.map((line) => line.payment_id);
-    const statement = create(db, 'account.bank.statement.line', { date: '2025-01-03', amount: batchLines.reduce((sum, line) => sum + line.amount, 0), payment_ref: 'Receipt', payment_id: oldPayment.id });
+    const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2025-01-03', amount: batchLines.reduce((sum, line) => sum + line.amount, 0), payment_ref: 'Receipt', payment_id: oldPayment.id });
     db = write(statement.db, 'account.bank.statement.line', statement.id, selection === 'batch' ? { batch_payment_id: batch.id } : { payment_ids: selected });
     db = run(db, 'account.bank.statement.line', statement.id, 'Match Payment');
     const matched = read(db, 'account.bank.statement.line', statement.id);
@@ -126,11 +127,11 @@ test('unbooked payment matching validates against the full statement amount', ()
     const moveId = read(db, 'account.move', next.id).payments.at(-1).move_id;
     paymentIds.push(search(db, 'account.payment').find((payment) => payment.move_id === moveId).id);
   }
-  const partial = create(db, 'account.bank.statement.line', { date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Partial payment', payment_id: paymentIds[0] });
+  const partial = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Partial payment', payment_id: paymentIds[0] });
   const before = JSON.stringify(partial.db);
   assert.throws(() => run(partial.db, 'account.bank.statement.line', partial.id, 'Match Payment'), /selected payments must total the bank transaction amount/);
   assert.equal(JSON.stringify(partial.db), before);
-  const full = create(partial.db, 'account.bank.statement.line', { date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Full payment', payment_id: paymentIds[1] });
+  const full = create(partial.db, 'account.bank.statement.line', { journal_id: bankJournalId(partial.db), date: '2025-01-03', amount: 100, open_amount: 60, payment_ref: 'Full payment', payment_id: paymentIds[1] });
   db = run(full.db, 'account.bank.statement.line', full.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', full.id);
   assert.equal(matched.state, 'reconciled');
@@ -187,7 +188,7 @@ for (const selection of ['payment list', 'batch']) {
     const posted = read(db, 'account.batch.payment', batch.id);
     const paymentId = posted.lines[0].payment_id;
     if (selection === 'batch') db = write(db, 'account.batch.payment', batch.id, { lines: [posted.lines[0], { ...posted.lines[0] }] });
-    const statement = create(db, 'account.bank.statement.line', { date: '2025-01-03', amount: 100, payment_ref: 'Duplicate receipt', ...(selection === 'batch' ? { batch_payment_id: batch.id } : { payment_ids: [paymentId, paymentId] }) });
+    const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), date: '2025-01-03', amount: 100, payment_ref: 'Duplicate receipt', ...(selection === 'batch' ? { batch_payment_id: batch.id } : { payment_ids: [paymentId, paymentId] }) });
     const before = JSON.stringify(statement.db);
     assert.throws(() => run(statement.db, 'account.bank.statement.line', statement.id, 'Match Payment'), /payment can only be selected once/i);
     assert.equal(JSON.stringify(statement.db), before);

@@ -11,16 +11,17 @@ import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 test('reconciliation model posts tax and counterpart partner and maps a partner alone', () => {
   let db = seed();
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
   const taxAccount = search(db, 'account.account').find((a) => a.code === '131000');
   const tax = create(db, 'account.tax', { name: 'Input tax', amount: 14, amount_type: 'percent', price_include: true, ...defaultTaxRepartitionLines(taxAccount.id, []) }); db = tax.db;
-  const line = create(db, 'account.bank.statement.line', { date: '2025-01-01', amount: -114, payment_ref: 'fee' }); db = line.db;
+  const line = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2025-01-01', amount: -114, payment_ref: 'fee' }); db = line.db;
   db = applyRule(db, { name: 'fee', line_ids: [{ account_id: search(db, 'account.account').find((a) => a.code === '600000').id, amount_type: 'percentage', amount: 100, tax_ids: [tax.id], partner_id: 3 }] }, read(db, 'account.bank.statement.line', line.id));
   const items = read(db, 'account.move', read(db, 'account.bank.statement.line', line.id).move_id).line_ids;
   assert.equal(items.find((l) => l.account_id === taxAccount.id).debit, 14);
   assert.equal(items.find((l) => read(db, 'account.account', l.account_id).code === '600000').debit, 100);
   assert.equal(items.find((l) => l.account_id === taxAccount.id).partner_id, 3);
   const mapping = create(db, 'account.reconcile.model', { name: 'mapping', auto_reconcile: true, match_label: 'contains', match_label_param: 'mapped', line_ids: [{ partner_id: 2 }] }); db = mapping.db;
-  const next = create(db, 'account.bank.statement.line', { date: '2025-01-01', amount: 10, payment_ref: 'mapped' }); db = autoReconcile(next.db);
+  const next = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2025-01-01', amount: 10, payment_ref: 'mapped' }); db = autoReconcile(next.db);
   assert.equal(read(db, 'account.bank.statement.line', next.id).partner_id, 2);
   assert.equal(read(db, 'account.bank.statement.line', next.id).state, 'to_check');
 });

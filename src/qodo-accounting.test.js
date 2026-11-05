@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
-import { create, read, write, unlink } from './orm.js';
+import { create, read, write, unlink, search } from './orm.js';
 import { applyDiff } from './sync.js';
 import { payMove, postMove } from './models/accounting.js';
 import { postEntry } from './models/ledger.js';
 import { reconcileWith } from './models/bank.js';
 import { moveInvariant, paymentInvariant } from './models/finance.js';
+
+const bankJournal = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 
 const invoice = (db = seed(), vals = {}) => {
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-04-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }], ...vals });
@@ -44,7 +46,7 @@ test('foreign invoice applications consume journal capacity in company currency'
 
 test('bank invoice matching links the payment entry and protects reversal', async () => {
   const inv = invoice();
-  const line = create(inv.db, 'account.bank.statement.line', { amount: 100, date: '2026-04-02', payment_ref: 'Bank' });
+  const line = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournal(inv.db), amount: 100, date: '2026-04-02', payment_ref: 'Bank' });
   const paid = reconcileWith(line.db, read(line.db, 'account.bank.statement.line', line.id), inv.id);
   const paymentEntry = read(paid, 'account.move', inv.id).payments.at(-1).move_id;
   assert.equal(read(paid, 'account.bank.statement.line', line.id).payment_move_id, paymentEntry);
@@ -56,7 +58,7 @@ test('bank invoice matching links the payment entry and protects reversal', asyn
 
 test('posted bank-linked entries already reject accounting-line and date changes', () => {
   const inv = invoice();
-  const bank = create(inv.db, 'account.bank.statement.line', { amount: 100, date: '2026-04-01', payment_ref: 'BANK', partner_id: 3 });
+  const bank = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournal(inv.db), amount: 100, date: '2026-04-01', payment_ref: 'BANK', partner_id: 3 });
   const matched = reconcileWith(bank.db, read(bank.db, 'account.bank.statement.line', bank.id), inv.id);
   const paymentId = read(matched, 'account.bank.statement.line', bank.id).payment_move_id;
   const entry = read(matched, 'account.move', paymentId);
@@ -66,14 +68,14 @@ test('posted bank-linked entries already reject accounting-line and date changes
 
 test('a reconciled bank line cannot be deleted, directly or together with its entry', () => {
   const entry = postEntry(seed(), { journal: 'BNK1', lines: [{ account: '101401', debit: 10 }, { account: '450000', credit: 10 }] });
-  const line = create(entry.db, 'account.bank.statement.line', { amount: 10, date: '2026-04-02', payment_ref: 'Bank', state: 'reconciled', move_id: entry.id });
+  const line = create(entry.db, 'account.bank.statement.line', { journal_id: bankJournal(entry.db), amount: 10, date: '2026-04-02', payment_ref: 'Bank', state: 'reconciled', move_id: entry.id });
   assert.throws(() => unlink(line.db, 'account.bank.statement.line', [line.id]), /reconciled/);
   assert.throws(() => applyDiff(line.db, { deletes: { 'account.bank.statement.line': [line.id], 'account.move': [entry.id] } }), /reconciled/);
 });
 
 test('a staged bank reconciliation protects a draft entry from deletion', () => {
   const draft = create(seed(), 'account.move', { move_type: 'entry', name: 'Draft' });
-  const line = { id: 900, amount: 10, date: '2026-04-02', payment_ref: 'Bank', state: 'reconciled', move_id: draft.id };
+  const line = { id: 900, journal_id: bankJournal(draft.db), amount: 10, date: '2026-04-02', payment_ref: 'Bank', state: 'reconciled', move_id: draft.id };
   // Direct delete-guard coverage: the staged reference must count even before the bank guard validates it.
   const staged = { ...draft.db, records: { ...draft.db.records, 'account.bank.statement.line': [line] } };
   const { protectDelete } = modelMove;

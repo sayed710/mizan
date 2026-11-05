@@ -56,7 +56,8 @@ test('early payment discount requires the configured company expense account', (
 test('reconciliation rules post the explicitly configured account id', () => {
   const account = create(seed(), 'account.account', { code: 'RULE01', name: 'Bank fees', account_type: 'expense', company_id: 1 });
   const rule = create(account.db, 'account.reconcile.model', { name: 'Explicit fee', company_id: 1, rule_type: 'writeoff_button', line_ids: [{ account_id: account.id, amount_type: 'percentage', amount: 100 }] });
-  const line = create(rule.db, 'account.bank.statement.line', { date: '2026-10-01', state: 'to_check', payment_ref: 'Fee', amount: -100 });
+  const bankJournal = search(rule.db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(rule.db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-10-01', state: 'to_check', payment_ref: 'Fee', amount: -100 });
   const db = applyRule(line.db, read(line.db, 'account.reconcile.model', rule.id), read(line.db, 'account.bank.statement.line', line.id));
   const move = read(db, 'account.move', read(db, 'account.bank.statement.line', line.id).move_id);
   assert.ok(move.line_ids.some((item) => item.account_id === account.id));

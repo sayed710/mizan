@@ -58,7 +58,8 @@ test('foreign currency write-off uses the statement-date rate and clears the boo
   const inv = create(currency.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   db = postMove(inv.db, inv.id);
   const account = search(db, 'account.account').find((a) => a.code === '690000');
-  const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'Foreign', amount: 45, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Adjustment', writeoff_amount: 5 });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-02', payment_ref: 'Foreign', amount: 45, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Adjustment', writeoff_amount: 5 });
   db = run(line.db, line.id);
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   const entry = read(db, 'account.move', read(db, LINE, line.id).writeoff_move_id);

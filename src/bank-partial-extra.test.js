@@ -13,7 +13,8 @@ for (const mode of ['Book to Account', 'rule']) test(`outbound oversized bill le
   let db = seed();
   const inv = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   db = postMove(inv.db, inv.id);
-  const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'bill and fees', amount: -130, move_id: inv.id, counterpart_account_id: search(db, 'account.account').find((a) => a.code === '690000').id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-02', payment_ref: 'bill and fees', amount: -130, move_id: inv.id, counterpart_account_id: search(db, 'account.account').find((a) => a.code === '690000').id });
   db = run(line.db, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   assert.equal(read(db, LINE, line.id).open_amount, 30);

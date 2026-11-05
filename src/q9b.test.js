@@ -62,7 +62,8 @@ test('legacy bank counterpart migration falls back to unique shared accounts and
   const base = seed();
   const shared = create(base, 'account.account', { name: 'Shared expense', code: 'Q9B-SHARED', account_type: 'expense', company_id: null });
   const company = create(shared.db, 'res.company', { name: 'Other company', currency_id: shared.db.settings.base_currency_id });
-  const line = create(company.db, 'account.bank.statement.line', { company_id: company.id, date: '2025-01-02', payment_ref: 'Legacy', amount: -15 });
+  const journal = search(company.db, 'account.journal').find((j) => j.type === 'bank');
+  const line = create(company.db, 'account.bank.statement.line', { journal_id: journal.id, company_id: company.id, date: '2025-01-02', payment_ref: 'Legacy', amount: -15 });
   const legacy = { ...line.db, schema_version: 29, records: { ...line.db.records,
     'account.bank.statement.line': line.db.records['account.bank.statement.line'].map((row) => row.id === line.id ? { ...row, counterpart: 'Q9B-SHARED', counterpart_account_id: null } : row) } };
   assert.equal(read(migrate(legacy), 'account.bank.statement.line', line.id).counterpart_account_id, shared.id);

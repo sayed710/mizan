@@ -47,6 +47,7 @@ test('Item 1: One bank statement line matches a batch payment (several outstandi
   const p2 = read(db, 'account.payment', postedBatch.lines[1].payment_id);
 
   const stmt = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -100,
     batch_payment_id: batch.id,
@@ -74,10 +75,10 @@ test('Item 1: One bank statement line matches a batch payment (several outstandi
   assert.deepEqual(outstandingItems.map((l) => l.debit).sort(), [25, 75]);
 
   // Double matching guards: another statement line matching either payment must be rejected
-  const dup1 = create(db, 'account.bank.statement.line', { date: '2025-01-04', amount: -75, payment_id: p1.id, payment_ref: 'dup1' });
+  const dup1 = create(db, 'account.bank.statement.line', { journal_id: journal.id, date: '2025-01-04', amount: -75, payment_id: p1.id, payment_ref: 'dup1' });
   assert.throws(() => runBtn(dup1.db, 'account.bank.statement.line', dup1.id, 'Match Payment'), /already matched/);
 
-  const dup2 = create(db, 'account.bank.statement.line', { date: '2025-01-04', amount: -25, payment_id: p2.id, payment_ref: 'dup2' });
+  const dup2 = create(db, 'account.bank.statement.line', { journal_id: journal.id, date: '2025-01-04', amount: -25, payment_id: p2.id, payment_ref: 'dup2' });
   assert.throws(() => runBtn(dup2.db, 'account.bank.statement.line', dup2.id, 'Match Payment'), /already matched/);
 
   // While reconciled, reversing any matched payment is blocked
@@ -134,6 +135,7 @@ test('Item 1b: Matching explicit payment_ids list clears outstanding items and u
   const p2 = read(db, 'account.payment', postedBatch.lines[1].payment_id);
 
   const stmt = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -100,
     payment_ids: [p1.id, p2.id],
@@ -183,6 +185,7 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
 
   // When amounts differ (statement line 100, single payment 75): must be rejected with the total mismatch message
   const diffStmt = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -100,
     payment_id: p1.id,
@@ -195,6 +198,7 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
 
   // When amounts match (statement line 75, single payment 75): matches ONLY that payment
   const stmt = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -75,
     payment_id: p1.id,
@@ -219,6 +223,7 @@ test('Item 1c: A single selected payment belonging to a batch matches only that 
   assert.throws(() => reversePayment(db, p1, '2025-01-04'), /reconciled bank transaction/);
   // p2 can be matched independently by another statement line
   const stmt2 = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -25,
     payment_id: p2.id,
@@ -253,6 +258,7 @@ test('Item 1d: Statement line open amount mismatch with selected payments throws
   const payment = read(db, 'account.payment', postedBatch.lines[0].payment_id);
 
   const stmt = create(db, 'account.bank.statement.line', {
+    journal_id: journal.id,
     date: '2025-01-03',
     amount: -80,
     payment_id: payment.id,
@@ -293,10 +299,13 @@ test('Item 1e: Statement line rejects batch_payment_id from another company', ()
   });
   db = postBatch(batch2.db, read(batch2.db, 'account.batch.payment', batch2.id));
 
+  const journal1 = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+
   // lineGuard rejects creating a statement line in company 1 with batch from company 2
   assert.throws(
     () => create(db, 'account.bank.statement.line', {
       company_id: 1,
+      journal_id: journal1.id,
       date: '2025-01-03',
       amount: -100,
       batch_payment_id: batch2.id,
@@ -308,6 +317,7 @@ test('Item 1e: Statement line rejects batch_payment_id from another company', ()
   // lineGuard rejects writing batch from company 2 onto an existing company 1 line
   const stmt1 = create(db, 'account.bank.statement.line', {
     company_id: 1,
+    journal_id: journal1.id,
     date: '2025-01-03',
     amount: -100,
     payment_ref: 'Co1 line',

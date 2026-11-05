@@ -11,7 +11,11 @@ import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
 const run = (db, id, label) => models[LINE].form.buttons.find((b) => b.label === label).run(db, read(db, LINE, id)).db;
-const addLine = (db, vals) => create(db, LINE, { date: '2026-10-01', payment_ref: 'test', state: 'to_check', ...vals });
+const addLine = (db, vals) => {
+  const company = vals?.company_id ?? 1;
+  const journal_id = vals?.journal_id ?? search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === company)?.id;
+  return create(db, LINE, { date: '2026-10-01', payment_ref: 'test', state: 'to_check', journal_id, ...vals });
+};
 const openInvoice = (db) => search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted' && m.amount_residual > 0);
 const openBill = (db) => search(db, 'account.move').find((m) => m.move_type === 'in_invoice' && m.state === 'posted' && m.amount_residual > 0);
 

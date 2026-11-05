@@ -101,8 +101,9 @@ test('taxed bank write-offs reach sale and purchase grids', () => {
   let db = seed(); const tag = create(db, 'account.account.tag', { name: 'Q6 grid', applicability: 'taxes' }); db = tag.db;
   const tax = create(db, 'account.tax', { name: 'Q6 tax', amount: 10, amount_type: 'percent', ...defaultTaxRepartitionLines(accountId(db, '131000'), [tag.id]) }); db = tax.db;
   const rule = create(db, 'account.reconcile.model', { name: 'tax', sequence: -100, rule_type: 'writeoff_suggestion', line_ids: [{ account_id: accountId(db, '600000'), amount: 100, tax_ids: [tax.id] }] }); db = rule.db;
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank').id;
   for (const amount of [110, -110]) {
-    const line = create(db, LINE, { payment_ref: 'Q6', date: '2025-01-02', amount });
+    const line = create(db, LINE, { payment_ref: 'Q6', date: '2025-01-02', amount, journal_id: bank });
     db = run(line.db, LINE, line.id, 'Apply Reconciliation Model');
     const items = read(db, 'account.move', read(db, LINE, line.id).move_id).line_ids;
     assert.equal(items.find((l) => l.tax_grid_base).tax_side, amount > 0 ? 'sale' : 'purchase');

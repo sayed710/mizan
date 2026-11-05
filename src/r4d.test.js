@@ -94,7 +94,9 @@ test('Finding 8: journal-less batch updates company_id to invoice company on pos
     assert.ok(branchBatches.some((b) => b.id === batch.id), 'Branch user must find the batch in company-scoped search');
 
     // Branch statement line can match the batch
+    const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank');
     const stmt = create(db, 'account.bank.statement.line', {
+      journal_id: bankJournal.id,
       company_id: branch.id,
       date: '2025-01-03',
       amount: 150,
@@ -109,6 +111,7 @@ test('Finding 8: journal-less batch updates company_id to invoice company on pos
     const inconsistentBatch = write(db, 'account.batch.payment', batch.id, { company_id: 1 });
     assert.throws(
       () => create(inconsistentBatch, 'account.bank.statement.line', {
+        journal_id: bankJournal.id,
         company_id: branch.id,
         date: '2025-01-03',
         amount: 150,

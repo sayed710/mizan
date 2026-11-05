@@ -371,11 +371,10 @@ function lineGuard(db, before, after) {
   }
   const company = after.company_id ?? 1;
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
-  if (after.journal_id) {
-    const journal = read(db, 'account.journal', after.journal_id);
-    if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
-    if (!['bank', 'cash'].includes(journal.type)) return 'Bank transactions need a bank or cash journal';
-  }
+  if (!after.journal_id) return 'Bank Journal is required';
+  const journal = read(db, 'account.journal', after.journal_id);
+  if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
+  if (!['bank', 'cash'].includes(journal.type)) return 'Bank transactions need a bank or cash journal';
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
     if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
@@ -440,6 +439,9 @@ function lineGuard(db, before, after) {
   return null;
 }
 
+/** Unreconciled statement lines saved before a journal was required; they count on no bank card until assigned one. */
+export const statementLinesWithoutJournal = (db) => (db.records['account.bank.statement.line'] ?? []).filter((l) => l.state === 'to_check' && !l.journal_id);
+
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
@@ -455,7 +457,7 @@ export const bankModels = {
       amount: { type: 'monetary', label: 'Amount', required: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Existing Payment' },
       payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Existing Payments' },

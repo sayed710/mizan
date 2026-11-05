@@ -20,7 +20,8 @@ test('match a registered invoice payment through outstanding receipts without an
   const bank = search(db, 'account.account').find((a) => a.code === '101401').id;
   assert.ok(!entry.line_ids.some((l) => l.account_id === bank));
   assert.equal(entry.line_ids.find((l) => l.debit === 100).account_id, outstanding.id);
-  const line = create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'received', amount: 100, payment_id: p.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'received', amount: 100, payment_id: p.id });
   const count = search(line.db, 'account.payment').length;
   db = run(line.db, 'account.bank.statement.line', line.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', line.id);
@@ -30,7 +31,7 @@ test('match a registered invoice payment through outstanding receipts without an
   assert.equal(read(db, 'account.move', draft.id).amount_residual, 0);
   assert.ok(bankEntry.line_ids.some((l) => l.account_id === bank && l.debit === 100));
   assert.ok(bankEntry.line_ids.some((l) => l.account_id === outstanding.id && l.credit === 100));
-  const duplicate = create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'duplicate', amount: 100, payment_id: p.id });
+  const duplicate = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'duplicate', amount: 100, payment_id: p.id });
   assert.throws(() => run(duplicate.db, 'account.bank.statement.line', duplicate.id, 'Match Payment'), /already matched/);
   assert.throws(() => run(db, 'account.payment', p.id, 'Reverse'), /reconciled bank transaction/);
 });

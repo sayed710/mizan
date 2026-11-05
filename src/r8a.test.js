@@ -16,6 +16,7 @@ import { taxSnapshot } from './models/taxes.js';
 import { configureRevaluationLoss } from './test-support/revaluation-accounts.js';
 
 const LINE = 'account.bank.statement.line';
+const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 const run = (db, model, id, label, values = []) => models[model].form.buttons.find((button) => button.label === label)
   .run(db, read(db, model, id), values).db;
 const invoice = (db, { type = 'out_invoice', partner, company = 1, currency = null, date, invoiceDate = date, amount }) => {
@@ -60,12 +61,12 @@ test('automatic bank and rule matching require the same commercial partner', () 
   const customerB = create(customerA.db, 'res.partner', { name: 'R8A Customer B', is_company: true });
   const invoiceA = invoice(customerB.db, { partner: customerA.id, date: '2030-01-01', amount: 150 });
   const invoiceB = invoice(invoiceA.db, { partner: customerB.id, date: '2030-01-01', amount: 100 });
-  const statement = create(invoiceB.db, LINE, { date: '2030-01-05', payment_ref: 'Customer transfer', amount: 100, partner_id: customerA.id });
+  const statement = create(invoiceB.db, LINE, { journal_id: bankJournalId(invoiceB.db), date: '2030-01-05', payment_ref: 'Customer transfer', amount: 100, partner_id: customerA.id });
   assert.throws(() => run(statement.db, LINE, statement.id, 'Reconcile'), /No open invoice or bill with this exact amount belongs to the statement partner/);
   assert.equal(read(statement.db, LINE, statement.id).state, 'to_check');
   assert.equal(read(statement.db, 'account.move', invoiceB.id).amount_residual, 100);
 
-  const noPartner = create(invoiceB.db, LINE, { date: '2030-01-05', payment_ref: 'Customer transfer', amount: 100 });
+  const noPartner = create(invoiceB.db, LINE, { journal_id: bankJournalId(invoiceB.db), date: '2030-01-05', payment_ref: 'Customer transfer', amount: 100 });
   assert.ok(candidates(noPartner.db, read(noPartner.db, LINE, noPartner.id)).some((move) => move.id === invoiceB.id));
   const rule = create(noPartner.db, 'account.reconcile.model', {
     name: 'R8A invoice suggestions', rule_type: 'invoice_matching', active: true, match_partner: false,
@@ -86,11 +87,12 @@ test('matching a posted payment allows an explicitly configured difference write
   db = postMove(draft.db, draft.id);
   const payment = create(db, 'account.payment', { invoice_id: draft.id, partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 100, date: '2030-01-02' });
   db = run(payment.db, 'account.payment', payment.id, 'Confirm');
-  const plain = create(db, LINE, { date: '2030-01-03', payment_ref: 'Received less bank fee', amount: 95, payment_id: payment.id });
+  const plain = create(db, LINE, { journal_id: bankJournalId(db), date: '2030-01-03', payment_ref: 'Received less bank fee', amount: 95, payment_id: payment.id });
   assert.throws(() => run(plain.db, LINE, plain.id, 'Match Payment'), /selected payments must total the bank transaction amount/i);
 
   const fee = accountId(db, '690000');
   const configured = create(db, LINE, {
+    journal_id: bankJournalId(db),
     date: '2030-01-03', payment_ref: 'Received less bank fee', amount: 95, payment_id: payment.id,
     writeoff_account_id: fee, writeoff_label: 'Withheld bank fee', writeoff_amount: 5,
   });

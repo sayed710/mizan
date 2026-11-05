@@ -5,6 +5,7 @@ import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
+import { statementLinesWithoutJournal } from '../models/bank.js';
 import { companyViewDb } from '../companyView.js';
 import { invoiceKpis } from '../dashboardKpis.js';
 import { RateNote } from './RateNote.jsx';
@@ -37,6 +38,7 @@ export function Dashboard() {
   const invoices = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice');
   const kpi = invoiceKpis(db, today().slice(0, 7));
   const byPartner = kpi.topCustomers;
+  const withoutJournal = statementLinesWithoutJournal(db).length;
 
   const tiles = [
     ['Invoiced this month', money(kpi.invoicedThisMonth), '#/accounting/invoices?view=list&filter=posted'],
@@ -44,6 +46,7 @@ export function Dashboard() {
     ['Payable', money(kpi.payable), '#/accounting/bills?view=list&filter=unpaid'],
     ['Overdue invoices', String(kpi.overdue), '#/accounting/invoices?view=list&filter=overdue'],
     ['To reconcile', String(search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length), '#/accounting/bank'],
+    ...(withoutJournal ? [['Bank transactions without a journal', String(withoutJournal), '#/accounting/bank']] : []),
   ];
 
   return (

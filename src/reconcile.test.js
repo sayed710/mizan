@@ -8,8 +8,9 @@ import { models } from './models/index.js';
 import { seed } from './seed.js';
 
 const LINE = 'account.bank.statement.line';
+const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 const rule = (vals) => ({ match_nature: 'both', match_amount: '', match_label: '', active: true, ...vals });
-const addLine = (db, vals) => create(db, LINE, { date: '2026-10-01', state: 'to_check', ...vals });
+const addLine = (db, vals) => create(db, LINE, { journal_id: bankJournalId(db), date: '2026-10-01', state: 'to_check', ...vals });
 const addRule = (db, vals) => create(db, 'account.reconcile.model', { name: 'Rule', ...vals }).db;
 
 test('ruleMatches checks label, amount, nature, partner and regex; an invalid regex never matches', () => {
@@ -80,10 +81,10 @@ test('autoReconcile applies the lowest-sequence auto-validated rule and skips th
 test('the bank line button applies the matching reconciliation model', () => {
   const initial = seed();
   const base = create(initial, 'account.reconcile.model', { name: 'Fees', rule_type: 'writeoff_button', match_label: 'contains', match_label_param: 'fee', line_ids: [{ account_id: accountId(initial, '690000'), label: 'Fee', amount_type: 'percentage', amount: 100 }] });
-  const { db, id } = create(base.db, 'account.bank.statement.line', { date: '2026-05-01', payment_ref: 'Card fee May', amount: -12, state: 'to_check' });
+  const { db, id } = create(base.db, 'account.bank.statement.line', { journal_id: bankJournalId(base.db), date: '2026-05-01', payment_ref: 'Card fee May', amount: -12, state: 'to_check' });
   const button = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Apply Reconciliation Model');
   const done = button.run(db, read(db, 'account.bank.statement.line', id)).db;
   assert.equal(read(done, 'account.bank.statement.line', id).state, 'reconciled');
-  const other = create(done, 'account.bank.statement.line', { date: '2026-05-02', payment_ref: 'Unknown transfer', amount: 999, state: 'to_check' });
+  const other = create(done, 'account.bank.statement.line', { journal_id: bankJournalId(done), date: '2026-05-02', payment_ref: 'Unknown transfer', amount: 999, state: 'to_check' });
   assert.throws(() => button.run(other.db, read(other.db, 'account.bank.statement.line', other.id)), /No reconciliation model/);
 });

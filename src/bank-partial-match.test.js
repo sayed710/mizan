@@ -19,7 +19,8 @@ test('partial statement match settles the oldest installment and leaves the rema
   let db = seed();
   const term = create(db, 'account.payment.term', { name: 'Halves', line_ids: [{ value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' }, { value_type: 'percent', value: 50, nb_days: 30, delay_type: 'days_after' }] });
   const inv = invoice(term.db, 1, 100, term.id);
-  const line = create(inv.db, LINE, { date: '2026-01-20', payment_ref: 'partial', amount: 30, move_id: inv.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(inv.db, LINE, { journal_id: bankJournal.id, date: '2026-01-20', payment_ref: 'partial', amount: 30, move_id: inv.id });
   db = run(line.db, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 70);
   const aged = agedBalance(db, 'receivable', '2026-01-21').rows.find((r) => r.partner_id === 1);
