@@ -1,7 +1,7 @@
 import { read } from '../orm.js';
 import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
-import { taxRepartitionLine } from './taxes.js';
+import { taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 
 export function expenseReportJournal(db, report) {
   const company = report.company_id ?? 1;
@@ -20,18 +20,26 @@ export function expenseDebits(db, report, expenses, postingJournal = null) {
     const product = read(db, 'product', line.product_id);
     const account = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id') ?? journal.default_account_id);
     if (!account || account.active === false || (account.company_id && account.company_id !== company)) throw new Error('Configure the expense account on the product, category or expense journal');
-    const taxAmount = round(Number(line.total_amount) - Number(line.total_amount) / (1 + Number(line.tax ?? 0) / 100));
-    const tax = taxAmount ? read(db, 'account.tax', line.tax_id) : null;
-    // Expenses saved with only a tax percentage need their purchase tax selected; reset an approved expense to draft to set it.
-    if (taxAmount && !line.tax_id) throw new Error(`Configure the expense tax on ${line.name || 'the expense'}`);
-    const taxAccount = tax && read(db, 'account.account', taxRepartitionLine(tax)?.account_id);
-    if (taxAmount && (!tax || tax.type_tax_use !== 'purchase' || tax.amount_type !== 'percent' || Number(tax.amount) !== Number(line.tax) || !taxAccount || taxAccount.active === false || (tax.company_id && tax.company_id !== company) || (taxAccount.company_id && taxAccount.company_id !== company))) throw new Error('Configure the expense tax and its account');
-    const base = round(Number(line.total_amount) - taxAmount);
+    const tax = Number(line.tax) && line.tax_id ? read(db, 'account.tax', line.tax_id) : null;
+    if (Number(line.tax) && !tax) throw new Error(`Configure the expense tax on ${line.name || 'the expense'}`);
+    if (tax && (tax.type_tax_use !== 'purchase' || tax.amount_type !== 'percent' || Number(tax.amount) !== Number(line.tax) || (tax.company_id && tax.company_id !== company))) throw new Error('Configure the expense tax and its account');
+    const rows = tax ? taxRepartitionLines(tax, 'invoice').filter((row) => row.repartition_type === 'tax') : [];
+    const factor = rows.reduce((sum, row) => sum + (Number(row.factor_percent) || 0), 0) / 100;
+    const base = round(Number(line.total_amount) / (1 + (Number(line.tax) || 0) * factor / 100));
+    const taxAmount = round(base * (Number(line.tax) || 0) / 100);
+    const splits = tax ? taxRepartitionSplits({ ...tax, amount: taxAmount, base }, {}, 'invoice', null).splits : [];
+    const taxLines = splits.map(({ row, amount, base: taxBase }) => {
+      const taxAccount = read(db, 'account.account', row.account_id ?? account.id);
+      if (!taxAccount || taxAccount.active === false || (taxAccount.company_id && taxAccount.company_id !== company)) throw new Error('Configure the expense tax and its account');
+      return { account: taxAccount.id, debit: Math.max(amount, 0), credit: Math.max(-amount, 0), tax_id: tax.id, tax_name: tax.name, tax_side: 'purchase', tax_base: taxBase, tax_tag_ids: row.tag_ids ?? [] };
+    });
+    const baseTags = taxRepartitionLine(tax, 'invoice', 'base')?.tag_ids ?? [];
     return [{
       account: account.id,
       debit: base,
+      ...(baseTags.length ? { tax_tag_ids: baseTags, tax_grid_base: true } : {}),
       ...(line.product_id ? { product_id: line.product_id } : {}),
       ...(line.analytic_distribution != null ? { analytic_distribution: line.analytic_distribution } : (line.analytic_account_id ? { analytic_account_id: line.analytic_account_id } : {})),
-    }, ...(taxAmount ? [{ account: taxAccount.id, debit: taxAmount, tax_name: tax.name, tax_side: 'purchase', tax_base: base }] : [])];
+    }, ...taxLines];
   });
 }

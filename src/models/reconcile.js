@@ -4,7 +4,7 @@ import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { computeLineTaxes, expandTaxIds, taxRepartitionLines } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -111,27 +111,15 @@ function writeOff(db, rule, line) {
     for (const t of computed.taxes) {
       const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
       if (!taxRec) continue;
-      const repartLines = taxRepartitionLines(taxRec, 'invoice');
-      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
-      if (!taxRows.length) continue;
-      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
-      const splitAmounts = taxRows.length === 1
-        ? [t.amount]
-        : allocateCents(t.amount, weights, currency, { tieBreak: 'last' });
-      const splitBases = taxRows.length === 1
-        ? [t.base]
-        : allocateCents(t.base, weights, currency, { tieBreak: 'last' });
-
-      for (let i = 0; i < taxRows.length; i++) {
-        const row = taxRows[i];
-        taxLines.push(side(splitAmounts[i], !incoming, {
+      for (const { row, amount, base } of taxRepartitionSplits(t, {}, 'invoice', currency).splits) {
+        taxLines.push(side(Math.abs(amount), amount < 0 ? incoming : !incoming, {
           account: row.account_id ?? l.account_id,
           partner_id: partner,
           name: taxRec.name,
           tax_id: taxRec.id,
           tax_name: taxRec.name,
           tax_side: incoming ? 'sale' : 'purchase',
-          tax_base: toCompany(db, journalCurrency, splitBases[i], line.date, company),
+          tax_base: toCompany(db, journalCurrency, base, line.date, company),
           tax_tag_ids: row.tag_ids ?? [],
         }));
       }

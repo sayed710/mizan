@@ -26,6 +26,12 @@ export function taxRepartitionLines(tax, side = 'invoice') {
 }
 
 /** The applicable repartition line for a tax or line snapshot (defaults to the tax row on invoice side). */
+/** Net share of a tax amount posted by its tax rows on one side (sum of factors / 100; 1 without explicit rows). */
+export function taxRowsFactor(tax, side = 'invoice') {
+  const rows = taxRepartitionLines(tax, side).filter((row) => row.repartition_type === 'tax');
+  return rows.length ? rows.reduce((sum, row) => sum + (Number(row.factor_percent) || 0), 0) / 100 : 1;
+}
+
 export function taxRepartitionLine(tax, side = 'invoice', type = 'tax') {
   if (!tax) return null;
   if (tax.repartition_type) return tax;
@@ -201,7 +207,7 @@ const gross = (l) => (Number(l.qty) || 0) * (Number(l.price_unit) || 0) * (1 - (
  * price-included taxes, include_base_amount / is_base_affected, group taxes, fixed taxes,
  * and round_per_line vs round_globally).
  */
-export function computeLineTaxes(l, { currency = null, roundingMethod = null } = {}) {
+export function computeLineTaxes(l, { currency = null, roundingMethod = null, side = 'invoice' } = {}) {
   const roundPerLine = roundingMethod === 'round_per_line';
   if (!l || isSectionOrNote(l)) return { untaxed: 0, tax: 0, total: 0, taxes: [] };
   const qty = Number(l.qty) || 0;
@@ -217,18 +223,19 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
   let extraA = 0;
   let extraC = 0;
   for (const t of specs) {
+    const factor = taxRowsFactor(t, side);
     const baseA = t.tax_is_base_affected !== false ? 1 + extraA : 1;
     const baseC = t.tax_is_base_affected !== false ? extraC : 0;
     const amt = Number(t.tax) || 0;
     const taxA = t.tax_type === 'fixed' ? 0 : baseA * (amt / 100);
     const taxC = t.tax_type === 'fixed' ? qty * amt : baseC * (amt / 100);
     if (t.tax_include) {
-      inclA += taxA;
-      inclC += taxC;
+      inclA += taxA * factor;
+      inclC += taxC * factor;
     }
     if (t.tax_include_base_amount) {
-      extraA += taxA;
-      extraC += taxC;
+      extraA += taxA * factor;
+      extraC += taxC * factor;
     }
   }
   const rawBase0 = inclA !== 0 ? (g - inclC) / inclA : g;
@@ -244,20 +251,21 @@ export function computeLineTaxes(l, { currency = null, roundingMethod = null } =
     const baseAmt = roundPerLine ? roundCurrency(curBase, currency) : curBase;
     taxes.push({ ...t, base: baseAmt, amount: taxAmt });
     if (t.tax_include_base_amount) {
-      extraBase += taxAmt;
+      extraBase += taxAmt * taxRowsFactor(t, side);
     }
   }
   if (roundPerLine && specs.some((t) => t.tax_include)) {
-    const inclSum = roundCurrency(taxes.filter((t) => t.tax_include).reduce((s, t) => s + t.amount, 0), currency);
+    const inclSum = roundCurrency(taxes.filter((t) => t.tax_include).reduce((s, t) => s + taxRepartitionSplits(t, l, side, currency).splits.reduce((sum, split) => sum + split.amount, 0), 0), currency);
     const roundedGross = roundCurrency(g, currency);
     if (roundCurrency(base0 + inclSum - roundedGross, currency) !== 0) {
       base0 = roundCurrency(roundedGross - inclSum, currency);
       if (taxes.length && taxes[0].tax_is_base_affected !== false) taxes[0].base = base0;
     }
   }
-  const totalTax = roundPerLine
-    ? roundCurrency(taxes.reduce((s, t) => s + t.amount, 0), currency)
-    : taxes.reduce((s, t) => s + t.amount, 0);
+  const totalTax = taxes.reduce((sum, t) => {
+    const net = t.amount * taxRowsFactor(t, side);
+    return sum + (roundPerLine ? roundCurrency(net, currency) : net);
+  }, 0);
   const total = roundPerLine ? roundCurrency(base0 + totalTax, currency) : base0 + totalTax;
   return { untaxed: base0, tax: totalTax, total, taxes };
 }
@@ -267,18 +275,19 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
   const by = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
-    const computed = computeLineTaxes(l, { currency: documentCurrency, roundingMethod });
+    const computed = computeLineTaxes(l, { currency: documentCurrency, roundingMethod, side });
     for (const t of computed.taxes) {
       if (!taxFilter(t)) continue;
       if (t.amount === 0 && !t.tax_cash_basis) continue;
-      const account_id = accountOf({ ...l, ...t });
-      const tax_name = taxLabel(t);
-      const tax_id = t.tax_id ?? null;
-      const repart = taxRepartitionLine(t, side);
-      const tax_tag_ids = [...(repart?.tag_ids ?? [])].sort((a, b) => a - b);
-      const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-      const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
-      by.set(key, { ...g, document_base: g.document_base + t.base, document_amount: g.document_amount + t.amount });
+      for (const { row, amount, base } of taxRepartitionSplits(t, l, side, documentCurrency).splits) {
+        const account_id = accountOf({ ...l, ...t, repartition_line: row });
+        const tax_name = taxLabel(t);
+        const tax_id = t.tax_id ?? null;
+        const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
+        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
+        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
+        by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
+      }
     }
   }
   return [...by.values()].map(({ document_base, document_amount, ...group }) => {
@@ -297,8 +306,19 @@ export function taxRepartitionSplits(t, line, side, currency) {
   const rows = (own.length ? own : taxRepartitionLines(line, side)).filter((r) => r.repartition_type === 'tax');
   const explicit = rows.length > 0;
   const taxRows = explicit ? rows : [{ repartition_type: 'tax', factor_percent: 100, account_id: t.tax_account_id ?? line.tax_account_id ?? null, tag_ids: t.tax_tag_ids ?? line.tax_tag_ids ?? [] }];
-  const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
-  const split = (value) => (taxRows.length === 1 ? [value] : allocateCents(value, weights, currency, { tieBreak: 'last' }));
+  const factors = taxRows.map((r) => Number(r.factor_percent) || 0);
+  const split = (value) => {
+    if (factors.length === 1 && factors[0] === 100) return [value];
+    const portions = factors.map(() => 0);
+    for (const sign of [1, -1]) {
+      const indexes = factors.map((factor, index) => ({ factor, index })).filter(({ factor }) => Math.sign(factor) === sign);
+      if (!indexes.length) continue;
+      const total = roundCurrency(value * indexes.reduce((sum, item) => sum + item.factor, 0) / 100, currency);
+      const allocated = allocateCents(total, indexes.map((item) => Math.abs(item.factor)), currency, { tieBreak: 'last' });
+      indexes.forEach((item, i) => { portions[item.index] = allocated[i]; });
+    }
+    return portions;
+  };
   const amounts = split(t.amount);
   const bases = split(t.base);
   return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: bases[i] })) };
@@ -353,7 +373,7 @@ function validateRepartitionSide(lines, sideName) {
     return `A tax must have at least one tax row for ${sideName}`;
   }
   const factorSum = taxRows.reduce((sum, l) => sum + (Number(l.factor_percent) || 0), 0);
-  if (Math.abs(factorSum - 100) > 1e-4) {
+  if (Math.abs(factorSum - 100) > 1e-4 && !(Math.abs(factorSum) < 1e-4 && taxRows.some((l) => Number(l.factor_percent) < 0))) {
     return `Tax repartition factors must sum to 100 for ${sideName}`;
   }
   return null;
@@ -374,6 +394,12 @@ export const taxModels = {
       // An on-payment tax cannot post without its transition account, so it is required when saving.
       if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
         try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
+      }
+      for (const row of [...(after.invoice_repartition_line_ids ?? []), ...(after.refund_repartition_line_ids ?? [])]) {
+        if (row.account_id) {
+          const account = read(db, 'account.account', row.account_id);
+          if (!account || (account.company_id && account.company_id !== (after.company_id ?? 1))) return 'Tax repartition account must belong to the tax company';
+        }
       }
       const allTags = [
         ...(after.tag_ids ?? []),
