@@ -635,22 +635,34 @@ MIGRATIONS.push({
   name: 'Taxes: repartition lines for invoice and refund documents',
   up: (db) => {
     const taxMap = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, t]));
+    // Before repartition lines, a tax without an account posted to the chart's VAT account; keep that only when it is unambiguous.
+    const defaultTaxAccount = (companyId, use) => {
+      const code = use === 'purchase' ? '131000' : '251000';
+      const type = CHART.find((row) => row[0] === code)?.[2];
+      const typed = (db.records['account.account'] ?? []).filter((a) => a.code === code && a.account_type === type);
+      const owned = typed.filter((a) => a.company_id === (companyId ?? 1));
+      const pick = owned.length ? owned : typed.filter((a) => a.company_id == null);
+      return pick.length === 1 ? pick[0].id : null;
+    };
     const convertLine = (l) => {
       if (!l) return l;
-      const { tax_account_id, tax_tag_ids, ...rest } = l;
+      const { tax_account_id, tax_tag_ids, tax_base_tag_ids, ...rest } = l;
       let invLines = l.invoice_repartition_line_ids;
       let refLines = l.refund_repartition_line_ids;
       if (!invLines?.length && !refLines?.length && (tax_account_id !== undefined || tax_tag_ids !== undefined || l.tax_id)) {
         const taxRec = l.tax_id ? taxMap.get(l.tax_id) : null;
-        const acc = tax_account_id ?? taxRec?.account_id ?? null;
-        const tags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
+        const lineCompId = taxRec?.company_id ?? 1;
+        const defAcc = defaultTaxAccount(lineCompId, taxRec?.type_tax_use);
+        const acc = tax_account_id ?? taxRec?.account_id ?? defAcc;
+        const baseTags = [...(tax_base_tag_ids ?? taxRec?.base_tag_ids ?? [])];
+        const taxTags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
         invLines = [
-          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
-          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
         ];
         refLines = [
-          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
-          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
         ];
       }
       let breakdown = rest.tax_breakdown;
@@ -666,28 +678,29 @@ MIGRATIONS.push({
     };
 
     const convertModelLines = (recs, fieldName) =>
-      (recs ?? []).map((r) => r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r);
+      (recs ?? []).map((r) => (r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r));
 
     const nextRecords = { ...db.records };
     nextRecords['account.tax'] = (db.records['account.tax'] ?? []).map((t) => {
-      const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
+      const baseTags = [...(t.base_tag_ids ?? [])];
       const taxTags = [...(t.tag_ids ?? [])];
-      const accountId = t.account_id ?? null;
+      const defAcc = defaultTaxAccount(t.company_id, t.type_tax_use);
+      const accountId = t.account_id ?? defAcc;
       const { account_id, tag_ids, base_tag_ids, ...restTax } = t;
       return {
         ...restTax,
         invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
           ? t.invoice_repartition_line_ids
           : [
-              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-            ],
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
         refund_repartition_line_ids: t.refund_repartition_line_ids?.length
           ? t.refund_repartition_line_ids
           : [
-              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-            ],
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
       };
     });
 

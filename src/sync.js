@@ -302,6 +302,24 @@ function remapDistribution(distribution, remapped) {
   return result;
 }
 
+function remapTaxSnapshot(snap, to) {
+  if (!snap || typeof snap !== 'object') return snap;
+  const remapRepartition = (rows) => (Array.isArray(rows)
+    ? rows.map((r) => (!r || typeof r !== 'object' ? r : {
+      ...r,
+      ...(Number.isInteger(r.account_id) ? { account_id: to('account.account', r.account_id) } : {}),
+      ...(Array.isArray(r.tag_ids) ? { tag_ids: r.tag_ids.map((id) => to('account.account.tag', id)) } : {}),
+    }))
+    : rows);
+  return {
+    ...snap,
+    ...(Number.isInteger(snap.tax_id) ? { tax_id: to('account.tax', snap.tax_id) } : {}),
+    ...(Array.isArray(snap.invoice_repartition_line_ids) ? { invoice_repartition_line_ids: remapRepartition(snap.invoice_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.refund_repartition_line_ids) ? { refund_repartition_line_ids: remapRepartition(snap.refund_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.tax_breakdown) ? { tax_breakdown: snap.tax_breakdown.map((c) => remapTaxSnapshot(c, to)) } : {}),
+  };
+}
+
 /** Point many2one, line and res_model/res_id references in a record at remapped ids. */
 function remapRefs(model, rec, remapped) {
   const to = (relation, v) => (Number.isInteger(v) && remapped[relation]?.[v]) || v;
@@ -325,10 +343,14 @@ function remapRefs(model, rec, remapped) {
         const rows = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'json' && s.refs && Array.isArray(line[k]))
           .map(([k, s]) => [k, line[k].map((row) => (row && typeof row === 'object' ? { ...row, ...Object.fromEntries(Object.entries(s.refs).filter(([rk]) => rk in row)
             .map(([rk, rel]) => [rk, Array.isArray(row[rk]) ? row[rk].map((id) => to(rel, id)) : to(rel, row[rk])])) } : row))]);
-        return subs.length || analytic || rows.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic } : line;
+        const breakdown = Array.isArray(line.tax_breakdown)
+          ? { tax_breakdown: line.tax_breakdown.map((s) => remapTaxSnapshot(s, to)) }
+          : null;
+        return subs.length || analytic || rows.length || breakdown ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic, ...breakdown } : line;
       });
     }
   }
+  if (Array.isArray(out.tax_breakdown)) out.tax_breakdown = out.tax_breakdown.map((s) => remapTaxSnapshot(s, to));
   if (typeof out.res_model === 'string') out.res_id = to(out.res_model, out.res_id);
   return out;
 }

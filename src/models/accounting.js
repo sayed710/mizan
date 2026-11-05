@@ -412,6 +412,10 @@ export function postMove(db, id) {
     const fp = read(db, 'account.fiscal.position', r.fiscal_position_id);
     if (fp?.company_id && fp.company_id !== (r.company_id ?? 1)) throw new Error('Fiscal position belongs to another company');
   }
+  if (r.invoice_payment_term_id) {
+    const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
+    if (term?.company_id && term.company_id !== (r.company_id ?? 1)) throw new Error('Payment terms belong to another company');
+  }
   for (const line of r.invoice_line_ids ?? []) {
     validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
     validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
@@ -1152,7 +1156,13 @@ export const accountingModels = {
   'account.move': {
     label: 'Invoices',
     actions: { postAutoPostMoves },
-    guard: (db, before, after, ctx) => moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null),
+    guard: (db, before, after, ctx) => {
+      if (after.invoice_payment_term_id) {
+        const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
+        if (term?.company_id && term.company_id !== (after.company_id ?? 1)) return 'Payment terms belong to another company';
+      }
+      return moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
+    },
     invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.

@@ -201,7 +201,8 @@ export function publicCart(db, body) {
   const b = bodyOf(body);
   const { lines, error } = cartLines(db, b.lines);
   if (error) return { status: 400, body: { error } };
-  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80) };
+  const companyId = db.settings?.current_company_id ?? 1;
+  const options = { pricelistId: pricelistOf(db, b.pricelist), partnerCountry: clip(b.country, 80), companyId };
   const carriers = websiteCarriers(db);
   try {
     const totals = cartTotals(db, lines, { ...options, carrierId: carriers.find((c) => c.id === b.carrier_id)?.id ?? null });
@@ -251,11 +252,13 @@ export function publicOrder(db, body) {
   const provider = enabledProviders(db).find((p) => p.code === b.provider_code);
   if (!provider) return { status: 400, body: { error: 'Choose a payment method' } };
   const pricelistId = pricelistOf(db, b.pricelist);
+  const companyId = db.settings?.current_company_id ?? 1;
   try {
-    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country });
+    const totals = cartTotals(db, lines, { pricelistId, carrierId: carrier?.id ?? null, partnerCountry: address.country, companyId });
     const { db: withPartner, partnerId, shippingId } = checkoutPartners(db, v, address);
     const token = randomBytes(24).toString('base64url');
     const order = create(withPartner, 'sale.order', {
+      company_id: companyId,
       partner_id: partnerId, partner_invoice_id: partnerId, partner_shipping_id: shippingId, pricelist_id: pricelistId, carrier_id: carrier?.id ?? null,
       order_line: totals.orderLines, state: 'sent', source: 'website', payment_provider: provider.code, payment_state: 'pending', access_token_hash: hashToken(token),
     });
