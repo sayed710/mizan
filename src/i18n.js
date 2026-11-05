@@ -79,6 +79,8 @@ const ar = {
   'Configure the batch company before printing checks.': 'اضبط شركة الدفعة قبل طباعة الشيكات.',
   'Configure the document company before printing.': 'اضبط شركة المستند قبل الطباعة.',
   'Company currency is not configured': 'عملة الشركة غير مضبوطة',
+  'Currency not configured': 'عملة غير مضبوطة',
+  'currency not configured': 'عملة غير مضبوطة',
   'Regularization Entries': 'قيود التسوية',
   'Checks': 'الشيكات',
   'Tax Groups': 'مجموعات الضرائب',

@@ -201,7 +201,7 @@ test('Journal Audit and Inalterability show only selected companies and their se
   });
   const heads = moves.map((m) => ({ company_id: m.company_id, count: 1, last_sequence: 1, last_hash: m.inalterable_hash, last_move_id: m.id, last_move_name: m.name }));
   const db = { ...base, settings: { ...base.settings, current_company_id: 1, allowed_company_ids: [1] }, records: { ...base.records,
-    'res.company': [{ id: 1, name: 'First Company' }, { id: 2, name: 'Second Company' }],
+    'res.company': [{ id: 1, name: 'First Company', currency_id: base.records['res.company']?.[0]?.currency_id ?? 1 }, { id: 2, name: 'Second Company', currency_id: base.records['res.company']?.[0]?.currency_id ?? 1 }],
     'account.journal': [{ id: 900, name: 'Shared Secure Journal', code: 'SEC', restrict_mode_hash_table: true, secure_chain_heads: heads }], 'account.move': moves } };
   await React.act(async () => commit(db));
   const { Reports } = await import('./views/Reports.jsx');

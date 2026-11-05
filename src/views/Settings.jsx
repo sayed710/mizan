@@ -3,7 +3,7 @@ import { updateSettings, write } from '../orm.js';
 import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
-import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
+import { createCompany, ensureCurrencyRecord, renameCompany, setCompanyCurrency } from '../models/company.js';
 import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
@@ -84,9 +84,11 @@ function Companies({ db }) {
     const current = getDb();
     const currency = newCurrency || mainCurrency;
     if (current.records['res.company']?.length) {
-      const created = createCompany(current, { name });
-      const newCompanyId = (created.db.seq['res.company'] ?? 0);
-      commit(setCompanyCurrency(created.db, newCompanyId, currency));
+      const curRec = currency ? ensureCurrencyRecord(current, currency) : null;
+      const dbWithCurr = curRec ? curRec.db : current;
+      const currencyId = curRec?.id ?? null;
+      const created = createCompany(dbWithCurr, { name, ...(currencyId ? { currency_id: currencyId } : {}) });
+      commit(created.db);
       setNewName('');
       return;
     }

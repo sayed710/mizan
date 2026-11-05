@@ -326,18 +326,18 @@ function companyGuard(db, before, r, ctx) {
 /** Create a company and its shared contact, inheriting the parent's currency. */
 export function createCompany(db, vals) {
   if (!vals.name?.trim()) throw new Error('Company name is required');
-  const parent = vals.parent_id && record(db, 'res.company', vals.parent_id);
-  let currencyId = parent ? parent.currency_id : vals.currency_id;
+  let next = db;
+  const parent = vals.parent_id && record(next, 'res.company', vals.parent_id);
+  let currencyId = parent ? parent.currency_id : (vals.currency_id ?? null);
   if (!currencyId) {
     try {
-      currencyId = companyCurrencyRecord(db, null)?.id;
+      currencyId = companyCurrencyRecord(next, null)?.id;
     } catch {
       throw new Error('Configure the company currency before creating a company');
     }
   }
   if (!currencyId) throw new Error('Configure the company currency before creating a company');
   const values = { ...vals, currency_id: currencyId };
-  let next = db;
   if (!values.partner_id) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
@@ -422,10 +422,16 @@ export function renameCompany(db, companyId, name) {
   return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
 }
 
+/** Ensure a currency record exists by code, creating it when missing. */
+export function ensureCurrencyRecord(db, code) {
+  if (!code) return { db, id: null };
+  const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);
+  return found ? { db, id: found.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
+}
+
 /** Set a company's currency by code, creating the currency record when missing. */
 export function setCompanyCurrency(db, companyId, code) {
-  const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const currency = found ? { db, id: found.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
+  const currency = ensureCurrencyRecord(db, code);
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 

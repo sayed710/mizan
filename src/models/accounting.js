@@ -126,7 +126,10 @@ export const residual = (r, db) => {
 };
 const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
-  if (residual(r, db) === 0) return 'paid';
+  const res = residual(r, db);
+  // Without a resolvable currency the open amount is unknown; say so rather than guess paid or partial.
+  if (res == null) return 'unavailable';
+  if (res === 0) return 'paid';
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -1379,7 +1382,7 @@ export const accountingModels = {
         type: 'selection',
         label: 'Payment Status',
         compute: paymentState,
-        options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid']],
+        options: [['not_paid', 'Not Paid'], ['partial', 'Partially Paid'], ['paid', 'Paid'], ['unavailable', 'Unavailable']],
       },
       should_be_paid: { type: 'selection', label: 'Should Be Paid', compute: (r, db) => shouldBePaid(db, r), options: [['yes', 'Yes'], ['exception', 'Exception']] },
       payment_date: { type: 'date', label: 'Paid on', readonly: true },

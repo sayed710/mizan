@@ -17,10 +17,19 @@ const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
 let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 let activeCurrency = null;
+let activeCode = 'USD';
+let currencyConfigured = true;
 /** Switch the company currency used by every amount on screen. */
 export function setCurrency(code, currency = null) {
   activeCurrency = currency;
-  try { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }); }
+  activeCode = code;
+  if (!code) {
+    currencyConfigured = false;
+    moneyFmt = null;
+    return;
+  }
+  currencyConfigured = true;
+  try { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { currencyConfigured = false; moneyFmt = null; }
 }
 const docFmts = new Map();
 // In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
@@ -28,15 +37,23 @@ const docFmts = new Map();
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null, currency = null) => {
-  if (currency) return ltr(formatCurrency(n, currency, code || moneyFmt.resolvedOptions().currency));
-  if (!code && activeCurrency) return ltr(formatCurrency(n, activeCurrency));
-  const fmt = code && code !== moneyFmt.resolvedOptions().currency
-    ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
-    : moneyFmt;
+  const activeCurrencyCode = activeCode || (moneyFmt ? moneyFmt.resolvedOptions().currency : null);
+  if (currency) return ltr(formatCurrency(n, currency, code || activeCurrencyCode || undefined));
+  if (code) {
+    const fmt = docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code);
+    return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
+  }
+  if (!currencyConfigured) {
+    const val = Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n);
+    const plain = val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${ltr(plain)} (${t('currency not configured')})`;
+  }
+  if (activeCurrency) return ltr(formatCurrency(n, activeCurrency));
+  const fmt = moneyFmt ?? safeFormat('USD');
   return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
 };
 function safeFormat(code) {
-  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return moneyFmt; }
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 }
 export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: 'numeric' }) =>
   new Date(iso + 'T00:00').toLocaleDateString(dateLocale, opts);
@@ -50,7 +67,12 @@ export function display(db, field, value, rec = null) {
   switch (field.type) {
     case 'monetary': {
       const context = { ...rec, company_id: rec?.company_id ?? db?.settings?.current_company_id ?? 1 };
-      const currency = field.currency === 'company' ? companyCurrencyRecord(db, context.company_id) : documentCurrency(db, context);
+      let currency;
+      try {
+        currency = field.currency === 'company' ? companyCurrencyRecord(db, context.company_id) : documentCurrency(db, context);
+      } catch {
+        currency = null;
+      }
       return money(value, currency?.name ?? currencyCode(db, rec), currency);
     }
     case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: field.digits == null ? 2 : 0, maximumFractionDigits: field.digits ?? 2 }));

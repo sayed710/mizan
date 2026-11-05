@@ -175,8 +175,8 @@ function SiteHeader({ site, route, cartCount, pricelist, setPricelist }) {
         </form>
         {site.pricelists?.length > 0 && (
           <select aria-label={t('Pricelist')} value={pricelist ?? ''} onChange={(e) => setPricelist(e.target.value ? Number(e.target.value) : null)}>
-            <option value="">{site.currency}</option>
-            {site.pricelists.map((p) => <option key={p.id} value={p.id}>{p.name} ({site.currency})</option>)}
+            <option value="">{site.currency || t('Currency not configured')}</option>
+            {site.pricelists.map((p) => <option key={p.id} value={p.id}>{p.name} ({site.currency || t('Currency not configured')})</option>)}
           </select>
         )}
         <a className="shop-cart-link" href="#/shop/cart" aria-label={t('Cart ({count})', { count: cartCount })}>{t('Cart')} <span className="shop-badge">{cartCount}</span></a>
