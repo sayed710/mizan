@@ -424,7 +424,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
       debit: l.credit,
       credit: l.debit,
       ...(l.currency_id ? { amount_currency: -(Number(l.amount_currency) || 0) } : {}),
-      ...(l.tax_zero ? { tax_base: -(Number(l.tax_base) || 0) } : {}),
+      ...(l.tax_zero || l.tax_base_signed ? { tax_base: -(Number(l.tax_base) || 0) } : {}),
       name: `Reversal: ${l.name ?? ''}`.trim(),
     })),
   });
