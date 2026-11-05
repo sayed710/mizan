@@ -82,7 +82,7 @@ export function closeFiscalYear(db, yearId, { date } = {}) {
   const earningsAccountId = currentYearEarningsAccount(db, year.company_id).id;
   const lines = closingLines(db, year, earningsAccountId);
   const next = db;
-  const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines });
+  const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines, system_generated: true });
   const marked = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((m) => m.id === entry.id ? { ...m, closing_fiscal_year_id: yearId } : m) } };
   // The year references its closing entry first: only such an entry may carry the closing flag.
   const closed = write(marked, 'account.fiscal.year', yearId, { state: 'closed', closing_move_id: entry.id, closing_earnings_account_id: earningsAccountId, opening_move_id: null });
@@ -100,6 +100,7 @@ export function reopenFiscalYear(db, yearId) {
   const entry = postEntry(next, {
     journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`, company: year.company_id,
     lines: closing.line_ids.map((l) => ({ account_id: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
+    system_generated: true,
   });
   return write(write(entry.db, 'account.fiscal.year', yearId, { opening_move_id: entry.id }), 'account.move', entry.id, { is_closing: true });
 }
@@ -296,10 +297,11 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
   let next = db;
   for (const plan of plans) {
     const { company, expected } = plan;
-    const entry = postEntry(next, { journal: 'MISC', date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company });
+    const entry = postEntry(next, { journal: 'MISC', date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company, system_generated: true });
     const reversal = postEntry(entry.db, {
       journal: 'MISC', date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
       lines: expected.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
+      system_generated: true,
     });
     next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }

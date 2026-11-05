@@ -10,6 +10,7 @@ import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
+import { normalizeDistribution } from '../analytic_distribution.js';
 
 export const openSession = (db) => search(db, 'pos.session').find((s) => s.state === 'opened') ?? null;
 
@@ -51,12 +52,14 @@ export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fis
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
   const price = uom_id && stock ? convertPrice(db, rawPrice, stock, uom_id) : rawPrice;
   const line = { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: price, discount: Number(l.discount ?? 0), ...tax };
-  const analytic_distribution = l.analytic_distribution ?? findAnalyticDistribution(db, {
-    partner_id: partnerId,
-    product_id: l.product_id,
-    account_id: invoiceLineAccount(db, { move_type: 'out_invoice', journal_id: journalId, company_id: companyId, partner_id: partnerId, fiscal_position_id: fp }, line),
-    company_id: companyId,
-  });
+  const analytic_distribution = l.analytic_distribution != null
+    ? normalizeDistribution(l.analytic_distribution, db)
+    : findAnalyticDistribution(db, {
+        partner_id: partnerId,
+        product_id: l.product_id,
+        account_id: invoiceLineAccount(db, { move_type: 'out_invoice', journal_id: journalId, company_id: companyId, partner_id: partnerId, fiscal_position_id: fp }, line),
+        company_id: companyId,
+      });
   return { ...line, ...(l.analytic_distribution != null || Object.keys(analytic_distribution).length ? { analytic_distribution } : {}) };
 });
 
@@ -697,7 +700,16 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
 export function payCart(db, { cart = [], lines: inputLines = null, method, payments = null, partner_id = null, request_key = null, config_id = null, preset_id = null, refund_of = null }) {
   const original = refund_of ? read(db, 'pos.order', Number(refund_of)) : null;
   const rawCart = inputLines ?? cart;
-  const normalized = original ? original.lines : rawCart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) }));
+  const normalized = original ? original.lines : rawCart.map((l) => {
+    const distribution = l?.analytic_distribution != null ? normalizeDistribution(l.analytic_distribution, db) : null;
+    return {
+      product_id: Number(l.product_id),
+      qty: Number(l.qty),
+      discount: Number(l.discount ?? 0),
+      ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}),
+      ...(distribution != null ? { analytic_distribution: distribution } : {}),
+    };
+  });
   const fingerprint = JSON.stringify([normalized, method, payments, partner_id, config_id, preset_id, refund_of]);
   if (request_key !== null && (typeof request_key !== 'string' || !/^[\w:-]{8,200}$/.test(request_key))) throw new Error('Invalid payment request key');
   const prior = request_key && search(db, 'pos.order').find((o) => o.request_key === request_key);

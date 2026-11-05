@@ -19,6 +19,7 @@ const FIELDS = {
     revaluation_date: hidden('date', 'Revaluation Date'), // closing.js: one revaluation per date
     reversal_move_id: m2o('account.move', 'Reversal Entry'),
     repair_id: m2o('repair.order', 'Repair Order'),
+    system_generated: hidden('boolean', 'System Generated'),
     deferred_contributions: {
       type: 'one2many', label: 'Deferred Contributions', readonly: true, hidden: true,
       fields: {
