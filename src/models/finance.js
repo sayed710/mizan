@@ -898,8 +898,9 @@ function ageDocumentInstallments(db, kind, at, moves, add) {
 }
 
 /** Add each payment's unallocated portion until it is applied or reversed. */
-function ageUnappliedCredits(db, kind, at, moves, add) {
+function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   for (const payment of search(db, 'account.payment')) {
+    if (companyId != null && (payment.company_id ?? 1) !== companyId) continue;
     if (!payment.move_id || !['posted', 'reversed'].includes(payment.state) || payment.date > at) continue;
     if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
     const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
@@ -921,7 +922,7 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
 export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
-export function agedBalance(db, kind = 'receivable', at = today()) {
+export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
     amount = reportingBookedAmount(db, source, amount);
@@ -941,9 +942,9 @@ export function agedBalance(db, kind = 'receivable', at = today()) {
     }
     rows.set(partner, row);
   };
-  const moves = search(db, 'account.move');
+  const moves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
   ageDocumentInstallments(db, kind, at, moves, add);
-  ageUnappliedCredits(db, kind, at, moves, add);
+  ageUnappliedCredits(db, kind, at, moves, add, companyId);
   return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
@@ -991,8 +992,8 @@ function followUpSummary(invoices) {
 }
 
 /** Partners with overdue invoices, for payment reminders. */
-export function followUps(db, at = today(), { ignoreNextActionDate = false } = {}) {
-  const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
+export function followUps(db, at = today(), { ignoreNextActionDate = false, companyId = null } = {}) {
+  const overdue = search(db, 'account.move').filter((m) => (companyId == null || (m.company_id ?? 1) === companyId) && m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
     if (m.exclude_from_followup) return [];
     const partner = read(db, 'res.partner', m.partner_id);
     if (!partner) return [];
