@@ -96,10 +96,14 @@ export function postSheet(db, id, date = today()) {
   const own = lines[0].payment_mode === 'own_account';
   const companyId = r.company_id ?? 1;
   const via = own ? null : paymentJournal(db, null, companyId);
+  // An employee-paid report posts to its selected journal, else the company's default general journal.
+  const expenseJournal = own ? read(db, 'account.journal', r.expense_journal_id ?? read(db, 'res.company', companyId)?.default_general_journal_id) : null;
+  if (own && !expenseJournal) throw new Error('Select an expense journal or configure a default general journal on the company');
   const debits = expenseDebits(db, r, lines);
   const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
   const payable = own ? partnerAccount(contact.db, contact.id, companyId, 'payable') : null;
-  const booked = postEntry(contact.db, { journal: own ? (r.journal || 'MISC') : via.code, ...(via ? { journal_id: via.id } : {}), date, ref: r.name, company: companyId,
+  const journal = own ? expenseJournal : via;
+  const booked = postEntry(contact.db, { journal: journal.code, journal_id: journal.id, date, ref: r.name, company: companyId,
     lines: [...debits, own ? { account_id: payable, credit: total(lines), partner_id: contact.id } : { account_id: via.accountId, credit: total(lines) }],
   });
   const linked = lines.reduce((acc, l) => write(acc, 'hr.expense', l.id, { move_id: booked.id }), booked.db);

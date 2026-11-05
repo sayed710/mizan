@@ -123,7 +123,7 @@ export function postOperationCost(db, productionId) {
   const valuation = stockAccount(db, product, 'valuation', company);
   const production = stockAccount(db, product, 'production', company);
   const entry = postEntry(db, { journal: 'MISC', company, ref: `Operation costs ${mo.name}`, lines: [{ account_id: valuation, debit: cost }, { account_id: production, credit: cost }] });
-  const next = mo.state === 'done' ? capitalizeStock(entry.db, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: entry.id }) : entry.db;
+  const next = mo.state === 'done' ? capitalizeStock(entry.db, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: entry.id, company_id: company }) : entry.db;
   return write(next, 'mrp.production', productionId, { operation_cost_move_id: entry.id });
 }
 

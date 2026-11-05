@@ -290,20 +290,21 @@ export function moveValued(db, lines, sign, options = {}) {
 }
 
 /** Capitalize an already-posted additional cost without posting it twice. */
-export function capitalizeStock(db, productId, amount, { date = today(), reference = '', moveId } = {}) {
+export function capitalizeStock(db, productId, amount, { date = today(), reference = '', moveId, company_id } = {}) {
   nonnegative(amount, 'Additional cost');
   amount = round(amount);
-  let next = prepare(db, productId, date);
+  const compId = company_id ?? companyOf(db);
+  let next = prepare(db, productId, date, compId);
   const p = product(next, productId);
-  const remaining = layers(next, productId).filter((l) => l.remaining_qty > 0);
-  const onHand = stockQuantity(next, p);
+  const remaining = layers(next, productId, compId).filter((l) => l.remaining_qty > 0);
+  const onHand = stockQuantity(next, p, compId);
   if (!(onHand > 0)) throw new Error('Stock is required to capitalize additional costs');
   const shares = remaining.length ? allocateCents(amount, remaining.map((l) => l.remaining_qty)) : [];
   for (const [i, l] of remaining.entries()) {
     next = write(next, 'stock.valuation.layer', l.id, { remaining_value: round(l.remaining_value + shares[i]) });
   }
   next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + amount / onHand) });
-  return create(next, 'stock.valuation.layer', { product_id: p.id, company_id: companyOf(next), date, reference, description: reference,
+  return create(next, 'stock.valuation.layer', { product_id: p.id, company_id: compId, date, reference, description: reference,
     quantity: 0, value: amount, unit_cost: 0, kind: 'landed', move_id: moveId }).db;
 }
 

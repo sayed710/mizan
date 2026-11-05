@@ -125,7 +125,7 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
   if (mo.operation_cost_move_id && product?.valuation !== 'manual_periodic') {
     const operation = read(stocked, 'account.move', mo.operation_cost_move_id);
     const cost = (operation?.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
-    if (cost) stocked = capitalizeStock(stocked, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: operation.id });
+    if (cost) stocked = capitalizeStock(stocked, mo.product_id, cost, { reference: `Operation costs ${mo.name}`, moveId: operation.id, company_id: mo.company_id ?? 1 });
   }
   let closed = write(stocked, 'mrp.production', mo.id, {
     state: 'done', date_finished: today(), product_qty: producing, qty_producing: producing,

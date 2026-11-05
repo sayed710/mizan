@@ -775,8 +775,25 @@ export function closeSession(db, session, countedCash) {
   let cashJournal;
   let differenceAccount;
   if (difference) {
+    const sessionOrders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
+    const usedMethodIds = new Set();
+    for (const o of sessionOrders) {
+      if (o.payment_ids?.length) {
+        for (const p of o.payment_ids) {
+          if (p.payment_method_id) usedMethodIds.add(p.payment_method_id);
+        }
+      } else if (o.payment_method_id) {
+        usedMethodIds.add(o.payment_method_id);
+      }
+    }
+    const usedCashMethods = [...usedMethodIds]
+      .map((id) => read(db, 'pos.payment.method', id))
+      .filter((m) => m && m.type === 'cash' && (m.company_id ?? 1) === (session.company_id ?? 1));
+
     const config = read(db, 'pos.config', session.config_id);
-    const methods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+    const configuredMethods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+
+    const methods = usedCashMethods.length ? usedCashMethods : configuredMethods;
     const journals = [...new Set(methods.map((m) => m.journal_id).filter(Boolean))];
     if (journals.length !== 1 || methods.some((m) => !m.journal_id)) throw new Error('Configure one cash journal on the point of sale cash payment methods');
     cashJournal = read(db, 'account.journal', journals[0]);
