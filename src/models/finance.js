@@ -109,6 +109,13 @@ const companyLockDate = (db, move) => {
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
   return lockDateFor(comp, move, journal);
 };
+
+/** The applicable lock date for an entry or record: company lock, tax lock, and closed fiscal-year lock. */
+export function recordLockDate(db, record) {
+  if (!record) return '';
+  const compId = record.company_id ?? 1;
+  return [companyLockDate(db, record), taxLockFor(db, record), closedYearLock(db, compId)].filter(Boolean).sort().at(-1) ?? '';
+}
 export const companyTaxLock = (db, companyId) => {
   const comp = (db.records?.['res.company'] ?? []).find((c) => c.id === companyId);
   return comp?.tax_lock_date ?? null;
@@ -545,7 +552,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [companyLockDate(db, before), taxLockFor(db, before), closedYearLock(db, before.company_id ?? 1)].sort().at(-1);
+  const lock = before && recordLockDate(db, before);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -563,7 +570,7 @@ export function lockedSettlementInvariant(db, after, before) {
  */
 export const datedLockGuard = (fields, booked) => (db, before, after) => {
   const locks = [before, after].filter((r) => r && booked(r))
-    .map((r) => ({ record: r, lock: [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1) }))
+    .map((r) => ({ record: r, lock: recordLockDate(db, r) }))
     .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
     .map(({ lock }) => lock);
   if (!locks.length) return null;
@@ -573,7 +580,7 @@ export const datedLockGuard = (fields, booked) => (db, before, after) => {
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
 export const datedLockDelete = (booked) => (db, r) => {
-  const lock = [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1);
+  const lock = recordLockDate(db, r);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
@@ -584,7 +591,7 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
+  const lock = recordLockDate(db, move);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);

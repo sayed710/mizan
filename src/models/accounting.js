@@ -1186,6 +1186,11 @@ export const accountingModels = {
         if (!category) return 'Select an existing fiscal category';
         if (after.company_id && category.company_id !== after.company_id) return 'Fiscal category must belong to the account company';
       }
+      if (after.asset_model_id) {
+        const model = read(db, 'account.asset.model', after.asset_model_id);
+        if (!model) return 'Select an existing asset model';
+        if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
+      }
       return null;
     },
     protectDelete: accountDeleteGuard,
@@ -1725,7 +1730,13 @@ Object.assign(accountingModels, {
 
   'account.asset.model': {
     label: 'Depreciation Models',
-    guard: assetAccountGuard,
+    guard: (db, before, after, ctx) => {
+      if (before && before.company_id !== after.company_id && after.company_id
+        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
+        return 'Asset model must belong to the account company';
+      }
+      return assetAccountGuard(db, before, after, ctx);
+    },
     fields: {
       name: { type: 'char', label: 'Model Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },

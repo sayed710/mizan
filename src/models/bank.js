@@ -7,7 +7,7 @@ import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
-import { datedLockDelete, datedLockGuard } from './finance.js';
+import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
@@ -295,8 +295,41 @@ function bookToAccount(db, line) {
   return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: value }] }) };
 }
 
+/** Reject unreconciling when the statement line date, or any bank or counterpart entry, is on or before a lock date. */
+function unreconcileLockError(db, line) {
+  if (!line) return null;
+  const lineLock = recordLockDate(db, line);
+  const violatedLocks = [];
+  if (lineLock && String(line.date ?? today()) <= lineLock) {
+    violatedLocks.push(lineLock);
+  }
+  const moveIds = new Set([
+    line.bank_move_id,
+    line.move_id,
+    line.payment_move_id,
+    line.writeoff_move_id,
+    ...(line.allocations ?? []).flatMap((a) => [a.payment_move_id, a.writeoff_move_id]),
+    ...(line.payment_id ? [read(db, 'account.payment', line.payment_id)?.move_id] : []),
+    ...((line.payment_ids ?? []).map((id) => read(db, 'account.payment', id)?.move_id)),
+    ...((line.batch_payment_id ? (read(db, 'account.batch.payment', line.batch_payment_id)?.lines ?? []).map((l) => read(db, 'account.payment', l.payment_id)?.move_id) : [])),
+  ].filter(Boolean));
+  for (const moveId of moveIds) {
+    const move = read(db, 'account.move', moveId);
+    if (!move) continue;
+    const moveLock = recordLockDate(db, move);
+    if (moveLock && moveDate(move) <= moveLock) {
+      violatedLocks.push(moveLock);
+    }
+  }
+  if (!violatedLocks.length) return null;
+  const lock = violatedLocks.sort().at(-1);
+  return `The period up to ${lock} is locked`;
+}
+
 /** Validate a release against linked, posted mirror entries rather than trusting a client flag. */
 function unreconcileError(db, before, after) {
+  const lockError = unreconcileLockError(db, before);
+  if (lockError) return lockError;
   if (after.state !== 'to_check' || after.move_id || after.payment_id || (after.payment_ids ?? []).length || after.batch_payment_id || after.payment_move_id || after.writeoff_move_id || after.bank_move_id || after.open_amount != null || (after.allocations ?? []).length) return 'Unreconciliation requires reversing entries and clearing the bank links';
   const clearedFields = new Set(['state', 'move_id', 'payment_id', 'payment_ids', 'batch_payment_id', 'payment_move_id', 'writeoff_move_id', 'bank_move_id', 'open_amount', 'allocations', 'name']);
   if ([...new Set([...Object.keys(before), ...Object.keys(after)])].filter((k) => !clearedFields.has(k)).some((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))) return 'A reconciled bank transaction cannot be changed';
@@ -332,20 +365,21 @@ function unreconcileError(db, before, after) {
 
 /** Release a match by posting linked reversals; existing payments are not reversed. */
 export function unreconcile(db, line, reversalDate = null) {
-  const bankId = line.bank_move_id ?? (line.payment_id ? line.move_id : null);
+  const target = read(db, 'account.bank.statement.line', line.id) ?? line;
+  const lockErr = unreconcileLockError(db, target);
+  if (lockErr) throw new Error(lockErr);
+  const bankId = target.bank_move_id ?? (target.payment_id ? target.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
-  const allocations = line.allocations ?? [];
-  const date = reversalDate ?? [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
-  // Stage an unlinked line while reversals are generated; the original and complete result are validated below.
-  const original = db.records['account.bank.statement.line'].find((l) => l.id === line.id);
-  const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_ids: [], batch_payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };
-  let current = { ...db, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => l.id === line.id ? cleared : l) } };
+  const allocations = target.allocations ?? [];
+  const date = reversalDate ?? [today(), target.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
+
+  let current = db;
   const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
   for (const allocation of allocations) {
     if (allocation.invoice_id) {
       const payment = (current.records['account.payment'] ?? []).find((p) => p.move_id === allocation.payment_move_id);
       if (!payment) throw new Error('Cannot unreconcile: the generated payment link is missing');
-      current = reversePayment(current, payment, date);
+      current = reversePayment(current, payment, date, { excludeLineId: target.id });
       if (allocation.writeoff_move_id) current = reverseWriteoff(current, allocation.invoice_id, allocation.writeoff_move_id, date);
     } else if (!isDirectPayment(allocation.payment_move_id)) {
       const made = reverseEntry(current, read(current, 'account.move', allocation.payment_move_id), date);
@@ -353,8 +387,19 @@ export function unreconcile(db, line, reversalDate = null) {
     }
   }
   if (!isDirectPayment(bankId) && !(current.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === bankId)) current = reverseEntry(current, read(current, 'account.move', bankId), date).db;
-  const error = unreconcileError(current, line, cleared);
-  if (error) throw new Error(error);
+
+  current = write(current, 'account.bank.statement.line', target.id, {
+    state: 'to_check',
+    move_id: null,
+    payment_id: null,
+    payment_ids: [],
+    batch_payment_id: null,
+    payment_move_id: null,
+    writeoff_move_id: null,
+    bank_move_id: null,
+    open_amount: null,
+    allocations: [],
+  });
   return { db: current };
 }
 

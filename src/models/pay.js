@@ -495,12 +495,12 @@ export function reverseWriteoff(db, invoiceId, moveId, date) {
  * Reverse a posted payment (FLOW-017): a mirror entry is posted on `date`, and what the payment settled becomes due
  * again, cash-basis taxes included. Payments made by a bank reconciliation stay, since the bank line still matches them.
  */
-export function reversePayment(db, p, date = today()) {
+export function reversePayment(db, p, date = today(), options = {}) {
   if (p.state !== 'posted' || !p.move_id) throw new Error('Only posted payments can be reversed');
   if (p.return_id || p.is_tax_payment) throw new Error('Tax return payments cannot be reversed independently');
   const entry = read(db, 'account.move', p.move_id);
-  const fromBank = isPaymentMatched(db, p);
-  const missingBankLink = p.invoice_id && search(db, 'account.bank.statement.line').some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && !l.payment_move_id);
+  const fromBank = isPaymentMatched(db, p, options?.excludeLineId);
+  const missingBankLink = p.invoice_id && search(db, 'account.bank.statement.line').some((l) => l.state === 'reconciled' && l.move_id === p.invoice_id && !l.payment_move_id && (!options?.excludeLineId || l.id !== options.excludeLineId));
   if (missingBankLink) throw new Error('Cannot reverse payment: the reconciled bank transaction is missing its payment link; repair it first');
   if (fromBank) throw new Error('This payment is linked to a reconciled bank transaction; unreconcile the transaction before reversing it');
   // A posted legacy line without payment identity could represent any payment of its linked invoice.
