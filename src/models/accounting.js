@@ -15,7 +15,7 @@ import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
 import { t } from '../i18n.js';
-import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
+import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, reverseInvoiceDeferrals, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
@@ -277,11 +277,7 @@ function spawnRecurringMove(db, move) {
     ...(nextDue ? { invoice_date_due: nextDue } : {}),
     ...(move.auto_reverse ? { reverse_date: recurringReversalDate(read(db, 'account.move', origin), nextDate) } : {}),
     auto_post_origin_id: origin,
-    invoice_line_ids: isInvoice(move) ? (raw.invoice_line_ids ?? []).map((l) => ({
-      ...l,
-      ...(l.deferred_start_date ? { deferred_start_date: shiftMonth(l.deferred_start_date, months) } : {}),
-      ...(l.deferred_end_date ? { deferred_end_date: shiftMonth(l.deferred_end_date, months) } : {}),
-    })) : [],
+    invoice_line_ids: isInvoice(move) ? copyInvoiceLines(raw.invoice_line_ids, { months, preserveSourceLineId: Boolean(move.reversed_entry_id) }) : [],
     line_ids: !isInvoice(move) ? (raw.line_ids ?? []).map((l) => ({
       ...l,
       ...(l.date_maturity ? { date_maturity: shiftMonth(l.date_maturity, months) } : {}),
@@ -347,6 +343,61 @@ function intercompanyBill(db, move) {
   return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id };
 }
 
+const newInvoiceLineId = () => {
+  if (typeof globalThis.crypto?.randomUUID !== 'function') throw new Error('Secure ID generation is required to identify invoice lines');
+  return globalThis.crypto.randomUUID();
+};
+
+/** Give each embedded invoice line a stable unique identity without deriving it from its content or position. */
+export function ensureInvoiceLineIds(db, move, reservedIds = null) {
+  const used = reservedIds ?? new Set((db.records['account.move'] ?? [])
+    .filter((record) => record.id !== move.id)
+    .flatMap((record) => record.invoice_line_ids ?? [])
+    .map((line) => line.line_id)
+    .filter((lineId) => lineId != null && lineId !== '')
+    .map(String));
+  const seen = new Set();
+  const lines = (move.invoice_line_ids ?? []).map((line) => {
+    let lineId = line.line_id == null || line.line_id === '' ? null : String(line.line_id);
+    if (!lineId || used.has(lineId) || seen.has(lineId)) {
+      do { lineId = newInvoiceLineId(); } while (used.has(lineId) || seen.has(lineId));
+    }
+    seen.add(lineId);
+    reservedIds?.add(lineId);
+    return line.line_id === lineId ? line : { ...line, line_id: lineId };
+  });
+  return lines;
+}
+
+function storeInvoiceLineIds(db, move) {
+  const invoiceLineIds = ensureInvoiceLineIds(db, move);
+  if ((move.invoice_line_ids ?? []).every((line, index) => line === invoiceLineIds[index])) return { db, move };
+  const nextMove = { ...move, invoice_line_ids: invoiceLineIds };
+  const moves = (db.records['account.move'] ?? []).map((record) => record.id === move.id ? nextMove : record);
+  return { db: { ...db, records: { ...db.records, 'account.move': moves } }, move: nextMove };
+}
+
+/** Copy invoice lines as new records, optionally linking each one to its source line. */
+function copyInvoiceLines(lines, { sourceCredit = false, preserveSourceLineId = false, months = null } = {}) {
+  return (lines ?? []).map((line) => {
+    const sourceLineId = line.line_id;
+    if (sourceCredit && (sourceLineId == null || sourceLineId === '')) {
+      throw new Error('The source invoice line is missing its stable ID; update the database before creating a credit note');
+    }
+    const { line_id: ignoredLineId, source_line_id: ignoredSourceLineId, ...copy } = line;
+    void ignoredLineId;
+    void ignoredSourceLineId;
+    return {
+      ...copy,
+      line_id: newInvoiceLineId(),
+      ...(sourceCredit ? { source_line_id: String(sourceLineId) } : {}),
+      ...(!sourceCredit && preserveSourceLineId && line.source_line_id ? { source_line_id: line.source_line_id } : {}),
+      ...(months != null && line.deferred_start_date ? { deferred_start_date: shiftMonth(line.deferred_start_date, months) } : {}),
+      ...(months != null && line.deferred_end_date ? { deferred_end_date: shiftMonth(line.deferred_end_date, months) } : {}),
+    };
+  });
+}
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   let r = read(db, 'account.move', id);
@@ -355,6 +406,8 @@ export function postMove(db, id) {
     && !(r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0)) {
     r = { ...r, invoice_line_ids: refreshAdvanceDeductions(db, order, r.invoice_line_ids, id) };
   }
+  if (isInvoice(r)) r = { ...r, invoice_line_ids: ensureInvoiceLineIds(db, r) };
+  validateInvoiceDeferralCredit(db, r);
   const enteredName = r.name && r.name !== '/' ? r.name : null;
   const journalRecord = resolveDocumentJournal(db, r, { required: true });
   const journal = journalRecord.id;
@@ -450,7 +503,10 @@ export function postMove(db, id) {
   if (matchWarnings.length) posted = postNote(posted, 'account.move', id, `Purchase price mismatch: ${matchWarnings.map((line) => `${read(db, 'product', line.product_id)?.name ?? 'Unknown product'}, difference ${line.priceDifference}`).join('; ')}`);
   posted = write(posted, 'account.journal', journal, { [sequence.numberField]: sequence.nextNumber + 1 });
   const deferred = createInvoiceDeferrals(posted, read(posted, 'account.move', id));
-  if (isRefund(r) && r.reversed_entry_id) return spawnRecurringMove(offsetCreditNote(deferred, id), read(deferred, 'account.move', id));
+  if (isRefund(r) && r.reversed_entry_id) {
+    const adjusted = adjustInvoiceDeferralsForCreditNote(deferred, read(deferred, 'account.move', id), reverseEntry);
+    return spawnRecurringMove(offsetCreditNote(adjusted, id), read(adjusted, 'account.move', id));
+  }
   const withAssets = r.move_type === 'in_invoice' ? draftAssetsFromBill(deferred, read(deferred, 'account.move', id)) : deferred;
   return spawnRecurringMove(withAssets, read(withAssets, 'account.move', id));
 }
@@ -774,6 +830,7 @@ export function creditNote(db, r, options = {}) {
     const expectedType = purchase ? 'purchase' : 'sale';
     if (j.type !== expectedType) throw new Error(`Journal must be of type ${expectedType}`);
   }
+  ({ db, move: r } = storeInvoiceLineIds(db, r));
   const reason = String(opts.reason ?? '').trim();
   const ref = reason ? `Reversal of ${r.name}, ${reason}` : `Reversal of ${r.name}`;
   const { db: next, id } = create(db, 'account.move', {
@@ -787,7 +844,7 @@ export function creditNote(db, r, options = {}) {
     sale_id: r.sale_id ?? null,
     purchase_id: r.purchase_id ?? null,
     company_id: r.company_id,
-    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })),
+    invoice_line_ids: copyInvoiceLines(r.invoice_line_ids, { sourceCredit: true }),
     ref,
     currency_id: r.currency_id ?? null,
     fiscal_position_id: r.fiscal_position_id ?? null,
@@ -824,7 +881,7 @@ export function creditNote(db, r, options = {}) {
     currency_id: r.currency_id ?? null,
     fiscal_position_id: r.fiscal_position_id ?? null,
     ref: r.ref ?? '',
-    invoice_line_ids: r.invoice_line_ids.map((l) => ({ ...l })),
+    invoice_line_ids: copyInvoiceLines(r.invoice_line_ids),
   });
   const finalDb = syncInvoicedQty(draft.db, read(draft.db, 'account.move', draft.id));
   return { db: finalDb, id: draft.id, credit_note_id: id, go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${draft.id}` };
@@ -839,7 +896,7 @@ export function correctCreditNote(db, note) {
     move_type: purchase ? 'in_invoice' : 'out_invoice', correction_of_id: note.id, company_id: note.company_id,
     partner_id: note.partner_id, currency_id: note.currency_id ?? null, fiscal_position_id: note.fiscal_position_id ?? null,
     invoice_origin: note.name, ref: `Correction of ${note.name}`, invoice_date: today(), invoice_date_due: today(),
-    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, ...line }) => ({ ...line })),
+    invoice_line_ids: note.invoice_line_ids.map(({ purchase_line_id, sale_line_id, line_id, source_line_id, ...line }) => ({ ...line, line_id: newInvoiceLineId() })),
   });
   return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
 }
@@ -1012,7 +1069,7 @@ const invoiceLineField = {
       ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
       : updated;
   },
-  fields: { name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+  fields: { line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true }, source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true }, name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
 
 const lineItem = {
   type: 'one2many',
@@ -1032,7 +1089,7 @@ const lineItem = {
     discount_percentage: { type: 'float', label: 'Discount Percentage', hidden: true },
     blocked: { type: 'boolean', label: 'Blocked / In Dispute', hidden: true },
     invoice_sources: { type: 'one2many', label: 'Invoice Sources', hidden: true, fields: {
-      index: { type: 'integer', label: 'Line' }, amount: { type: 'monetary', label: 'Amount' },
+      index: { type: 'integer', label: 'Line' }, line_id: { type: 'char', label: 'Reference' }, amount: { type: 'monetary', label: 'Amount' },
       original_account_id: { type: 'many2one', relation: 'account.account', label: 'Recognition Account' },
     } },
     // Tax lines name their tax and the base it was charged on (company currency) for the tax return.
@@ -1270,6 +1327,7 @@ export const accountingModels = {
       fx_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Settlement Invoice', readonly: true },
       cash_basis_origin_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true, hidden: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
+      deferred_adjustment_of_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true, hidden: true },
       // Set by fiscal closing and exchange revaluation only.
       is_closing: { type: 'boolean', label: 'Closing Entry', readonly: true, hidden: true },
       revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },

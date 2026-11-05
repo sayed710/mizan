@@ -125,7 +125,8 @@ test('Area 1: credit notes and vendor refunds with deferred dates create offsett
   const cnBtn = models['account.move'].form.buttons.find((b) => b.label === 'Credit Note');
   const cnCreated = cnBtn.run(db, read(db, 'account.move', inv.id));
   const cnId = Number(cnCreated.go.split('/').at(-1));
-  db = write(cnCreated.db, 'account.move', cnId, { invoice_date: '2026-01-15', invoice_date_due: '2026-01-15' });
+  const unlinkedLines = read(cnCreated.db, 'account.move', cnId).invoice_line_ids.map(({ source_line_id, ...line }) => line);
+  db = write(cnCreated.db, 'account.move', cnId, { invoice_date: '2026-01-15', invoice_date_due: '2026-01-15', invoice_line_ids: unlinkedLines });
   db = press(db, 'account.move', cnId, 'Confirm');
 
   const cnSchedule = search(db, 'account.deferral').find((d) => d.source_move_id === cnId);
