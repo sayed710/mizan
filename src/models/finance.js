@@ -2,13 +2,13 @@
 import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
-import { addDays, sameCommercialPartner, today, total } from './common.js';
+import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
 import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
-import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
+import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
 
 export { applicationEffectiveDate };
@@ -245,16 +245,28 @@ function backsSettlement(db, id) {
  * Credit released by unapplied rows must reach the payment, and their settlement-specific entries must be reversed,
  * in the same change. Compares the stored and resulting databases, so other applications in that change count too.
  */
+function reversesJournalLines(source, reversal) {
+  return Array.isArray(source?.line_ids) && source.line_ids.length > 0
+    && JSON.stringify(source.line_ids.map((l) => [l.account_id, l.partner_id ?? null, l.debit || 0, l.credit || 0]))
+      === JSON.stringify((reversal?.line_ids ?? []).map((l) => [l.account_id, l.partner_id ?? null, l.credit || 0, l.debit || 0]));
+}
+
 function unapplicationError(db, stored, after, before) {
   const moves = db.records['account.move'] ?? [];
-  const reversedIds = new Set(moves.filter((m) => m.state === 'posted' && m.reversed_entry_id).map((m) => m.reversed_entry_id));
-  const released = (before?.payments ?? []).filter((p, i) => !p.reversed && after.payments?.[i]?.unapplied);
-  if (released.some((p) => [p.payment_fx_move_id, p.cash_basis_move_id].some((id) => id && !reversedIds.has(id)))) {
+  const entries = new Map(moves.map((m) => [m.id, m]));
+  const released = (before?.payments ?? []).flatMap((p, i) => !p.reversed && after.payments?.[i]?.unapplied ? [{ row: p, date: after.payments[i].reversal_date }] : []);
+  const mirrored = (source, reversal, date) => source?.state === 'posted' && source.move_type === 'entry'
+    && (source.company_id ?? 1) === (after.company_id ?? 1)
+    && reversal.state === 'posted' && reversal.move_type === 'entry' && reversal.reversed_entry_id === source.id
+    && (reversal.company_id ?? 1) === (after.company_id ?? 1)
+    && validDate(date) && reversal.invoice_date === date && date >= (source.invoice_date ?? source.date ?? '')
+    && reversesJournalLines(source, reversal);
+  if (released.some(({ row, date }) => [row.payment_fx_move_id, row.cash_basis_move_id].some((id) => id && !moves.some((move) => mirrored(entries.get(id), move, date))))) {
     return 'Unapplying a payment must reverse its exchange and cash-basis entries';
   }
   if (!stored) return null;
   const storedMoves = new Map((stored.records['account.move'] ?? []).map((m) => [m.id, m]));
-  for (const moveId of new Set(released.map((p) => p.move_id))) {
+  for (const moveId of new Set(released.map(({ row }) => row.move_id))) {
     // Net credit change for this payment across every move in the change: released rows add, new applications take.
     let change = 0;
     for (const move of moves) {
@@ -262,13 +274,17 @@ function unapplicationError(db, stored, after, before) {
       (move.payments ?? []).forEach((row, i) => {
         if (row.move_id !== moveId) return;
         if (i >= old.length && !row.reversed) change -= Number(row.payment_company_amount) || 0;
-        else if (i < old.length && !old[i].reversed && row.unapplied) change += Number(old[i].payment_company_amount) || 0;
+        else if (i < old.length && !old[i].reversed && row.unapplied) {
+          const amount = paymentCompanyAmount(stored, storedMoves.get(move.id), old[i]);
+          if (!(amount > 0)) { change = NaN; return; }
+          change += amount;
+        }
       });
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
-    if (!payment || !prior || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
+    if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
       return 'Unapplying a payment must restore its outstanding credit';
     }
   }
@@ -300,8 +316,7 @@ export function moveInvariant(db, after, before, stored = null) {
     const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
     const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
     return JSON.stringify(original) !== JSON.stringify(p) || !source || entry?.state !== 'posted' || (revDate && revDate !== entry.invoice_date) || (p.date && p.date > entry.invoice_date) || entry.reversed_entry_id !== source.id
-      || JSON.stringify((source.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
-      !== JSON.stringify((entry.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]));
+      || !reversesJournalLines(source, entry);
   })) return 'Registered payments cannot be changed without a posted reversing journal entry';
   const unapplication = unapplicationError(db, stored, after, before);
   if (unapplication) return unapplication;

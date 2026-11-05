@@ -244,12 +244,8 @@ function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
   const end = origin.reverse_date;
   if (!validDate(start) || !validDate(end) || end <= start) throw new Error('Reversal date must be after the accounting date');
-  const [sy, sm] = start.split('-').map(Number);
-  const [ey, em] = end.split('-').map(Number);
-  let months = (ey - sy) * 12 + em - sm;
-  if (shiftMonth(start, months) > end) months--;
-  const days = (Date.parse(end) - Date.parse(shiftMonth(start, months))) / 86400000;
-  return addDays(shiftMonth(nextDate, months), days);
+  const days = (Date.parse(end) - Date.parse(start)) / 86400000;
+  return addDays(nextDate, days);
 }
 
 function spawnRecurringMove(db, move) {
@@ -1331,7 +1327,7 @@ export const accountingModels = {
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         {
           label: 'Reverse Entry',
-          when: (r, db) => r.state === 'posted' && r.move_type === 'entry' && !r.reversal_move_id && !(db?.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === r.id) && !(db && settlingEntries(db).has(r.id)),
+          when: (r, db) => r.state === 'posted' && r.move_type === 'entry' && (!r.reversal_move_id || (db?.records['account.move'] ?? []).some((m) => m.id === r.reversal_move_id && m.state === 'cancel')) && !(db?.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === r.id) && !(db && settlingEntries(db).has(r.id)),
           wizard: (db, r) => ({
             title: 'Reverse Entry',
             fields: [
@@ -1443,7 +1439,12 @@ export const accountingModels = {
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !r.inalterable_hash && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
-        { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, run: (db, r) => ({ db: syncInvoicedQty(removeAnalytic(write(db, 'account.move', r.id, { state: 'cancel' }), r.id), r) }) },
+        { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, run: (db, r) => {
+          let next = write(db, 'account.move', r.id, { state: 'cancel' });
+          const source = r.reversed_entry_id && read(next, 'account.move', r.reversed_entry_id);
+          if (source?.reversal_move_id === r.id) next = write(next, 'account.move', source.id, { reversal_move_id: null });
+          return { db: syncInvoicedQty(removeAnalytic(next, r.id), r) };
+        } },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',

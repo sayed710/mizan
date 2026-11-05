@@ -3,6 +3,7 @@ import { create, read, write } from '../orm.js';
 import { addDays, today } from './common.js';
 import { postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
+import { closedYearLock, lockDateFor } from './finance.js';
 import { allocateCents, companyCurrencyRecord, roundCurrency } from '../money.js';
 
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
@@ -54,6 +55,16 @@ function recognitionTargetThroughDate(schedule, index, date, method, currency) {
 
 const isRefund = (move) => ['out_refund', 'in_refund'].includes(move.move_type);
 
+function correctionDate(db, move) {
+  const date = move.invoice_date ?? move.date ?? today();
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const journal = read(db, 'account.journal', move.journal_id);
+  const lock = [lockDateFor(company, { move_type: 'entry' }, journal), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
+  if (!lock || date > lock) return date;
+  if (today() <= lock) throw new Error(`Cannot reverse deferred recognition: the period up to ${lock} is locked`);
+  return today();
+}
+
 /** Make schedules from the protected posted company amounts, once per source line. */
 export function createInvoiceDeferrals(db, move) {
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return db;
@@ -104,7 +115,7 @@ export function reverseInvoiceDeferrals(db, source) {
   for (const { original, reversal, lines } of corrections) {
     for (const [move, reverse] of [[original, false], [reversal, true]]) {
       const correction = postEntry(next, {
-        journal: move.journal_id, company: move.company_id, date: move.invoice_date ?? move.date,
+        journal: move.journal_id, company: move.company_id, date: correctionDate(db, move),
         ref: `Grouped deferral adjustment ${move.name}`,
         lines: lines.map((line) => reverse ? { ...line, debit: line.credit, credit: line.debit } : line),
       });
@@ -116,7 +127,7 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const line of schedule.board ?? []) {
       if (!line.move_id || line.reversal_move_id) { board.push(line); continue; }
       const original = read(next, 'account.move', line.move_id);
-      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: original.invoice_date ?? original.date ?? today(), ref: `Reversal of ${original.name}`, lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
     }
