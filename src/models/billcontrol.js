@@ -23,7 +23,8 @@ const orderFor = (db, bill) => {
   return po;
 };
 const previousBills = (db, bill, po) => (db.records['account.move'] ?? []).filter((m) => m.id !== bill.id && m.move_type === 'in_invoice'
-  && m.state === 'posted' && orderFor(db, m)?.id === po.id);
+  // Only bills of this order are validated: an unrelated historical bill must not block it (Qodo 28).
+  && m.state === 'posted' && m.purchase_id === po.id && orderFor(db, m)?.id === po.id);
 const totalQty = (lines, id) => lines.filter((l) => l.product_id === id).reduce((s, l) => s + number(l.qty), 0);
 
 /** Return each PO line's quantities eligible for billing under its product policy. */
@@ -80,7 +81,7 @@ function matches(db, bill) {
     const receivedQty = source.reduce((s, p) => s + number(p.qty_delivered), 0);
     const orderedQty = totalQty(source, l.product_id);
     const key = l.purchase_line_key || l.product_id;
-    const offset = (used.get(key) ?? 0) + totalQty(l.purchase_line_key ? prior.filter((p) => p.purchase_line_key === l.purchase_line_key) : prior, l.product_id);
+    const offset = (used.get(key) ?? 0) + totalQty(l.purchase_line_key ? prior.filter((p) => p.purchase_line_key === l.purchase_line_key || !p.purchase_line_key) : prior, l.product_id);
     let skip = offset, left = billedQty, expected = 0;
     for (const p of source) {
       const available = Math.max(0, number(p.qty) - skip);

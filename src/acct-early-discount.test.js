@@ -1,4 +1,4 @@
-import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { createCompanyWithDefaultInvoiceJournals, withDefaultVat } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,8 @@ import { taxRepartitionLine, taxSnapshot } from './models/taxes.js';
 test('untaxed early discount settles to the configured account in each invoice company', () => {
   const base = seed();
   const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Discount branch', currency_id: base.records['res.company'][0].currency_id });
-  let db = branch.db;
+  // Plain-rate VAT posts to the branch's configured default tax.
+  let db = withDefaultVat(branch.db, branch.id);
   for (const companyId of [1, branch.id]) {
     const account = create(db, 'account.account', { name: 'Early discount expense', code: `DISC${companyId}`, account_type: 'expense', company_id: companyId });
     db = write(account.db, 'res.company', companyId, { expense_early_payment_discount_account_id: account.id });

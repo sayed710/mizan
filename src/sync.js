@@ -302,6 +302,24 @@ function remapDistribution(distribution, remapped) {
   return result;
 }
 
+function remapTaxSnapshot(snap, to) {
+  if (!snap || typeof snap !== 'object') return snap;
+  const remapRepartition = (rows) => (Array.isArray(rows)
+    ? rows.map((r) => (!r || typeof r !== 'object' ? r : {
+      ...r,
+      ...(Number.isInteger(r.account_id) ? { account_id: to('account.account', r.account_id) } : {}),
+      ...(Array.isArray(r.tag_ids) ? { tag_ids: r.tag_ids.map((id) => to('account.account.tag', id)) } : {}),
+    }))
+    : rows);
+  return {
+    ...snap,
+    ...(Number.isInteger(snap.tax_id) ? { tax_id: to('account.tax', snap.tax_id) } : {}),
+    ...(Array.isArray(snap.invoice_repartition_line_ids) ? { invoice_repartition_line_ids: remapRepartition(snap.invoice_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.refund_repartition_line_ids) ? { refund_repartition_line_ids: remapRepartition(snap.refund_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.tax_breakdown) ? { tax_breakdown: snap.tax_breakdown.map((c) => remapTaxSnapshot(c, to)) } : {}),
+  };
+}
+
 /** Point many2one, line and res_model/res_id references in a record at remapped ids. */
 function remapRefs(model, rec, remapped) {
   const to = (relation, v) => (Number.isInteger(v) && remapped[relation]?.[v]) || v;
@@ -325,10 +343,14 @@ function remapRefs(model, rec, remapped) {
         const rows = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'json' && s.refs && Array.isArray(line[k]))
           .map(([k, s]) => [k, line[k].map((row) => (row && typeof row === 'object' ? { ...row, ...Object.fromEntries(Object.entries(s.refs).filter(([rk]) => rk in row)
             .map(([rk, rel]) => [rk, Array.isArray(row[rk]) ? row[rk].map((id) => to(rel, id)) : to(rel, row[rk])])) } : row))]);
-        return subs.length || analytic || rows.length ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic } : line;
+        const breakdown = Array.isArray(line.tax_breakdown)
+          ? { tax_breakdown: line.tax_breakdown.map((s) => remapTaxSnapshot(s, to)) }
+          : null;
+        return subs.length || analytic || rows.length || breakdown ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic, ...breakdown } : line;
       });
     }
   }
+  if (Array.isArray(out.tax_breakdown)) out.tax_breakdown = out.tax_breakdown.map((s) => remapTaxSnapshot(s, to));
   if (typeof out.res_model === 'string') out.res_id = to(out.res_model, out.res_id);
   return out;
 }
@@ -427,7 +449,8 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
 export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
-  d = rebaseConcurrentInvoiceSequence(db, d);
+  // Renumbering events are produced here by the server only; a client-sent list is discarded (Qodo 5).
+  d = rebaseConcurrentInvoiceSequence(db, { ...d, sequenceRenamed: [] });
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
@@ -541,7 +564,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db);
       if (err) throw new Error(err);
     }
   }
@@ -607,7 +630,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.
       hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
-      audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
       company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),
       company_iban: String(s.company_iban ?? db.settings.company_iban ?? '').slice(0, 40),

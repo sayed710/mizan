@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
+import { applyDiff, diffDb } from './sync.js';
 import { postMove } from './models/accounting.js';
 import { journalItems, postEntry } from './models/ledger.js';
 import { postPayment, reconcileJournalItems, unreconcileJournalItems, writeoffJournalItem } from './models/pay.js';
@@ -182,4 +183,13 @@ test('Journal Items selection and confirmation controls execute reconciliation a
     assert.equal(read(getDb(), 'account.move', f.invoiceId).amount_residual, 100);
     assert.ok(button('Write Off'));
   } finally { await React.act(async () => root.unmount()); }
+});
+
+test('an unreconcile that frees a payment credit is accepted by server save (Qodo 1)', () => {
+  const f = fixture(40);
+  const matched = reconcileJournalItems(f.db, selection(f), { date });
+  const local = unreconcileJournalItems(matched, [item(matched, f.invoiceId, f.account)], { date });
+  const synced = applyDiff(matched, diffDb(matched, local), { isAdmin: true });
+  assert.equal(read(synced, 'account.move', f.invoiceId).amount_residual, 100);
+  assert.equal(read(synced, 'account.payment', f.paymentId).unapplied, read(f.db, 'account.payment', f.paymentId).unapplied);
 });

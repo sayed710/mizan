@@ -3,12 +3,12 @@ import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
-import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
-import { currentYearEarningsAccount } from './earnings.js';
+import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
@@ -263,6 +263,16 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
+/** A plain-rate tax (no tax record) posts to the tax account of the company's configured default sales or purchase tax. */
+function plainRateTaxAccount(db, move, sale, side) {
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const tax = read(db, 'account.tax', sale ? company?.account_sale_tax_id : company?.account_purchase_tax_id);
+  const configured = tax ? taxRepartitionLines(tax, side).find((r) => r.repartition_type === 'tax' && r.account_id)?.account_id : null;
+  const account = configured ? resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, configured), move.company_id) : null;
+  if (!account) throw new Error(`Configure the default ${sale ? 'sales' : 'purchase'} tax and its tax account on the company to post a plain-rate tax`);
+  return account;
+}
+
 /** Tax groups for an invoice/bill, applying mixed early-payment discount rounding per group when present. */
 export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
@@ -271,6 +281,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
+  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const side = isRefund ? 'refund' : 'invoice';
   const by = new Map();
 
@@ -279,23 +290,8 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
     for (const t of computed.taxes) {
       if (t.amount === 0 && !t.tax_cash_basis) continue;
-      const repartLines = taxRepartitionLines(t, side).length
-        ? taxRepartitionLines(t, side)
-        : taxRepartitionLines(l, side);
-      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
-      if (!taxRows.length) continue;
-      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
-      const splitAmounts = taxRows.length === 1
-        ? [t.amount]
-        : allocateCents(t.amount, weights, docCurrency, { tieBreak: 'last' });
-      const splitBases = taxRows.length === 1
-        ? [t.base]
-        : allocateCents(t.base, weights, docCurrency, { tieBreak: 'last' });
-
-      for (let i = 0; i < taxRows.length; i++) {
-        const row = taxRows[i];
-        const docAmt = splitAmounts[i];
-        const docBase = splitBases[i];
+      const { explicit, splits } = taxRepartitionSplits(t, l, side, docCurrency);
+      for (const { row, amount: docAmt, base: docBase } of splits) {
         let account_id;
         if (t.tax_cash_basis) {
           account_id = cashBasisTransitionAccount(db, t.tax_id, move.company_id);
@@ -304,8 +300,11 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
           const resolved = resolveCompanyAccount(db, mapped, move.company_id);
           if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
           account_id = resolved;
-        } else {
+        } else if (explicit) {
+          // A configured repartition row without an account books the tax on the base line's account.
           account_id = invoiceLineAccount(db, move, l);
+        } else {
+          account_id = plainRateTaxAccount(db, move, sale, side);
         }
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;
@@ -726,7 +725,8 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
-  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
+  // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
+  const earningsAccount = configuredEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,
