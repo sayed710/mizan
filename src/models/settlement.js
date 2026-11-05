@@ -1,5 +1,30 @@
 import { read } from '../orm.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
+import { invoiceCounterpartAccount } from './ledger.js';
+
+/** Resolve the cash booked for an application, including unambiguous pre-upgrade invoice payments. */
+export function paymentCompanyAmount(db, invoice, row) {
+  if (row.payment_company_amount != null) return Number.isFinite(row.payment_company_amount) && row.payment_company_amount > 0 ? row.payment_company_amount : null;
+  const payments = (db.records['account.payment'] ?? []).filter((p) => p.move_id === row.move_id && p.state === 'posted');
+  if (payments.length !== 1) return null;
+  const [payment] = payments;
+  const source = read(db, 'account.move', row.move_id);
+  if (payment.invoice_id !== invoice.id || !payment.outstanding_account_id || source?.state !== 'posted'
+    || (payment.company_id ?? 1) !== (invoice.company_id ?? 1) || (source.company_id ?? 1) !== (invoice.company_id ?? 1)
+    || payment.date !== row.date || (source.invoice_date ?? source.date) !== row.date) return null;
+  const uses = (db.records['account.move'] ?? []).flatMap((m) => (m.payments ?? []).filter((p) => p.move_id === row.move_id));
+  if (uses.length !== 1) return null;
+  const counterpart = invoiceCounterpartAccount(db, invoice);
+  if (!counterpart || counterpart === payment.outstanding_account_id) return null;
+  const lines = source.line_ids ?? [];
+  const liquidity = lines.filter((l) => l.account_id === payment.outstanding_account_id && l.partner_id === payment.partner_id);
+  const partner = lines.filter((l) => l.account_id === counterpart && l.partner_id === invoice.partner_id);
+  if (liquidity.length !== 1 || partner.length !== 1) return null;
+  const inbound = payment.payment_type === 'inbound';
+  const cash = Number(inbound ? liquidity[0].debit : liquidity[0].credit);
+  const otherSide = Number(inbound ? liquidity[0].credit : liquidity[0].debit) || 0;
+  return Number.isFinite(cash) && cash > 0 && otherSide === 0 ? roundCurrency(cash, companyCurrencyRecord(db, invoice.company_id)) : null;
+}
 
 function invoiceCompanyBalance(db, invoice) {
   const type = ['in_invoice', 'in_refund'].includes(invoice.move_type) ? 'liability_payable' : 'asset_receivable';
