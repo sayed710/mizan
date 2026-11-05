@@ -6,6 +6,7 @@ import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
+import { returnTaxLock } from './finance.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -256,7 +257,10 @@ function companyGuard(db, before, r, ctx) {
   }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
-  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null))) {
+  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
+    JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null)
+    && !(field === 'tax_lock_date' && (r[field] ?? null) === (returnTaxLock(db, r.id) || null))
+  ))) {
     return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);

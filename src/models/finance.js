@@ -122,13 +122,14 @@ export function returnCompanies(db, ret) {
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
   .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state) && returnCompanies(db, r).includes(companyId))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
 export function taxLockFor(db, move) {
   if (!move) return '';
   const compId = move?.company_id ?? 1;
   // A submitted or paid return keeps its period locked even if the company setting is lowered below it.
   // A return's own closing entry is unlocked by resetting that return, so it is not held by the floor.
-  const lock = [companyTaxLock(db, compId), !move.tax_return_id && returnTaxLock(db, compId)].filter(Boolean).sort().at(-1);
+  const lock = [companyTaxLock(db, compId), returnTaxLock(db, compId, isReturnEntry(db, move) ? move.tax_return_id : null)].filter(Boolean).sort().at(-1);
   if (!lock) return '';
   const accounts = taxAccounts(db, compId);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
@@ -489,7 +490,6 @@ export function paymentInvariant(db, after) {
 
 /** Whether a fiscal year names this entry as its closing or reopening entry. */
 const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some((y) => y.closing_move_id === id || y.opening_move_id === id);
-const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 
 /** A closed fiscal year locks its period whoever closed it. */
 export function closedYearLock(db, companyId = 1) {
