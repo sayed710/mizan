@@ -35,6 +35,11 @@ const docFmts = new Map();
 // In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
 // number and the run does not reorder the surrounding right-to-left text.
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
+/** An amount whose currency is not configured: the number, marked as such, never a borrowed currency symbol. */
+function unconfiguredMoney(n) {
+  const val = Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n);
+  return `${ltr(val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))} (${t('currency not configured')})`;
+}
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
 export const money = (n, code = null, currency = null) => {
   const activeCurrencyCode = activeCode || (moneyFmt ? moneyFmt.resolvedOptions().currency : null);
@@ -43,11 +48,7 @@ export const money = (n, code = null, currency = null) => {
     const fmt = docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code);
     return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
   }
-  if (!currencyConfigured) {
-    const val = Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n);
-    const plain = val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return `${ltr(plain)} (${t('currency not configured')})`;
-  }
+  if (!currencyConfigured) return unconfiguredMoney(n);
   if (activeCurrency) return ltr(formatCurrency(n, activeCurrency));
   const fmt = moneyFmt ?? safeFormat('USD');
   return ltr(fmt.format(Math.abs(Number(n) || 0) < 0.005 ? 0 : Number(n)));
@@ -71,6 +72,8 @@ export function display(db, field, value, rec = null) {
       try {
         currency = field.currency === 'company' ? companyCurrencyRecord(db, context.company_id) : documentCurrency(db, context);
       } catch {
+        // Company amounts never borrow the record's own currency: an unresolved company currency is shown as such.
+        if (field.currency === 'company') return unconfiguredMoney(value);
         currency = null;
       }
       return money(value, currency?.name ?? currencyCode(db, rec), currency);
