@@ -2,7 +2,7 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, updateSettings, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
@@ -123,7 +123,7 @@ test('tax return periods and tax locks use accounting date rather than invoice d
   assert.deepEqual(december, { output: 0, input: 0, payable: 0 });
   assert.ok(january.input > 0);
 
-  const locked = updateSettings(posted, { tax_lock_dates: { 1: '2030-12-31' } });
+  const locked = write(posted, 'res.company', 1, { tax_lock_date: '2030-12-31' });
   const nextBill = create(locked, 'account.move', {
     move_type: 'in_invoice', partner_id: 3, invoice_date: '2030-12-31', date: '2031-01-06',
     invoice_line_ids: [{ name: 'Taxable service', qty: 1, price_unit: 25, ...taxSnapshot(tax) }],

@@ -2,6 +2,7 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
+import { createCompany } from './models/company.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { today } from './models/common.js';
@@ -75,10 +76,13 @@ test('discount button uses the posted invoice counterpart account', () => {
 
 
 test('migration preserves both legacy company-one and other company tax locks', () => {
-  const base = seed();
-  const old = { ...base, schema_version: 17, settings: { ...base.settings, tax_lock_date: '2026-01-31', tax_lock_dates: { 1: '2025-01-01', 2: '2026-02-28' } } };
+  const c2 = createCompany(seed(), { name: 'Company Two' });
+  const base = c2.db;
+  const old = { ...base, schema_version: 17, settings: { ...base.settings, tax_lock_date: '2026-01-31', tax_lock_dates: { 1: '2025-01-01', [c2.id]: '2026-02-28' } } };
   const migrated = migrate(old);
-  assert.deepEqual(migrated.settings.tax_lock_dates, { 1: '2026-01-31', 2: '2026-02-28' });
+  assert.equal(read(migrated, 'res.company', 1).tax_lock_date, '2026-01-31');
+  assert.equal(read(migrated, 'res.company', c2.id).tax_lock_date, '2026-02-28');
+  assert.equal('tax_lock_dates' in migrated.settings, false);
   assert.equal('tax_lock_date' in migrated.settings, false);
   assert.equal(migrate(migrated), migrated);
 });

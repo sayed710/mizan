@@ -17,7 +17,7 @@ const sync = (base, next) => applyDiff(base, diffDb(base, next), { isAdmin: fals
 test('a year closed by a non-admin keeps its P&L and its lock on the server', () => {
   const { db: base, id } = opened();
   const server = sync(base, closeFiscalYear(base, id));
-  assert.equal(server.settings.lock_date ?? null, base.settings.lock_date ?? null);
+  assert.equal(read(server, 'res.company', 1).lock_date ?? null, read(base, 'res.company', 1).lock_date ?? null);
   const closing = read(server, 'account.move', read(server, 'account.fiscal.year', id).closing_move_id);
   assert.equal(closing.is_closing, true);
   assert.equal(profitAndLoss(server, period).net, 1000);

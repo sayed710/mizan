@@ -94,9 +94,6 @@ const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(
 export class ConflictError extends Error {
   conflict = true;
 }
-/** A submitted lock date if it is a date or null (cleared), else the current one. */
-const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
-const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
 /**
  * `bases` holds, for each edited record, the values its changed fields had before the edit, so the server can
@@ -541,7 +538,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const changed = [];
   const requestedGeneratedMoves = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
-  const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
+  const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[b]?.guardFirst ? 1 : 0) - (models[a]?.guardFirst ? 1 : 0) || (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
   for (const [model, recs] of upserts) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
@@ -732,18 +729,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
-      lock_date: lockValue(s.lock_date, db.settings.lock_date),
-      tax_lock_dates: s.tax_lock_dates && typeof s.tax_lock_dates === 'object' && !Array.isArray(s.tax_lock_dates)
-        ? { ...db.settings.tax_lock_dates, ...Object.fromEntries(Object.entries(s.tax_lock_dates).filter(([id]) => /^[1-9]\d*$/.test(id))
-          .map(([id, value]) => [id, lockValue(value, db.settings.tax_lock_dates?.[id])])) }
-        : db.settings.tax_lock_dates,
-      sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
-      purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
-      // The hard lock only ever moves forward.
-      hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
-      invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
-      company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),
-      company_iban: String(s.company_iban ?? db.settings.company_iban ?? '').slice(0, 40),
       uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
       customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,
     } : {}),

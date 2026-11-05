@@ -42,10 +42,10 @@ test('untrusted input is validated and stripped', () => {
 });
 
 test('the hard lock date can only move forward through sync', () => {
-  const base = { ...seed(), settings: { ...seed().settings, hard_lock_date: '2026-03-31' } };
-  const withSettings = (vals) => ({ ...base, settings: { ...base.settings, ...vals } });
-  assert.equal(applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-01-31' })), { isAdmin: true }).settings.hard_lock_date, '2026-03-31');
-  const forward = applyDiff(base, diffDb(base, withSettings({ hard_lock_date: '2026-06-30', sale_lock_date: '2026-05-31' })), { isAdmin: true });
-  assert.equal(forward.settings.hard_lock_date, '2026-06-30');
-  assert.equal(forward.settings.sale_lock_date, '2026-05-31');
+  const base = write(seed(), 'res.company', 1, { hard_lock_date: '2026-03-31' });
+  const comp = read(base, 'res.company', 1);
+  assert.throws(() => applyDiff(base, { upserts: { 'res.company': [{ ...comp, hard_lock_date: '2026-01-31' }] } }, { isAdmin: true }), /hard lock date cannot be moved back/i);
+  const forward = applyDiff(base, { upserts: { 'res.company': [{ ...comp, hard_lock_date: '2026-06-30', sale_lock_date: '2026-05-31' }] } }, { isAdmin: true });
+  assert.equal(read(forward, 'res.company', 1).hard_lock_date, '2026-06-30');
+  assert.equal(read(forward, 'res.company', 1).sale_lock_date, '2026-05-31');
 });
