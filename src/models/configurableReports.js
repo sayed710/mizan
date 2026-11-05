@@ -1,5 +1,5 @@
 import { read } from '../orm.js';
-import { journalItems } from './ledger.js';
+import { analyticDistributionForLines, journalItems } from './ledger.js';
 import { distributionOfLine, normalizeDistribution } from './analyticplus.js';
 import { currentCompany } from './company.js';
 import { round } from '../money.js';
@@ -95,8 +95,13 @@ function analyticWeights(db, item, analyticAccountIds) {
       if (line) add(line, Math.abs(Number(source.amount) || 0) / total, lineContext);
     }
   } else add(item, 1, lineContext);
-  if (analyticAccountIds?.length) {
-    const selected = new Set(analyticAccountIds.map(Number));
+  if (!weights.size && move) {
+    for (const [id, percent] of Object.entries(analyticDistributionForLines(move.line_ids ?? [], analyticAccountIds))) {
+      weights.set(Number(id), percent / 100);
+    }
+  }
+  const selected = analyticAccountIds?.length ? new Set(analyticAccountIds.map(Number)) : null;
+  if (selected) {
     const selectedTotal = [...weights].reduce((sum, [id, weight]) => sum + (selected.has(id) ? weight : 0), 0);
     if (!selectedTotal) return new Map();
     return new Map([...weights].filter(([id]) => selected.has(id)).map(([id, weight]) => [id, weight / selectedTotal]));
@@ -108,17 +113,17 @@ function analyticWeights(db, item, analyticAccountIds) {
 export function groupBuckets(db, group, items, { analyticAccountIds } = {}) {
   // Weights are memoised per item and computed on demand, so callers may pass rebuilt copies of the items.
   const cache = new WeakMap();
-  const analytic = { get: (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item, analyticAccountIds)).get(item) };
+  const analytic = (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item, analyticAccountIds)).get(item);
   return group.rule_ids.flatMap((rule, index) => {
     const domain = idsFor(rule);
     const model = rule.field === 'partner' ? 'res.partner' : 'account.analytic.account';
     const used = new Set();
     for (const item of items) {
       if (rule.field === 'partner' && item.partner_id) used.add(item.partner_id);
-      if (rule.field === 'analytic') for (const id of analytic.get(item).keys()) used.add(id);
+      if (rule.field === 'analytic') for (const id of analytic(item).keys()) used.add(id);
     }
     const ids = (domain.length ? domain : [...used]).filter((id) => read(db, model, id)).sort((a, b) => String(read(db, model, a).name).localeCompare(String(read(db, model, b).name)) || a - b);
-    const fraction = (item, id) => rule.field === 'partner' ? Number(item.partner_id === id) : analytic.get(item).get(id) ?? 0;
+    const fraction = (item, id) => rule.field === 'partner' ? Number(item.partner_id === id) : analytic(item).get(id) ?? 0;
     return [...ids.map((id) => ({ key: `${index}:${id}`, label: read(db, model, id).name, weight: (item) => fraction(item, id) })),
       { key: `${index}:other`, label: 'Others', weight: (item) => Math.max(0, 1 - ids.reduce((sum, id) => sum + fraction(item, id), 0)) }];
   });

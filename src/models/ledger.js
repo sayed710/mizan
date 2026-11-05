@@ -529,7 +529,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   if (analyticPostingHooks?.checkMandatoryPlans) {
-    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids });
+    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids }, { systemGenerated: system_generated });
   } else if (search(db, 'account.analytic.plan').length) {
     throw new Error('Analytic posting support is not loaded');
   }
@@ -746,6 +746,43 @@ export function balances(db, items) {
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
+const lineNet = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
+export const hasAnalyticAllocation = (line) => line.analytic_distribution != null
+  ? Object.keys(line.analytic_distribution).length > 0
+  : !!line.analytic_account_id;
+export const capAnalyticShare = (share) => Math.min(1, Math.max(0, Number(share) || 0));
+
+const analyticShare = (line, selected) => {
+  const rawShare = line.analytic_distribution
+    ? Object.entries(line.analytic_distribution).reduce((total, [key, percent]) => (
+      key.split(',').some((id) => selected.has(Number(id))) ? total + (Number(percent) || 0) : total
+    ), 0) / 100
+    : (selected.has(Number(line.analytic_account_id)) ? 1 : 0);
+  return capAnalyticShare(rawShare);
+};
+
+/** Derive amount-weighted per-plan percentages from explicit allocations on source lines. */
+export function analyticDistributionForLines(lines, analyticAccountIds) {
+  const selected = analyticAccountIds?.length ? new Set(analyticAccountIds.map(Number)) : null;
+  const contributions = new Map();
+  const total = lines.filter(hasAnalyticAllocation).reduce((sum, line) => sum + Math.abs(lineNet(line)), 0);
+  if (!total) return {};
+  for (const line of lines) {
+    if (!hasAnalyticAllocation(line)) continue;
+    const amount = Math.abs(lineNet(line));
+    if (!amount) continue;
+    const distribution = line.analytic_distribution ?? { [line.analytic_account_id]: 100 };
+    for (const [key, value] of Object.entries(distribution)) {
+      const ids = key.split(',').map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+      const matched = selected ? ids.filter((id) => selected.has(id)) : ids;
+      const percent = Number(value);
+      if (!matched.length || !Number.isFinite(percent) || percent <= 0) continue;
+      for (const id of matched) contributions.set(id, (contributions.get(id) ?? 0) + amount * percent / 100);
+    }
+  }
+  return Object.fromEntries([...contributions].map(([id, amount]) => [id, amount / total * 100]));
+}
+
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
 const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
@@ -755,22 +792,13 @@ export function filterByAnalytic(items, analyticAccountIds) {
   const selected = new Set(analyticAccountIds.map(Number));
   const shares = new Map();
   const filtered = items.filter((line) => {
-    const share = line.analytic_distribution
-      ? Object.entries(line.analytic_distribution).reduce((total, [key, percent]) => (
-        key.split(',').some((id) => selected.has(Number(id))) ? total + (Number(percent) || 0) : total
-      ), 0) / 100
-      : (selected.has(Number(line.analytic_account_id)) ? 1 : 0);
+    const share = analyticShare(line, selected);
     if (share <= 0) return false;
     shares.set(line, share);
     return true;
   });
   return weighted(filtered, (line) => shares.get(line));
 }
-
-const lineNet = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
-const hasAnalyticAllocation = (line) => line.analytic_distribution != null
-  ? Object.keys(line.analytic_distribution).length > 0
-  : !!line.analytic_account_id;
 
 /** Keep selected analytic lines and restore each move's untagged counterparts by the move's selected share, so filtered reports still balance. */
 export function analyticMoveItems(items, analyticAccountIds) {
@@ -790,10 +818,12 @@ export function analyticMoveItems(items, analyticAccountIds) {
     const share = assignedAmount ? Math.min(1, matchedAmount / assignedAmount) : 0;
     output.push(...matched);
     if (share) {
+      const derivedDist = analyticDistributionForLines(matched, analyticAccountIds);
       output.push(...originals.filter((line) => !hasAnalyticAllocation(line)).map((line) => ({
         ...line,
         debit: (Number(line.debit) || 0) * share,
         credit: (Number(line.credit) || 0) * share,
+        ...(Object.keys(derivedDist).length ? { analytic_distribution: derivedDist } : {}),
       })));
     }
   }

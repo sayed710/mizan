@@ -516,6 +516,9 @@ function lockRule(db, before, after, ctx) {
   if (company?.audit_trail && before?.state === 'posted' && before.name !== after.name) return 'Posted entries keep their number while the audit trail is active';
   // The closing flag takes an entry out of the P&L, so only fiscal-year closing sets it, and nothing clears it.
   if (!!after.is_closing !== !!before?.is_closing && (before?.is_closing || !isYearEntry(db, after.id))) return 'Only fiscal year closing marks closing entries';
+  if (before && (before.system_generated ?? false) !== (after.system_generated ?? false)) return 'System-generated status cannot be changed';
+  if (!before && after.system_generated && after.state === 'draft') return 'Draft moves cannot be system generated';
+  if (!before && after.system_generated && after.move_type !== 'entry') return 'Invoices cannot be system generated';
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
   const proposed = companyTaxLock(ctx?.settings, companyId);

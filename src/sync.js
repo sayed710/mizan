@@ -9,9 +9,83 @@ import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
 import { journalInvoiceSequence } from './models/accounting.js';
+import { checkMandatoryPlans } from './models/analyticplus.js';
+import { companyCurrencyRecord, roundCurrency } from './money.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
+
+function depreciationMoveMatches(seen, asset, boardLine, move) {
+  if (!move || move.move_type !== 'entry' || move.state !== 'posted'
+    || (move.company_id ?? 1) !== (asset.company_id ?? 1) || (move.date ?? move.invoice_date) !== boardLine.date) return false;
+  const moveLines = move.line_ids ?? [];
+  if (moveLines.length !== 2) return false;
+  const expenseLines = moveLines.filter((entry) => entry.account_id === asset.account_depreciation_expense_id);
+  const depreciationLines = moveLines.filter((entry) => entry.account_id === asset.account_depreciation_id);
+  if (expenseLines.length !== 1 || depreciationLines.length !== 1) return false;
+  const currency = companyCurrencyRecord(seen, asset.company_id ?? 1);
+  const amount = roundCurrency(Number(boardLine.amount), currency);
+  const expense = expenseLines[0];
+  const depreciation = depreciationLines[0];
+  if (roundCurrency(Number(expense.debit) || 0, currency) !== amount || Number(expense.credit) !== 0
+    || Number(depreciation.debit) !== 0 || roundCurrency(Number(depreciation.credit) || 0, currency) !== amount) return false;
+  const distribution = (value) => JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  return distribution(expense.analytic_distribution) === distribution(asset.analytic_distribution)
+    && !depreciation.analytic_distribution;
+}
+
+function linesByDate(lines) {
+  const indexed = new Map();
+  for (const line of lines) {
+    if (!line.date || indexed.has(line.date)) return null;
+    indexed.set(line.date, line);
+  }
+  return indexed;
+}
+
+function generatedAssetMove(seen, original, move, changed) {
+  const links = (seen.records['account.asset'] ?? []).flatMap((asset) => (asset.depreciation_ids ?? [])
+    .filter((line) => line.posted && line.move_id === move.id).map((line) => ({ asset, line })));
+  if (links.length !== 1) return false;
+  const { asset, line } = links[0];
+  if (!changed.some(([model, record]) => model === 'account.asset' && record.id === asset.id)) return false;
+  const before = (original.records['account.asset'] ?? []).find((record) => record.id === asset.id);
+  if (!before || before.state !== 'open') return false;
+
+  const unchangedFields = new Set(['id', 'state', 'depreciation_ids']);
+  const fields = new Set([...Object.keys(before), ...Object.keys(asset)]);
+  if ([...fields].some((field) => !unchangedFields.has(field) && same(before[field]) !== same(asset[field]))) return false;
+  const beforeLines = linesByDate(before.depreciation_ids ?? []);
+  const afterLines = linesByDate(asset.depreciation_ids ?? []);
+  if (!beforeLines || !afterLines || beforeLines.size !== afterLines.size) return false;
+
+  let linkedMoveCount = 0;
+  for (const [date, previous] of beforeLines) {
+    const current = afterLines.get(date);
+    if (!current) return false;
+    if (same(previous) === same(current)) continue;
+    if (previous.posted || previous.move_id || !current.posted || !current.move_id) return false;
+    const expected = { ...previous, posted: true, move_id: current.move_id };
+    if (same(expected) !== same(current)) return false;
+    const linkedMove = (seen.records['account.move'] ?? []).find((record) => record.id === current.move_id);
+    if (!changed.some(([model, record]) => model === 'account.move' && record.id === current.move_id)
+      || !depreciationMoveMatches(seen, asset, current, linkedMove)) return false;
+    if (current.move_id === move.id) linkedMoveCount++;
+  }
+  if (linkedMoveCount !== 1 || !depreciationMoveMatches(seen, asset, line, move)) return false;
+  const expectedState = (asset.depreciation_ids ?? []).every((candidate) => candidate.posted) ? 'close' : 'open';
+  return asset.state === expectedState;
+}
+
+/** Only a validated closing/reopening or a posted asset board line may carry the internal marker. */
+function generatedMoveOrigin(seen, original, move, changed) {
+  if (move.move_type !== 'entry' || move.state !== 'posted') return false;
+  const fiscalOrigin = move.is_closing === true && (seen.records['account.fiscal.year'] ?? []).some((year) => (
+    changed.some(([model, record]) => model === 'account.fiscal.year' && record.id === year.id)
+    && (year.closing_move_id === move.id || year.opening_move_id === move.id)
+  ));
+  return fiscalOrigin || generatedAssetMove(seen, original, move, changed);
+}
 
 /** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
 const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(models[model]?.fields[k] && !models[model].fields[k].compute);
@@ -465,6 +539,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let growth = 0;
   /** @type {[string, any][]} */
   const changed = [];
+  const requestedGeneratedMoves = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
   for (const [model, recs] of upserts) {
@@ -493,7 +568,15 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (model === 'account.move' && prior && (submitted.fx_payment_move_id !== prior.fx_payment_move_id || submitted.fx_invoice_id !== prior.fx_invoice_id)) {
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
-      const input = model === 'account.move' && !prior ? (({ fx_payment_move_id, fx_invoice_id, ...rest }) => rest)(submitted) : submitted;
+      if (model === 'account.move') {
+        if (prior && submitted.system_generated !== undefined && submitted.system_generated !== prior.system_generated) {
+          throw new Error('System-generated status cannot be changed');
+        }
+        if (!prior && submitted.system_generated === true) requestedGeneratedMoves.add(submitted.id);
+      }
+      const input = model === 'account.move' && !prior
+        ? (({ fx_payment_move_id, fx_invoice_id, system_generated, ...rest }) => rest)(submitted)
+        : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
       const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
       if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
@@ -530,14 +613,35 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     records = { ...records, 'account.move': (records['account.move'] ?? []).map((m) => provenance.has(m.id) ? { ...m, ...provenance.get(m.id) } : m) };
     for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
-  const seen = { ...db, records };
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
+  const staged = { ...db, records };
+  const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
+    model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed) ? [rec.id] : []
+  )));
+  for (const id of requestedGeneratedMoves) {
+    if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');
+  }
+  const seen = { ...db, records };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
       ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null });
     if (err) throw new Error(err);
+    if (model === 'account.move') {
+      const generated = generatedMoves.has(rec.id);
+      if (rec.state === 'posted' && before?.state !== 'posted') {
+        checkMandatoryPlans(seen, rec, { systemGenerated: generated });
+      }
+    }
+  }
+  if (generatedMoves.size) {
+    const generatedRecords = new Map((records['account.move'] ?? []).filter((move) => generatedMoves.has(move.id)).map((move) => [move.id, { ...move, system_generated: true }]));
+    for (const [id, marked] of generatedRecords) {
+      const before = (records['account.move'] ?? []).find((move) => move.id === id);
+      growth += json(marked) - json(before);
+    }
+    records = { ...records, 'account.move': (records['account.move'] ?? []).map((move) => generatedRecords.get(move.id) ?? move) };
   }
   const marks = highWater(db.numbering, db.records);
   const numbered = uniqueNumbers(records, d.upserts, db.records, marks);

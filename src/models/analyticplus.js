@@ -55,7 +55,6 @@ export function distributionOfLine(line, db, move) {
   if (line.analytic_account_id) {
     return { [line.analytic_account_id]: 100 };
   }
-  if (move?.system_generated) return {};
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
 
@@ -107,11 +106,11 @@ export function planApplicability(db, plan, line, move = null) {
 }
 
 /** Require a positive product-line allocation for every mandatory plan. */
-export function checkMandatoryPlans(db, move) {
-  if (move?.system_generated || move?.is_closing) return;
+export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) {
   const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type);
   const isEntry = move?.move_type === 'entry';
   if (!isInvoiceDoc && !isEntry) return;
+  if (isEntry && systemGenerated) return;
 
   const plans = search(db, 'account.analytic.plan');
   if (!plans.length) return;
