@@ -34,6 +34,25 @@ export function parseCamt(text) {
   }).filter((l) => /^\d{4}-\d{2}-\d{2}$/.test(l.date ?? '') && Number.isFinite(l.amount));
 }
 
+/** Bank and cash journals a user may choose when the action has no journal relation. */
+export function statementImportJournalChoices(db, companyId = null) {
+  const configuredCompanies = db.settings?.allowed_company_ids;
+  const visibleCompanies = companyId == null
+    ? (Array.isArray(configuredCompanies) && configuredCompanies.length ? configuredCompanies : [db.settings?.current_company_id ?? 1])
+    : [companyId];
+  const companyIds = new Set(visibleCompanies.map(Number));
+  return search(db, 'account.journal').filter((journal) =>
+    ['bank', 'cash'].includes(journal.type) && companyIds.has(Number(journal.company_id ?? 1))
+  );
+}
+
+/** Add the journal explicitly selected in the import UI while preserving action defaults. */
+export function withSelectedStatementJournal(defaults = {}, selectedJournalId = null) {
+  if (defaults.journal_id || selectedJournalId == null || selectedJournalId === '') return defaults;
+  const journalId = Number(selectedJournalId);
+  return Number.isSafeInteger(journalId) && journalId > 0 ? { ...defaults, journal_id: journalId } : defaults;
+}
+
 /** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
@@ -42,13 +61,16 @@ export function importStatement(db, fileName, text, defaults = {}) {
   if (!defaults.journal_id) throw new Error('Bank Journal is required');
   const journal = read(db, 'account.journal', defaults.journal_id);
   if (!journal) throw new Error('The bank journal does not exist');
+  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Choose a bank or cash journal');
   if (defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);
   if (camt && lines.some((l) => !l.currency || l.currency !== currency?.name)) throw new Error(`Statement currency does not match journal currency ${currency?.name ?? ''}`);
   const journalId = defaults.journal_id ?? null;
-  const known = new Set(search(db, 'account.bank.statement.line').filter((l) => (l.journal_id ?? null) === journalId && (l.company_id ?? 1) === company).map((l) => l.unique_import_id).filter(Boolean));
+  const known = new Set(search(db, 'account.bank.statement.line')
+    .filter((l) => (l.journal_id == null || l.journal_id === journalId) && (l.company_id ?? 1) === company)
+    .map((l) => l.unique_import_id).filter(Boolean));
   const fresh = lines.filter((l) => {
     if (!l.unique_import_id) return true;
     if (known.has(l.unique_import_id)) return false;

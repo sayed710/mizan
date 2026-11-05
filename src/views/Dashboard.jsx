@@ -46,7 +46,7 @@ export function Dashboard() {
     ['Payable', money(kpi.payable), '#/accounting/bills?view=list&filter=unpaid'],
     ['Overdue invoices', String(kpi.overdue), '#/accounting/invoices?view=list&filter=overdue'],
     ['To reconcile', String(search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').length), '#/accounting/bank'],
-    ...(withoutJournal ? [['Bank transactions without a journal', String(withoutJournal), '#/accounting/bank']] : []),
+    ...(withoutJournal ? [['Bank transactions without a journal', String(withoutJournal), '#/accounting/bank?view=list&filter=unassigned']] : []),
   ];
 
   return (

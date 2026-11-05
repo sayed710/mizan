@@ -340,6 +340,13 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       for (const { line, recognitionMove, outstanding } of eligiblePosted) {
         const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
         const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
+        const pendingScheduledReversals = (next.records['account.move'] ?? []).filter((move) =>
+          move.state === 'draft' && move.auto_post === 'at_date' && move.reversed_entry_id === recognitionMove.id
+        );
+        for (const pending of pendingScheduledReversals) {
+          // A full credit supplies the offset now; disarm any future auto-post of the same reversal.
+          next = write(next, 'account.move', pending.id, { state: 'cancel', auto_post: 'no' });
+        }
         const hasExistingReversal = (next.records['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === recognitionMove.id);
         const { db: stepDb, id: reversalId } = !hasExistingReversal
           ? reverseEntryFn(next, recognitionMove, { date, reason: `Credit note ${note.name}` })
