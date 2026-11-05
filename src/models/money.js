@@ -34,6 +34,8 @@ export function reportingBookedAmount(db, rec, amount) {
   if (!date) throw new Error('An accounting date is required for currency conversion');
   const companyId = rec.company_id ?? 1;
   const reportingId = db.settings?.current_company_id ?? 1;
+  // A company's own books are already in the reporting currency; no second currency needs to be configured.
+  if (companyId === reportingId) return Number(amount) || 0;
   const own = read(db, 'res.currency', ownCurrencyId(db, { company_id: companyId }));
   const target = read(db, 'res.currency', ownCurrencyId(db, { company_id: reportingId }));
   if (own.id === target.id) return Number(amount) || 0;

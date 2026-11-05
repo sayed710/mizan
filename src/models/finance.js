@@ -1151,11 +1151,14 @@ export function analyticActualLines(db, period = {}) {
   });
 }
 
+/** An analytic line's amount in the reporting company's currency, translated at the line's accounting date. */
+export const analyticReportAmount = (db, line) => reportingBookedAmount(db, line, Number(line.amount) || 0);
+
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
   for (const line of analyticActualLines(db, period)) {
-    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
+    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + analyticReportAmount(db, line)));
   }
   return totals;
 }

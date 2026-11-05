@@ -13,7 +13,7 @@ test('analytic report includes selected companies and period and links to source
   const { initStore, getDb, commit } = await import('./store.js'); await initStore();
   const base = getDb(); const year = new Date().getFullYear();
   const db = { ...base, settings: { ...base.settings, current_company_id: 1, allowed_company_ids: [1, 2] }, records: { ...base.records,
-    'res.company': [{ id: 1, name: 'First' }, { id: 2, name: 'Second' }],
+    'res.company': [{ id: 1, name: 'First', currency_id: 1 }, { id: 2, name: 'Second', currency_id: 1 }],
     'account.analytic.account': [{ id: 91, name: 'Project', company_id: 1 }, { id: 92, name: 'Foreign project', company_id: 2 }],
     'account.analytic.line': [
       { id: 91, name: 'Current line', account_id: 91, amount: 123, company_id: 1, move_id: 91, date: `${year}-02-01` },
