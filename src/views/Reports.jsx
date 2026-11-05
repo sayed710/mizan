@@ -3,7 +3,8 @@ import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
@@ -119,7 +120,11 @@ function Ledger({ db, period }) {
     .map((id) => read(db, 'account.account', id)).filter(Boolean).sort((a, b) => a.code.localeCompare(b.code));
   const [open, setOpen] = useState(() => new Set());
   const toggle = (id) => setOpen((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  const bal = (ls) => ls.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  // Lines of every allowed company are translated into the active company's currency before being shown.
+  const booked = (l, amount) => reportingBookedAmount(db, l, amount);
+  const debitOf = (l) => booked(l, Number(l.debit) || 0);
+  const creditOf = (l) => booked(l, Number(l.credit) || 0);
+  const bal = (ls) => ls.reduce((s, l) => s + debitOf(l) - creditOf(l), 0);
   return (
     <tbody>
       {accounts.map((a) => {
@@ -129,19 +134,19 @@ function Ledger({ db, period }) {
         return [
           <tr key={a.id} className="rep-section" onClick={() => toggle(a.id)} aria-expanded={open.has(a.id)}>
             <td><span className="caret">{open.has(a.id) ? '▾' : '▸'}</span> {a.code} {a.name}</td>
-            <td className="num">{money(lines.reduce((s, l) => s + (Number(l.debit) || 0), 0))}</td>
-            <td className="num">{money(lines.reduce((s, l) => s + (Number(l.credit) || 0), 0))}</td>
+            <td className="num">{money(lines.reduce((s, l) => s + debitOf(l), 0))}</td>
+            <td className="num">{money(lines.reduce((s, l) => s + creditOf(l), 0))}</td>
             <td className="num">{money(start + bal(lines))}</td>
           </tr>,
           ...(open.has(a.id) ? [
             <tr key={`${a.id}-open`} className="rep-detail"><td>{t('Initial Balance')}</td><td /><td /><td className="num">{money(start)}</td></tr>,
             ...lines.map((l, i) => {
-              running += (Number(l.debit) || 0) - (Number(l.credit) || 0);
+              running += debitOf(l) - creditOf(l);
               return (
                 <tr key={`${a.id}-${i}`} className="rep-detail">
                   <td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a> <span className="muted">{l.name}</span></td>
-                  <td className="num">{l.debit ? money(l.debit) : ''}</td>
-                  <td className="num">{l.credit ? money(l.credit) : ''}</td>
+                  <td className="num">{l.debit ? money(debitOf(l)) : ''}</td>
+                  <td className="num">{l.credit ? money(creditOf(l)) : ''}</td>
                   <td className="num">{money(running)}</td>
                 </tr>
               );
@@ -345,7 +350,7 @@ function Analytic({ db, period }) {
         <Total label={a.name} value={actual.get(a.id) ?? 0} />
         {lines.filter((line) => line.account_id === a.id).map((line) => <tr key={line.id} className="rep-detail">
           <td><a href={`#/open/account.analytic.line/${line.id}`}>{line.name || line.date}</a>{line.move_id && <>{' · '}<a href={`#/open/account.move/${line.move_id}`}>{read(db, 'account.move', line.move_id)?.name ?? line.move_id}</a></>}</td>
-          <td className="num">{money(line.amount)}</td>
+          <td className="num">{money(analyticReportAmount(db, line))}</td>
         </tr>)}
       </Fragment>)}
     </tbody>
