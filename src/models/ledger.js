@@ -12,6 +12,7 @@ import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
+import { findAnalyticDistribution } from './analytic-distribution-models.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
@@ -470,7 +471,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, system_generated = false }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -486,6 +487,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     partner_id: lines.find((line) => line.partner_id)?.partner_id ?? null,
     date,
     ref,
+    ...(system_generated ? { system_generated: true } : {}),
   };
   const line_ids = lines.map((l) => {
     let accId = null;
@@ -509,8 +511,19 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
     if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
-    // Callers pass an explicit allocation; system entries (closing, revaluation, depreciation) get none from models.
-    const distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
+    // Callers pass an explicit allocation; business entries receive applicable defaults from distribution models.
+    let distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
+    if (distribution == null && !system_generated && analyticEligibleAccount(acc)) {
+      const defaultDist = findAnalyticDistribution(db, {
+        partner_id: l.partner_id ?? moveContext.partner_id,
+        product_id: l.product_id,
+        account_id: accId,
+        company_id: company ?? 1,
+      });
+      if (defaultDist && Object.keys(defaultDist).length) {
+        distribution = defaultDist;
+      }
+    }
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
     return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
@@ -528,6 +541,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
+    ...(system_generated ? { system_generated: true } : {}),
   });
   if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
   if (line_ids.some((line) => Object.keys(line.analytic_distribution ?? {}).length)) throw new Error('Analytic posting support is not loaded');

@@ -40,10 +40,10 @@ export { findAnalyticDistribution } from './analytic-distribution-models.js';
 /** Resolve a fresh default using the same account that will be posted. */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
   return findAnalyticDistribution(db, {
-    partner_id: move?.partner_id,
+    partner_id: line?.partner_id ?? move?.partner_id,
     product_id: line.product_id,
-    account_id: move?.move_type === 'entry' ? line.account_id : invoiceLineAccount(db, move, line),
-    company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : 1,
+    account_id: move?.move_type === 'entry' ? (line.account_id ?? line.account) : invoiceLineAccount(db, move, line),
+    company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : (line?.company_id ?? 1),
   }, fallback);
 }
 
@@ -55,6 +55,7 @@ export function distributionOfLine(line, db, move) {
   if (line.analytic_account_id) {
     return { [line.analytic_account_id]: 100 };
   }
+  if (move?.system_generated) return {};
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
 
@@ -107,8 +108,9 @@ export function planApplicability(db, plan, line, move = null) {
 
 /** Require a positive product-line allocation for every mandatory plan. */
 export function checkMandatoryPlans(db, move) {
-  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type);
-  const isEntry = move.move_type === 'entry';
+  if (move?.system_generated || move?.is_closing) return;
+  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type);
+  const isEntry = move?.move_type === 'entry';
   if (!isInvoiceDoc && !isEntry) return;
 
   const plans = search(db, 'account.analytic.plan');

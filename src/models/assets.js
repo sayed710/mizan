@@ -143,6 +143,7 @@ export function postDepreciation(db, asset, upTo = today()) {
       journal, date: l.date, ref: `${asset.name} depreciation ${l.date}`,
       lines: [{ account: expAcc, debit: l.amount, analytic_distribution: asset.analytic_distribution }, { account: depAcc, credit: l.amount }],
       company,
+      system_generated: true,
     });
     return { db: postAnalytic(booked, id), lines: [...acc.lines, { ...l, posted: true, move_id: id }] };
   }, { db, lines: [] });
