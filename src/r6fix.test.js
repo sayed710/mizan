@@ -49,7 +49,7 @@ test('statement import deduplicates within the bank journal and company', () => 
 
 test('cash basis grids report the paid share in the payment period', () => {
   const tag = create(seed(), 'account.account.tag', { name: 'Cash grid', applicability: 'taxes' });
-  const tax = create(tag.db, 'account.tax', { name: 'Cash grid VAT', amount: 10, type_tax_use: 'sale', tax_exigibility: 'on_payment', ...defaultTaxRepartitionLines(accountId(tag.db, '251000'), [tag.id]) });
+  const tax = create(tag.db, 'account.tax', { name: 'Cash grid VAT', amount: 10, type_tax_use: 'sale', tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(tag.db, '251100'), ...defaultTaxRepartitionLines(accountId(tag.db, '251000'), [tag.id]) });
   const move = create(tax.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = postMove(move.db, move.id);
   db = payMove(db, move.id, 55, '2025-02-01');

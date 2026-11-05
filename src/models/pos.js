@@ -2,6 +2,8 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
+import { roundingAccount } from './configured-account.js';
+import { stockAccount } from './stock-accounts.js';
 import { assertCompanyAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
@@ -543,7 +545,8 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
       const before = new Set((stocked.records['stock.valuation.layer'] ?? []).map((layer) => layer.id));
-      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, counterpart: '500000', company_id: session.company_id });
+      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, // Periodic goods move quantities only, so they need no cost-of-goods-sold account.
+        counterpart: periodic ? null : stockAccount(stocked, p, 'cogs', session.company_id), company_id: session.company_id });
       if (!original && qty < 0) {
         const layer = (stocked.records['stock.valuation.layer'] ?? []).find((item) => !before.has(item.id) && item.kind === 'in' && item.product_id === p.id);
         returnLayers.push({ index, layer_id: layer?.id ?? null });
@@ -597,8 +600,6 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
   const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
-  const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
-  const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
@@ -612,11 +613,11 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   ];
   if (roundingDiff !== 0) {
     const isProfit = (refund_of ? -roundingDiff : roundingDiff) > 0;
-    const acc = isProfit ? profitAcc : lossAcc;
+    const acc = roundingAccount(db, rounding, isProfit, session.company_id);
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {
@@ -775,8 +776,25 @@ export function closeSession(db, session, countedCash) {
   let cashJournal;
   let differenceAccount;
   if (difference) {
+    const sessionOrders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
+    const usedMethodIds = new Set();
+    for (const o of sessionOrders) {
+      if (o.payment_ids?.length) {
+        for (const p of o.payment_ids) {
+          if (p.payment_method_id) usedMethodIds.add(p.payment_method_id);
+        }
+      } else if (o.payment_method_id) {
+        usedMethodIds.add(o.payment_method_id);
+      }
+    }
+    const usedCashMethods = [...usedMethodIds]
+      .map((id) => read(db, 'pos.payment.method', id))
+      .filter((m) => m && m.type === 'cash' && (m.company_id ?? 1) === (session.company_id ?? 1));
+
     const config = read(db, 'pos.config', session.config_id);
-    const methods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+    const configuredMethods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+
+    const methods = usedCashMethods.length ? usedCashMethods : configuredMethods;
     const journals = [...new Set(methods.map((m) => m.journal_id).filter(Boolean))];
     if (journals.length !== 1 || methods.some((m) => !m.journal_id)) throw new Error('Configure one cash journal on the point of sale cash payment methods');
     cashJournal = read(db, 'account.journal', journals[0]);

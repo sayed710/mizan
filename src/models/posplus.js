@@ -6,6 +6,7 @@ import { openSession, payOrder, posOrderTotal, refundOrder, tendersOf, posPaymen
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
 import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { companyFilter } from './company.js';
+import { configuredAccount } from './configured-account.js';
 
 const baseOrder = moreModels['pos.order'];
 const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
@@ -404,6 +405,13 @@ export const posPlusModels = {
   },
   'account.cash.rounding': {
     label: 'Cash Roundings',
+    guard: (db, before, after) => {
+      for (const field of ['profit_account_id', 'loss_account_id']) {
+        if (!after[field]) continue;
+        try { configuredAccount(db, after[field], after.company_id, field === 'profit_account_id' ? 'profit' : 'loss', after.name); } catch (error) { return error.message; }
+      }
+      return null;
+    },
     fields: {
       name: { type: 'char', label: 'Name' },
       rounding: { type: 'float', label: 'Rounding Precision', required: true },

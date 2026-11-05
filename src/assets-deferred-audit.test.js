@@ -9,6 +9,7 @@ import { analyticBalance } from './models/analyticplus.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
 import { createCompany } from './models/company.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 const button = (model, label, db, id) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -16,7 +17,7 @@ test('sale uses the posted invoice line account and reverses depreciation before
   let db = seed();
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Sale', qty: 1, price_unit: 50, tax: 0, account_id: accountId(db, '410000') }] });
   db = button('account.move', 'Confirm', invoice.db, invoice.id);
-  const asset = create(db, 'account.asset', { name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = button('account.asset', 'Post Depreciation', db, asset.id);
   const original = read(db, 'account.asset', asset.id).depreciation_ids[0].move_id;
@@ -38,7 +39,7 @@ test('reversing and reposting depreciation offsets analytic actuals through sync
   const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'DEP-A' });
   const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'DEP-B' });
   const distribution = { [first.id]: 60, [second.id]: 40 };
-  const asset = create(second.db, 'account.asset', { name: 'Allocated asset', original_value: 100,
+  const asset = create(second.db, 'account.asset', { ...assetAccounts(second.db), name: 'Allocated asset', original_value: 100,
     acquisition_date: '2020-01-01', method: 'linear', method_number: 1, method_period: '12', analytic_distribution: distribution });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = button('account.asset', 'Post Depreciation', db, asset.id);
@@ -183,7 +184,8 @@ test('second company disposal uses its own sale and gain accounts', () => {
   const gainAccount = create(db, 'account.account', { name: 'Disposal gains', code: 'G2', account_type: 'income_other', company_id: company.id }); db = gainAccount.db;
   const invoice = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Asset sale', qty: 1, price_unit: 150, tax: 0, account_id: saleAccount.id }] });
   db = button('account.move', 'Confirm', invoice.db, invoice.id);
-  const asset = create(db, 'account.asset', { company_id: company.id, name: 'Branch machine', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', account_gain_id: gainAccount.id });
+  db = write(db, 'res.company', company.id, { gain_account_id: gainAccount.id });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db, company.id), company_id: company.id, name: 'Branch machine', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = models['account.asset'].actions.dispose(db, read(db, 'account.asset', asset.id), { date: '2026-01-02', saleValue: 150, invoiceId: invoice.id, invoiceLine: 0 });
   const move = search(db, 'account.move').find((m) => m.ref === 'Branch machine disposal');
@@ -201,7 +203,7 @@ test('disposal wizard selects posted company invoice lines and rejects another c
   db = button('account.move', 'Confirm', sale.db, sale.id);
   const other = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other sale', qty: 1, price_unit: 150, tax: 0 }] });
   db = button('account.move', 'Confirm', other.db, other.id);
-  const asset = create(db, 'account.asset', { name: 'Wizard asset', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Wizard asset', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   const action = models['account.asset'].form.buttons.find((b) => b.label === 'Sell or Dispose');
   const record = read(db, 'account.asset', asset.id);

@@ -1,9 +1,21 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
 import { read, search } from '../orm.js';
-import { roundCurrency } from '../money.js';
+import { allocateCents, roundCurrency } from '../money.js';
 
-/** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
-export const TRANSITION = { sale: '251100', purchase: '131100' };
+import { configuredAccount } from './configured-account.js';
+
+/** Cash basis uses the originating tax's explicit transition setting. */
+export function cashBasisTransitionAccount(db, taxId, company) {
+  const tax = read(db, 'account.tax', taxId);
+  if (tax?.company_id && tax.company_id !== (company ?? 1)) throw new Error('The cash basis tax belongs to another company');
+  return configuredAccount(db, tax?.cash_basis_transition_account_id, company, 'cash basis transition', tax?.name ?? 'the tax');
+}
+
+export function cashBasisTransitionAccounts(db, company) {
+  // Only configured taxes can have booked a transition line; an incomplete tax must not block reports and locks.
+  return search(db, 'account.tax').filter((tax) => tax.tax_exigibility === 'on_payment' && tax.cash_basis_transition_account_id && (!company || !tax.company_id || tax.company_id === company))
+    .map((tax) => cashBasisTransitionAccount(db, tax.id, company ?? tax.company_id));
+}
 
 /** Repartition lines of a tax or line snapshot for the requested side ('invoice' or 'refund'). */
 export function taxRepartitionLines(tax, side = 'invoice') {
@@ -276,17 +288,45 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
   });
 }
 
-/** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines. */
+/**
+ * Split one computed tax over its 'tax' repartition rows (the tax's own, else the line snapshot's) by factor.
+ * `explicit` is false for a plain-rate tax with no repartition, which then gets one row with the snapshot's account.
+ */
+export function taxRepartitionSplits(t, line, side, currency) {
+  const own = taxRepartitionLines(t, side);
+  const rows = (own.length ? own : taxRepartitionLines(line, side)).filter((r) => r.repartition_type === 'tax');
+  const explicit = rows.length > 0;
+  const taxRows = explicit ? rows : [{ repartition_type: 'tax', factor_percent: 100, account_id: t.tax_account_id ?? line.tax_account_id ?? null, tag_ids: t.tax_tag_ids ?? line.tax_tag_ids ?? [] }];
+  const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
+  const split = (value) => (taxRows.length === 1 ? [value] : allocateCents(value, weights, currency, { tieBreak: 'last' }));
+  const amounts = split(t.amount);
+  const bases = split(t.base);
+  return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: bases[i] })) };
+}
+
+/** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines, split per repartition row. */
 export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) => {
   const side = options.side ?? 'invoice';
-  return taxGroups(
-    (lines ?? []).filter((l) => resolveLineTaxes(l).some((t) => t.tax_cash_basis)),
-    (l) => taxRepartitionLine(l, side)?.account_id ?? null,
-    rate,
-    documentCurrency,
-    companyCurrency,
-    { ...options, side, taxFilter: (t) => t.tax_cash_basis },
-  ).filter((g) => g.amount || g.base);
+  const by = new Map();
+  for (const l of lines ?? []) {
+    if (isSectionOrNote(l)) continue;
+    for (const t of computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null }).taxes) {
+      if (!t.tax_cash_basis) continue;
+      for (const { row, amount, base } of taxRepartitionSplits(t, l, side, documentCurrency).splits) {
+        const account_id = row.account_id ?? null;
+        const tax_id = t.tax_id ?? null;
+        const tax_tag_ids = [...(row.tag_ids ?? [])].sort((x, y) => x - y);
+        const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
+        const g = by.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids, cash_basis: true, document_base: 0, document_amount: 0 };
+        by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
+      }
+    }
+  }
+  return [...by.values()].map(({ document_base, document_amount, ...group }) => {
+    const tax = roundCurrency(document_amount, documentCurrency);
+    const base = roundCurrency(document_base, documentCurrency);
+    return { ...group, amount: roundCurrency(tax / rate, companyCurrency), base: roundCurrency(base / rate, companyCurrency), document_amount: tax };
+  }).filter((g) => g.amount || g.base);
 };
 
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
@@ -329,6 +369,10 @@ export const taxModels = {
   'account.tax': {
     label: 'Taxes',
     guard: (db, before, after) => {
+      // An on-payment tax cannot post without its transition account, so it is required when saving.
+      if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
+        try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
+      }
       const allTags = [
         ...(after.tag_ids ?? []),
         ...(after.invoice_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
@@ -359,6 +403,7 @@ export const taxModels = {
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
+      cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
       invoice_repartition_line_ids: {
@@ -419,7 +464,7 @@ export const taxModels = {
       title: 'name',
       groups: [
         ['amount_type', 'amount', 'children_tax_ids', 'sequence', 'description', 'type_tax_use'],
-        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'active'],
+        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'cash_basis_transition_account_id', 'active'],
       ],
       tabs: [
         { label: 'Distribution for Invoices', fields: ['invoice_repartition_line_ids'] },

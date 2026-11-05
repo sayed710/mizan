@@ -9,8 +9,8 @@ import { formatCurrency } from '../money.js';
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period }) {
-  const { rows, totals } = trialBalance(db, period);
+export function TrialBalance({ db, period, analyticAccountIds }) {
+  const { rows, totals } = trialBalance(db, { ...period, analyticAccountIds });
   return (
     <tbody>
       {rows.map((r) => (
@@ -30,8 +30,8 @@ function FiscalCategoryRows({ row }) {
   </>;
 }
 
-export function FiscalReport({ db, period }) {
-  const { rows, totals } = fiscalReport(db, period);
+export function FiscalReport({ db, period, analyticAccountIds }) {
+  const { rows, totals } = fiscalReport(db, { ...period, analyticAccountIds });
   return <tbody>
     {rows.map((row) => <FiscalCategoryRows key={row.category?.id ?? 'uncategorized'} row={row} />)}
     <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.debit)}{num(totals.credit)}{num(totals.balance)}</tr>
@@ -54,8 +54,8 @@ function PartnerRows({ db, p }) {
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }) {
-  const rows = partnerLedger(db, period, kind);
+export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, analyticAccountIds }) {
+  const rows = partnerLedger(db, { ...period, analyticAccountIds }, kind);
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}
@@ -83,9 +83,9 @@ export function CustomerStatement({ db, period, companyId }) {
   </tbody>;
 }
 
-export function CashFlow({ db, period, companyId }) {
+export function CashFlow({ db, period, companyId, analyticAccountIds }) {
   const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
-  const r = cashFlow(db, currentCo ? { ...period, company_id: currentCo } : period);
+  const r = cashFlow(db, currentCo ? { ...period, company_id: currentCo, analyticAccountIds } : { ...period, analyticAccountIds });
   const section = (key, title) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td>{num(r[key])}</tr>
@@ -107,8 +107,8 @@ export function CashFlow({ db, period, companyId }) {
   );
 }
 
-export function ExecutiveSummary({ db, period }) {
-  const s = executiveSummary(db, period);
+export function ExecutiveSummary({ db, period, analyticAccountIds }) {
+  const s = executiveSummary(db, { ...period, analyticAccountIds });
   const rows = [
     ['Revenue', money(s.revenue)], ['Gross Profit', money(s.grossProfit)], ['Net Profit', money(s.netProfit)],
     ['Cash', money(s.cash)], ['Receivables', money(s.receivables)], ['Payables', money(s.payables)],

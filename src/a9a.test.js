@@ -10,12 +10,14 @@ import { discountAvailable, payWithDiscount, postMove } from './models/accountin
 import { postBatch } from './models/payments.js';
 import { taxSnapshot } from './models/taxes.js';
 import { followUps, partnerFollowUp, updatePartnerFollowUp } from './models/finance.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 test('asset modification: value increase posts adjusting entry, updates original value and recomputes remaining board', () => {
   let db = seed();
   const assetAccId = accountId(db, '151000');
   const revalAccId = accountId(db, '450300');
   const asset = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Machinery',
     acquisition_date: '2026-01-01',
     original_value: 10000,
@@ -70,6 +72,7 @@ test('asset modification: value decrease (impairment) posts loss entry and recom
   const assetAccId = accountId(db, '151000');
   const lossAccId = accountId(db, '690300');
   const asset = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Tech Equipment',
     acquisition_date: '2026-01-01',
     original_value: 10000,
@@ -79,7 +82,7 @@ test('asset modification: value decrease (impairment) posts loss entry and recom
     method_period: '12',
     method_progress_factor: 0.3,
     account_asset_id: assetAccId,
-    account_loss_id: lossAccId,
+    account_depreciation_expense_id: lossAccId,
   });
   db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
 
@@ -117,6 +120,7 @@ test('asset modification: value decrease (impairment) posts loss entry and recom
 test('asset modification guards: enforces valid states, dates, configured accounts, and non-depreciable bounds', () => {
   let db = seed();
   const asset = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Guarded Asset',
     acquisition_date: '2026-01-01',
     original_value: 5000,
@@ -140,7 +144,7 @@ test('asset modification guards: enforces valid states, dates, configured accoun
   // Missing configured asset account or loss account throws a clear error
   const unconfigured = write(db, 'account.asset', a.id, { account_asset_id: null, account_loss_id: null });
   assert.throws(() => modifyAsset(unconfigured, read(unconfigured, 'account.asset', a.id), { date: '2028-01-01', value_change: -100 }), /fixed asset account/i);
-  const noLoss = write(db, 'account.asset', a.id, { account_loss_id: null });
+  const noLoss = write(db, 'account.asset', a.id, { account_loss_id: null, account_depreciation_expense_id: null });
   assert.throws(() => modifyAsset(noLoss, read(noLoss, 'account.asset', a.id), { date: '2028-01-01', value_change: -100 }), /loss or expense account/i);
 
   // Dispose the asset
@@ -345,7 +349,7 @@ test('degressive boards: declining takes the factor on the residual, declining-t
 
 test('asset disposal: due depreciation is posted, the loss entry balances and the board closes', () => {
   let db = seed();
-  const asset = create(db, 'account.asset', { name: 'Truck', acquisition_date: '2026-01-01', original_value: 12000, salvage_value: 0, method: 'linear', method_number: 5, method_period: '12' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Truck', acquisition_date: '2026-01-01', original_value: 12000, salvage_value: 0, method: 'linear', method_number: 5, method_period: '12' });
   db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
   db = postDepreciation(db, read(db, 'account.asset', asset.id), '2027-12-31');
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2028-12-31', invoice_line_ids: [{ qty: 1, price_unit: 5000, tax: 0 }] });

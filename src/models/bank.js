@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { ensureBankSuspense, invoiceCounterpartAccount, paymentJournal, postEntry } from './ledger.js';
+import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -11,13 +11,6 @@ import { datedLockDelete, datedLockGuard } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
-
-/** Statement amounts use the journal currency; open allocations use company currency. */
-export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
-  const company = line.company_id ?? 1;
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
-  return toCompany(db, currency, amount, line.date ?? today(), company);
-}
 
 /** The suggested reconciliation model for a line, else the first matching button model. */
 const modelFor = (db, line) => suggestRule(db, line)
@@ -81,9 +74,11 @@ export function reconcileWith(db, line, moveId) {
     const account = read(db, 'account.account', line.writeoff_account_id);
     if (!eligibleCounterpart(account, company)) throw new Error('Write-off account belongs to another company, is inactive, or is not a valid counterpart');
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label');
-    if (!Number.isFinite(amount) || !(amount > 0) || round(amount) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
-    writeoffValue = docRound(amount * rate);
-    if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== amount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
+    const currency = read(db, 'res.currency', journalCurrency);
+    if (!Number.isFinite(amount) || !(amount > 0) || roundCurrency(amount, currency) !== amount) throw new Error('Write-off amount must be a positive monetary amount');
+    const companyAmount = statementCompanyAmount(db, line, amount);
+    writeoffValue = sameCurrency ? amount : docRound(companyAmount * rate);
+    if (!(writeoffValue > 0) || writeoffValue > docRound(move.amount_residual - value) || toCompany(db, move.currency_id, writeoffValue, date, company) !== companyAmount) throw new Error('Write-off amount exceeds the remaining invoice or cannot be represented in its currency');
     const receivable = invoiceCounterpartAccount(db, move);
     const bankAccount = paymentJournal(db, line.journal_id, company).accountId;
     if (account.id === receivable || account.id === bankAccount || account.id === ensureBankSuspense(db, company, line.journal_id).id) throw new Error('Write-off account must differ from the invoice, bank and suspense accounts');
@@ -111,7 +106,7 @@ export function reconcileWith(db, line, moveId) {
   }
   const paid = payMove(current, moveId, value, date, { journalId: line.journal_id, statementLineId: line.id, ...(suspense ? { liquidityAccountId: suspense } : { directBank: true }) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
-  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, Number(line.writeoff_amount), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id }) : null;
+  const writeoff = hasWriteoff ? settleWriteoff(paid, moveId, writeoffValue, statementCompanyAmount(db, line, Number(line.writeoff_amount)), date, { accountId: line.writeoff_account_id, label: line.writeoff_label, journalId: line.journal_id }) : null;
   return write(writeoff?.db ?? paid, 'account.bank.statement.line', line.id, { state: remaining ? 'to_check' : 'reconciled', move_id: moveId, payment_move_id: paymentMove, writeoff_move_id: writeoff?.id ?? null, bank_move_id: bankMoveId ?? paymentMove, open_amount: remaining, allocations: [...(line.allocations ?? []), { invoice_id: moveId, payment_move_id: paymentMove, amount: used, ...(writeoff ? { writeoff_move_id: writeoff.id } : {}) }], partner_id: line.partner_id ?? move.partner_id });
 }
 
@@ -128,24 +123,7 @@ const batchPaymentCompany = (db, batch) => {
   return (batch.company_id ?? 1) === common ? common : null;
 };
 
-/** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
-export function isPaymentMatched(db, payment, excludeLineId = null) {
-  const pId = typeof payment === 'object' && payment ? payment.id : payment;
-  const pMoveId = typeof payment === 'object' && payment ? payment.move_id : (pId ? read(db, 'account.payment', pId)?.move_id : null);
-  return search(db, 'account.bank.statement.line').some((l) => {
-    if (excludeLineId && l.id === excludeLineId) return false;
-    if (pMoveId && (l.allocations ?? []).some((a) => a.payment_move_id === pMoveId)) return true;
-    if (l.state !== 'reconciled') return false;
-    if (pMoveId && l.payment_move_id === pMoveId) return true;
-    if (l.payment_id === pId) return true;
-    if ((l.payment_ids ?? []).includes(pId)) return true;
-    if (l.batch_payment_id) {
-      const batch = read(db, 'account.batch.payment', l.batch_payment_id);
-      if ((batch?.lines ?? []).some((bl) => !bl.cancelled && bl.payment_id === pId)) return true;
-    }
-    return false;
-  });
-}
+export { bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
 
 function resolveAndValidatePayments(db, line) {
   const company = line.company_id ?? 1;
@@ -227,8 +205,10 @@ function matchPayment(db, line) {
     if (!String(line.writeoff_label ?? '').trim()) throw new Error('Set a write-off label for the bank difference');
     if (line.writeoff_amount != null) {
       const configuredAmount = Number(line.writeoff_amount);
-      if (!Number.isFinite(configuredAmount) || configuredAmount < 0 || round(configuredAmount) !== configuredAmount || round(configuredAmount) !== Math.abs(difference)) {
-        throw new Error('Write-off amount must equal the payment difference in company currency');
+      const currency = read(db, 'res.currency', journal?.currency_id) ?? companyCurrencyRecord(db, company);
+      const expected = Math.abs(foreign ? foreignDifference : difference);
+      if (!Number.isFinite(configuredAmount) || configuredAmount < 0 || roundCurrency(configuredAmount, currency) !== configuredAmount || configuredAmount !== expected) {
+        throw new Error('Write-off amount must equal the payment difference in statement currency');
       }
     }
     const forbidden = new Set([via.accountId, ensureBankSuspense(db, company, line.journal_id).id, ...outstandingItems.map((item) => item.account)]);
@@ -258,14 +238,14 @@ function matchPayment(db, line) {
     : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }));
 
   const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
+  const writeoff = needsWriteoff ? (foreign ? statementCompanyAmount(db, line, foreignDifference) : difference) : 0;
   if (needsWriteoff) {
-    const companyNet = incoming ? difference : -difference;
+    const companyNet = incoming ? writeoff : -writeoff;
     const currencyNet = incoming ? foreignDifference : -foreignDifference;
     lines.push({ account_id: writeoffAccount.id, partner_id: line.partner_id ?? null, name: line.writeoff_label, debit: Math.max(0, companyNet), credit: Math.max(0, -companyNet), ...fx(currencyNet) });
-  } else if (difference) {
-    const exchangeDifference = (incoming ? 1 : -1) * (amount - paymentsTotal);
-    lines.push({ account: exchangeAccount(db, company, exchangeDifference), ...(exchangeDifference > 0 ? { credit: exchangeDifference } : { debit: -exchangeDifference }) });
   }
+  const exchangeDifference = round((incoming ? 1 : -1) * (writeoff - difference));
+  if (exchangeDifference) lines.push({ account: exchangeAccount(db, company, exchangeDifference), ...(exchangeDifference > 0 ? { credit: exchangeDifference } : { debit: -exchangeDifference }) });
   const booked = postEntry(db, { journal: via.code, journal_id: journal?.id, company, date: line.date, ref: line.payment_ref, lines });
 
   return {
@@ -351,11 +331,11 @@ function unreconcileError(db, before, after) {
 }
 
 /** Release a match by posting linked reversals; existing payments are not reversed. */
-function unreconcile(db, line) {
+export function unreconcile(db, line, reversalDate = null) {
   const bankId = line.bank_move_id ?? (line.payment_id ? line.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = line.allocations ?? [];
-  const date = [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
+  const date = reversalDate ?? [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
   // Stage an unlinked line while reversals are generated; the original and complete result are validated below.
   const original = db.records['account.bank.statement.line'].find((l) => l.id === line.id);
   const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_ids: [], batch_payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };
@@ -376,16 +356,6 @@ function unreconcile(db, line) {
   const error = unreconcileError(current, line, cleared);
   if (error) throw new Error(error);
   return { db: current };
-}
-
-/** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
-export function bookedStatementAmount(db, line) {
-  if (!line.bank_move_id) return statementCompanyAmount(db, line);
-  const company = line.company_id ?? 1;
-  const entry = read(db, 'account.move', line.bank_move_id);
-  const account = paymentJournal(db, line.journal_id, company).accountId;
-  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
-  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
 }
 
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
@@ -442,7 +412,7 @@ function lineGuard(db, before, after) {
         const writeoff = read(db, 'account.move', allocation.writeoff_move_id);
         const account = read(db, 'account.account', after.writeoff_account_id);
         const items = (writeoff?.line_ids ?? []).filter((l) => l.account_id === after.writeoff_account_id && l.name === after.writeoff_label && l.partner_id === invoice?.partner_id);
-        if (after.writeoff_move_id !== allocation.writeoff_move_id || !(invoice?.payments ?? []).some((p) => p.move_id === allocation.writeoff_move_id && !p.reversed) || !account || (account.company_id && account.company_id !== company) || writeoff?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(after.amount > 0 ? items[0].debit : items[0].credit) !== round(after.writeoff_amount)) return 'The matched document must link to its write-off entry';
+        if (after.writeoff_move_id !== allocation.writeoff_move_id || !(invoice?.payments ?? []).some((p) => p.move_id === allocation.writeoff_move_id && !p.reversed) || !account || (account.company_id && account.company_id !== company) || writeoff?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(after.amount > 0 ? items[0].debit : items[0].credit) !== statementCompanyAmount(db, after, Number(after.writeoff_amount))) return 'The matched document must link to its write-off entry';
       }
       if (allocation.payment_move_id !== after.bank_move_id) {
         const items = (entry?.line_ids ?? []).filter((l) => l.account_id === suspense);

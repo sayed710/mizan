@@ -1,4 +1,4 @@
-import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { createCompanyWithDefaultInvoiceJournals, withDefaultVat } from './test-support/accounting-company.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
@@ -43,7 +43,8 @@ function setupPrecision(rounding, foreign) {
   if (foreign) db = write(db, 'account.journal', journalId(db, 'BNK1'), { currency_id: made.id });
   if (!foreign) {
     const created = createCompanyWithDefaultInvoiceJournals(db, { name: `Precision ${rounding}`, currency_id: made.id });
-    db = created.db;
+    // Plain-rate VAT posts to the new company's configured default tax.
+    db = withDefaultVat(created.db, created.id);
     company = created.id;
   }
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, company_id: company, currency_id: made.id,
@@ -106,7 +107,7 @@ test('cash rounding and installments post in three-decimal foreign currency unit
   let db = seed();
   const currency = create(db, 'res.currency', { name: 'KWD', rounding: 0.001, rate_ids: [{ date: '2025-01-01', rate: 2 }] });
   const term = create(currency.db, 'account.payment.term', { name: 'Three payments', line_ids: [{ value_type: 'percent', value: 33 }, { value_type: 'percent', value: 33 }, { value_type: 'percent', value: 34 }] });
-  const cash = create(term.db, 'account.cash.rounding', { name: 'Five fils', rounding: 0.005, rounding_method: 'UP', strategy: 'add_invoice_line' });
+  const cash = create(term.db, 'account.cash.rounding', { profit_account_id: accountId(term.db, '450000'), loss_account_id: accountId(term.db, '690000'), name: 'Five fils', rounding: 0.005, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const made = create(cash.db, 'account.move', { move_type: 'out_invoice', partner_id: 2, currency_id: currency.id, invoice_date: '2025-01-02', invoice_payment_term_id: term.id, invoice_cash_rounding_id: cash.id, invoice_line_ids: [{ qty: 1, price_unit: 10.122, tax: 0 }] });
   db = postMove(made.db, made.id);
   const invoice = read(db, 'account.move', made.id);

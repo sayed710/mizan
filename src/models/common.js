@@ -113,7 +113,7 @@ export function amounts(lines = [], currency = null, { roundingMethod = null } =
     for (const t of c.taxes) {
       const repart = taxRepartitionLine(t);
       const tags = [...(repart?.tag_ids ?? [])].sort((a, b) => a - b).join(',');
-      const key = `${repart?.account_id ?? ''}|${taxLabel(t)}|${tags}`;
+      const key = `${repart?.account_id ?? ''}|${t.tax_id ?? ''}|${taxLabel(t)}|${tags}`;
       byTax.set(key, (byTax.get(key) ?? 0) + t.amount);
     }
   }

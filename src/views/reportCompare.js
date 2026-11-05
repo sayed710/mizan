@@ -1,4 +1,5 @@
 import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
+import { cashFlow } from '../models/reports.js';
 import { round } from '../money.js';
 import { groupBuckets } from '../models/configurableReports.js';
 
@@ -69,13 +70,13 @@ const BALANCE_TOTALS = [
 ];
 
 /** P&L sections and totals with account detail aligned across calendar periods. */
-export function pnlColumns(db, periods) {
-  return columns(periods, periods.map((p) => profitAndLoss(db, p)), PNL_SECTIONS, PNL_TOTALS);
+export function pnlColumns(db, periods, { analyticAccountIds } = {}) {
+  return columns(periods, periods.map((p) => profitAndLoss(db, p, { analyticAccountIds })), PNL_SECTIONS, PNL_TOTALS);
 }
 
 /** Cumulative balance sheets at each period end, retaining the displayed equity split. */
-export function balanceColumns(db, periods) {
-  return columns(periods, periods.map((p) => balanceSheet(db, p.to)), BALANCE_SECTIONS, BALANCE_TOTALS);
+export function balanceColumns(db, periods, { analyticAccountIds } = {}) {
+  return columns(periods, periods.map((p) => balanceSheet(db, p.to, { analyticAccountIds })), BALANCE_SECTIONS, BALANCE_TOTALS);
 }
 
 /** Horizontal comparison columns partitioned by a horizontal group for Profit & Loss. */
@@ -93,4 +94,16 @@ export function balanceAnalyticColumns(db, group, period) {
   };
   const buckets = groupBuckets(db, group, journalItems(db, filter));
   return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight })), BALANCE_SECTIONS, BALANCE_TOTALS, { showVariance: false });
+}
+
+const cashLines = (section) => (c) => c.lines.filter((l) => l.section === section).map((l) => ({ account: l.account, balance: l.amount }));
+const CASHFLOW_SECTIONS = [['operating', 'Operating Activities'], ['investing', 'Investing Activities'], ['financing', 'Financing Activities'], ['unclassified', 'Unclassified']]
+  .map(([section, title]) => [title, (c) => c[section], cashLines(section)]);
+const CASHFLOW_TOTALS = [
+  ['Net Change in Cash', (c) => c.net], ['Cash at Beginning', (c) => c.opening], ['Cash at End', (c) => c.closing, true],
+];
+
+/** Cash flow statement per calendar period, activity lines aligned by account. */
+export function cashflowColumns(db, periods, { analyticAccountIds, company_id } = {}) {
+  return columns(periods, periods.map((p) => cashFlow(db, { ...p, company_id, analyticAccountIds })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS);
 }

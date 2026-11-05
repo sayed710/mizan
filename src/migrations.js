@@ -635,22 +635,34 @@ MIGRATIONS.push({
   name: 'Taxes: repartition lines for invoice and refund documents',
   up: (db) => {
     const taxMap = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, t]));
+    // Before repartition lines, a tax without an account posted to the chart's VAT account; keep that only when it is unambiguous.
+    const defaultTaxAccount = (companyId, use) => {
+      const code = use === 'purchase' ? '131000' : '251000';
+      const type = CHART.find((row) => row[0] === code)?.[2];
+      const typed = (db.records['account.account'] ?? []).filter((a) => a.code === code && a.account_type === type);
+      const owned = typed.filter((a) => a.company_id === (companyId ?? 1));
+      const pick = owned.length ? owned : typed.filter((a) => a.company_id == null);
+      return pick.length === 1 ? pick[0].id : null;
+    };
     const convertLine = (l) => {
       if (!l) return l;
-      const { tax_account_id, tax_tag_ids, ...rest } = l;
+      const { tax_account_id, tax_tag_ids, tax_base_tag_ids, ...rest } = l;
       let invLines = l.invoice_repartition_line_ids;
       let refLines = l.refund_repartition_line_ids;
       if (!invLines?.length && !refLines?.length && (tax_account_id !== undefined || tax_tag_ids !== undefined || l.tax_id)) {
         const taxRec = l.tax_id ? taxMap.get(l.tax_id) : null;
-        const acc = tax_account_id ?? taxRec?.account_id ?? null;
-        const tags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
+        const lineCompId = taxRec?.company_id ?? 1;
+        const defAcc = defaultTaxAccount(lineCompId, taxRec?.type_tax_use);
+        const acc = tax_account_id ?? taxRec?.account_id ?? defAcc;
+        const baseTags = [...(tax_base_tag_ids ?? taxRec?.base_tag_ids ?? [])];
+        const taxTags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
         invLines = [
-          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
-          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
         ];
         refLines = [
-          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: tags },
-          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: tags },
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
         ];
       }
       let breakdown = rest.tax_breakdown;
@@ -666,28 +678,29 @@ MIGRATIONS.push({
     };
 
     const convertModelLines = (recs, fieldName) =>
-      (recs ?? []).map((r) => r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r);
+      (recs ?? []).map((r) => (r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r));
 
     const nextRecords = { ...db.records };
     nextRecords['account.tax'] = (db.records['account.tax'] ?? []).map((t) => {
-      const baseTags = [...(t.base_tag_ids ?? t.tag_ids ?? [])];
+      const baseTags = [...(t.base_tag_ids ?? [])];
       const taxTags = [...(t.tag_ids ?? [])];
-      const accountId = t.account_id ?? null;
+      const defAcc = defaultTaxAccount(t.company_id, t.type_tax_use);
+      const accountId = t.account_id ?? defAcc;
       const { account_id, tag_ids, base_tag_ids, ...restTax } = t;
       return {
         ...restTax,
         invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
           ? t.invoice_repartition_line_ids
           : [
-              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-            ],
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
         refund_repartition_line_ids: t.refund_repartition_line_ids?.length
           ? t.refund_repartition_line_ids
           : [
-              { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
-              { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
-            ],
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
       };
     });
 
@@ -716,8 +729,14 @@ MIGRATIONS.push({ version: 29, name: 'Explicit company stock accounts', up: (db)
 MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral accounts', up: (db) => {
   const find = (company, code) => {
     const type = CHART.find((row) => row[0] === code)?.[2];
-    const matches = (db.records['account.account'] ?? []).filter((a) => a.company_id === company && a.code === code && a.account_type === type);
-    return matches.length === 1 ? matches[0].id : null;
+    const accounts = db.records['account.account'] ?? [];
+    const owned = accounts.filter((a) => a.company_id === company && a.code === code);
+    if (owned.length) {
+      const match = owned.filter((a) => a.account_type === type);
+      return match.length === 1 ? match[0].id : null;
+    }
+    const shared = accounts.filter((a) => a.company_id == null && a.code === code && a.account_type === type);
+    return shared.length === 1 ? shared[0].id : null;
   };
   const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company,
     deferred_revenue_account_id: company.deferred_revenue_account_id ?? find(company.id, '212000'),
@@ -732,11 +751,95 @@ MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral a
   // Statement lines stored the chosen counterpart as a chart code; resolve it once to that company's account.
   const accounts = db.records['account.account'] ?? [];
   const lines = (db.records['account.bank.statement.line'] ?? []).map(({ counterpart, ...line }) => {
-    if (counterpart == null || line.counterpart_account_id) return line;
-    const matches = accounts.filter((a) => a.code === counterpart && (a.company_id ?? 1) === (line.company_id ?? 1));
-    return matches.length === 1 ? { ...line, counterpart_account_id: matches[0].id } : line;
+    const company = line.company_id ?? 1;
+    let journalId = line.journal_id ?? null;
+    if (!journalId) {
+      // Only an unambiguous journal is assigned: the company's single default bank journal, else its single bank journal.
+      const banks = (db.records['account.journal'] ?? []).filter((j) => j.type === 'bank' && (j.company_id ?? 1) === company);
+      const defaults = banks.filter((j) => j.default_for_payments);
+      journalId = (defaults.length === 1 ? defaults[0] : banks.length === 1 ? banks[0] : null)?.id ?? null;
+    }
+    const withJournal = journalId ? { ...line, journal_id: journalId } : line;
+    if (counterpart == null || line.counterpart_account_id) return withJournal;
+    const matches = accounts.filter((a) => a.code === counterpart && (a.company_id ?? 1) === company);
+    // An unresolved code stays on the line so the user's choice is not lost (Qodo 40).
+    return matches.length === 1 ? { ...withJournal, counterpart_account_id: matches[0].id } : { ...withJournal, counterpart };
   });
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
+} });
+
+MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental and reconciliation accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    if (!type) return null;
+    const accounts = db.records['account.account'] ?? [];
+    const owned = accounts.filter((account) => account.company_id === company && account.code === code);
+    if (owned.length) {
+      const match = owned.filter((a) => a.account_type === type);
+      return match.length === 1 ? match[0].id : null;
+    }
+    const shared = accounts.filter((account) => account.company_id == null && account.code === code && account.account_type === type);
+    return shared.length === 1 ? shared[0].id : null;
+  };
+  const resolveRuleAccount = (company, code) => {
+    if (!code) return null;
+    const accounts = db.records['account.account'] ?? [];
+    const owned = accounts.filter((a) => (a.company_id ?? 1) === company && a.code === code);
+    if (owned.length === 1) return owned[0].id;
+    const shared = accounts.filter((a) => a.company_id == null && a.code === code);
+    if (shared.length === 1) return shared[0].id;
+    return find(company, code);
+  };
+  const companyRoles = { gain_account_id: '450300', loss_account_id: '690300', income_currency_exchange_account_id: '450100', expense_currency_exchange_account_id: '690100', income_early_payment_discount_account_id: '450200', expense_early_payment_discount_account_id: '690200', rental_deposit_account_id: '230100', rental_withheld_deposit_account_id: '450000', down_payment_account_id: '212000' };
+  const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company, ...Object.fromEntries(Object.entries(companyRoles).filter(([field]) => !company[field]).map(([field, code]) => [field, find(company.id, code)])) }));
+  const assets = (records) => (records ?? []).map(({ account_expense_id, ...asset }) => ({ ...asset,
+    account_asset_id: asset.account_asset_id ?? find(asset.company_id ?? 1, '151000'),
+    account_depreciation_id: asset.account_depreciation_id ?? find(asset.company_id ?? 1, '152000'),
+    account_depreciation_expense_id: asset.account_depreciation_expense_id ?? account_expense_id ?? find(asset.company_id ?? 1, '680000'),
+  }));
+  const rules = (db.records['account.reconcile.model'] ?? []).map((rule) => ({ ...rule, line_ids: (rule.line_ids ?? []).map(({ account_code, ...line }) => ({ ...line, account_id: line.account_id ?? (account_code ? resolveRuleAccount(rule.company_id ?? 1, account_code) : null) })) }));
+  return { ...db, records: { ...db.records, 'res.company': companies, 'account.asset': assets(db.records['account.asset']), 'account.asset.model': assets(db.records['account.asset.model']), 'account.reconcile.model': rules } };
+} });
+
+MIGRATIONS.push({ version: 32, name: 'Budget company', up: (db) => {
+  // Only a single-company database identifies the budget's company; otherwise the report asks the user to select one.
+  const companies = db.records['res.company'] ?? [];
+  if (companies.length !== 1) return db;
+  const budgets = (db.records['account.budget'] ?? []).map((budget) => budget.company_id ? budget : { ...budget, company_id: companies[0].id });
+  return { ...db, records: { ...db.records, 'account.budget': budgets } };
+} });
+
+MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    const matches = (db.records['account.account'] ?? []).filter((a) => a.company_id === company && a.code === code && a.account_type === type);
+    return matches.length === 1 ? matches[0].id : null;
+  };
+  const structures = (db.records['hr.payroll.structure'] ?? []).map((structure) => {
+    const company = structure.company_id ?? 1;
+    const journals = (db.records['account.journal'] ?? []).filter((j) => (j.company_id ?? 1) === company && j.code === 'SAL' && j.type === 'general');
+    return { ...structure, company_id: company, journal_id: structure.journal_id ?? (journals.length === 1 ? journals[0].id : null),
+      salary_expense_account_id: structure.salary_expense_account_id ?? find(company, '620000'),
+      salary_payable_account_id: structure.salary_payable_account_id ?? find(company, '230000'),
+      rules: (structure.rules ?? []).map(({ account, ...rule }) => ({ ...rule,
+        ...(account && !rule.account_credit_id ? { account_credit_id: find(company, account) } : {}),
+      })),
+    };
+  });
+  return { ...db, records: { ...db.records,
+    'hr.payroll.structure': structures,
+    'stock.valuation.layer': (db.records['stock.valuation.layer'] ?? []).map((layer) => typeof layer.counterpart === 'string' ? { ...layer, counterpart: find(layer.company_id ?? 1, layer.counterpart) } : layer),
+    'res.company': (db.records['res.company'] ?? []).map((company) => {
+      const candidates = structures.filter((s) => s.company_id === company.id);
+      return { ...company, opening_equity_account_id: company.opening_equity_account_id ?? find(company.id, '301000'),
+        default_payroll_structure_id: company.default_payroll_structure_id ?? (candidates.length === 1 ? candidates[0].id : null) };
+    }),
+    'account.tax': (db.records['account.tax'] ?? []).map((tax) => ({ ...tax, cash_basis_transition_account_id: tax.cash_basis_transition_account_id ?? (tax.tax_exigibility === 'on_payment' ? find(tax.company_id ?? 1, tax.type_tax_use === 'sale' ? '251100' : '131100') : null) })),
+    'account.cash.rounding': (db.records['account.cash.rounding'] ?? []).map((rounding) => ({ ...rounding,
+      profit_account_id: Number.isInteger(rounding.profit_account_id) ? rounding.profit_account_id : find(rounding.company_id ?? 1, rounding.profit_account_id || '450000'),
+      loss_account_id: Number.isInteger(rounding.loss_account_id) ? rounding.loss_account_id : find(rounding.company_id ?? 1, rounding.loss_account_id || '690000'),
+    })),
+  } };
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

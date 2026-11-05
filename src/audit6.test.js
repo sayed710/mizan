@@ -8,6 +8,7 @@ import { create, read, search, updateSettings, write } from './orm.js';
 import { postMove } from './models/accounting.js';
 import { confirmAsset } from './models/assets.js';
 import { accountId, journalItems } from './models/ledger.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 const reset = (db, id) => models['account.move'].form.buttons.find((b) => b.label === 'Reset to Draft').run(db, read(db, 'account.move', id)).db;
 const billWithAsset = () => {
@@ -15,6 +16,8 @@ const billWithAsset = () => {
   const fixed = accountId(db, '151000');
   const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2025-01-01', invoice_line_ids: [{ name: 'Machine', qty: 1, price_unit: 100, tax: 0, account_id: fixed }] });
   db = postMove(bill.db, bill.id);
+  const assetId = search(db, 'account.asset').find((a) => a.bill_id === bill.id).id;
+  db = write(db, 'account.asset', assetId, assetAccounts(db));
   return { db, id: bill.id, fixed, asset: search(db, 'account.asset').find((a) => a.bill_id === bill.id) };
 };
 

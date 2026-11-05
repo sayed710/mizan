@@ -1,9 +1,10 @@
 // Fixed assets: depreciation boards and their posting.
 import { read, search, write } from '../orm.js';
 import { addDays, today } from './common.js';
-import { accountId, journalId, postEntry } from './ledger.js';
+import { journalId, postEntry } from './ledger.js';
 import { postAnalytic } from './analyticplus.js';
 import { cents } from '../money.js';
+import { configuredAccount } from './configured-account.js';
 
 /** Depreciation settings of an asset without a model. */
 export const ASSET_DEPRECIATION_DEFAULTS = { method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false };
@@ -13,6 +14,15 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const monthEnd = (y, m) => `${y}-${pad2(m)}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
 const dayNumber = (iso) => Date.UTC(...iso.split('-').map((v, i) => Number(v) - (i === 1 ? 1 : 0))) / DAY;
 const postedCents = (asset) => (asset.depreciation_ids ?? []).filter((l) => l.posted).reduce((s, l) => s + cents(l.amount), 0);
+
+export function assetAccountGuard(db, _before, asset) {
+  for (const field of ['account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id']) {
+    if (!asset[field]) continue;
+    const account = read(db, 'account.account', asset[field]);
+    if (!account || account.active === false || (account.company_id && account.company_id !== (asset.company_id ?? 1))) return 'Asset accounts must be active and belong to the asset company';
+  }
+  return null;
+}
 
 /** End date of period `i` counted from the acquisition period. */
 function periodEnd(y, m, yearly, i) {
@@ -73,15 +83,15 @@ function validate(db, asset) {
   if (!j) throw new Error('Asset journal not found');
   if (j.company_id && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
 
-  for (const [field, code, label] of [
-    ['account_asset_id', '151000', 'Asset'],
-    ['account_depreciation_id', '152000', 'Depreciation'],
-    ['account_depreciation_expense_id', '680000', 'Expense'],
+  for (const [field, label] of [
+    ['account_asset_id', 'fixed asset'],
+    ['account_depreciation_id', 'depreciation'],
+    ['account_depreciation_expense_id', 'depreciation expense'],
   ]) {
-    const id = asset[field] ?? accountId(db, code, company) ?? accountId(db, code);
-    if (!id) continue;
+    const id = asset[field];
+    if (!id) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
     const acc = read(db, 'account.account', id);
-    if (!acc) throw new Error('Asset account not found');
+    if (!acc || acc.active === false) throw new Error(`Configure the ${label} account on asset ${asset.name}`);
     if (acc.company_id && acc.company_id !== company) throw new Error(`${label} account ${acc.code || acc.name} belongs to another company`);
   }
 }
@@ -118,8 +128,8 @@ export function postDepreciation(db, asset, upTo = today()) {
   validate(db, asset);
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(db, 'MISC', company) ?? 'MISC';
-  const expAcc = asset.account_depreciation_expense_id ?? asset.account_expense_id ?? '680000';
-  const depAcc = asset.account_depreciation_id ?? '152000';
+  const expAcc = asset.account_depreciation_expense_id;
+  const depAcc = asset.account_depreciation_id;
   const { db: next, lines } = (asset.depreciation_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, lines: [...acc.lines, l] };
     const { db: booked, id } = postEntry(acc.db, {
@@ -143,7 +153,9 @@ export function pauseAsset(db, asset, date = today()) {
 /** Shift remaining periods by the paused days and recompute their residual amounts. */
 export function resumeAsset(db, asset, date = today()) {
   asset = read(db, 'account.asset', asset.id) ?? asset;
-  if (asset.state !== 'paused' || !asset.pause_date) throw new Error('The asset needs a recorded pause date before it can be resumed');
+  if (asset.state !== 'paused') throw new Error('Only a paused asset can be resumed');
+  // Paused before pause dates were recorded: no pause period is known, so the board resumes unshifted, as it then did.
+  if (!asset.pause_date) return write(db, 'account.asset', asset.id, { state: 'open' });
   if (date < asset.pause_date) throw new Error('Resume date cannot precede the pause date');
   const days = dayNumber(date) - dayNumber(asset.pause_date);
   const posted = (asset.depreciation_ids ?? []).filter((line) => line.posted);
@@ -181,15 +193,20 @@ export function disposeAsset(db, asset, { date, saleValue, invoiceId = null, inv
   const accumulated = postedCents(current) + cents(asset.already_depreciated);
   const loss = original - accumulated - sale;
   const company = asset.company_id ?? 1;
+  // Immutable db: resolving the disposal account after the depreciation catch-up persists nothing on failure.
+  const companyRecord = read(db, 'res.company', company);
+  const disposalAccount = loss > 0 ? companyRecord?.loss_account_id : loss < 0 ? companyRecord?.gain_account_id : null;
+  const disposalRecord = disposalAccount && read(db, 'account.account', disposalAccount);
+  if (loss && (!disposalRecord || disposalRecord.active === false || (disposalRecord.company_id && disposalRecord.company_id !== company))) throw new Error(`Configure the disposal ${loss > 0 ? 'loss' : 'gain'} account on company ${companyRecord?.name ?? company}`);
   const journal = asset.journal_id ?? journalId(depreciated, 'MISC', company) ?? 'MISC';
-  const assetAcc = asset.account_asset_id ?? '151000';
-  const depAcc = asset.account_depreciation_id ?? '152000';
+  const assetAcc = asset.account_asset_id;
+  const depAcc = asset.account_depreciation_id;
   const lines = [
     { account: assetAcc, credit: original / 100 },
     accumulated > 0 && { account: depAcc, debit: accumulated / 100 },
     sale > 0 && { account: saleLine.account_id, debit: sale / 100 },
-    loss > 0 && { account: asset.account_loss_id ?? '690300', debit: loss / 100, analytic_distribution: asset.analytic_distribution },
-    loss < 0 && { account: asset.account_gain_id ?? '450300', credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
+    loss > 0 && { account: disposalAccount, debit: loss / 100, analytic_distribution: asset.analytic_distribution },
+    loss < 0 && { account: disposalAccount, credit: -loss / 100, analytic_distribution: asset.analytic_distribution },
   ].filter(Boolean);
   const { db: booked, id } = postEntry(depreciated, { journal, date, ref: `${asset.name} disposal`, lines, company });
   return write(postAnalytic(booked, id), 'account.asset', asset.id, { depreciation_ids: kept, cancelled_depreciation_ids: (current.depreciation_ids ?? []).filter((l) => !l.posted).map((l) => ({ ...l, cancelled: true })), state: 'close', disposal_date: date, sale_value: sale / 100, sale_invoice_id: invoice?.id ?? null, sale_invoice_line: invoice ? Number(invoiceLine) : null });
@@ -203,6 +220,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
   if ((asset.depreciation_ids ?? []).some((line) => line.posted && line.date > date)) throw new Error('Modification date cannot precede posted depreciation');
   if ((asset.revaluation_ids ?? []).some((entry) => entry.date > date)) throw new Error('Modification date cannot precede an existing revaluation');
 
+  if (Number(valueChange) < 0 && !accountId && !asset.account_depreciation_expense_id) throw new Error(`Configure the loss or expense account on asset ${asset.name}`);
   validate(db, asset);
   let nextDb = postDepreciation(db, asset, date);
   asset = read(nextDb, 'account.asset', asset.id) ?? asset;
@@ -222,8 +240,7 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
 
   const company = asset.company_id ?? 1;
   const journal = asset.journal_id ?? journalId(nextDb, 'MISC', company) ?? 'MISC';
-  const model = asset.model_id ? read(nextDb, 'account.asset.model', asset.model_id) : null;
-  const assetAcc = asset.account_asset_id ?? model?.account_asset_id ?? null;
+  const assetAcc = asset.account_asset_id;
 
   let adjustmentMoveId = null;
   if (delta !== 0) {
@@ -233,9 +250,11 @@ export function modifyAsset(db, asset, { date = today(), value_change = 0, value
       if (!accountId) throw new Error('Select a counterpart account for the asset value increase');
       counterpartAcc = accountId;
     } else {
-      counterpartAcc = accountId ?? asset.account_loss_id ?? asset.account_depreciation_expense_id ?? asset.account_expense_id ?? model?.account_expense_id ?? null;
+      counterpartAcc = accountId ?? asset.account_depreciation_expense_id;
       if (!counterpartAcc) throw new Error('Configure a loss or expense account on the asset (or select a counterpart account) for the impairment');
     }
+    // A selected counterpart must be active and belong to the asset company, like the asset's own accounts (Qodo 39).
+    counterpartAcc = configuredAccount(nextDb, counterpartAcc, company, 'counterpart', asset.name || 'the asset');
     const lines = delta > 0
       ? [
           { account: assetAcc, debit: delta / 100 },
@@ -297,7 +316,7 @@ export const assetModels = {
       model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Fixed Asset Account' },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
-      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Model Expense Account (Fallback)' },
+      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
       bill_id: { type: 'many2one', relation: 'account.move', label: 'Bill' },
@@ -330,14 +349,13 @@ export const assetModels = {
       sale_invoice_line: { type: 'integer', label: 'Sale Invoice Line', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account (Override)' },
-      account_gain_id: { type: 'many2one', relation: 'account.account', label: 'Gain Account' },
-      account_loss_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
     },
     defaults: () => ({ acquisition_date: today(), ...ASSET_DEPRECIATION_DEFAULTS, state: 'draft', depreciation_ids: [], company_id: 1 }),
+    guard: assetAccountGuard,
     createDefaults: (db, vals) => {
       const model = vals?.model_id && read(db, 'account.asset.model', vals.model_id);
       if (!model) return {};
-      return Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_expense_id', 'journal_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]]));
+      return Object.fromEntries(['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id', 'journal_id', 'analytic_distribution'].filter((key) => model[key] !== undefined).map((key) => [key, model[key]]));
     },
     onchange: (r, key, db) => {
       if (key === 'model_id' && r.model_id) {
@@ -351,7 +369,8 @@ export const assetModels = {
             prorata: model.prorata !== undefined ? model.prorata : r.prorata,
             account_asset_id: model.account_asset_id ?? r.account_asset_id,
             account_depreciation_id: model.account_depreciation_id ?? r.account_depreciation_id,
-            account_expense_id: model.account_expense_id ?? r.account_expense_id,
+            account_depreciation_expense_id: model.account_depreciation_expense_id ?? r.account_depreciation_expense_id,
+            account_expense_id: model.account_depreciation_expense_id ?? r.account_depreciation_expense_id,
             journal_id: model.journal_id ?? r.journal_id,
             analytic_distribution: model.analytic_distribution ?? r.analytic_distribution,
           };

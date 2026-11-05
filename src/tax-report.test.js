@@ -1,3 +1,4 @@
+import { accountId } from './models/ledger.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, search, read, write } from './orm.js';
@@ -109,7 +110,7 @@ test('reversing a final cash-basis payment removes its exact rounded release', (
     for (const direct of [true, false]) {
       let db = seed();
       const name = `Rounding ${type} ${direct}`;
-      const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, tax_exigibility: 'on_payment' });
+      const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, ...defaultTaxRepartitionLines(accountId(db, side === 'sale' ? '251000' : '131000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, side === 'sale' ? '251100' : '131100') });
       const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
       db = confirm(inv.db, 'account.move', inv.id);
       let last;
@@ -128,7 +129,7 @@ test('reversing a final cash-basis payment removes its exact rounded release', (
 test('legacy final payment reversal removes the original rounded cash-basis release', () => {
   const button = (model, name) => models[model].form.buttons.find((b) => b.label === name);
   let db = seed();
-  const tax = create(db, 'account.tax', { name: 'Legacy cash rounding', amount: 14, type_tax_use: 'sale', tax_exigibility: 'on_payment' });
+  const tax = create(db, 'account.tax', { name: 'Legacy cash rounding', amount: 14, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(db, '251000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, '251100') });
   const inv = create(tax.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   db = button('account.move', 'Confirm').run(inv.db, read(inv.db, 'account.move', inv.id)).db;
   let last;
@@ -154,7 +155,7 @@ test('legacy cash-basis reversals do not inflate the final release base', () => 
     for (const scenario of ['one', 'partial reversal', 'two legacy', 'mixed']) {
       let db = seed();
       const name = `Legacy ${type} ${scenario}`;
-      const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, tax_exigibility: 'on_payment' });
+      const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, ...defaultTaxRepartitionLines(accountId(db, side === 'sale' ? '251000' : '131000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, side === 'sale' ? '251100' : '131100') });
       const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
       db = run(inv.db, 'account.move', inv.id, 'Confirm');
       const pay = (amount, legacy) => {
@@ -193,7 +194,7 @@ test('rounded-to-zero cash-basis tax bases are released on payment for invoices 
   const confirm = (db, model, id) => models[model].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, model, id)).db;
   for (const [type, side, sign] of [['out_invoice', 'sale', 1], ['out_refund', 'sale', -1], ['in_invoice', 'purchase', 1], ['in_refund', 'purchase', -1]]) {
     let db = seed();
-    const tax = create(db, 'account.tax', { name: `Micro cash ${type}`, amount: 1, type_tax_use: side, tax_exigibility: 'on_payment' });
+    const tax = create(db, 'account.tax', { name: `Micro cash ${type}`, amount: 1, type_tax_use: side, ...defaultTaxRepartitionLines(accountId(db, side === 'sale' ? '251000' : '131000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, side === 'sale' ? '251100' : '131100') });
     const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 0.10, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
     db = confirm(inv.db, 'account.move', inv.id);
     const posted = read(db, 'account.move', inv.id);
@@ -219,7 +220,7 @@ test('negative cash-basis groups release and reverse with signed bases on invoic
   for (const [type, side, sign] of [['out_invoice', 'sale', 1], ['out_refund', 'sale', -1], ['in_invoice', 'purchase', 1], ['in_refund', 'purchase', -1]]) {
     let db = seed();
     const name = `Negative cash ${type}`;
-    const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, tax_exigibility: 'on_payment' });
+    const tax = create(db, 'account.tax', { name, amount: 14, type_tax_use: side, ...defaultTaxRepartitionLines(accountId(db, side === 'sale' ? '251000' : '131000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, side === 'sale' ? '251100' : '131100') });
     const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [
       { qty: 1, price_unit: 100, tax: 0 },
       { qty: 1, price_unit: -20, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) },
@@ -260,7 +261,7 @@ test('negative cash-basis groups release and reverse with signed bases on invoic
 
 test('cash-basis base survives a zero-tax partial release and payment reversal', () => {
   let db = seed();
-  const tax = create(db, 'account.tax', { name: 'Small cash refund', amount: 14, type_tax_use: 'sale', tax_exigibility: 'on_payment' });
+  const tax = create(db, 'account.tax', { name: 'Small cash refund', amount: 14, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(db, '251000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, '251100') });
   const inv = create(tax.db, 'account.move', { move_type: 'out_refund', partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 0.10, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   const button = (model, name) => models[model].form.buttons.find((b) => b.label === name);
   db = button('account.move', 'Confirm').run(inv.db, read(inv.db, 'account.move', inv.id)).db;
@@ -278,7 +279,7 @@ test('zero-rate cash-basis tax reports its base only as payments are made and re
   const run = (db, model, id, action) => models[model].form.buttons.find((b) => b.label === action).run(db, read(db, model, id)).db;
   for (const [type, side, sign] of [['out_invoice', 'sale', 1], ['out_refund', 'sale', -1], ['in_invoice', 'purchase', 1], ['in_refund', 'purchase', -1]]) {
     const name = `Zero cash ${type}`;
-    const tax = create(seed(), 'account.tax', { name, amount: 0, type_tax_use: side, tax_exigibility: 'on_payment' });
+    const tax = create(seed(), 'account.tax', { name, amount: 0, type_tax_use: side, ...defaultTaxRepartitionLines(accountId(seed(), side === 'sale' ? '251000' : '131000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(seed(), side === 'sale' ? '251100' : '131100') });
     const inv = create(tax.db, 'account.move', { move_type: type, partner_id: 1, invoice_date: today(), invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
     let db = run(inv.db, 'account.move', inv.id, 'Confirm');
     assert.equal(taxesByTax(db).find((r) => r.name === name), undefined, `${type}: unpaid`);
@@ -300,7 +301,7 @@ test('zero-rate cash-basis tax reports its base only as payments are made and re
 test('zero-rate invoice and cash-basis lines remain distinct even with the same tax label', () => {
   const run = (db, model, id, action) => models[model].form.buttons.find((b) => b.label === action).run(db, read(db, model, id)).db;
   const immediate = create(seed(), 'account.tax', { name: 'Shared zero label', amount: 0, type_tax_use: 'sale' });
-  const cash = create(immediate.db, 'account.tax', { name: 'Shared zero label', amount: 0, type_tax_use: 'sale', tax_exigibility: 'on_payment' });
+  const cash = create(immediate.db, 'account.tax', { name: 'Shared zero label', amount: 0, type_tax_use: 'sale', ...defaultTaxRepartitionLines(accountId(immediate.db, '251000')), tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(immediate.db, '251100') });
   const inv = create(cash.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: today(), invoice_line_ids: [
     { qty: 1, price_unit: 60, ...taxSnapshot(read(cash.db, 'account.tax', immediate.id)) },
     { qty: 1, price_unit: 40, ...taxSnapshot(read(cash.db, 'account.tax', cash.id)) },

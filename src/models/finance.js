@@ -3,9 +3,9 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
-import { TRANSITION, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccounts, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
@@ -125,7 +125,7 @@ function taxLockFor(db, move, settings = db.settings) {
   if (!move || !lock) return '';
   const accounts = taxAccounts(db, move.company_id);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
-    accountId(db, TRANSITION.sale, move.company_id), accountId(db, TRANSITION.purchase, move.company_id)]);
+    ...cashBasisTransitionAccounts(db, move.company_id)]);
   const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
     || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
   return taxable ? lock : '';
@@ -241,7 +241,41 @@ function backsSettlement(db, id) {
  * at posted payment or discount entries for its partner, by exactly their amount and within what those entries settle;
  * an entry that records a payment stays posted while the payment does.
  */
-export function moveInvariant(db, after, before) {
+/**
+ * Credit released by unapplied rows must reach the payment, and their settlement-specific entries must be reversed,
+ * in the same change. Compares the stored and resulting databases, so other applications in that change count too.
+ */
+function unapplicationError(db, stored, after, before) {
+  const moves = db.records['account.move'] ?? [];
+  const reversedIds = new Set(moves.filter((m) => m.state === 'posted' && m.reversed_entry_id).map((m) => m.reversed_entry_id));
+  const released = (before?.payments ?? []).filter((p, i) => !p.reversed && after.payments?.[i]?.unapplied);
+  if (released.some((p) => [p.payment_fx_move_id, p.cash_basis_move_id].some((id) => id && !reversedIds.has(id)))) {
+    return 'Unapplying a payment must reverse its exchange and cash-basis entries';
+  }
+  if (!stored) return null;
+  const storedMoves = new Map((stored.records['account.move'] ?? []).map((m) => [m.id, m]));
+  for (const moveId of new Set(released.map((p) => p.move_id))) {
+    // Net credit change for this payment across every move in the change: released rows add, new applications take.
+    let change = 0;
+    for (const move of moves) {
+      const old = storedMoves.get(move.id)?.payments ?? [];
+      (move.payments ?? []).forEach((row, i) => {
+        if (row.move_id !== moveId) return;
+        if (i >= old.length && !row.reversed) change -= Number(row.payment_company_amount) || 0;
+        else if (i < old.length && !old[i].reversed && row.unapplied) change += Number(old[i].payment_company_amount) || 0;
+      });
+    }
+    const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
+    const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
+    const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
+    if (!payment || !prior || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
+      return 'Unapplying a payment must restore its outstanding credit';
+    }
+  }
+  return null;
+}
+
+export function moveInvariant(db, after, before, stored = null) {
   if (before?.state === 'posted' && after.state !== 'posted' && backsSettlement(db, after.id)) return 'This entry records a payment; reverse the payment instead';
   const was = Array.isArray(before?.payments) ? before.payments : [];
   const now = Array.isArray(after.payments) ? after.payments : [];
@@ -255,6 +289,13 @@ export function moveInvariant(db, after, before) {
     const current = now[i];
     if (JSON.stringify(current) === JSON.stringify(p)) return false;
     if (p.reversed || !current?.reversed) return true;
+    // Unreconcile removes a credit application: the payment entry stays posted, so no reversing entry exists.
+    if (current.unapplied) {
+      const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
+      const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || !payment
+        || !unappliedOn || (p.date && unappliedOn < p.date);
+    }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
     const entry = (db.records['account.move'] ?? []).find((m) => m.id === reversalId);
     const source = (db.records['account.move'] ?? []).find((m) => m.id === p.move_id);
@@ -262,6 +303,8 @@ export function moveInvariant(db, after, before) {
       || JSON.stringify((source.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.debit || 0, l.credit || 0]))
       !== JSON.stringify((entry.line_ids ?? []).map((l) => [l.account_id, l.partner_id, l.credit || 0, l.debit || 0]));
   })) return 'Registered payments cannot be changed without a posted reversing journal entry';
+  const unapplication = unapplicationError(db, stored, after, before);
+  if (unapplication) return unapplication;
   const added = now.slice(was.length);
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   if (!added.every((p) => {
@@ -317,7 +360,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const account = invoiceCounterpartAccount(db, invoice);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && (l.partner_id === invoice.partner_id || sameCommercialPartner(db, l.partner_id, invoice.partner_id))).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const configured = exchangeAccount(db, invoice.company_id, difference);
-  const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
+  const offset = configured;
   const lines = fx?.line_ids ?? [];
   const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
   const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
@@ -350,10 +393,27 @@ export function fxProvenanceError(db, entry) {
     const clearsDebit = sale ? gap < 0 : gap > 0;
     const account = invoiceCounterpartAccount(db, invoice);
     const amount = Math.abs(gap);
+    let offset;
+    try {
+      offset = exchangeAccount(db, invoice.company_id, clearsDebit ? amount : -amount);
+    } catch (error) {
+      return error.message;
+    }
+    // Exactly the open-item line and the configured gain/loss line, both for this amount (as offsetCreditNote posts it).
     const lines = entry.line_ids ?? [];
+    const side = (l, field) => companyRound(Number(l[field]) || 0);
     const openLine = lines.find((l) => l.account_id === account && l.partner_id === invoice.partner_id);
-    if (!openLine || companyRound(Number(clearsDebit ? openLine.debit : openLine.credit)) !== amount) {
+    const fxLine = lines.find((l) => l !== openLine && l.account_id === offset && !l.partner_id);
+    const [open, close] = clearsDebit ? ['debit', 'credit'] : ['credit', 'debit'];
+    if (entry.state !== 'posted' || entry.move_type !== 'entry' || (entry.company_id ?? 1) !== (invoice.company_id ?? 1) || entry.invoice_date !== invRow.date
+      || lines.length !== 2 || !openLine || !fxLine || side(openLine, open) !== amount || side(openLine, close) || side(fxLine, close) !== amount || side(fxLine, open)) {
       return 'A dedicated posted exchange entry must match the settlement';
+    }
+    // One settlement books its exchange difference once; a reversed earlier entry no longer counts.
+    const moves = db.records['account.move'] ?? [];
+    const live = (m) => m.state === 'posted' && !m.reversal_move_id && !moves.some((r) => r.state === 'posted' && r.reversed_entry_id === m.id);
+    if (moves.some((m) => m.id !== entry.id && m.fx_payment_move_id === source.id && m.fx_invoice_id === invoice.id && live(m))) {
+      return 'Exchange entry is already used by another settlement';
     }
     return null;
   }
@@ -422,7 +482,13 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+}
+
+/** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
+function pendingReversalRule(db, before, after) {
+  if (after.state !== 'posted' || before?.state === 'posted' || !after.reversed_entry_id) return null;
+  return read(db, 'account.move', after.reversed_entry_id)?.state === 'posted' ? null : 'The entry this reverses is no longer posted';
 }
 
 function lockRule(db, before, after, ctx) {
@@ -501,8 +567,9 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
-  const company = read(db, 'res.company', move.company_id ?? 1);
-  if (company?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
+  // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
+  const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
+  if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;
@@ -510,8 +577,11 @@ export function moveDeleteGuard(db, move, staged = db) {
 
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
 export function taxAccounts(db, companyId) {
-  const of = (use, code) => new Set([
-    accountId(db, code, companyId),
+  // Tax accounts come from repartition lines and from the return types' explicit payable/receivable accounts.
+  const returnTypes = search(db, 'account.return.type').filter((t) => !companyId || (t.company_id ?? 1) === companyId);
+  const returnField = { sale: 'tax_payable_account_id', purchase: 'tax_receivable_account_id' };
+  const of = (use) => new Set([
+    ...returnTypes.map((t) => t[returnField[use]]),
     ...search(db, 'account.tax')
       .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
       .flatMap((x) => [
@@ -519,7 +589,7 @@ export function taxAccounts(db, companyId) {
         ...taxRepartitionLines(x, 'refund').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
       ]),
   ].filter(Boolean));
-  return { sale: of('sale', '251000'), purchase: of('purchase', '131000') };
+  return { sale: of('sale'), purchase: of('purchase') };
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
@@ -528,7 +598,7 @@ function taxItems(db, period) {
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  const transitions = new Set([accountId(db, TRANSITION.sale, companyId), accountId(db, TRANSITION.purchase, companyId)].filter(Boolean));
+  const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
     const move = l.tax_name && moves.get(l.move_id);
@@ -871,9 +941,10 @@ export function journalCards(db, at = today()) {
   return search(db, 'account.journal').map((j) => {
     const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.id));
     if (['sale', 'purchase'].includes(j.type)) {
-      const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
+      const documents = own.filter((m) => m.move_type === (j.type === 'sale' ? 'out_invoice' : 'in_invoice'));
+      const unpaid = documents.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
-        journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
+        journal: j, kind: j.type, draft: documents.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
         unpaidAmount: companySum(db, unpaid, 'amount_residual', at), unratedCount: unratedCount(db, unpaid, at), late: unpaid.filter((m) => m.invoice_date_due < at).length,
       };
     }
@@ -881,7 +952,8 @@ export function journalCards(db, at = today()) {
       const balances = items.filter((l) => l.account_id === j.default_account_id).map((l) => ({ company_id: companyByMove.get(l.move_id), balance: (Number(l.debit) || 0) - (Number(l.credit) || 0) }));
       const balance = companySum(db, balances, 'balance', at);
       const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && l.journal_id === j.id) : [];
-      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...toCheck], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, toCheck, 'amount', at) };
+      const open = toCheck.map((line) => ({ company_id: line.company_id, balance: (line.amount < 0 ? -1 : 1) * (line.open_amount ?? bookedStatementAmount(db, line)) }));
+      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...open], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, open, 'balance', at) };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
   });
@@ -1111,7 +1183,9 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     const level = followUpLevel(scope, part, at);
 
     const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-    const detail = `${level?.name ?? 'Payment reminder'}: ${round(part.total)} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
+    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
+    const overdue = part.total == null ? 'Amounts' : round(part.total);
+    const detail = `${level?.name ?? 'Payment reminder'}: ${overdue} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
     const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
     nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
 
@@ -1147,15 +1221,18 @@ export function analyticActualLines(db, period = {}) {
     if (period.account_id != null && line.account_id !== period.account_id) return false;
     if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) return false;
     const move = line.move_id && read(db, 'account.move', line.move_id);
-    return !line.move_id || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
+    return (!line.move_id && !period.posted_only) || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
   });
 }
+
+/** An analytic line's amount in the reporting company's currency, translated at the line's accounting date. */
+export const analyticReportAmount = (db, line) => reportingBookedAmount(db, line, Number(line.amount) || 0);
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
   for (const line of analyticActualLines(db, period)) {
-    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
+    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + analyticReportAmount(db, line)));
   }
   return totals;
 }
@@ -1210,6 +1287,7 @@ export const financeModels = {
   'account.budget': {
     label: 'Budgets',
     fields: {
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
@@ -1229,7 +1307,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },

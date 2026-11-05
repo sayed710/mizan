@@ -38,7 +38,7 @@ test('a foreign invoice paid in parts leaves nothing on the receivable', () => {
 
 test('cash-basis tax paid in three parts ends at zero on the transition account', () => {
   const base = seed();
-  const tax = create(base, 'account.tax', { name: 'VAT 14% on payment', amount: 14, amount_type: 'percent', type_tax_use: 'sale', tax_exigibility: 'on_payment', ...defaultTaxRepartitionLines(accountId(base, '251000')) });
+  const tax = create(base, 'account.tax', { name: 'VAT 14% on payment', amount: 14, amount_type: 'percent', type_tax_use: 'sale', tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(base, '251100'), ...defaultTaxRepartitionLines(accountId(base, '251000')) });
   const p = newPartner(tax.db);
   const made = create(p.db, 'account.move', { move_type: 'out_invoice', partner_id: p.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = confirm(made.db, made.id);

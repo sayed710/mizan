@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
+import { configureRevaluationLoss } from './test-support/revaluation-accounts.js';
 import { models } from './registry.js';
 import { accountId, isBalanced, journalId, journalItems, postEntry } from './models/ledger.js';
 import { analyticBalance, budgetReport } from './models/analyticplus.js';
@@ -143,7 +144,7 @@ test('Area 1: credit notes and vendor refunds with deferred dates create offsett
 });
 
 test('Area 2: currency revaluation revalues open foreign credit notes/refunds and date-only bank moves, linking next-day reversal', () => {
-  const currency = create(seed(), 'res.currency', {
+  const currency = create(configureRevaluationLoss(seed()), 'res.currency', {
     name: 'CHFFX',
     rate_ids: [{ date: '2026-01-01', rate: 2 }, { date: '2026-02-01', rate: 1 }],
   });

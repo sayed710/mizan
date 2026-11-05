@@ -7,7 +7,7 @@ import { display, formatDate } from '../ui.jsx';
 import { checkAmountDisplay } from '../models/payments.js';
 import { subtotal } from '../models/common.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
-import { documentCompany } from '../models/company.js';
+import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
 import { documentCurrency } from '../money.js';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -33,7 +33,7 @@ function PaymentQr({ db, company, settings, move }) {
 
 // Document layouts per model: which fields form the header block and which one2many holds the lines.
 const LAYOUTS = {
-  'account.move': { title: (r) => t(models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] },
+  'account.move': { title: (r) => t(models['account.move'].form.subtitle(r)), lines: 'invoice_line_ids', info: ['invoice_date', 'invoice_date_due', 'ref', 'invoice_origin', 'payment_reference', 'incoterm_id', 'incoterm_location'], totals: ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] },
   'sale.order': { title: (r) => t(r.state === 'sale' ? 'Sales Order' : 'Quotation'), lines: 'order_line', info: ['date_order', 'validity_date', 'user'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'purchase.order': { title: (r) => t(r.state === 'purchase' ? 'Purchase Order' : 'Request for Quotation'), lines: 'order_line', info: ['date_order', 'date_planned'], totals: ['amount_untaxed', 'amount_tax', 'amount_total'] },
   'hr.payslip': { title: () => t('Payslip'), lines: 'line_ids', info: ['date_from', 'date_to'], totals: ['gross_wage', 'net_wage'], partner: 'employee_id', partnerModel: 'hr.employee' },
@@ -99,6 +99,7 @@ export function PrintDoc({ model, id }) {
   const qrSettings = invoiceQrSettingsForCompany(db, company);
 
   const partner = read(db, layout.partnerModel ?? 'res.partner', rec[layout.partner ?? 'partner_id']);
+  const taxBreakdown = model === 'account.move' ? documentTaxBreakdown(db, rec, rec[layout.lines] ?? []) : [];
   const lineDef = def.fields[layout.lines];
   const cols = Object.entries(lineDef.fields).filter(([, f]) => !f.hidden);
   const priced = 'price_unit' in lineDef.fields;
@@ -110,12 +111,16 @@ export function PrintDoc({ model, id }) {
       </div>
       <article className="paper">
         <header className="paper-head">
-          <div><b className="paper-company">{company.name}</b><div className="muted">{company.currency ?? t('Company currency is not configured')}</div></div>
+          <div>
+            <b className="paper-company">{company.name}</b>
+            {addressLines(company, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`} className="muted">{line}</div>)}
+            <div className="muted">{company.currency ?? t('Company currency is not configured')}</div>
+          </div>
           {partner && (
             <address>
               <b>{partner.name}</b>
-              {[partner.email ?? partner.work_email, partner.phone ?? partner.work_phone, [partner.city, partner.country].filter(Boolean).join(', '), partner.vat && `${t('Tax ID')}: ${partner.vat}`]
-                .filter(Boolean).map((l) => <div key={l}>{l}</div>)}
+              {[partner.email ?? partner.work_email, partner.phone ?? partner.work_phone].filter(Boolean).map((l) => <div key={l}>{l}</div>)}
+              {addressLines(partner, t('Tax ID')).map((line, i) => <div key={`${i}-${line}`}>{line}</div>)}
             </address>
           )}
         </header>
@@ -136,6 +141,20 @@ export function PrintDoc({ model, id }) {
             ))}
           </tbody>
         </table>
+        {model === 'account.move' && taxBreakdown.length > 0 && (
+          <table className="paper-lines paper-taxes">
+            <thead><tr><th>{t('Tax')}</th><th className="num">{t('Base')}</th><th className="num">{t('Amount')}</th></tr></thead>
+            <tbody>
+              {taxBreakdown.map((row, i) => (
+                <tr key={i}>
+                  <td>{row.label}</td>
+                  <td className="num">{display(db, { type: 'monetary' }, row.base, rec)}</td>
+                  <td className="num">{display(db, { type: 'monetary' }, row.amount, rec)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
         <dl className="totals paper-totals">
           {layout.totals.map((f) => (
             <div key={f} className={f === 'amount_total' || f === 'net_wage' ? 'grand' : ''}><dt>{t(def.fields[f].label)}</dt><dd>{display(db, def.fields[f], rec[f], rec)}</dd></div>

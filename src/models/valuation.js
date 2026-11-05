@@ -1,7 +1,8 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
 import { create, getActiveCompany, postNote, read, search, setActiveCompany, write } from '../orm.js';
 import { nextName, subtotal, today } from './common.js';
-import { accountId, postEntry } from './ledger.js';
+import { postEntry } from './ledger.js';
+import { configuredAccount } from './configured-account.js';
 import { moveStock, salesModels } from './sales.js';
 import { allocateCents, round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
@@ -46,34 +47,37 @@ function prepare(db, id, date, company = companyOf(db)) {
   return openingStock(db, [id], date, company);
 }
 
-const OPENING_EQUITY = '301000';
+
 
 /**
  * Value stock that exists without layers (seeded, imported or typed in) as opening layers, and post their value
  * once to the stock account against opening equity so the valuation report and the ledger agree.
  */
 function openingStock(db, ids, date, company = companyOf(db)) {
+  const plans = ids.map((id) => {
+    const p = product(db, id);
+    const qty = stockQuantity(db, p, company);
+    const value = round(qty * (Number(p.cost) || 0));
+    return { id, p, qty, value, accounts: !isPeriodicValuation(db, p) && value ? valuationAccounts(db, p, company) : null };
+  });
+  const equity = plans.some((plan) => plan.accounts) ? configuredAccount(db, read(db, 'res.company', company)?.opening_equity_account_id, company, 'opening balance equity', read(db, 'res.company', company)?.name ?? 'the company') : null;
   let next = db;
   const opened = [];
-  for (const id of ids) {
-    const p = product(next, id);
-    const qty = stockQuantity(next, p, company);
-    const value = round(qty * (Number(p.cost) || 0));
+  for (const { id, p, qty, value, accounts } of plans) {
     const res = create(next, 'stock.valuation.layer', {
       product_id: id, date: '0001-01-01', quantity: qty, unit_cost: Number(p.cost) || 0,
       value, remaining_qty: qty, remaining_value: value, kind: 'adjustment',
       description: 'Opening stock', reference: 'Opening stock', opening: true, company_id: company,
     });
     next = res.db;
-    if (!isPeriodicValuation(next, p) && value) opened.push({ id: res.id, value, ...valuationAccounts(next, p, company) });
+    if (accounts) opened.push({ id: res.id, value, ...accounts });
   }
-  if (!accountId(next, OPENING_EQUITY, company)) return next;
   const groups = new Map();
   for (const item of opened) { const key = JSON.stringify([item.account, item.journal]); groups.set(key, [...(groups.get(key) ?? []), item]); }
   for (const items of groups.values()) {
     const total = round(items.reduce((s, item) => s + item.value, 0));
     if (!total) continue;
-    const entry = postEntry(next, { journal: items[0].journal, company, date, ref: 'Opening stock', lines: [{ account: items[0].account, debit: total }, { account: OPENING_EQUITY, credit: total }] });
+    const entry = postEntry(next, { journal: items[0].journal, company, date, ref: 'Opening stock', lines: [{ account: items[0].account, debit: total }, { account_id: equity, credit: total }] });
     next = items.reduce((acc, item) => write(acc, 'stock.valuation.layer', item.id, { move_id: entry.id }), entry.db);
   }
   return next;
@@ -286,20 +290,21 @@ export function moveValued(db, lines, sign, options = {}) {
 }
 
 /** Capitalize an already-posted additional cost without posting it twice. */
-export function capitalizeStock(db, productId, amount, { date = today(), reference = '', moveId } = {}) {
+export function capitalizeStock(db, productId, amount, { date = today(), reference = '', moveId, company_id } = {}) {
   nonnegative(amount, 'Additional cost');
   amount = round(amount);
-  let next = prepare(db, productId, date);
+  const compId = company_id ?? companyOf(db);
+  let next = prepare(db, productId, date, compId);
   const p = product(next, productId);
-  const remaining = layers(next, productId).filter((l) => l.remaining_qty > 0);
-  const onHand = stockQuantity(next, p);
+  const remaining = layers(next, productId, compId).filter((l) => l.remaining_qty > 0);
+  const onHand = stockQuantity(next, p, compId);
   if (!(onHand > 0)) throw new Error('Stock is required to capitalize additional costs');
   const shares = remaining.length ? allocateCents(amount, remaining.map((l) => l.remaining_qty)) : [];
   for (const [i, l] of remaining.entries()) {
     next = write(next, 'stock.valuation.layer', l.id, { remaining_value: round(l.remaining_value + shares[i]) });
   }
   next = write(next, 'product', p.id, { cost: round((Number(p.cost) || 0) + amount / onHand) });
-  return create(next, 'stock.valuation.layer', { product_id: p.id, company_id: companyOf(next), date, reference, description: reference,
+  return create(next, 'stock.valuation.layer', { product_id: p.id, company_id: compId, date, reference, description: reference,
     quantity: 0, value: amount, unit_cost: 0, kind: 'landed', move_id: moveId }).db;
 }
 
@@ -428,6 +433,7 @@ export const valuationModels = {
       description: { type: 'char', label: 'Description' }, picking_id: relation('stock.picking', 'Transfer'),
       reference: { type: 'char', label: 'Reference' }, move_id: { ...relation('account.move', 'Journal Entry'), readonly: true },
       reversed_layer_id: { type: 'many2one', relation: 'stock.valuation.layer', ref: 'stock.valuation.layer', label: 'Reversed Layer', readonly: true },
+      counterpart: { type: 'many2one', relation: 'account.account', label: 'Counterpart Account', readonly: true, hidden: true },
       price_difference: money('Price Difference'), opening: { type: 'boolean', label: 'Opening Balance', readonly: true },
       kind: { type: 'selection', label: 'Kind', options: [['in', 'Receipt'], ['out', 'Delivery'], ['adjustment', 'Inventory Adjustment'], ['revaluation', 'Revaluation'], ['landed', 'Landed Cost']] },
     },

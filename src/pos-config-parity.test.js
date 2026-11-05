@@ -53,7 +53,7 @@ test('string tenders post identically to their configured records for sales, rou
     receivable_account_id: accountId(db, '121000'), outstanding_account_id: accountId(db, '101501'),
   });
   const later = create(custom.db, 'pos.payment.method', { name: 'Customer Account', type: 'pay_later', company_id: 1, receivable_account_id: accountId(db, '121000') });
-  const rounding = create(later.db, 'account.cash.rounding', { name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
+  const rounding = create(later.db, 'account.cash.rounding', { profit_account_id: accountId(later.db, '450000'), loss_account_id: accountId(later.db, '690000'), name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const preset = create(rounding.db, 'pos.preset', { name: 'Return', is_return: true, identification: 'none', service_at: 'counter' });
   db = write(preset.db, 'pos.config', cfg.id, { payment_method_ids: [custom.id, later.id], available_preset_ids: [preset.id] });
 
@@ -410,7 +410,7 @@ test('product form exposes POS categories and category writes reject cycles', ()
 test('invoice form exposes rounding and draft totals reflect it', () => {
   let db = seed();
   assert.ok(models['account.move'].form.groups.flat().includes('invoice_cash_rounding_id'));
-  const rounding = create(db, 'account.cash.rounding', { name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
+  const rounding = create(db, 'account.cash.rounding', { profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'), name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const inv = create(rounding.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_cash_rounding_id: rounding.id, invoice_line_ids: [{ qty: 1, price_unit: 10.02, tax: 0 }] });
   assert.equal(read(inv.db, 'account.move', inv.id).amount_total, 10.05);
 });
@@ -1483,7 +1483,7 @@ test('server checkout returns authoritative payable total with rounding differen
   let db = seed();
   const cfg1 = search(db, 'pos.config').find((c) => (c.company_id ?? 1) === 1);
   const rounding = create(db, 'account.cash.rounding', {
-    name: 'Half Up 0.05',
+    name: 'Half Up 0.05', profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'),
     rounding: 0.05,
     rounding_method: 'HALF-UP',
     strategy: 'add_invoice_line',

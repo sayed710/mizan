@@ -62,7 +62,8 @@ export function periodRates(db, period) {
   return (chart.company_ids ?? []).map(({ company_id }) => {
     const company = read(db, 'res.company', company_id);
     if (!company) throw new Error('Select an existing company');
-    const convert = (date) => rateAt(db, chart.currency_id, date) / rateAt(db, company.currency_id, date);
+    // Chart currency per unit of the member's currency, with the member's own company-specific rates.
+    const convert = (date) => rateAt(db, chart.currency_id, date, company.id);
     let sum = 0;
     let days = 0;
     for (let date = period.date_from; date <= period.date_to; date = addDays(date, 1)) { sum += convert(date); days++; }
@@ -104,7 +105,7 @@ export function consolidate(db, periodId) {
     const share = Number(member.ownership ?? 100) / 100;
     const factor = member.method === 'full' || !member.method ? 1 : share;
     // Equity and earlier results keep the rate of the day they were booked (historical rate).
-    const historical = (date) => rateAt(db, chart.currency_id, date) / rateAt(db, company.currency_id, date);
+    const historical = (date) => rateAt(db, chart.currency_id, date, company.id);
     const balances = new Map();
     // Translated totals: net assets at the closing rate, equity and earlier results historical, the period's result at the average rate.
     const sums = { assets: 0, equity: 0, retained: 0, result: 0 };

@@ -1,10 +1,10 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { accountId, ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
+import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, taxRepartitionLine, taxSnapshot } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, taxRepartitionLines } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -62,46 +62,93 @@ function writeOff(db, rule, line) {
   const balance = line.open_amount != null ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency) : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance, currency).filter((l) => l.value);
-  const unknown = counterparts.find((l) => !accountId(db, l.account_code, line.company_id ?? 1) && !accountId(db, l.account_code));
-  if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
+  for (const counterpart of counterparts) {
+    const account = read(db, 'account.account', counterpart.account_id);
+    if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${rule.name}`);
+    if (!account || account.active === false) throw new Error(`Unknown account in reconciliation model ${rule.name}`);
+    if (account.company_id && account.company_id !== company) throw new Error('Reconciliation account belongs to another company');
+  }
   const partner_id = line.partner_id ?? null;
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
   const via = paymentJournal(db, line.journal_id, company);
   const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrencyRecord(db, company)), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
   const items = counterparts.flatMap((l) => {
-    const taxes = (l.tax_ids ?? []).map((id) => {
-      const tax = read(db, 'account.tax', id);
-      const taxRow = taxRepartitionLine(tax, 'invoice', 'tax');
-      if (!tax || !taxRow?.account_id) throw new Error('Tax and its account must exist');
-      return { tax, taxRow, baseRow: taxRepartitionLine(tax, 'invoice', 'base') };
-    });
-    const taxAt = (tax, base) => lineTaxOf({ ...taxSnapshot(tax), qty: 1, price_unit: tax.price_include && tax.amount_type !== 'fixed' ? base * (1 + Number(tax.amount) / 100) : base });
-    const fixed = taxes.reduce((sum, { tax }) => sum + taxAt(tax, 0), 0);
-    const factor = 1 + taxes.reduce((sum, { tax }) => sum + taxAt(tax, 1) - taxAt(tax, 0), 0);
-    const base = roundCurrency((l.value - fixed) / factor, currency);
-    const amounts = taxes.map(({ tax }) => roundCurrency(taxAt(tax, base), currency));
-    const net = roundCurrency(l.value - amounts.reduce((a, b) => a + b, 0), currency);
+    const taxRecs = expandTaxIds(db, l.tax_ids ?? []);
+    for (const tax of taxRecs) {
+      const repart = taxRepartitionLines(tax, 'invoice');
+      for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
+        if (row.account_id) {
+          const account = read(db, 'account.account', row.account_id);
+          if (!account || account.active === false) throw new Error('Tax account does not exist or is inactive');
+          if (account.company_id && account.company_id !== company) throw new Error('Tax account belongs to another company');
+        }
+      }
+    }
+    const taxSpecs = taxRecs.map((tax) => ({
+      tax_id: tax.id,
+      tax: Number(tax.amount) || 0,
+      tax_type: tax.amount_type || 'percent',
+      tax_include: true,
+      tax_cash_basis: tax.tax_exigibility === 'on_payment',
+      tax_name: tax.name,
+      tax_include_base_amount: !!tax.include_base_amount,
+      tax_is_base_affected: tax.is_base_affected !== false,
+      tax_sequence: Number(tax.sequence ?? 1),
+      invoice_repartition_line_ids: tax.invoice_repartition_line_ids ?? [],
+      refund_repartition_line_ids: tax.refund_repartition_line_ids ?? [],
+    }));
+
+    const computed = computeLineTaxes({
+      qty: 1,
+      price_unit: l.value,
+      tax_breakdown: taxSpecs,
+    }, { currency, roundingMethod: 'round_per_line' });
+
     const partner = l.partner_id ?? partner_id;
+    const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
+
+    const taxLines = [];
+    for (const t of computed.taxes) {
+      const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
+      if (!taxRec) continue;
+      const repartLines = taxRepartitionLines(taxRec, 'invoice');
+      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
+      if (!taxRows.length) continue;
+      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
+      const splitAmounts = taxRows.length === 1
+        ? [t.amount]
+        : allocateCents(t.amount, weights, currency, { tieBreak: 'last' });
+      const splitBases = taxRows.length === 1
+        ? [t.base]
+        : allocateCents(t.base, weights, currency, { tieBreak: 'last' });
+
+      for (let i = 0; i < taxRows.length; i++) {
+        const row = taxRows[i];
+        taxLines.push(side(splitAmounts[i], !incoming, {
+          account: row.account_id ?? l.account_id,
+          partner_id: partner,
+          name: taxRec.name,
+          tax_name: taxRec.name,
+          tax_side: incoming ? 'sale' : 'purchase',
+          tax_base: toCompany(db, journalCurrency, splitBases[i], line.date, company),
+          tax_tag_ids: row.tag_ids ?? [],
+        }));
+      }
+    }
+
+    const net = computed.untaxed;
     return [
       side(net, !incoming, {
-        account: l.account_code,
+        account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
-        ...(taxes.length ? {
+        ...(taxRecs.length ? {
           tax_side: incoming ? 'sale' : 'purchase',
           tax_grid_base: true,
-          tax_tag_ids: [...new Set(taxes.flatMap(({ baseRow }) => baseRow?.tag_ids ?? []))],
+          tax_tag_ids: allBaseTags,
         } : {}),
       }),
-      ...taxes.map(({ tax, taxRow }, i) => side(amounts[i], !incoming, {
-        account: taxRow.account_id,
-        partner_id: partner,
-        name: tax.name,
-        tax_name: tax.name,
-        tax_side: incoming ? 'sale' : 'purchase',
-        tax_base: toCompany(db, journalCurrency, net, line.date, company),
-        tax_tag_ids: taxRow.tag_ids ?? [],
-      })),
+      ...taxLines,
     ];
   });
   const gap = roundCurrency(companyValue - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));
@@ -120,7 +167,8 @@ function writeOff(db, rule, line) {
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
-  const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_code);
+  if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
     return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
@@ -167,6 +215,7 @@ export const reconcileModels = {
     label: 'Reconciliation Models',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       sequence: { type: 'integer', label: 'Sequence' },
       rule_type: { type: 'selection', label: 'Type', options: [['writeoff_button', 'Button to generate counterpart entry'], ['writeoff_suggestion', 'Rule to suggest counterpart entry'], ['invoice_matching', 'Rule to match invoices/bills']] },
       auto_reconcile: { type: 'boolean', label: 'Auto-validate' },
@@ -182,21 +231,26 @@ export const reconcileModels = {
         type: 'one2many',
         label: 'Counterpart Entries',
         fields: {
-          account_code: { type: 'char', label: 'Account' },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
           label: { type: 'char', label: 'Label' },
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
           tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes' },
           amount_type: { type: 'selection', label: 'Amount Type', options: [['percentage', 'Percentage of balance'], ['fixed', 'Fixed']] },
           amount: { type: 'float', label: 'Amount' },
         },
-        newLine: () => ({ account_code: '690000', label: '', amount_type: 'percentage', amount: 100 }),
+        newLine: () => ({ label: '', amount_type: 'percentage', amount: 100 }),
       },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
       sequence: 10, rule_type: 'writeoff_button', match_nature: 'both', match_amount: '', match_label: '', active: true,
-      line_ids: [{ account_code: '690000', label: '', amount_type: 'percentage', amount: 100 }],
+      line_ids: [{ label: '', amount_type: 'percentage', amount: 100 }],
     }),
+    guard: (db, _before, rule) => (rule.line_ids ?? []).some((line) => {
+      if (!line.account_id) return false;
+      const account = read(db, 'account.account', line.account_id);
+      return !account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1));
+    }) ? 'Reconciliation accounts must be active and belong to the model company' : null,
     list: ['sequence', 'name', 'rule_type', 'auto_reconcile'],
     form: {
       title: 'name',

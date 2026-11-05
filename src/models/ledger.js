@@ -1,14 +1,16 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
+import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
-import { companyCurrency, rateAt } from './currency.js';
-import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
-import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrency, rateAt, toCompany } from './currency.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
-import { currentYearEarningsAccount } from './earnings.js';
+import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
+import { models } from '../registry.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
@@ -84,8 +86,7 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  const match = uniqueByCode(db.records['account.account'] ?? [], 'account.account', acc.code, (account) => account.company_id === comp);
-  return match?.id ?? null;
+  return null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -262,6 +263,16 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
+/** A plain-rate tax (no tax record) posts to the tax account of the company's configured default sales or purchase tax. */
+function plainRateTaxAccount(db, move, sale, side) {
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const tax = read(db, 'account.tax', sale ? company?.account_sale_tax_id : company?.account_purchase_tax_id);
+  const configured = tax ? taxRepartitionLines(tax, side).find((r) => r.repartition_type === 'tax' && r.account_id)?.account_id : null;
+  const account = configured ? resolveCompanyAccount(db, mapAccount(db, move.fiscal_position_id, configured), move.company_id) : null;
+  if (!account) throw new Error(`Configure the default ${sale ? 'sales' : 'purchase'} tax and its tax account on the company to post a plain-rate tax`);
+  return account;
+}
+
 /** Tax groups for an invoice/bill, applying mixed early-payment discount rounding per group when present. */
 export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMethod(db, move.company_id)) {
   const rate = rateAt(db, move.currency_id, move.invoice_date ?? today(), move.company_id);
@@ -270,8 +281,8 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
-  const side = isRefund ? 'refund' : 'invoice';
   const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
+  const side = isRefund ? 'refund' : 'invoice';
   const by = new Map();
 
   for (const l of move.invoice_line_ids ?? []) {
@@ -279,39 +290,27 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
     for (const t of computed.taxes) {
       if (t.amount === 0 && !t.tax_cash_basis) continue;
-      const repartLines = taxRepartitionLines(t, side).length
-        ? taxRepartitionLines(t, side)
-        : taxRepartitionLines(l, side);
-      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
-      if (!taxRows.length) continue;
-      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
-      const splitAmounts = taxRows.length === 1
-        ? [t.amount]
-        : allocateCents(t.amount, weights, docCurrency, { tieBreak: 'last' });
-      const splitBases = taxRows.length === 1
-        ? [t.base]
-        : allocateCents(t.base, weights, docCurrency, { tieBreak: 'last' });
-
-      for (let i = 0; i < taxRows.length; i++) {
-        const row = taxRows[i];
-        const docAmt = splitAmounts[i];
-        const docBase = splitBases[i];
+      const { explicit, splits } = taxRepartitionSplits(t, l, side, docCurrency);
+      for (const { row, amount: docAmt, base: docBase } of splits) {
         let account_id;
         if (t.tax_cash_basis) {
-          account_id = accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
+          account_id = cashBasisTransitionAccount(db, t.tax_id, move.company_id);
         } else if (row.account_id) {
           const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
           const resolved = resolveCompanyAccount(db, mapped, move.company_id);
           if (!resolved) throw new Error('Configured tax account does not exist for the invoice company');
           account_id = resolved;
-        } else {
+        } else if (explicit) {
+          // A configured repartition row without an account books the tax on the base line's account.
           account_id = invoiceLineAccount(db, move, l);
+        } else {
+          account_id = plainRateTaxAccount(db, move, sale, side);
         }
         const tax_name = taxLabel(t);
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
+        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
       }
     }
@@ -404,9 +403,7 @@ export function invoiceLines(db, move) {
   const roundingLines = [];
   if (rounding && !adjustTax && diffDoc !== 0) {
     const isProfit = (sale !== refund) ? diffDoc > 0 : diffDoc < 0;
-    const profitAcc = rounding.profit_account_id ? (read(db, 'account.account', rounding.profit_account_id)?.id || rounding.profit_account_id) : accountId(db, '450000', move.company_id);
-    const lossAcc = rounding.loss_account_id ? (read(db, 'account.account', rounding.loss_account_id)?.id || rounding.loss_account_id) : accountId(db, '690000', move.company_id);
-    const acc = isProfit ? profitAcc : lossAcc;
+    const acc = roundingAccount(db, rounding, isProfit, move.company_id);
     roundingLines.push({
       account_id: acc,
       partner_id: move.partner_id,
@@ -446,7 +443,7 @@ export function invoiceLines(db, move) {
   return [
     ...counterparts,
     ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
@@ -465,7 +462,7 @@ export function postedBillLine(move, index) {
 /**
  * Create and post a miscellaneous entry.
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
- * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
+ * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
 export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
@@ -481,6 +478,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
     else if (l.account) {
+      // Chart-code lines are an import/fixture convenience only: runtime models pass account ids (see codesd.test.js).
       accId = accountId(db, l.account, company);
       if (!accId && company && (db.records['account.account'] ?? []).some((account) => account.code === l.account
         && account.company_id && account.company_id !== company)) {
@@ -550,6 +548,96 @@ export function outstandingAccount(db, journal, company, inbound) {
   return id;
 }
 
+/** Statement amounts use the journal currency; open allocations use company currency. */
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+  const company = line.company_id ?? 1;
+  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  return toCompany(db, currency, amount, line.date ?? today(), company);
+}
+
+/** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
+export function bookedStatementAmount(db, line) {
+  if (!line.bank_move_id) return statementCompanyAmount(db, line);
+  const company = line.company_id ?? 1;
+  const entry = read(db, 'account.move', line.bank_move_id);
+  const account = paymentJournal(db, line.journal_id, company).accountId;
+  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
+  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
+}
+
+/** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
+export function isPaymentMatched(db, payment, excludeLineId = null) {
+  const pId = typeof payment === 'object' && payment ? payment.id : payment;
+  const pMoveId = typeof payment === 'object' && payment ? payment.move_id : (pId ? read(db, 'account.payment', pId)?.move_id : null);
+  return search(db, 'account.bank.statement.line').some((l) => {
+    if (excludeLineId && l.id === excludeLineId) return false;
+    if (pMoveId && (l.allocations ?? []).some((a) => a.payment_move_id === pMoveId)) return true;
+    if (l.state !== 'reconciled') return false;
+    if (pMoveId && l.payment_move_id === pMoveId) return true;
+    if (l.payment_id === pId) return true;
+    if ((l.payment_ids ?? []).includes(pId)) return true;
+    if (l.batch_payment_id) {
+      const batch = read(db, 'account.batch.payment', l.batch_payment_id);
+      if ((batch?.lines ?? []).some((bl) => !bl.cancelled && bl.payment_id === pId)) return true;
+    }
+    return false;
+  });
+}
+
+/** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
+const reconcileIndexes = new WeakMap();
+function reconcileIndex(db) {
+  const cached = reconcileIndexes.get(db.records);
+  if (cached) return cached;
+  const push = (map, key, value) => map.set(key, [...(map.get(key) ?? []), value]);
+  const applications = new Map();
+  for (const invoice of db.records['account.move'] ?? []) {
+    for (const row of (invoice.payments ?? []).filter((r) => !r.unapplied)) {
+      push(applications, row.move_id, { invoice, row });
+      if (row.reversed && row.reversal_move_id) push(applications, row.reversal_move_id, { invoice, row });
+    }
+  }
+  const payments = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+  const settledSuspense = new Map();
+  for (const statement of (db.records['account.bank.statement.line'] ?? []).filter((l) => l.open_amount === 0)) {
+    const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
+    for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
+  }
+  const index = { applications, payments, settledSuspense };
+  reconcileIndexes.set(db.records, index);
+  return index;
+}
+
+/** Derive reconciliation from settlement links, never from labels or a second stored flag. */
+export function reconciledJournalItems(db, move) {
+  const { applications: byMove, payments, settledSuspense } = reconcileIndex(db);
+  const applications = byMove.get(move.id) ?? [];
+  const payment = payments.get(move.id);
+  const posted = move.state === 'posted';
+  const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type);
+  return (move.line_ids ?? []).map((line) => {
+    if (!posted) return { ...line, reconciled: false };
+    const account = read(db, 'account.account', line.account_id);
+    let reconciled = false;
+    if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
+      reconciled = document
+        ? models['account.move'].fields.amount_residual.compute(move, db) === 0
+        : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
+          && (invoice.company_id ?? 1) === (move.company_id ?? 1)
+          && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
+          && (row.reversed || !payment?.unapplied));
+    }
+    if (payment?.outstanding_account_id === line.account_id) reconciled = isPaymentMatched(db, payment);
+    if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
+    return { ...line, reconciled };
+  });
+}
+
+/** Identity of an embedded journal line, independent of its position and derived matching state. */
+export function journalItemIdentity({ reconciled: _reconciled, ...line }) {
+  return JSON.stringify(line);
+}
+
 /** Journal items with their move date, optionally limited by review status, date and company. */
 export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
@@ -567,8 +655,9 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return (m.line_ids ?? []).map((l) => ({
+      return reconciledJournalItems(db, m).map((l) => ({
         ...l,
+        line_identity: journalItemIdentity(l),
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,
@@ -595,14 +684,24 @@ export function balances(db, items) {
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
+/** Journal items whose analytic distribution (or legacy analytic account) touches one of the selected analytic accounts; no selection keeps every item. */
+export function filterByAnalytic(items, analyticAccountIds) {
+  if (!analyticAccountIds?.length) return items;
+  const selected = new Set(analyticAccountIds.map(Number));
+  return items.filter((l) => l.analytic_distribution
+    ? Object.keys(l.analytic_distribution).some((key) => key.split(',').some((id) => selected.has(Number(id))))
+    : selected.has(Number(l.analytic_account_id)));
+}
+
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
 const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
 const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + sign * r.balance, 0));
 
 /** Profit & loss figures (income shown positive); year-end closing entries are left out unless asked for. */
-export function profitAndLoss(db, period, { includeClosing = false, weight } = {}) {
-  const rows = balances(db, weighted(journalItems(db, period).filter((l) => includeClosing || !l.is_closing), weight));
+export function profitAndLoss(db, period, { includeClosing = false, weight, analyticAccountIds } = {}) {
+  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosing || !l.is_closing);
+  const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
   const expense = sumTypes(rows, ['expense']);
@@ -617,16 +716,17 @@ export function profitAndLoss(db, period, { includeClosing = false, weight } = {
 }
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
-export function balanceSheet(db, at = today(), { weight } = {}) {
+export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const rows = balances(db, weighted(journalItems(db, filter), weight));
+  const rows = balances(db, weighted(filterByAnalytic(journalItems(db, filter), analyticAccountIds), weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
-  const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
+  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
+  // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
+  const earningsAccount = configuredEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,
