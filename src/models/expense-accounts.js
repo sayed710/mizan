@@ -19,6 +19,6 @@ export function expenseDebits(db, report, expenses) {
     const taxAccount = tax && read(db, 'account.account', taxRepartitionLine(tax)?.account_id);
     if (taxAmount && (!tax || tax.type_tax_use !== 'purchase' || tax.amount_type !== 'percent' || Number(tax.amount) !== Number(line.tax) || !taxAccount || taxAccount.active === false || (tax.company_id && tax.company_id !== company) || (taxAccount.company_id && taxAccount.company_id !== company))) throw new Error('Configure the expense tax and its account');
     const base = round(Number(line.total_amount) - taxAmount);
-    return [{ account: account.id, debit: base }, ...(taxAmount ? [{ account: taxAccount.id, debit: taxAmount, tax_name: tax.name, tax_side: 'purchase', tax_base: base }] : [])];
+    return [{ account: account.id, debit: base, ...(line.analytic_account_id ? { analytic_account_id: line.analytic_account_id } : {}) }, ...(taxAmount ? [{ account: taxAccount.id, debit: taxAmount, tax_name: tax.name, tax_side: 'purchase', tax_base: base }] : [])];
   });
 }

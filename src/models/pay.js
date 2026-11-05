@@ -7,7 +7,7 @@ import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInva
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { rateAt, toCompany } from './currency.js';
-import { settlementCompanyAmount } from './settlement.js';
+import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
@@ -322,7 +322,8 @@ function paymentUnapplication(db, invoiceId, paymentMoveId, date) {
   if (!validDate(date) || date < row.date) throw new Error('Enter an unapplication date on or after the application date');
   if ((payment.company_id ?? 1) !== (invoice.company_id ?? 1) || !sameCommercialPartner(db, payment.partner_id, invoice.partner_id)) throw new Error('Payment and invoice must belong to the same company and partner');
   if (row.discount || payment.return_id || payment.is_tax_payment) throw new Error('Unapply this settlement from its originating document workflow');
-  if (!Number.isFinite(row.payment_company_amount) || !(row.payment_company_amount > 0)) throw new Error('The application is missing its explicit payment company amount; repair the settlement link first');
+  const bookedPayment = paymentCompanyAmount(db, invoice, row);
+  if (!(bookedPayment > 0)) throw new Error('The application payment company amount cannot be determined from its booked entry; repair the settlement link first');
   const source = read(db, 'account.move', paymentMoveId);
   if (source?.state !== 'posted' || search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === paymentMoveId)) throw new Error('The payment entry must remain posted and unreversed');
   const fxError = settlementFxError(db, invoice, row);
@@ -349,7 +350,7 @@ function paymentUnapplication(db, invoiceId, paymentMoveId, date) {
     return p;
   });
   const invoiceValues = { amount_paid: roundCurrency(Number(invoice.amount_paid) - Number(row.amount) - discountAmount, documentCurrency(db, invoice)), payments: paymentsAfter, payment_date: paymentsAfter.filter((p) => !p.reversed).at(-1)?.date ?? null };
-  const unapplied = roundCurrency(Number(payment.unapplied) + row.payment_company_amount, companyCurrencyRecord(db, invoice.company_id));
+  const unapplied = roundCurrency(Number(payment.unapplied) + bookedPayment, companyCurrencyRecord(db, invoice.company_id));
   const lockError = datedLockGuard(['unapplied'], (p) => p.state === 'posted')(db, payment, { ...payment, unapplied })
     ?? lockedSettlementInvariant(db, { ...invoice, ...invoiceValues }, invoice);
   if (lockError) throw new Error(lockError);
@@ -602,7 +603,7 @@ const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
   const nextVoided = after.voided_check_numbers ?? [];
   if (!before) return !nextVoided.length && (after.check_number == null || after.state === 'posted');
-  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (before.state === 'draft' && after.state === 'posted'));
+  if (before.check_number == null) return !nextVoided.length && (after.check_number == null || (after.state === 'posted' && after.payment_type === 'outbound'));
   if (before.journal_id !== after.journal_id) return false;
   if (before.check_number === after.check_number) return JSON.stringify(priorVoided) === JSON.stringify(nextVoided);
   if (before.state !== 'posted' || after.state !== 'posted' || after.payment_type !== 'outbound') return false;

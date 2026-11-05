@@ -42,6 +42,8 @@ const documentDetails = (rec) => [
   ['Reference', rec.ref ?? rec.invoice_origin],
 ].filter(([, value]) => value);
 
+const partnerLabel = (model, rec) => (model === 'purchase.order' || (model === 'account.move' && ['in_invoice', 'in_refund', 'in_receipt'].includes(rec.move_type))) ? 'Vendor' : 'Customer';
+
 /** Plain-text rendering of a document: parties, header, lines, tax breakdown and totals. */
 export function documentText(db, model, rec, company = null) {
   const docCompany = emailCompany(db, rec, company);
@@ -54,7 +56,7 @@ export function documentText(db, model, rec, company = null) {
     ...addressLines(docCompany),
     '',
     `${models[model].label.replace(/s$/, '')} ${rec.name}`,
-    ...(partner ? [`Customer: ${partner.name}`, ...addressLines(partner).map((line) => `  ${line}`)] : []),
+    ...(partner ? [`${partnerLabel(model, rec)}: ${partner.name}`, ...addressLines(partner).map((line) => `  ${line}`)] : []),
     ...documentDetails(rec).map(([label, value]) => `${label}: ${value}`),
     '',
     ...lines.map((l) => `- ${product(l.product_id)}  ×${l.qty}  ${money(db, rec, l.price_unit)}  ${money(db, rec, subtotal(l))}`),

@@ -1102,8 +1102,8 @@ const runJobs = async () => {
   jobsRunning = true;
   try {
     let base = db;
-    const commitFollowUps = (before, after) => {
-      commitDb(applyDiff(db, diffDb(before, after), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    const commitFollowUps = (_before, after) => {
+      commitDb(applyDiff(db, diffDb(base, after), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
       base = db;
       return db;
     };
