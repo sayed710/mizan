@@ -2,7 +2,7 @@
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
-import { isInvoice, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
+import { isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -190,16 +190,21 @@ export function postPayment(db, p) {
     : companyRound(rawAmount);
   const payCurrency = isForeignCurrency ? read(db, 'res.currency', currentPayment.currency_id) : null;
   const foreignDocAmount = isForeignCurrency ? roundCurrency(rawAmount, payCurrency) : null;
-  // Both lines get currency metadata with opposite signs so the entry is balanced in foreign currency too.
-  const lineWithFx = (line, sign) =>
-    isForeignCurrency ? { ...line, currency_id: currentPayment.currency_id, amount_currency: sign * foreignDocAmount } : line;
+  // Counterpart line keeps the payment currency; liquidity line derives from the journal currency.
+  const counterpartFx = (sign) =>
+    isForeignCurrency ? { currency_id: currentPayment.currency_id, amount_currency: sign * foreignDocAmount } : {};
+  const liquidityCurrency = journal.currency_id ?? currentPayment.currency_id ?? null;
+  const liquidityFx = (sign) => liquidityForeignFields(db, {
+    currencyId: liquidityCurrency, companyAmount: amount * sign, date, companyId: currentPayment.company_id,
+    docAmount: isForeignCurrency && liquidityCurrency === currentPayment.currency_id ? sign * foreignDocAmount : null,
+  });
   const { db: booked, id: moveId } = postEntry(db, {
     journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || name,
     lines: inbound
-      ? [lineWithFx({ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, 1),
-         lineWithFx({ account: counterpart, credit: amount, partner_id: currentPayment.partner_id }, -1)]
-      : [lineWithFx({ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, 1),
-         lineWithFx({ account: liquidity, credit: amount, partner_id: currentPayment.partner_id }, -1)],
+      ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id, ...liquidityFx(1) },
+         { account: counterpart, credit: amount, partner_id: currentPayment.partner_id, ...counterpartFx(-1) }]
+      : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id, ...counterpartFx(1) },
+         { account: liquidity, credit: amount, partner_id: currentPayment.partner_id, ...liquidityFx(-1) }],
     company: currentPayment.company_id ?? 1,
     is_tax_payment: Boolean(currentPayment.is_tax_payment || currentPayment.return_id),
     tax_return_id: currentPayment.return_id ?? null,

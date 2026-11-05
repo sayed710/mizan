@@ -670,6 +670,16 @@ function draftAssetsFromBill(db, bill) {
 }
 
 /**
+ * Currency metadata of a liquidity journal item in `currencyId` (the bank journal's currency, or the payment's when the
+ * journal has none): `docAmount` when known in that currency, otherwise the signed company amount converted at `date`.
+ */
+export function liquidityForeignFields(db, { currencyId, companyAmount, docAmount = null, date, companyId }) {
+  if (!currencyId || currencyId === companyCurrencyRecord(db, companyId)?.id) return {};
+  const amount = docAmount ?? companyAmount * rateAt(db, currencyId, date, companyId);
+  return { currency_id: currencyId, amount_currency: roundCurrency(amount, read(db, 'res.currency', currencyId)) };
+}
+
+/**
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
@@ -722,18 +732,10 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const extra = excess > 0 ? companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) : 0;
   const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
   const foreignAmount = (value) => foreign ? { currency_id: r.currency_id, amount_currency: docRound(value) } : {};
-  // Liquidity line must carry currency metadata whenever the payment journal has a designated foreign currency,
-  // even if the invoice itself is in the company currency (Odoo 20 behaviour: journal currency wins for bank lines).
-  const journalCurrency = journal?.currency_id ?? null;
-  const journalIsForeign = !!journalCurrency && journalCurrency !== companyCurrencyRecord(db, r.company_id)?.id;
-  const liquidityForeignAmount = (value) => {
-    if (journalCurrency === r.currency_id) return foreignAmount(value);
-    if (!journalIsForeign) return {};
-    // Journal currency differs from both invoice and company currency: convert bank amount to journal currency.
-    const journalCurrencyRec = read(db, 'res.currency', journalCurrency);
-    const liquidityAmount = roundCurrency(Math.abs(bank + extra) * rateAt(db, journalCurrency, date, r.company_id) * Math.sign(value), journalCurrencyRec);
-    return { currency_id: journalCurrency, amount_currency: liquidityAmount };
-  };
+  const liquidityForeignAmount = (value) => liquidityForeignFields(db, {
+    currencyId: journal?.currency_id ?? null, companyAmount: (bank + extra) * Math.sign(value), date, companyId: r.company_id,
+    docAmount: foreign && journal?.currency_id === r.currency_id ? docRound(value) : null,
+  });
   const credit = excess > 0 ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(-excess) } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(excess) }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: via.code, journal_id: journal?.id, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,

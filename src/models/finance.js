@@ -478,7 +478,10 @@ export function paymentInvariant(db, after) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
+  const currencyId = invoice ? invoice.currency_id : after.currency_id;
+  const expected = currencyId
+    ? toCompany(db, currencyId, after.amount, after.date, invoice?.company_id ?? after.company_id)
+    : companyRound(Number(after.amount));
   let bank;
   try {
     bank = after.outstanding_account_id ?? paymentJournal(db, after.journal_id, after.company_id ?? 1).accountId;

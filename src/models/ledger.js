@@ -884,16 +884,25 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   const earningsAccount = configuredEarningsAccount(db, reportCompanyId);
   // Closing entries carry no analytic allocation, so an analytic report keeps a closed year's P&L visible.
   // Split it from the current year and fold it into equity as prior unallocated earnings; their sum is unchanged.
-  const yearStart = fiscalYearStart(db, reportDate, reportCompanyId);
-  const currentFilter = { ...filter, to: reportDate, from: filter.from && filter.from > yearStart ? filter.from : yearStart };
-  const priorFilter = { ...filter, to: addDays(yearStart, -1) };
-  let earnings = profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net;
-  const priorEarnings = profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net;
-  if (priorEarnings) {
-    const index = earningsAccount ? equity.findIndex((r) => r.account.id === earningsAccount.id) : -1;
-    if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + priorEarnings) } : r));
-    else if (earningsAccount) equity.push({ account: earningsAccount, balance: round(priorEarnings) });
-    else earnings = round(earnings + priorEarnings);
+  const targetCompany = filter.company_id ?? filter.company;
+  // Each company splits its own earnings at its own fiscal-year start into its own earnings account.
+  const companyIds = targetCompany != null ? [targetCompany] : search(db, 'res.company').map((c) => c.id);
+  if (!companyIds.length) companyIds.push(reportCompanyId);
+  let earnings = 0;
+  for (const cId of companyIds) {
+    const yearStart = fiscalYearStart(db, reportDate, cId);
+    const cEarningsAccount = configuredEarningsAccount(db, cId);
+    const currentFilter = { ...filter, company_id: cId, to: reportDate, from: filter.from && filter.from > yearStart ? filter.from : yearStart };
+    const priorFilter = { ...filter, company_id: cId, to: addDays(yearStart, -1) };
+    const cEarnings = profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+    const cPriorEarnings = profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+    earnings = round(earnings + cEarnings);
+    if (cPriorEarnings) {
+      const index = cEarningsAccount ? equity.findIndex((r) => r.account.id === cEarningsAccount.id) : -1;
+      if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + cPriorEarnings) } : r));
+      else if (cEarningsAccount) equity.push({ account: cEarningsAccount, balance: round(cPriorEarnings) });
+      else earnings = round(earnings + cPriorEarnings);
+    }
   }
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
