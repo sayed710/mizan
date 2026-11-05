@@ -95,9 +95,6 @@ function analyticWeights(db, item) {
       if (line) add(line, Math.abs(Number(source.amount) || 0) / total, lineContext);
     }
   } else add(item, 1, lineContext);
-  // Independent analytic plans can each allocate 100%; partition the item across their combined weights.
-  const totalWeight = [...weights.values()].reduce((sum, weight) => sum + weight, 0);
-  if (totalWeight > 1) for (const [id, weight] of weights) weights.set(id, weight / totalWeight);
   return weights;
 }
 

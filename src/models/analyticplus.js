@@ -14,6 +14,20 @@ const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];
 const inPeriod = (r, from, to) => (!from || r.date >= from) && (!to || r.date <= to);
 const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
+// A category reference is an id (legacy rules stored it as text); names are never matched.
+const toCategoryId = (val) => {
+  const n = Number(typeof val === 'object' && val !== null ? val.id : val);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+};
+const categoryHierarchy = (db, initialCat) => {
+  const categories = new Set();
+  let catId = toCategoryId(initialCat);
+  while (catId && !categories.has(catId)) {
+    categories.add(catId);
+    catId = read(db, 'product.category', catId)?.parent_id;
+  }
+  return categories;
+};
 const allocatedShares = (db, distribution, base) => {
   const entries = Object.entries(normalizeDistribution(distribution, db)).filter(([, n]) => n > 0);
   const amounts = entries.map(([, percent]) => round(base * percent / 100));
@@ -45,6 +59,7 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
 
   const partnerCat = partner_category_id ?? partner?.partner_category_id ?? partner?.category_id;
   const productCat = product_categ_id ?? product?.categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
+  const categories = categoryHierarchy(db, productCat);
 
   const targetCompany = company_id;
   const matched = [];
@@ -56,9 +71,9 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
       const matchCat = partnerCat === m.partner_category_id || (partner?.tag_ids ?? []).includes(m.partner_category_id);
       if (!matchCat) continue;
     }
-    if (m.product_categ_id) {
-      const matchProdCat = productCat === m.product_categ_id;
-      if (!matchProdCat) continue;
+    if (m.product_categ_id != null && m.product_categ_id !== '') {
+      const modelCat = toCategoryId(m.product_categ_id);
+      if (!modelCat || !categories.has(modelCat)) continue;
     }
     if (m.account_prefix) {
       if (!code || !code.startsWith(m.account_prefix)) continue;
@@ -69,8 +84,51 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
   }
 
   if (!matched.length) return fallback;
-  matched.sort((a, b) => b.score - a.score || a.seq - b.seq);
-  return matched[0].model.analytic_distribution ?? {};
+  matched.sort((a, b) => b.score - a.score || a.seq - b.seq || a.model.id - b.model.id);
+
+  if (matched[0].model.analytic_distribution && Object.keys(matched[0].model.analytic_distribution).length === 0) {
+    return {};
+  }
+
+  const winningRulesByPlan = new Map();
+  for (const item of matched) {
+    const dist = item.model.analytic_distribution ?? {};
+    for (const id of Object.keys(dist)) {
+      const account = read(db, 'account.analytic.account', Number(id));
+      const plan = planOf(account);
+      if (!winningRulesByPlan.has(plan)) {
+        winningRulesByPlan.set(plan, item);
+      }
+    }
+  }
+
+  const winningRules = [...new Set(winningRulesByPlan.values())];
+  winningRules.sort((a, b) => a.seq - b.seq || b.score - a.score || a.model.id - b.model.id);
+
+  const result = {};
+  const coveredPlans = new Set();
+  for (const item of winningRules) {
+    const dist = item.model.analytic_distribution ?? {};
+    for (const [id, percent] of Object.entries(dist)) {
+      const account = read(db, 'account.analytic.account', Number(id));
+      const plan = planOf(account);
+      if (winningRulesByPlan.get(plan) === item) {
+        result[id] = percent;
+        coveredPlans.add(plan);
+      }
+    }
+  }
+
+  for (const [id, percent] of Object.entries(fallback)) {
+    const account = read(db, 'account.analytic.account', Number(id));
+    const plan = planOf(account);
+    if (!coveredPlans.has(plan)) {
+      result[id] = percent;
+      coveredPlans.add(plan);
+    }
+  }
+
+  return result;
 }
 
 /** Resolve a fresh default using the same account that will be posted. */
@@ -106,12 +164,7 @@ export function planApplicability(db, plan, line, move = null) {
   const code = accountId ? read(db, 'account.account', accountId)?.code || '' : '';
 
   const product = line?.product_id ? read(db, 'product', line.product_id) : null;
-  const categories = new Set();
-  let catId = product?.categ_id;
-  while (catId && !categories.has(catId)) {
-    categories.add(catId);
-    catId = read(db, 'product.category', catId)?.parent_id;
-  }
+  const categories = categoryHierarchy(db, product?.categ_id);
 
   const matched = [];
   for (const r of plan?.applicability_ids ?? []) {
@@ -387,7 +440,7 @@ export const analyticPlusModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_category_id: { type: 'char', label: 'Partner Category' },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
-      product_categ_id: { type: 'char', label: 'Product Category' },
+      product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
       account_prefix: { type: 'char', label: 'Accounts Prefix' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
     },
