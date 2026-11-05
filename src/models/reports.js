@@ -25,15 +25,15 @@ const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccoun
 const itemsBefore = (db, from, company_id, analyticAccountIds) => (from ? filterByAnalytic(journalItems(db, { company_id }), analyticAccountIds).filter((l) => l.date < from) : []);
 
 /** Trial balance: opening balance per account, movement inside the period, ending balance; rows sorted by code, all-zero rows omitted. */
-export function trialBalance(db, { from, to, analyticAccountIds } = {}) {
-  const opening = new Map(balances(db, itemsBefore(db, from, undefined, analyticAccountIds)).map((b) => [b.account.id, b.balance]));
+export function trialBalance(db, { from, to, company_id, analyticAccountIds } = {}) {
+  const opening = new Map(balances(db, itemsBefore(db, from, company_id, analyticAccountIds)).map((b) => [b.account.id, b.balance]));
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { account: read(db, 'account.account', id), initial: round(opening.get(id) ?? 0), debit: 0, credit: 0 });
     return rows.get(id);
   };
   for (const id of opening.keys()) row(id);
-  for (const l of filterByAnalytic(journalItems(db, { from, to }), analyticAccountIds)) {
+  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds)) {
     const r = row(l.account_id);
     r.debit += reportingBookedAmount(db, l, l.debit);
     r.credit += reportingBookedAmount(db, l, l.credit);
@@ -48,8 +48,8 @@ export function trialBalance(db, { from, to, analyticAccountIds } = {}) {
 }
 
 /** Period movements grouped by the explicit fiscal category on each trial-balance account. */
-export function fiscalReport(db, { from, to, analyticAccountIds } = {}) {
-  const trial = trialBalance(db, { from, to, analyticAccountIds });
+export function fiscalReport(db, { from, to, company_id, analyticAccountIds } = {}) {
+  const trial = trialBalance(db, { from, to, company_id, analyticAccountIds });
   const categories = search(db, 'account.fiscal.category', { includeArchived: true });
   const groups = new Map(categories.map((category) => [category.id, { category, accounts: [], debit: 0, credit: 0 }]));
   const uncategorized = { category: null, accounts: [], debit: 0, credit: 0 };
@@ -67,10 +67,11 @@ export function fiscalReport(db, { from, to, analyticAccountIds } = {}) {
 }
 
 /** Aggregate statement-line amounts by month and journal without deriving transactions from the ledger. */
-export function cashflowAnalysis(db, { from, to }) {
+export function cashflowAnalysis(db, { from, to, company_id }) {
   const months = new Map();
   const journals = new Map();
   for (const line of search(db, 'account.bank.statement.line')) {
+    if (company_id != null && (line.company_id ?? 1) !== company_id) continue;
     const journal = read(db, 'account.journal', line.journal_id);
     if (!journal || !['bank', 'cash'].includes(journal.type) || (journal.company_id && journal.company_id !== (line.company_id ?? 1))) continue;
     if (!line.date || line.date < from || line.date > to || !Number.isFinite(Number(line.amount))) continue;
@@ -94,18 +95,18 @@ export function cashflowAnalysis(db, { from, to }) {
 }
 
 /** Receivable or payable ledger per partner: opening balance, the period's lines with a running balance, sorted by partner name. */
-export function partnerLedger(db, { from, to, analyticAccountIds } = {}, kind = 'receivable') {
+export function partnerLedger(db, { from, to, company_id, analyticAccountIds } = {}, kind = 'receivable') {
   const accounts = accountIds(db, kind === 'payable' ? 'liability_payable' : 'asset_receivable');
   const rows = new Map();
   const row = (id) => {
     if (!rows.has(id)) rows.set(id, { partner_id: id, initial: 0, debit: 0, credit: 0, lines: [] });
     return rows.get(id);
   };
-  for (const l of itemsBefore(db, from, undefined, analyticAccountIds).filter((x) => accounts.has(x.account_id))) {
+  for (const l of itemsBefore(db, from, company_id, analyticAccountIds).filter((x) => accounts.has(x.account_id))) {
     const r = row(l.partner_id);
     r.initial += reportingBookedAmount(db, l, netOf(l));
   }
-  const items = filterByAnalytic(journalItems(db, { from, to }), analyticAccountIds).filter((x) => accounts.has(x.account_id)).sort((a, b) => a.date.localeCompare(b.date));
+  const items = filterByAnalytic(journalItems(db, { from, to, company_id }), analyticAccountIds).filter((x) => accounts.has(x.account_id)).sort((a, b) => a.date.localeCompare(b.date));
   for (const l of items) {
     const r = row(l.partner_id);
     const debit = reportingBookedAmount(db, l, l.debit);

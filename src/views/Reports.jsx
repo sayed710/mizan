@@ -207,8 +207,9 @@ function Tax({ db, period }) {
   );
 }
 
-const Aged = (kind) => function AgedBody({ db, period }) {
-  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to));
+const Aged = (kind) => function AgedBody({ db, period, companyId }) {
+  const company = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const { buckets, rows } = agedBalance(db, kind, agedReportDate(period.to), company);
   const [open, setOpen] = useState(() => new Set());
   const sum = (k) => rows.reduce((s, r) => s + r[k], 0);
   return (

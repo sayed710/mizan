@@ -41,7 +41,9 @@ const FIELDS = {
     request_key: hidden('char', 'Reference'),
     request_fingerprint: hidden('char', 'Reference'),
     preset_snapshot: hidden('json', 'Preset Snapshot'),
+    tender_accounts: hidden('json', 'Tender Accounts'),
     rounding_difference: hidden('monetary', 'Rounding Difference'),
+    rounding_account_id: m2o('account.account', 'Rounding Account'),
     return_layers: {
       type: 'one2many', label: 'Return Layers', readonly: true, hidden: true,
       fields: {

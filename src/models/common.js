@@ -179,7 +179,7 @@ export function total(r, db) {
 }
 
 /** One2many product lines; `priceField` is the product field copied into the unit price on product change. */
-export const productLines = (label, priceField) => ({
+export const productLines = (label, priceField, extraFields = {}) => ({
   type: 'one2many',
   label,
   fields: {
@@ -205,6 +205,7 @@ export const productLines = (label, priceField) => ({
     tax_name: { type: 'char', label: 'Tax Name', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
+    ...extraFields,
   },
   newLine: (record, db) => {
     const isCost = priceField === 'cost';

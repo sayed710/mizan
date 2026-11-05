@@ -1,11 +1,11 @@
 // Point of Sale sessions (opening/closing cash control), paying and refunding orders.
 import { create, read, search, write } from '../orm.js';
-import { amounts, nextName, today } from './common.js';
+import { amounts, companyRoundingMethod, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
 import { roundingAccount } from './configured-account.js';
 import { stockAccount } from './stock-accounts.js';
 import { assertCompanyAccount, invoiceLineAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
-import { fiscalPositionFor, productTax } from './taxes.js';
+import { computeLineTaxes, fiscalPositionFor, productTax, taxLabel, taxRepartitionLines } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
@@ -268,7 +268,9 @@ export function validatePosProducts(db, lines, configCompId, { allowAdjustments 
 
 function validateRefundSource(db, { lines, refund_of, config_id, session }) {
   const original = refund_of ? read(db, 'pos.order', Number(refund_of)) : null;
-  if (refund_of && (!original || JSON.stringify(lines) !== JSON.stringify(original.lines))) {
+  // Provenance recorded on the original is not part of the caller's cart payload.
+  const comparable = (cart) => JSON.stringify((cart ?? []).map(({ income_account_id, ...line }) => line));
+  if (refund_of && (!original || comparable(lines) !== comparable(original.lines))) {
     throw new Error('Only a full order refund is supported; partial refunds are not supported');
   }
   if (refund_of) {
@@ -294,13 +296,14 @@ function validateRefundSource(db, { lines, refund_of, config_id, session }) {
 function originalTenders(db, original, enabledMethods, expectedTotal, currency) {
   if (!original) return null;
   if (Array.isArray(original.payment_ids) && original.payment_ids.length > 0) {
-    return original.payment_ids.map((p) => {
+    return original.payment_ids.map((p, index) => {
       const match = matchMethod(db, enabledMethods, p.payment_method_id ?? p.method, true);
       const methodType = tenderType(match) ?? p.method;
       return {
         payment_method_id: match?.id ?? (typeof p.payment_method_id === 'number' ? p.payment_method_id : null),
         method: methodType,
         amount: roundCurrency(Number(p.amount) || 0, currency),
+        ...(original.tender_accounts?.[index] ? { recorded: original.tender_accounts[index] } : {}),
       };
     });
   }
@@ -418,7 +421,27 @@ function validateReturnValuation(db, { original, lines, session }) {
   }
 }
 
-function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id }) {
+/**
+ * Resolve and validate the cash rounding account for a POS order or refund.
+ * - On a refund of an order that recorded its rounding account, reverses that exact account.
+ * - On a historical order without the recorded field, or on a sale, resolves from current configuration.
+ * - Validates the account is active and belongs to the company before anything is written.
+ */
+function orderRoundingAccount(db, { original = null, config = null, roundingDiff = 0, companyId = 1 } = {}) {
+  if (Number(roundingDiff || 0) === 0) return null;
+  if (original?.rounding_account_id) {
+    const acc = read(db, 'account.account', original.rounding_account_id);
+    if (!acc || acc.active === false || (acc.company_id && acc.company_id !== (companyId ?? 1))) {
+      throw new Error('Original POS rounding account belongs to another company or is inactive');
+    }
+    return acc.id;
+  }
+  const isProfit = Number(roundingDiff) > 0;
+  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
+  return roundingAccount(db, rounding, isProfit, companyId);
+}
+
+function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id, config, roundingDiff }) {
   if (original) {
     if (roundCurrency(total.total, currency) !== 0) {
       const valuationMoveIds = new Set(
@@ -449,6 +472,24 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
         const configured = read(db, 'account.account', account);
         if (!configured || (configured.company_id && configured.company_id !== (session.company_id ?? 1))) throw new Error('Payment account must belong to the POS company');
       }
+    }
+  }
+  const shouldValidateRounding = original ? roundCurrency(total.total, currency) !== 0 : roundCurrency(expectedTotal, currency) !== 0;
+  return shouldValidateRounding
+    ? orderRoundingAccount(db, { original, config, roundingDiff, companyId: session.company_id })
+    : null;
+}
+
+function validateRefundTaxRepartition(db, lines, currency, companyId) {
+  const roundingMethod = companyRoundingMethod(db, companyId);
+  for (const line of lines ?? []) {
+    const computed = computeLineTaxes(line, { currency, roundingMethod, side: 'refund' });
+    for (const tax of computed.taxes) {
+      if (!Number(tax.amount)) continue;
+      const hasSnapshot = Boolean(tax.tax_id || line.tax_id || tax.invoice_repartition_line_ids?.length || line.invoice_repartition_line_ids?.length);
+      if (!hasSnapshot) continue;
+      if (taxRepartitionLines(tax, 'refund').length) continue;
+      throw new Error(`Tax ${taxLabel(tax)} has no refund distribution lines; configure the tax refund distribution before refunding this order`);
     }
   }
 }
@@ -502,6 +543,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
   }
 
   const currency = companyCurrencyRecord(db, session.company_id);
+  if (original) validateRefundTaxRepartition(db, original.lines, currency, session.company_id);
   const total = amounts(lines, currency);
   const calculated = original ? null : posOrderTotal(db, lines, { configId: resolvedConfigId, companyId: session.company_id, method, payments });
   const expectedTotal = original ? roundCurrency(total.total + (Number(original.rounding_difference) || 0), currency) : calculated.roundedTotal;
@@ -516,7 +558,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency });
 
   validateReturnValuation(db, { original, lines, session });
-  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId });
+  const roundingAccountId = validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId, config, roundingDiff });
 
   return {
     session,
@@ -532,6 +574,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     resolvedPayments,
     original,
     effectivePartnerId,
+    roundingAccountId,
   };
 }
 
@@ -568,31 +611,29 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
   return stocked;
 }
 
-function reverseOrderEntries(db, { stocked, original, session, name, id, expectedTotal }) {
-  const valuationMoveIds = new Set(
-    (db.records['stock.valuation.layer'] ?? [])
-      .map((l) => l.move_id)
-      .filter(Boolean)
-  );
-  const ids = original.accounting_entries?.map((entry) => entry.move_id);
-  if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) throw new Error('Original POS entries were not found; historical orders require manual refund');
-  const entries = ids.map((moveId) => read(db, 'account.move', moveId));
-  if (entries.some((m) => !m || m.state !== 'posted' || (m.company_id ?? 1) !== (session.company_id ?? 1) || valuationMoveIds.has(m.id))) throw new Error('Original POS entries are invalid');
-  let reversed = stocked;
-  const reversedIds = [];
-  for (const entry of entries) {
-    const journal = read(db, 'account.journal', entry.journal_id);
-    if (!journal) throw new Error('Original POS journal was not found');
-    const lines = entry.line_ids.map((l) => ({ ...l, debit: l.credit, credit: l.debit, ...(l.tax_zero ? { tax_base: -(Number(l.tax_base) || 0) } : {}) }));
-    const result = postEntry(reversed, { journal: journal.code, journal_id: journal.id, company: session.company_id, ref: name, lines });
-    reversed = result.db;
-    reversedIds.push(result.id);
+/**
+ * Journal and accounts of one tender: those recorded when the original sale posted it (a refund clears exactly
+ * those), otherwise the payment method's current configuration, as for a sale.
+ */
+function tenderAccounts(db, p, companyId, counterpart) {
+  const m = read(db, 'pos.payment.method', p.payment_method_id);
+  const recorded = p.recorded ?? null;
+  const receivableId = recorded ? recorded.receivable_account_id : (m.receivable_account_id ?? null);
+  const receivable = receivableId ? assertCompanyAccount(db, receivableId, companyId, 'asset_receivable', 'The selected counterpart account') : counterpart;
+  if (m.type === 'pay_later') return { method: m, journal: null, outstanding: null, receivable };
+  const journal = read(db, 'account.journal', recorded?.journal_id ?? m.journal_id);
+  if (!journal) throw new Error('The payment method journal was not found');
+  if (journal.company_id && journal.company_id !== companyId) throw new Error('The payment method journal must belong to this company');
+  const outstandingId = recorded ? recorded.outstanding_account_id : m.outstanding_account_id;
+  const outstanding = outstandingId ?? paymentJournal(db, journal.id, companyId).accountId;
+  const outstandingAccount = read(db, 'account.account', outstanding);
+  if (!outstandingAccount || outstandingAccount.active === false || (outstandingAccount.company_id && outstandingAccount.company_id !== companyId)) {
+    throw new Error('The tender outstanding account must be active and belong to this company');
   }
-  reversed = write(reversed, 'pos.order', original.id, { state: 'refunded' });
-  return { db: write(reversed, 'pos.order', id, { accounting_entries: reversedIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
+  return { method: m, journal, outstanding, receivable };
 }
 
-function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
+function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, resolvedPayments, roundingDiff, id, expectedTotal, roundingAccountId = null }) {
   const posJournal = resolveDocumentJournal(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
     company_id: session.company_id,
@@ -611,34 +652,45 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
   const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
+  const signedAmount = (p) => (refund_of ? -1 : 1) * Number(p.amount);
+  const tenders = resolvedPayments.map((p) => ({ p, ...tenderAccounts(db, p, session.company_id ?? 1, counterpart) }));
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
-    ...resolvedPayments.map((p) => ({
-      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id
-        ? assertCompanyAccount(db, read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account')
-        : counterpart,
-      partner_id,
-      debit: (refund_of || isReturn || Number(p.amount) < 0) ? 0 : Math.abs(Number(p.amount)),
-      credit: (refund_of || isReturn || Number(p.amount) < 0) ? Math.abs(Number(p.amount)) : 0,
-    })),
+    ...tenders.map(({ p, receivable }) => {
+      const signed = signedAmount(p);
+      return {
+        account_id: receivable,
+        partner_id,
+        debit: signed >= 0 ? Math.abs(Number(p.amount)) : 0,
+        credit: signed < 0 ? Math.abs(Number(p.amount)) : 0,
+      };
+    }),
   ];
+  let postedRoundingAccountId = null;
   if (roundingDiff !== 0) {
-    const isProfit = (refund_of ? -roundingDiff : roundingDiff) > 0;
-    const acc = roundingAccount(db, rounding, isProfit, session.company_id);
+    const isProfit = Number(roundingDiff) > 0;
+    const acc = roundingAccountId;
+    if (!acc) throw new Error('Cash rounding account is not configured');
+    postedRoundingAccountId = acc;
     const amt = Math.abs(roundingDiff);
-    saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
+    // A refund reverses the same rounding account, so the debit side flips with the document direction.
+    const debit = refund_of ? isProfit : !isProfit;
+    saleLines.push(debit ? { account: acc, debit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, credit: amt, partner_id, name: 'Cash Rounding' });
   }
+  const incomeByIndex = new Map();
+  for (const posted of sale) {
+    for (const source of posted.invoice_sources ?? []) {
+      if (!incomeByIndex.has(source.index)) incomeByIndex.set(source.index, posted.account_id);
+    }
+  }
+  const postedLines = lines.map((line, index) => (incomeByIndex.has(index) ? { ...line, income_account_id: incomeByIndex.get(index) } : line));
   const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
-  for (const p of resolvedPayments) {
-    const m = read(booked, 'pos.payment.method', p.payment_method_id);
+  for (const { p, method: m, journal, outstanding: account, receivable } of tenders) {
     if (m.type === 'pay_later') continue;
-    const journal = read(booked, 'account.journal', m.journal_id);
-    const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).accountId;
-    const receivable = m.receivable_account_id ? assertCompanyAccount(booked, m.receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account') : counterpart;
     const amount = Number(p.amount);
-    const isOutbound = refund_of || isReturn || amount < 0;
+    const isOutbound = signedAmount(p) < 0;
     const tenderEntry = postEntry(booked, {
       journal: journal.code,
       journal_id: journal.id,
@@ -651,7 +703,9 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     booked = tenderEntry.db;
     moveIds.push(tenderEntry.id);
   }
-  return { db: write(booked, 'pos.order', id, { accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
+  const postedRounding = (!refund_of && postedRoundingAccountId) ? { rounding_account_id: postedRoundingAccountId } : {};
+  const tenderAccountsPosted = tenders.map(({ journal, outstanding, receivable }) => ({ journal_id: journal?.id ?? null, outstanding_account_id: outstanding, receivable_account_id: receivable }));
+  return { db: write(booked, 'pos.order', id, { lines: postedLines, tender_accounts: tenderAccountsPosted, ...postedRounding, accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
 }
 
 /**
@@ -660,21 +714,22 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
  */
 export function payOrder(db, { lines, method, payments = null, partner_id = null, refund_of = null, config_id = null, preset_id = null }) {
   const checkout = resolvePosOrderCheckout(db, { lines, method, payments, partner_id, refund_of, config_id, preset_id });
-  const { session, config, resolvedConfigId, presetSnapshot, effectivePresetId, isReturn, total, expectedTotal, roundingDiff, resolvedPayments, original, effectivePartnerId } = checkout;
+  const { session, resolvedConfigId, presetSnapshot, effectivePresetId, total, expectedTotal, roundingDiff, resolvedPayments, original, effectivePartnerId, roundingAccountId } = checkout;
 
-  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
   const primaryMethod = read(db, 'pos.payment.method', resolvedPayments[0].payment_method_id);
   const orderPaymentMethod = primaryMethod ? (primaryMethod.type === 'cash' ? 'cash' : (primaryMethod.type === 'bank' ? 'card' : primaryMethod.type)) : resolvedPayments[0].method;
   const primaryMethodId = primaryMethod?.id ?? resolvedPayments[0].payment_method_id ?? null;
+  // Post from the original's recorded lines so a direct payOrder refund keeps the sale's tax and account provenance.
+  const orderLines = original ? original.lines : lines;
 
   const { db: next, id } = create(db, 'pos.order', {
     partner_id: effectivePartnerId,
     payment_method: orderPaymentMethod,
     payment_method_id: primaryMethodId,
-    payment_ids: resolvedPayments,
+    payment_ids: resolvedPayments.map(({ recorded, ...tender }) => tender),
     config_id: resolvedConfigId,
     company_id: session.company_id ?? 1,
-    lines,
+    lines: orderLines,
     session_id: session.id,
     state: refund_of ? 'refund' : 'paid',
     refund_of,
@@ -685,15 +740,14 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
     accounting_entries: [],
   });
   const name = read(next, 'pos.order', id).name;
-  let stocked = moveOrderStock(db, { next, id, name, lines, refund_of, original, session });
+  let stocked = moveOrderStock(db, { next, id, name, lines: orderLines, refund_of, original, session });
   if (roundCurrency(total.total, companyCurrencyRecord(db, session.company_id)) === 0) {
     if (original) stocked = write(stocked, 'pos.order', original.id, { state: 'refunded' });
     return { db: stocked, id, name, total: expectedTotal };
   }
 
-  if (original) return reverseOrderEntries(db, { stocked, original, session, name, id, expectedTotal });
-
-  return postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal });
+  const posted = postOrderEntries(db, { stocked, lines: orderLines, refund_of, session, partner_id: effectivePartnerId, presetSnapshot, name, resolvedPayments, roundingDiff, id, expectedTotal, roundingAccountId });
+  return original ? { ...posted, db: write(posted.db, 'pos.order', original.id, { state: 'refunded' }) } : posted;
 }
 
 /** Durable retry identity is stored with the booking; a changed catalog never reprices an already-paid cart. */

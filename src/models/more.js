@@ -643,7 +643,10 @@ export const moreModels = {
       session_id: { type: 'many2one', relation: 'pos.session', label: 'Session', readonly: true },
       state: { type: 'selection', label: 'Status', options: [['paid', 'Paid'], ['refunded', 'Refunded'], ['refund', 'Refund']] },
       refund_of: { type: 'many2one', relation: 'pos.order', label: 'Refund of', readonly: true },
-      lines: productLines('Products', 'list_price'),
+      lines: productLines('Products', 'list_price', {
+        // The account the line was actually posted to, so a refund never re-resolves it from current configuration.
+        income_account_id: { type: 'many2one', relation: 'account.account', label: 'Income Account', hidden: true, readonly: true },
+      }),
       ...amountFields('lines'),
     },
     defaults: (id) => ({ name: 'POS/' + pad(id), date_order: today(), payment_method: 'cash', state: 'paid', company_id: 1, lines: [] }),

@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
+import { amounts, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
@@ -169,6 +169,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
   const base = resolveCompanyAccount(db, journal.default_account_id, move.company_id);
   const byAccount = new Map();
   const getSourceAccount = (l) => {
+    // Provenance recorded when the source document was posted wins over current configuration.
+    if (l.income_account_id) return { accountId: l.income_account_id, configured: true, type: 'line', recorded: true };
     if (l.account_id) return { accountId: l.account_id, configured: true, type: 'line' };
     const p = (db.records.product ?? []).find((p) => p.id === l.product_id);
     const dropship = !sale && read(db, 'purchase.order', move.purchase_id)?.dropship_partner_id;
@@ -184,7 +186,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     if (isSectionOrNote(l)) continue;
     const source = getSourceAccount(l);
     if (!source.accountId) throw new Error(`No ${source.type} account found`);
-    const mapped = mapAccount(db, move.fiscal_position_id, source.accountId);
+    const mapped = source.recorded ? source.accountId : mapAccount(db, move.fiscal_position_id, source.accountId);
     const mappedAccount = read(db, 'account.account', mapped);
     const selectedForeignAccount = mappedAccount?.company_id && mappedAccount.company_id !== (move.company_id ?? 1);
     const resolved = selectedForeignAccount && source.type !== 'journal default' ? null : resolveCompanyAccount(db, mapped, move.company_id);
@@ -447,7 +449,7 @@ export function invoiceLines(db, move) {
   });
   return [
     ...counterparts,
-    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true } : {}) })),
+    ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true, tax_side: sale ? 'sale' : 'purchase' } : {}) })),
     ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
@@ -847,20 +849,61 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
   };
 }
 
+/**
+ * First day of the fiscal year containing a date. Configured fiscal years decide it; after the last configured
+ * year the same start repeats yearly, and a company without any year uses the calendar year (the app default).
+ */
+export function fiscalYearStart(db, date, companyId) {
+  const years = search(db, 'account.fiscal.year').filter((y) => (y.company_id ?? 1) === companyId
+    && y.date_from <= date && date <= y.date_to);
+  if (years.length > 1) {
+    const company = read(db, 'res.company', companyId)?.name ?? companyId;
+    throw new Error(`Fiscal years overlap for company ${company} on ${date}`);
+  }
+  if (years.length === 1) return years[0].date_from;
+  const previous = search(db, 'account.fiscal.year')
+    .filter((y) => (y.company_id ?? 1) === companyId && y.date_to < date)
+    .sort((a, b) => a.date_from.localeCompare(b.date_from)).at(-1);
+  let start = previous?.date_from ?? `${date.slice(0, 4)}-01-01`;
+  while (shiftMonth(start, 12) <= date) start = shiftMonth(start, 12);
+  return start;
+}
+
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
 export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const items = analyticMoveItems(journalItems(db, filter), analyticAccountIds);
+  const reportDate = filter.to ?? today();
+  const items = analyticMoveItems(journalItems(db, { ...filter, to: reportDate }), analyticAccountIds);
   const rows = balances(db, weighted(items, weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
-  const equity = pick(['equity', 'equity_unaffected'], -1);
-  // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
+  let equity = pick(['equity', 'equity_unaffected'], -1);
   // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
   const reportCompanyId = filter.company_id ?? filter.company ?? db.settings?.current_company_id ?? 1;
   const earningsAccount = configuredEarningsAccount(db, reportCompanyId);
+  // Closing entries carry no analytic allocation, so an analytic report keeps a closed year's P&L visible.
+  // Split it from the current year and fold it into equity as prior unallocated earnings; their sum is unchanged.
+  const targetCompany = filter.company_id ?? filter.company;
+  // Each company splits its own earnings at its own fiscal-year start into its own earnings account.
+  const companyIds = targetCompany != null ? [targetCompany] : search(db, 'res.company').map((c) => c.id);
+  if (!companyIds.length) companyIds.push(reportCompanyId);
+  let earnings = 0;
+  for (const cId of companyIds) {
+    const yearStart = fiscalYearStart(db, reportDate, cId);
+    const cEarningsAccount = configuredEarningsAccount(db, cId);
+    const currentFilter = { ...filter, company_id: cId, to: reportDate, from: filter.from && filter.from > yearStart ? filter.from : yearStart };
+    const priorFilter = { ...filter, company_id: cId, to: addDays(yearStart, -1) };
+    const cEarnings = profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+    const cPriorEarnings = profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+    earnings = round(earnings + cEarnings);
+    if (cPriorEarnings) {
+      const index = cEarningsAccount ? equity.findIndex((r) => r.account.id === cEarningsAccount.id) : -1;
+      if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + cPriorEarnings) } : r));
+      else if (cEarningsAccount) equity.push({ account: cEarningsAccount, balance: round(cPriorEarnings) });
+      else earnings = round(earnings + cPriorEarnings);
+    }
+  }
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,

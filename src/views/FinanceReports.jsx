@@ -9,8 +9,9 @@ import { formatCurrency } from '../money.js';
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period, analyticAccountIds }) {
-  const { rows, totals } = trialBalance(db, { ...period, analyticAccountIds });
+export function TrialBalance({ db, period, companyId, analyticAccountIds }) {
+  const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const { rows, totals } = trialBalance(db, { ...period, company_id, analyticAccountIds });
   return (
     <tbody>
       {rows.map((r) => (
@@ -54,8 +55,9 @@ function PartnerRows({ db, p }) {
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, analyticAccountIds }) {
-  const rows = partnerLedger(db, { ...period, analyticAccountIds }, kind);
+export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, companyId, analyticAccountIds }) {
+  const company_id = companyId && companyId !== 'all' ? Number(companyId) : null;
+  const rows = partnerLedger(db, { ...period, company_id, analyticAccountIds }, kind);
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}

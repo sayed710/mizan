@@ -33,24 +33,26 @@ function amountMatches(rule, amount) {
 
 /** Whether a statement line meets the rule's nature, amount, label and partner conditions. */
 export function ruleMatches(rule, line) {
-  const amount = Number(line.amount) || 0;
+  if (rule.company_id && rule.company_id !== (line?.company_id ?? 1)) return false;
+  const amount = Number(line?.amount) || 0;
   if (rule.match_nature === 'amount_received' && !(amount > 0)) return false;
   if (rule.match_nature === 'amount_paid' && !(amount < 0)) return false;
-  if ((rule.match_partner || rule.partner_id) && !line.partner_id) return false;
-  if (rule.partner_id && line.partner_id !== rule.partner_id) return false;
-  return amountMatches(rule, amount) && labelMatches(rule, line.payment_ref);
+  if ((rule.match_partner || rule.partner_id) && !line?.partner_id) return false;
+  if (rule.partner_id && line?.partner_id !== rule.partner_id) return false;
+  return amountMatches(rule, amount) && labelMatches(rule, line?.payment_ref);
 }
 
 /** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest. */
 function splitCounterparts(lines, balance, currency) {
+  const amountOf = (l) => Number(l.amount) || 0;
   const fixed = lines.filter((l) => l.amount_type === 'fixed');
-  const rest = roundCurrency(balance - fixed.reduce((s, l) => s + roundCurrency(Number(l.amount) || 0, currency), 0), currency);
-  const pct = lines.filter((l) => l.amount_type !== 'fixed').reduce((s, l) => s + (Number(l.amount) || 0), 0);
+  const rest = roundCurrency(balance - fixed.reduce((s, l) => s + roundCurrency(amountOf(l), currency), 0), currency);
+  const pct = lines.filter((l) => l.amount_type !== 'fixed').reduce((s, l) => s + amountOf(l), 0);
   if (rest < 0 || roundCurrency(rest * (1 - pct / 100), currency) !== 0) throw new Error('The counterpart lines do not cover the whole amount');
   const variable = lines.filter((l) => l.amount_type !== 'fixed');
-  const shares = variable.length && rest ? allocateCents(rest, variable.map((l) => Number(l.amount) || 0), currency) : variable.map(() => 0);
+  const shares = variable.length && rest ? allocateCents(rest, variable.map(amountOf), currency) : variable.map(() => 0);
   let index = 0;
-  return lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? roundCurrency(Number(l.amount) || 0, currency) : shares[index++] }));
+  return lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? roundCurrency(amountOf(l), currency) : shares[index++] }));
 }
 
 function writeOff(db, rule, line) {
@@ -140,8 +142,11 @@ function writeOff(db, rule, line) {
       ...taxLines,
     ];
   });
-  const gap = roundCurrency(companyValue - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));
-  if (gap && items.length) { const key = incoming ? 'credit' : 'debit'; items[0][key] = roundCurrency(items[0][key] + gap, companyCurrencyRecord(db, company)); }
+  const counterpartSide = incoming ? 'credit' : 'debit';
+  const opposingSide = incoming ? 'debit' : 'credit';
+  const counterpartTotal = items.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0);
+  const gap = roundCurrency(companyValue - counterpartTotal, companyCurrencyRecord(db, company));
+  if (gap && items.length) { items[0][counterpartSide] = roundCurrency((Number(items[0][counterpartSide]) || 0) + gap, companyCurrencyRecord(db, company)); }
   const { db: booked, id } = postEntry(db, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
     lines: [

@@ -109,6 +109,13 @@ const companyLockDate = (db, move) => {
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
   return lockDateFor(comp, move, journal);
 };
+
+/** The applicable lock date for an entry or record: company lock, tax lock, and closed fiscal-year lock. */
+export function recordLockDate(db, record) {
+  if (!record) return '';
+  const compId = record.company_id ?? 1;
+  return [companyLockDate(db, record), taxLockFor(db, record), closedYearLock(db, compId)].filter(Boolean).sort().at(-1) ?? '';
+}
 export const companyTaxLock = (db, companyId) => {
   const comp = (db.records?.['res.company'] ?? []).find((c) => c.id === companyId);
   return comp?.tax_lock_date ?? null;
@@ -471,7 +478,10 @@ export function paymentInvariant(db, after) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
   const companyStep = Number(companyCurrencyRecord(db, after.company_id)?.rounding ?? 0.01);
   const net = (id) => companyRound((entry.line_ids ?? []).filter((l) => l.account_id === id && l.partner_id === after.partner_id).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
-  const expected = invoice ? toCompany(db, invoice.currency_id, after.amount, after.date, invoice.company_id) : companyRound(Number(after.amount));
+  const currencyId = invoice ? invoice.currency_id : after.currency_id;
+  const expected = currencyId
+    ? toCompany(db, currencyId, after.amount, after.date, invoice?.company_id ?? after.company_id)
+    : companyRound(Number(after.amount));
   let bank;
   try {
     bank = after.outstanding_account_id ?? paymentJournal(db, after.journal_id, after.company_id ?? 1).accountId;
@@ -545,7 +555,7 @@ function lockRule(db, before, after) {
  * entries dated after the lock that book something for the entry's partner, so a forged object cannot mark it paid.
  */
 export function lockedSettlementInvariant(db, after, before) {
-  const lock = before && [companyLockDate(db, before), taxLockFor(db, before), closedYearLock(db, before.company_id ?? 1)].sort().at(-1);
+  const lock = before && recordLockDate(db, before);
   if (!lock || moveDate(before) > lock || !changedFields(before, after, SETTLEMENT_FIELDS)) return null;
   const was = Array.isArray(before.payments) ? before.payments.length : 0;
   const entries = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
@@ -563,7 +573,7 @@ export function lockedSettlementInvariant(db, after, before) {
  */
 export const datedLockGuard = (fields, booked) => (db, before, after) => {
   const locks = [before, after].filter((r) => r && booked(r))
-    .map((r) => ({ record: r, lock: [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1) }))
+    .map((r) => ({ record: r, lock: recordLockDate(db, r) }))
     .filter(({ record, lock }) => lock && String(record.date ?? today()) <= lock)
     .map(({ lock }) => lock);
   if (!locks.length) return null;
@@ -573,7 +583,7 @@ export const datedLockGuard = (fields, booked) => (db, before, after) => {
 
 /** Delete guard to pair with datedLockGuard: booked records dated inside the lock stay. */
 export const datedLockDelete = (booked) => (db, r) => {
-  const lock = [companyLockDate(db, r), closedYearLock(db, r.company_id ?? 1)].sort().at(-1);
+  const lock = recordLockDate(db, r);
   return lock && booked(r) && String(r.date ?? today()) <= lock ? `The period up to ${lock} is locked` : null;
 };
 
@@ -584,7 +594,7 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (isYearEntry(db, move.id) || isYearEntry(staged, move.id)) return 'Fiscal year closing entries are kept; reopen the fiscal year instead';
   if (isReturnEntry(db, move) || isReturnEntry(staged, move)) return 'Tax return closing entries are kept';
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
-  const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
+  const lock = recordLockDate(db, move);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
   // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
   const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
@@ -898,8 +908,9 @@ function ageDocumentInstallments(db, kind, at, moves, add) {
 }
 
 /** Add each payment's unallocated portion until it is applied or reversed. */
-function ageUnappliedCredits(db, kind, at, moves, add) {
+function ageUnappliedCredits(db, kind, at, moves, add, companyId) {
   for (const payment of search(db, 'account.payment')) {
+    if (companyId != null && (payment.company_id ?? 1) !== companyId) continue;
     if (!payment.move_id || !['posted', 'reversed'].includes(payment.state) || payment.date > at) continue;
     if (payment.partner_type !== (kind === 'receivable' ? 'customer' : 'supplier')) continue;
     const sign = (kind === 'receivable' ? payment.payment_type === 'inbound' : payment.payment_type === 'outbound') ? -1 : 1;
@@ -921,7 +932,7 @@ function ageUnappliedCredits(db, kind, at, moves, add) {
 export const agedReportDate = (end, now = today()) => end && end < now ? end : now;
 
 /** Aged receivable/payable per partner, bucketed by days past due. */
-export function agedBalance(db, kind = 'receivable', at = today()) {
+export function agedBalance(db, kind = 'receivable', at = today(), companyId = null) {
   const rows = new Map();
   const add = (partner, date, amount, document = null, source = document) => {
     amount = reportingBookedAmount(db, source, amount);
@@ -941,9 +952,9 @@ export function agedBalance(db, kind = 'receivable', at = today()) {
     }
     rows.set(partner, row);
   };
-  const moves = search(db, 'account.move');
+  const moves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
   ageDocumentInstallments(db, kind, at, moves, add);
-  ageUnappliedCredits(db, kind, at, moves, add);
+  ageUnappliedCredits(db, kind, at, moves, add, companyId);
   return { buckets: BUCKETS.map(([k, label]) => [k, label]), rows: [...rows.values()].sort((a, b) => b.total - a.total) };
 }
 
@@ -991,8 +1002,8 @@ function followUpSummary(invoices) {
 }
 
 /** Partners with overdue invoices, for payment reminders. */
-export function followUps(db, at = today(), { ignoreNextActionDate = false } = {}) {
-  const overdue = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
+export function followUps(db, at = today(), { ignoreNextActionDate = false, companyId = null } = {}) {
+  const overdue = search(db, 'account.move').filter((m) => (companyId == null || (m.company_id ?? 1) === companyId) && m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
     if (m.exclude_from_followup) return [];
     const partner = read(db, 'res.partner', m.partner_id);
     if (!partner) return [];

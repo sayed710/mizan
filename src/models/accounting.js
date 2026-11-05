@@ -670,6 +670,16 @@ function draftAssetsFromBill(db, bill) {
 }
 
 /**
+ * Currency metadata of a liquidity journal item in `currencyId` (the bank journal's currency, or the payment's when the
+ * journal has none): `docAmount` when known in that currency, otherwise the signed company amount converted at `date`.
+ */
+export function liquidityForeignFields(db, { currencyId, companyAmount, docAmount = null, date, companyId }) {
+  if (!currencyId || currencyId === companyCurrencyRecord(db, companyId)?.id) return {};
+  const amount = docAmount ?? companyAmount * rateAt(db, currencyId, date, companyId);
+  return { currency_id: currencyId, amount_currency: roundCurrency(amount, read(db, 'res.currency', currencyId)) };
+}
+
+/**
  * Record a payment: bank entry against receivable/payable, paid amount on the invoice, and a posted
  * payment record (or `paymentId`, an existing draft payment, gets posted with that entry).
  */
@@ -722,7 +732,10 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const extra = excess > 0 ? companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) : 0;
   const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
   const foreignAmount = (value) => foreign ? { currency_id: r.currency_id, amount_currency: docRound(value) } : {};
-  const liquidityForeignAmount = (value) => journal?.currency_id === r.currency_id ? foreignAmount(value) : {};
+  const liquidityForeignAmount = (value) => liquidityForeignFields(db, {
+    currencyId: journal?.currency_id ?? null, companyAmount: (bank + extra) * Math.sign(value), date, companyId: r.company_id,
+    docAmount: foreign && journal?.currency_id === r.currency_id ? docRound(value) : null,
+  });
   const credit = excess > 0 ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(-excess) } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(excess) }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: via.code, journal_id: journal?.id, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
@@ -1174,6 +1187,11 @@ export const accountingModels = {
         const category = read(db, 'account.fiscal.category', after.fiscal_category_id);
         if (!category) return 'Select an existing fiscal category';
         if (after.company_id && category.company_id !== after.company_id) return 'Fiscal category must belong to the account company';
+      }
+      if (after.asset_model_id) {
+        const model = read(db, 'account.asset.model', after.asset_model_id);
+        if (!model) return 'Select an existing asset model';
+        if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
       }
       return null;
     },
@@ -1714,7 +1732,13 @@ Object.assign(accountingModels, {
 
   'account.asset.model': {
     label: 'Depreciation Models',
-    guard: assetAccountGuard,
+    guard: (db, before, after, ctx) => {
+      if (before && before.company_id !== after.company_id && after.company_id
+        && (db.records['account.account'] ?? []).some((a) => a.asset_model_id === after.id && a.company_id && a.company_id !== after.company_id)) {
+        return 'Asset model must belong to the account company';
+      }
+      return assetAccountGuard(db, before, after, ctx);
+    },
     fields: {
       name: { type: 'char', label: 'Model Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
