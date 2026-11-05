@@ -209,7 +209,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
       return {
         name: line.name || product?.name || move.name || '/', date: move.date ?? move.invoice_date ?? today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
-        general_account: read(db, 'account.account', account)?.code || (purchase ? '600000' : '400000'),
+        general_account: read(db, 'account.account', account)?.code || '',
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
         category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };

@@ -5,7 +5,8 @@ import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettleme
 import { applyPaymentCredit, reverseEntry } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { TRANSITION, cashBasisTaxes, fiscalPositionFor, isSectionOrNote, productTax, validateTaxCompany } from './taxes.js';
+import { configuredAccount } from './configured-account.js';
+import { cashBasisTransitionAccount, cashBasisTaxes, fiscalPositionFor, isSectionOrNote, productTax, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -680,7 +681,7 @@ const releasedTaxes = (db, r) => {
   for (const m of db.records['account.move'] ?? []) {
     if (m.cash_basis_origin_move_id !== r.id || (m.company_id ?? 1) !== (r.company_id ?? 1) || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
-      const code = read(db, 'account.account', l.account_id)?.code;
+      const code = l.account_id;
       const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
       const previous = released.get(key) ?? { amount: 0, base: 0 };
       const zeroTax = !(Number(l.debit) || Number(l.credit));
@@ -708,7 +709,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const roundingMethod = companyRoundingMethod(db, r.company_id);
   const side = refund ? 'refund' : 'invoice';
   const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, { roundingMethod, side })
-    .map((g) => ({ ...g, account: read(db, 'account.account', g.account_id)?.code ?? (sale ? '251000' : '131000') }));
+    .map((g) => ({ ...g, account: configuredAccount(db, g.account_id, r.company_id, 'tax repartition', g.tax_name || 'the tax') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
@@ -721,11 +722,11 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   })
     .filter((g) => g.amount || g.base);
   if (!due.length) return { db, id: null };
-  const transition = TRANSITION[sale ? 'sale' : 'purchase'];
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
   const lines = due.flatMap(({ account, amount, base, tax_id, tax_name, tax_tag_ids }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
-    const tax = { account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
+    const transition = cashBasisTransitionAccount(db, tax_id, r.company_id);
+    const tax = { account_id: account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
     return (sale !== refund) === (share > 0)
       ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
       : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];

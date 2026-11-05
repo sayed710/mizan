@@ -9,7 +9,7 @@ import { postMove, payWithDiscount } from './models/accounting.js';
 import { postBatch } from './models/payments.js';
 import { reversePayment } from './models/pay.js';
 import { accountId, journalItems } from './models/ledger.js';
-import { taxSnapshot } from './models/taxes.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { taxesByTax } from './models/finance.js';
 import {currentCompany} from './models/company.js';
 import { customerStatement } from './models/reports.js';
@@ -324,8 +324,8 @@ test('Item 2: Early payment discount on a cash-basis vendor bill clears transiti
     name: 'Vendor cash VAT',
     amount: 14,
     type_tax_use: 'purchase',
-    tax_exigibility: 'on_payment',
-    account_id: accountId(db, '131000'),
+    tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, '131100'),
+    account_id: accountId(db, '131000'), ...defaultTaxRepartitionLines(accountId(db, '131000')),
   });
   const term = create(tax.db, 'account.payment.term', {
     name: '2% tax included',
@@ -365,8 +365,8 @@ test('Item 2b: Early payment discount on a cash-basis customer invoice clears tr
     name: 'Customer cash VAT',
     amount: 14,
     type_tax_use: 'sale',
-    tax_exigibility: 'on_payment',
-    account_id: accountId(db, '251000'),
+    tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(db, '251100'),
+    account_id: accountId(db, '251000'), ...defaultTaxRepartitionLines(accountId(db, '251000')),
   });
   const term = create(tax.db, 'account.payment.term', {
     name: '2% customer discount included',

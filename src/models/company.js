@@ -4,6 +4,7 @@ import { postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today } from './common.js';
 import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
+import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
@@ -274,6 +275,10 @@ function companyGuard(db, before, r) {
     if (!account || !['equity', 'equity_unaffected'].includes(account.account_type)
       || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an equity earnings account shared with or belonging to this company';
   }
+  if (r.default_payroll_structure_id) {
+    const structure = record(db, 'hr.payroll.structure', r.default_payroll_structure_id);
+    if (!structure || (structure.company_id && structure.company_id !== r.id)) return 'Select a payroll structure belonging to this company';
+  }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
   return null;
@@ -327,6 +332,18 @@ export function createCompany(db, vals) {
       installed.set(key, account.id);
     }
     accounts[field] = installed.get(key);
+  }
+  if (!values.opening_equity_account_id) accounts.opening_equity_account_id = accounts.current_year_earnings_account_id ?? values.current_year_earnings_account_id;
+  if (!values.default_payroll_structure_id) {
+    const payroll = {};
+    for (const [role, code, name, account_type] of [['expense', '620000', 'Salaries & Wages', 'expense'], ['payable', '230000', 'Salaries Payable', 'liability_current'], ['insurance', '240000', 'Social Insurance Payable', 'liability_current'], ['tax', '250100', 'Payroll Tax Payable', 'liability_current']]) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db; payroll[role] = account.id;
+    }
+    const journal = create(next, 'account.journal', { name: 'Salaries', code: 'SAL', type: 'general', company_id: res.id, default_account_id: payroll.expense });
+    const structure = create(journal.db, 'hr.payroll.structure', { name: 'Employees', company_id: res.id, journal_id: journal.id, salary_expense_account_id: payroll.expense, salary_payable_account_id: payroll.payable, rules: defaultPayrollRules({ insurance: payroll.insurance, tax: payroll.tax }) });
+    next = structure.db;
+    accounts.default_payroll_structure_id = structure.id;
   }
   return { ...res, db: ensureReturnTypes(write(next, 'res.company', res.id, accounts)) };
 }
@@ -426,7 +443,9 @@ export const companyModels = {
       default_sale_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Sales Journal' },
       default_purchase_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Purchase Journal' },
       default_general_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default General Journal' },
+      default_payroll_structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Default Payroll Structure' },
       current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
+      opening_equity_account_id: { type: 'many2one', relation: 'account.account', label: 'Opening Balance Equity Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
@@ -477,7 +496,7 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'current_year_earnings_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
       tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },

@@ -3,9 +3,9 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
-import { TRANSITION, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccounts, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
@@ -125,7 +125,7 @@ function taxLockFor(db, move, settings = db.settings) {
   if (!move || !lock) return '';
   const accounts = taxAccounts(db, move.company_id);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
-    accountId(db, TRANSITION.sale, move.company_id), accountId(db, TRANSITION.purchase, move.company_id)]);
+    ...cashBasisTransitionAccounts(db, move.company_id)]);
   const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
     || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
   return taxable ? lock : '';
@@ -317,7 +317,7 @@ export function settlementFxError(db, invoice, p, allocated) {
   const account = invoiceCounterpartAccount(db, invoice);
   const net = (fx?.line_ids ?? []).filter((l) => l.account_id === account && (l.partner_id === invoice.partner_id || sameCommercialPartner(db, l.partner_id, invoice.partner_id))).reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const configured = exchangeAccount(db, invoice.company_id, difference);
-  const offset = typeof configured === 'number' ? configured : accountId(db, configured, invoice.company_id ?? 1);
+  const offset = configured;
   const lines = fx?.line_ids ?? [];
   const other = lines.filter((l) => l.account_id === offset && !l.partner_id);
   const otherNet = other.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
@@ -510,8 +510,11 @@ export function moveDeleteGuard(db, move, staged = db) {
 
 /** Tax accounts per side: the default VAT accounts plus every account a sale / purchase tax books to. */
 export function taxAccounts(db, companyId) {
-  const of = (use, code) => new Set([
-    accountId(db, code, companyId),
+  // Tax accounts come from repartition lines and from the return types' explicit payable/receivable accounts.
+  const returnTypes = search(db, 'account.return.type').filter((t) => !companyId || (t.company_id ?? 1) === companyId);
+  const returnField = { sale: 'tax_payable_account_id', purchase: 'tax_receivable_account_id' };
+  const of = (use) => new Set([
+    ...returnTypes.map((t) => t[returnField[use]]),
     ...search(db, 'account.tax')
       .filter((x) => x.type_tax_use === use && (!companyId || !x.company_id || (x.company_id ?? 1) === companyId))
       .flatMap((x) => [
@@ -519,7 +522,7 @@ export function taxAccounts(db, companyId) {
         ...taxRepartitionLines(x, 'refund').filter((l) => l.repartition_type === 'tax').map((l) => l.account_id),
       ]),
   ].filter(Boolean));
-  return { sale: of('sale', '251000'), purchase: of('purchase', '131000') };
+  return { sale: of('sale'), purchase: of('purchase') };
 }
 
 /** Posted journal items on tax accounts in the period, with their side and signed tax (output credit / input debit positive). */
@@ -528,7 +531,7 @@ function taxItems(db, period) {
   const companyId = period?.company_id ?? period?.company;
   const accounts = taxAccounts(db, companyId);
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-  const transitions = new Set([accountId(db, TRANSITION.sale, companyId), accountId(db, TRANSITION.purchase, companyId)].filter(Boolean));
+  const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
   return journalItems(db, period).flatMap((l) => {
     if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
     const move = l.tax_name && moves.get(l.move_id);

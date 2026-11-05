@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
 import { seed } from './seed.js';
+import { accountId } from './models/ledger.js';
 import { startSession } from './models/pos.js';
 import { read } from './orm.js';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -63,7 +64,7 @@ test('server-backed receipt for a rounded checkout displays the authoritative ro
 
   let db = seed();
   const cfg1 = (db.records['pos.config'] ?? [])[0];
-  const rounding = { id: 99, name: 'Half Up 0.05', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line' };
+  const rounding = { id: 99, profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'), name: 'Half Up 0.05', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line' };
   db = {
     ...db,
     records: {

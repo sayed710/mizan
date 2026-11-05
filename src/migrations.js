@@ -765,6 +765,39 @@ MIGRATIONS.push({ version: 32, name: 'Budget company', up: (db) => {
   return { ...db, records: { ...db.records, 'account.budget': budgets } };
 } });
 
+MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    const matches = (db.records['account.account'] ?? []).filter((a) => a.company_id === company && a.code === code && a.account_type === type);
+    return matches.length === 1 ? matches[0].id : null;
+  };
+  const structures = (db.records['hr.payroll.structure'] ?? []).map((structure) => {
+    const company = structure.company_id ?? 1;
+    const journals = (db.records['account.journal'] ?? []).filter((j) => j.company_id === company && j.code === 'SAL' && j.type === 'general');
+    return { ...structure, company_id: company, journal_id: structure.journal_id ?? (journals.length === 1 ? journals[0].id : null),
+      salary_expense_account_id: structure.salary_expense_account_id ?? find(company, '620000'),
+      salary_payable_account_id: structure.salary_payable_account_id ?? find(company, '230000'),
+      rules: (structure.rules ?? []).map(({ account, ...rule }) => ({ ...rule,
+        ...(account && !rule.account_credit_id ? { account_credit_id: find(company, account) } : {}),
+      })),
+    };
+  });
+  return { ...db, records: { ...db.records,
+    'hr.payroll.structure': structures,
+    'stock.valuation.layer': (db.records['stock.valuation.layer'] ?? []).map((layer) => typeof layer.counterpart === 'string' ? { ...layer, counterpart: find(layer.company_id ?? 1, layer.counterpart) } : layer),
+    'res.company': (db.records['res.company'] ?? []).map((company) => {
+      const candidates = structures.filter((s) => s.company_id === company.id);
+      return { ...company, opening_equity_account_id: company.opening_equity_account_id ?? find(company.id, '301000'),
+        default_payroll_structure_id: company.default_payroll_structure_id ?? (candidates.length === 1 ? candidates[0].id : null) };
+    }),
+    'account.tax': (db.records['account.tax'] ?? []).map((tax) => ({ ...tax, cash_basis_transition_account_id: tax.cash_basis_transition_account_id ?? (tax.tax_exigibility === 'on_payment' ? find(tax.company_id ?? 1, tax.type_tax_use === 'sale' ? '251100' : '131100') : null) })),
+    'account.cash.rounding': (db.records['account.cash.rounding'] ?? []).map((rounding) => ({ ...rounding,
+      profit_account_id: Number.isInteger(rounding.profit_account_id) ? rounding.profit_account_id : find(rounding.company_id ?? 1, rounding.profit_account_id || '450000'),
+      loss_account_id: Number.isInteger(rounding.loss_account_id) ? rounding.loss_account_id : find(rounding.company_id ?? 1, rounding.loss_account_id || '690000'),
+    })),
+  } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

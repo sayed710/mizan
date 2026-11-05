@@ -425,7 +425,7 @@ function reverseCashBasis(db, allocation, invoice, date) {
   const original = read(db, 'account.move', allocation.cash_basis_move_id);
   if (!original) throw new Error('Cash-basis release for payment not found');
   const lines = original.line_ids.map((l) => ({
-    ...l, account: read(db, 'account.account', l.account_id)?.code, debit: l.credit, credit: l.debit,
+    ...l, debit: l.credit, credit: l.debit,
     tax_base: (l.tax_base_signed || !(Number(l.debit) || Number(l.credit)) ? -1 : 1) * (Number(l.tax_base) || 0),
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;

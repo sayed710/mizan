@@ -2,8 +2,19 @@
 import { read, search } from '../orm.js';
 import { roundCurrency } from '../money.js';
 
-/** Cash-basis taxes wait on these transition accounts until the invoice is paid. */
-export const TRANSITION = { sale: '251100', purchase: '131100' };
+import { configuredAccount } from './configured-account.js';
+
+/** Cash basis uses the originating tax's explicit transition setting. */
+export function cashBasisTransitionAccount(db, taxId, company) {
+  const tax = read(db, 'account.tax', taxId);
+  if (tax?.company_id && tax.company_id !== (company ?? 1)) throw new Error('The cash basis tax belongs to another company');
+  return configuredAccount(db, tax?.cash_basis_transition_account_id, company, 'cash basis transition', tax?.name ?? 'the tax');
+}
+
+export function cashBasisTransitionAccounts(db, company) {
+  return search(db, 'account.tax').filter((tax) => tax.tax_exigibility === 'on_payment' && (!company || !tax.company_id || tax.company_id === company))
+    .map((tax) => cashBasisTransitionAccount(db, tax.id, company ?? tax.company_id));
+}
 
 /** Repartition lines of a tax or line snapshot for the requested side ('invoice' or 'refund'). */
 export function taxRepartitionLines(tax, side = 'invoice') {
@@ -329,6 +340,9 @@ export const taxModels = {
   'account.tax': {
     label: 'Taxes',
     guard: (db, before, after) => {
+      if (after.cash_basis_transition_account_id) {
+        try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
+      }
       const allTags = [
         ...(after.tag_ids ?? []),
         ...(after.invoice_repartition_line_ids ?? []).flatMap((l) => l.tag_ids ?? []),
@@ -359,6 +373,7 @@ export const taxModels = {
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
+      cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
       tax_group: { type: 'char', label: 'Tax Group' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
       invoice_repartition_line_ids: {
@@ -419,7 +434,7 @@ export const taxModels = {
       title: 'name',
       groups: [
         ['amount_type', 'amount', 'children_tax_ids', 'sequence', 'description', 'type_tax_use'],
-        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'active'],
+        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'cash_basis_transition_account_id', 'active'],
       ],
       tabs: [
         { label: 'Distribution for Invoices', fields: ['invoice_repartition_line_ids'] },

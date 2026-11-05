@@ -1,6 +1,6 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
-import { accountId, balances, balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from './ledger.js';
+import { balances, balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from './ledger.js';
 import { exchangeAccount } from './exchange-account.js';
 import { round } from '../money.js';
 import { appliedValue } from './finance.js';
@@ -143,7 +143,7 @@ export function accountCashFlowActivity(db, account) {
 /** The accounts a company's realized exchange gains and losses are booked to (the same resolver payments post with). */
 const exchangeAccountIds = (db, companyId) => new Set([1, -1].map((difference) => {
   const account = exchangeAccount(db, companyId, difference);
-  return typeof account === 'number' ? account : accountId(db, account, companyId);
+  return account;
 }));
 
 export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) {

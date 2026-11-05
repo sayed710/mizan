@@ -1,8 +1,9 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
+import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
 import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
@@ -85,8 +86,7 @@ export function resolveCompanyAccount(db, accountId, companyId) {
   if (!acc) return null;
   const comp = companyId ?? 1;
   if (!acc.company_id || acc.company_id === comp) return acc.id;
-  const match = uniqueByCode(db.records['account.account'] ?? [], 'account.account', acc.code, (account) => account.company_id === comp);
-  return match?.id ?? null;
+  return null;
 }
 
 /** Whether any line has a negative debit or credit. */
@@ -272,7 +272,6 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
   const companyRound = (n) => roundCurrency(n, ownCurrency);
   const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
   const side = isRefund ? 'refund' : 'invoice';
-  const sale = !['in_invoice', 'in_refund'].includes(move.move_type);
   const by = new Map();
 
   for (const l of move.invoice_line_ids ?? []) {
@@ -299,7 +298,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
         const docBase = splitBases[i];
         let account_id;
         if (t.tax_cash_basis) {
-          account_id = accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id);
+          account_id = cashBasisTransitionAccount(db, t.tax_id, move.company_id);
         } else if (row.account_id) {
           const mapped = mapAccount(db, move.fiscal_position_id, row.account_id);
           const resolved = resolveCompanyAccount(db, mapped, move.company_id);
@@ -312,7 +311,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
+        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, cash_basis: !!t.tax_cash_basis, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + docBase, document_amount: g.document_amount + docAmt });
       }
     }
@@ -405,9 +404,7 @@ export function invoiceLines(db, move) {
   const roundingLines = [];
   if (rounding && !adjustTax && diffDoc !== 0) {
     const isProfit = (sale !== refund) ? diffDoc > 0 : diffDoc < 0;
-    const profitAcc = rounding.profit_account_id ? (read(db, 'account.account', rounding.profit_account_id)?.id || rounding.profit_account_id) : accountId(db, '450000', move.company_id);
-    const lossAcc = rounding.loss_account_id ? (read(db, 'account.account', rounding.loss_account_id)?.id || rounding.loss_account_id) : accountId(db, '690000', move.company_id);
-    const acc = isProfit ? profitAcc : lossAcc;
+    const acc = roundingAccount(db, rounding, isProfit, move.company_id);
     roundingLines.push({
       account_id: acc,
       partner_id: move.partner_id,
@@ -447,7 +444,7 @@ export function invoiceLines(db, move) {
   return [
     ...counterparts,
     ...bases.map(([account_id, amount, doc, zero, sources, tags, zeroTaxId, distribution, baseCompany]) => ({ account_id, ...(Object.keys(distribution).length ? { analytic_distribution: distribution } : {}), partner_id: move.partner_id, name: sale ? 'Sales' : 'Purchases', ...side(amount, !sale, doc), invoice_sources: allocateJournalSources(amount, sources, 1 / rate, ownCurrency), ...(zero ? { tax_id: zeroTaxId, tax_name: zero, tax_base: refund ? -baseCompany : baseCompany, tax_zero: true, tax_side: sale ? 'sale' : 'purchase' } : {}), ...(tags.length ? { tax_tag_ids: tags, tax_grid_base: true } : {}) })),
-    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(g.account_id !== accountId(db, TRANSITION[sale ? 'sale' : 'purchase'], move.company_id) ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
+    ...taxes.map((g) => ({ account_id: g.account_id, partner_id: move.partner_id, name: g.tax_name, ...side(g.amount, !sale, g.document_amount), tax_id: g.tax_id, tax_name: g.tax_name, tax_base: refund && !g.amount ? -g.base : g.base, ...(!g.cash_basis ? { tax_side: sale ? 'sale' : 'purchase' } : {}), ...(g.tax_tag_ids.length ? { tax_tag_ids: g.tax_tag_ids } : {}) })),
     ...roundingLines,
   ].filter((l) => l.debit || l.credit || l.amount_currency || l.invoice_sources?.length || l.tax_base);
 }
@@ -466,7 +463,7 @@ export function postedBillLine(move, index) {
 /**
  * Create and post a miscellaneous entry.
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
- * @param {{journal: string, date?: string, ref?: string, lines: {account: string, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
+ * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
 export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
@@ -482,6 +479,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     if (l.account_id) accId = l.account_id;
     else if (typeof l.account === 'number') accId = l.account;
     else if (l.account) {
+      // Chart-code lines are an import/fixture convenience only: runtime models pass account ids (see codesd.test.js).
       accId = accountId(db, l.account, company);
       if (!accId && company && (db.records['account.account'] ?? []).some((account) => account.code === l.account
         && account.company_id && account.company_id !== company)) {

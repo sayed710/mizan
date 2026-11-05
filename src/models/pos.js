@@ -2,6 +2,8 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
+import { roundingAccount } from './configured-account.js';
+import { stockAccount } from './stock-accounts.js';
 import { assertCompanyAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
@@ -543,7 +545,7 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
       const before = new Set((stocked.records['stock.valuation.layer'] ?? []).map((layer) => layer.id));
-      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, counterpart: '500000', company_id: session.company_id });
+      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, counterpart: stockAccount(stocked, p, 'cogs', session.company_id), company_id: session.company_id });
       if (!original && qty < 0) {
         const layer = (stocked.records['stock.valuation.layer'] ?? []).find((item) => !before.has(item.id) && item.kind === 'in' && item.product_id === p.id);
         returnLayers.push({ index, layer_id: layer?.id ?? null });
@@ -597,8 +599,6 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
   const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
-  const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
-  const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
@@ -612,11 +612,11 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   ];
   if (roundingDiff !== 0) {
     const isProfit = (refund_of ? -roundingDiff : roundingDiff) > 0;
-    const acc = isProfit ? profitAcc : lossAcc;
+    const acc = roundingAccount(db, rounding, isProfit, session.company_id);
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {

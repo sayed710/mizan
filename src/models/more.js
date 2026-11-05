@@ -4,11 +4,11 @@ import { addDays, amountFields, amounts, pad, productLines, today } from './comm
 import { capitalizeStock, deliver, moveValued } from './valuation.js';
 import { applyLots } from './logistics.js';
 import { refundOrder } from './pos.js';
-import { paymentJournal, postEntry } from './ledger.js';
+import { invoiceCounterpartAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { lineToStockQty } from './uom.js';
 import { freeQty, reservePicking } from './picking.js';
 import { round as round2 } from '../money.js';
-import { productProperty } from './productconfig-helpers.js';
+import { expenseDebits } from './expense-accounts.js';
 
 const employee = (label = 'Employee') => ({ type: 'many2one', relation: 'hr.employee', label });
 const state = (options, label = 'Status') => ({ type: 'selection', label, tracking: true, options });
@@ -141,8 +141,6 @@ export function produce(db, mo, { allowUnderConsumption = false } = {}) {
   return { db: confirmMo(rest.db, read(rest.db, 'mrp.production', rest.id)), go: `#/manufacturing/orders/${rest.id}` };
 }
 
-const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
-
 /**
  * Post an approved expense: expense (net) + input VAT against the employee (to reimburse) or the bank (company paid).
  * The product's expense account wins over the category default.
@@ -150,18 +148,14 @@ const CATEGORY_ACCOUNT = { travel: '610000', meals: '610000' };
 function postExpense(db, r) {
   const total = Number(r.total_amount) || 0;
   if (!(total > 0)) throw new Error('The expense total must be positive');
-  const tax = round2(total - total / (1 + (Number(r.tax) || 0) / 100));
-  const product = read(db, 'product', r.product_id);
-  const accountCode = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'))?.code || CATEGORY_ACCOUNT[r.category] || '600000';
   const own = r.payment_mode !== 'company_account';
   const companyId = r.company_id ?? read(db, 'hr.employee', r.employee_id)?.company_id ?? 1;
   const via = own ? null : paymentJournal(db, null, companyId);
   const { db: booked, id } = postEntry(db, {
     journal: own ? 'MISC' : via.code, ...(via ? { journal_id: via.id } : {}), company: companyId, date: r.date ?? today(), ref: `Expense: ${r.name}`,
     lines: [
-      { account: accountCode, debit: round2(total - tax) },
-      ...(tax ? [{ account: '131000', debit: tax, tax_name: `${Number(r.tax) || 0}%`, tax_base: round2(total - tax) }] : []),
-      own ? { account: '230100', credit: total } : { account_id: via.accountId, credit: total },
+      ...expenseDebits(db, { ...r, company_id: companyId }, [r]),
+      own ? { account_id: partnerAccount(db, null, companyId, 'payable'), credit: total } : { account_id: via.accountId, credit: total },
     ],
   });
   return write(booked, 'hr.expense', r.id, { state: own ? 'posted' : 'paid', move_id: id });
@@ -173,7 +167,7 @@ function reimburse(db, r) {
   const via = paymentJournal(db, null, companyId);
   const { db: paid } = postEntry(db, {
     journal: via.code, journal_id: via.id, company: companyId, date: today(), ref: `Reimbursement: ${r.name}`,
-    lines: [{ account: '230100', debit: r.total_amount }, { account_id: via.accountId, credit: r.total_amount }],
+    lines: [{ account_id: invoiceCounterpartAccount(db, { ...read(db, 'account.move', r.move_id), move_type: 'in_invoice' }), debit: r.total_amount }, { account_id: via.accountId, credit: r.total_amount }],
   });
   return write(paid, 'hr.expense', r.id, { state: 'paid' });
 }

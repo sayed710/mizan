@@ -5,6 +5,8 @@ import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { seed } from './seed.js';
+import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -71,7 +73,10 @@ test('unreconcile restores each invoice from a partly matched oversized statemen
 });
 
 test('unreconciliation reverses linked cash-basis tax releases', () => {
-  const inv = create(seed(), 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 14, tax_cash_basis: true }] });
+  const base = seed();
+  // The cash-basis tax names its own transition and final tax accounts explicitly.
+  const tax = create(base, 'account.tax', { name: 'Cash VAT 14%', company_id: 1, type_tax_use: 'sale', amount: 14, tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(base, '251100'), ...defaultTaxRepartitionLines(accountId(base, '251000')) });
+  const inv = create(tax.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = postMove(inv.db, inv.id);
   const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'cash basis', amount: 114, move_id: inv.id });
   db = button(line.db, LINE, line.id, 'Match');
