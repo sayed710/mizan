@@ -12,7 +12,9 @@ test('journal posting chooses the most matching criteria then sequence within th
   const expense = search(db, 'account.account').find((account) => account.code === '600000');
   const cash = search(db, 'account.account').find((account) => account.account_type === 'asset_cash');
   const company = create(db, 'res.company', { name: 'Other analytic company' });
-  db = create(company.db, 'account.analytic.distribution.model', { partner_id: 1, sequence: 1, company_id: 1, analytic_distribution: { [first.id]: 100 } }).db;
+  // Models only compete within one plan: the weaker rule allocates to the same plan as the winning one.
+  const rival = create(company.db, 'account.analytic.account', { name: 'Rival region', plan: second.plan });
+  db = create(rival.db, 'account.analytic.distribution.model', { partner_id: 1, sequence: 1, company_id: 1, analytic_distribution: { [rival.id]: 100 } }).db;
   db = create(db, 'account.analytic.distribution.model', { account_prefix: '600', partner_category_id: 'priority', sequence: 5, company_id: 1, analytic_distribution: { [second.id]: 100 } }).db;
   db = create(db, 'account.analytic.distribution.model', { partner_id: 1, account_prefix: '600', sequence: 0, company_id: company.id, analytic_distribution: { [first.id]: 100 } }).db;
   db = write(db, 'res.partner', 1, { tag_ids: ['priority'] });

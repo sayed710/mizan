@@ -92,44 +92,16 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
     return {};
   }
 
-  const winningRulesByPlan = new Map();
-  for (const item of matched) {
-    const dist = item.model.analytic_distribution ?? {};
-    for (const id of Object.keys(dist)) {
-      const account = read(db, 'account.analytic.account', Number(id));
-      const plan = planOf(account);
-      if (!winningRulesByPlan.has(plan)) {
-        winningRulesByPlan.set(plan, item);
-      }
-    }
-  }
-
-  const winningRules = [...new Set(winningRulesByPlan.values())];
-  winningRules.sort((a, b) => a.seq - b.seq || b.score - a.score || a.model.id - b.model.id);
-
+  // Like Odoo: each matching model, best first, applies whole when none of its plans is covered yet.
   const result = {};
-  const coveredPlans = new Set();
-  for (const item of winningRules) {
-    const dist = item.model.analytic_distribution ?? {};
-    for (const [id, percent] of Object.entries(dist)) {
-      const account = read(db, 'account.analytic.account', Number(id));
-      const plan = planOf(account);
-      if (winningRulesByPlan.get(plan) === item) {
-        result[id] = percent;
-        coveredPlans.add(plan);
-      }
-    }
+  const applied = new Set();
+  for (const { model } of matched) {
+    const distribution = model.analytic_distribution ?? {};
+    const plans = new Set(Object.keys(distribution).map((id) => planOf(read(db, 'account.analytic.account', Number(id)))));
+    if ([...plans].some((plan) => applied.has(plan))) continue;
+    Object.assign(result, distribution);
+    for (const plan of plans) applied.add(plan);
   }
-
-  for (const [id, percent] of Object.entries(fallback)) {
-    const account = read(db, 'account.analytic.account', Number(id));
-    const plan = planOf(account);
-    if (!coveredPlans.has(plan)) {
-      result[id] = percent;
-      coveredPlans.add(plan);
-    }
-  }
-
   return result;
 }
 
