@@ -8,7 +8,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
-import { journalInvoiceSequence } from './models/accounting.js';
+import { intercompanyBill, journalInvoiceSequence } from './models/accounting.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
@@ -651,6 +651,26 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
   const staged = { ...db, records, seq: stagedSeq };
   const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
+  for (const [model, counterpart] of changed) {
+    if (model !== 'account.move' || stored(model, counterpart.id) || !['in_invoice', 'in_refund'].includes(counterpart.move_type) || !counterpart.intercompany_move_id) continue;
+    const source = (records['account.move'] ?? []).find((move) => move.id === counterpart.intercompany_move_id);
+    if (!source || source.state !== 'posted' || source.intercompany_move_id !== counterpart.id || !changed.some(([kind, move]) => kind === 'account.move' && move.id === source.id)) {
+      throw new Error('Invalid inter-company counterpart: source link does not match');
+    }
+    const values = intercompanyBill(staged, { ...source, intercompany_move_id: null });
+    if (!values) throw new Error('Invalid inter-company counterpart: rule is not configured');
+    const expected = cleanRecord('account.move', { ...(models['account.move'].defaults?.(counterpart.id) ?? {}), ...values, id: counterpart.id });
+    const actual = cleanRecord('account.move', counterpart);
+    const stripVolatiles = (val) => {
+      if (val == null || typeof val !== 'object') return val;
+      if (Array.isArray(val)) return val.map(stripVolatiles);
+      const { line_id: _ignoredLineId, ...rest } = val;
+      return Object.fromEntries(Object.keys(rest).filter((k) => rest[k] !== undefined).sort().map((k) => [k, stripVolatiles(rest[k])]));
+    };
+    if (JSON.stringify(stripVolatiles(expected)) !== JSON.stringify(stripVolatiles(actual))) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+  }
   const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
     model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed, revaluationMoves) ? [rec.id] : []
   )));

@@ -313,36 +313,49 @@ export function postAutoPostMoves(db, at = today(), { onError = null } = {}) {
   return next;
 }
 
-function intercompanyBill(db, move) {
+export function intercompanyBill(db, move) {
   if (!['out_invoice', 'out_refund'].includes(move.move_type)) return null;
-  if (move.intercompany_move_id && read(db, 'account.move', move.intercompany_move_id)?.state !== 'cancel') return null;
   const buyer = (db.records['res.company'] ?? []).find((c) => c.id !== (move.company_id ?? 1) && c.partner_id === move.partner_id && c.active !== false);
   const sale = move.sale_id && read(db, 'sale.order', move.sale_id);
   const purchase = sale?.auto_purchase_id && read(db, 'purchase.order', sale.auto_purchase_id);
   if (!buyer || !(buyer.intercompany_rule === 'invoice_bill' || (buyer.intercompany_rule === 'sale_purchase' && purchase?.auto_sale_id === sale.id && purchase.company_id === buyer.id))) return null;
+  if (move.intercompany_move_id && read(db, 'account.move', move.intercompany_move_id)?.state !== 'cancel') return null;
   const seller = read(db, 'res.company', move.company_id ?? 1);
   if (!seller?.partner_id) throw new Error('Configure the selling company contact');
   const journal = read(db, 'account.journal', buyer.intercompany_journal_id);
   if (!journal || journal.type !== 'purchase' || journal.company_id !== buyer.id) throw new Error(`Configure the inter-company purchase journal for ${buyer.name}`);
   const payable = read(db, 'account.account', buyer.account_default_payable_id);
   if (!payable || payable.company_id !== buyer.id || payable.account_type !== 'liability_payable') throw new Error(`Configure the default payable account for ${buyer.name}`);
+  const fpId = fiscalPositionFor(db, seller.partner_id, buyer.id);
   const invoice_line_ids = (move.invoice_line_ids ?? []).map((line) => {
     if (isSectionOrNote(line)) return line;
-    const product = read(db, 'product', line.product_id);
-    const configured = read(db, 'account.account', productProperty(db, product, 'property_account_expense_id'));
-    const fallback = read(db, 'account.account', journal.default_account_id);
-    const account = configured && (!configured.company_id || configured.company_id === buyer.id) ? configured : fallback;
-    if (!account || (account.company_id && account.company_id !== buyer.id)) throw new Error(`Configure a product expense account or purchase journal default account for ${buyer.name}`);
+    const product = line.product_id ? read(db, 'product', line.product_id) : null;
+    if (!product) throw new Error(`Configure a product for line "${line.name || 'unnamed'}"`);
+    // Product accounts are shared across companies, so one that belongs to another company falls through to the buyer's category.
+    const ownAccount = read(db, 'account.account', product.property_account_expense_id);
+    const source = ownAccount?.company_id && ownAccount.company_id !== buyer.id ? { ...product, property_account_expense_id: null } : product;
+    const rawAccount = read(db, 'account.account', productProperty(db, source, 'property_account_expense_id', buyer.id));
+    if (!rawAccount || (rawAccount.company_id && rawAccount.company_id !== buyer.id)) throw new Error(`Configure an expense account for ${product.name}`);
+    const mappedAccountId = mapAccount(db, fpId, rawAccount.id);
+    const account = read(db, 'account.account', mappedAccountId);
+    if (!account || (account.company_id && account.company_id !== buyer.id)) {
+      throw new Error(`Configure an expense account for ${product.name}`);
+    }
     let tax;
     try {
-      tax = productTax(db, product, 'purchase', null, buyer.id);
+      tax = productTax(db, product, 'purchase', fpId, buyer.id);
       if (tax?.tax_id) validateTaxCompany(db, [tax.tax_id, ...(tax.tax_ids ?? [])], buyer.id);
     } catch {
-      throw new Error(`Configure purchase taxes for ${buyer.name}`);
+      throw new Error(`Configure purchase taxes for ${buyer.name} on ${product.name}`);
     }
     return { name: line.name, product_id: line.product_id, qty: line.qty, price_unit: line.price_unit, discount: line.discount, account_id: account.id, ...(tax ?? { tax: 0 }) };
   });
-  return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id };
+  const original = move.move_type === 'out_refund' && move.reversed_entry_id ? read(db, 'account.move', move.reversed_entry_id) : null;
+  const originalBill = original?.intercompany_move_id && read(db, 'account.move', original.intercompany_move_id);
+  if (originalBill && (originalBill.move_type !== 'in_invoice' || originalBill.company_id !== buyer.id || originalBill.intercompany_move_id !== original.id)) {
+    throw new Error('The original inter-company bill link is invalid');
+  }
+  return { company_id: buyer.id, move_type: move.move_type === 'out_invoice' ? 'in_invoice' : 'in_refund', partner_id: seller.partner_id, journal_id: journal.id, invoice_date: move.invoice_date, currency_id: move.currency_id, invoice_line_ids, intercompany_move_id: move.id, ...(originalBill ? { reversed_entry_id: originalBill.id } : {}) };
 }
 
 const newInvoiceLineId = () => {
@@ -1239,7 +1252,12 @@ export const accountingModels = {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
         if (term?.company_id && term.company_id !== (after.company_id ?? 1)) return 'Payment terms belong to another company';
       }
-      return moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
+      const counterpart = before?.intercompany_move_id ? read(db, 'account.move', before.intercompany_move_id) : null;
+      const counterpartBlocked = counterpart && (counterpart.state === 'posted' || Number(counterpart.amount_paid) > 0 || paymentState(counterpart, db) === 'paid');
+      if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
+        return 'The inter-company bill is posted or paid; issue a credit note instead';
+      }
+      return moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
     invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
@@ -1247,7 +1265,7 @@ export const accountingModels = {
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
     onUnlink: (db, r) => syncInvoicedQty(db, r),
     onWrite: (db, after, before, vals) => {
-      if (before.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type)) {
+      if (['out_invoice', 'out_refund'].includes(before.move_type) && ['posted', 'draft'].includes(before.state) && (after.state === 'draft' || after.state === 'cancel') && after.state !== before.state) {
         const bill = read(db, 'account.move', before.intercompany_move_id);
         if (bill?.state === 'draft') db = write(db, 'account.move', bill.id, { state: 'cancel' });
       }
