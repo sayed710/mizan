@@ -11,7 +11,7 @@ const sanitizeFormula = (s) => {
 
 const quote = (v) => {
   const cleaned = String(v ?? '').replace(/[\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g, '');
-  return `"${sanitizeFormula(cleaned).replace(/"/g, '""')}"`;
+  return `"${(typeof v === 'number' && Number.isFinite(v) ? cleaned : sanitizeFormula(cleaned)).replace(/"/g, '""')}"`;
 };
 
 /** @param {Array<Array<unknown>>} rows */

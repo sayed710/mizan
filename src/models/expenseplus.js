@@ -5,7 +5,7 @@ import { currentActor, employeeFor } from './authority.js';
 import { paymentJournal, postEntry, partnerAccount } from './ledger.js';
 import { moreModels } from './more.js';
 import { round } from '../money.js';
-import { expenseDebits } from './expense-accounts.js';
+import { expenseDebits, expenseReportJournal } from './expense-accounts.js';
 
 const expense = moreModels['hr.expense'];
 const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label });
@@ -97,9 +97,8 @@ export function postSheet(db, id, date = today()) {
   const companyId = r.company_id ?? 1;
   const via = own ? null : paymentJournal(db, null, companyId);
   // An employee-paid report posts to its selected journal, else the company's default general journal.
-  const expenseJournal = own ? read(db, 'account.journal', r.expense_journal_id ?? read(db, 'res.company', companyId)?.default_general_journal_id) : null;
-  if (own && !expenseJournal) throw new Error('Select an expense journal or configure a default general journal on the company');
-  const debits = expenseDebits(db, r, lines);
+  const expenseJournal = own ? expenseReportJournal(db, r) : null;
+  const debits = expenseDebits(db, r, lines, expenseJournal);
   const contact = own ? employeePartner(db, r.employee_id) : { db, id: null };
   const payable = own ? partnerAccount(contact.db, contact.id, companyId, 'payable') : null;
   const journal = own ? expenseJournal : via;
