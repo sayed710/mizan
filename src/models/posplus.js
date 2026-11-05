@@ -481,6 +481,8 @@ export const posPlusModels = {
       accounting_entries: { type: 'one2many', label: 'Journal Entries', readonly: true, hidden: true, fields: { move_id: { type: 'integer', ref: 'account.move', label: 'Journal Entry' } } },
       preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Preset' },
       preset_snapshot: { type: 'json', label: 'Preset Snapshot', readonly: true, hidden: true },
+      // Journal and accounts each tender (same position in payment_ids) was posted to, so a refund clears exactly those.
+      tender_accounts: { type: 'json', label: 'Tender Accounts', readonly: true, hidden: true },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       rounding_difference: { type: 'monetary', label: 'Rounding Difference', readonly: true, hidden: true },
       rounding_account_id: { type: 'many2one', relation: 'account.account', label: 'Rounding Account', readonly: true, hidden: true },

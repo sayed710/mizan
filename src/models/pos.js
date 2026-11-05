@@ -296,13 +296,14 @@ function validateRefundSource(db, { lines, refund_of, config_id, session }) {
 function originalTenders(db, original, enabledMethods, expectedTotal, currency) {
   if (!original) return null;
   if (Array.isArray(original.payment_ids) && original.payment_ids.length > 0) {
-    return original.payment_ids.map((p) => {
+    return original.payment_ids.map((p, index) => {
       const match = matchMethod(db, enabledMethods, p.payment_method_id ?? p.method, true);
       const methodType = tenderType(match) ?? p.method;
       return {
         payment_method_id: match?.id ?? (typeof p.payment_method_id === 'number' ? p.payment_method_id : null),
         method: methodType,
         amount: roundCurrency(Number(p.amount) || 0, currency),
+        ...(original.tender_accounts?.[index] ? { recorded: original.tender_accounts[index] } : {}),
       };
     });
   }
@@ -610,6 +611,28 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
   return stocked;
 }
 
+/**
+ * Journal and accounts of one tender: those recorded when the original sale posted it (a refund clears exactly
+ * those), otherwise the payment method's current configuration, as for a sale.
+ */
+function tenderAccounts(db, p, companyId, counterpart) {
+  const m = read(db, 'pos.payment.method', p.payment_method_id);
+  const recorded = p.recorded ?? null;
+  const receivableId = recorded ? recorded.receivable_account_id : (m.receivable_account_id ?? null);
+  const receivable = receivableId ? assertCompanyAccount(db, receivableId, companyId, 'asset_receivable', 'The selected counterpart account') : counterpart;
+  if (m.type === 'pay_later') return { method: m, journal: null, outstanding: null, receivable };
+  const journal = read(db, 'account.journal', recorded?.journal_id ?? m.journal_id);
+  if (!journal) throw new Error('The payment method journal was not found');
+  if (journal.company_id && journal.company_id !== companyId) throw new Error('The payment method journal must belong to this company');
+  const outstandingId = recorded ? recorded.outstanding_account_id : m.outstanding_account_id;
+  const outstanding = outstandingId ?? paymentJournal(db, journal.id, companyId).accountId;
+  const outstandingAccount = read(db, 'account.account', outstanding);
+  if (!outstandingAccount || outstandingAccount.active === false || (outstandingAccount.company_id && outstandingAccount.company_id !== companyId)) {
+    throw new Error('The tender outstanding account must be active and belong to this company');
+  }
+  return { method: m, journal, outstanding, receivable };
+}
+
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, resolvedPayments, roundingDiff, id, expectedTotal, roundingAccountId = null }) {
   const posJournal = resolveDocumentJournal(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
@@ -630,14 +653,13 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   });
   const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
   const signedAmount = (p) => (refund_of ? -1 : 1) * Number(p.amount);
+  const tenders = resolvedPayments.map((p) => ({ p, ...tenderAccounts(db, p, session.company_id ?? 1, counterpart) }));
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
-    ...resolvedPayments.map((p) => {
+    ...tenders.map(({ p, receivable }) => {
       const signed = signedAmount(p);
       return {
-        account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id
-          ? assertCompanyAccount(db, read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account')
-          : counterpart,
+        account_id: receivable,
         partner_id,
         debit: signed >= 0 ? Math.abs(Number(p.amount)) : 0,
         credit: signed < 0 ? Math.abs(Number(p.amount)) : 0,
@@ -665,12 +687,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
-  for (const p of resolvedPayments) {
-    const m = read(booked, 'pos.payment.method', p.payment_method_id);
+  for (const { p, method: m, journal, outstanding: account, receivable } of tenders) {
     if (m.type === 'pay_later') continue;
-    const journal = read(booked, 'account.journal', m.journal_id);
-    const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).accountId;
-    const receivable = m.receivable_account_id ? assertCompanyAccount(booked, m.receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account') : counterpart;
     const amount = Number(p.amount);
     const isOutbound = signedAmount(p) < 0;
     const tenderEntry = postEntry(booked, {
@@ -686,7 +704,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     moveIds.push(tenderEntry.id);
   }
   const postedRounding = (!refund_of && postedRoundingAccountId) ? { rounding_account_id: postedRoundingAccountId } : {};
-  return { db: write(booked, 'pos.order', id, { lines: postedLines, ...postedRounding, accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
+  const tenderAccountsPosted = tenders.map(({ journal, outstanding, receivable }) => ({ journal_id: journal?.id ?? null, outstanding_account_id: outstanding, receivable_account_id: receivable }));
+  return { db: write(booked, 'pos.order', id, { lines: postedLines, tender_accounts: tenderAccountsPosted, ...postedRounding, accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
 }
 
 /**
@@ -707,7 +726,7 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
     partner_id: effectivePartnerId,
     payment_method: orderPaymentMethod,
     payment_method_id: primaryMethodId,
-    payment_ids: resolvedPayments,
+    payment_ids: resolvedPayments.map(({ recorded, ...tender }) => tender),
     config_id: resolvedConfigId,
     company_id: session.company_id ?? 1,
     lines: orderLines,
