@@ -2,6 +2,7 @@
 import { RASTER } from './blobs.js';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { models, uninstalledModels } from '../src/models/index.js';
+import { fieldReadonly } from '../src/field-metadata.js';
 import { SHARED_MODELS, create, matches, postNote, read, search, unlink, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
 import { categoryPath } from '../src/models/ecommerce.js';
@@ -296,13 +297,16 @@ export function publicOrderStatus(db, query) {
 }
 
 /** Public shape of a model for API discovery. */
-const describe = (name) => ({
-  model: name,
-  label: models[name].label,
-  fields: Object.fromEntries(Object.entries(models[name].fields).map(([k, f]) => [k, {
-    type: f.type, label: f.label, required: !!f.required, readonly: !!(f.readonly || f.compute), ...(f.relation ? { relation: f.relation } : {}), ...(f.options ? { options: f.options.map((o) => o[0]) } : {}),
-  }])),
-});
+const describe = (name) => {
+  const defaults = models[name].defaults?.(0) ?? {};
+  return {
+    model: name,
+    label: models[name].label,
+    fields: Object.fromEntries(Object.entries(models[name].fields).map(([k, f]) => [k, {
+      type: f.type, label: f.label, required: !!f.required, readonly: fieldReadonly(f, defaults), ...(f.relation ? { relation: f.relation } : {}), ...(f.options ? { options: f.options.map((o) => o[0]) } : {}),
+    }])),
+  };
+};
 
 /**
  * @param {{ method: string, path: string, query: URLSearchParams, body: unknown, db: object, user: {name: string, isAdmin: boolean} }} req

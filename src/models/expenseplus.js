@@ -180,11 +180,17 @@ export const expensePlusModels = {
       accounting_date: { type: 'date', label: 'Accounting Date' },
       move_id: { ...expense.fields.move_id },
       journal: { type: 'char', label: 'Journal' },
-      expense_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Expense Journal' },
+      expense_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Expense Journal', readonly: (r) => ['post', 'done'].includes(r?.state) },
       amount_paid: { type: 'monetary', label: 'Reimbursed', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Reimbursement Contact', readonly: true },
     },
     protectDelete: (db, r) => sheetLines(db, r.id).length ? 'Reports containing expenses cannot be deleted' : null,
+    guard: (_db, before, r) => {
+      if (before && ['post', 'done'].includes(before.state) && r.expense_journal_id !== before.expense_journal_id) {
+        return 'The expense journal cannot be changed on a posted expense report';
+      }
+      return null;
+    },
     defaults: (id) => ({ name: `EXP/${id}`, state: 'draft', journal: 'MISC', accounting_date: today(), amount_paid: 0, expense_line_ids: [] }),
     onchange: (r, key, db) => key === 'employee_id' ? { manager_id: read(db, 'hr.employee', r.employee_id)?.parent_id ?? null } : {},
     list: ['name', 'employee_id', 'manager_id', 'total_amount', 'state'],

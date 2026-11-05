@@ -314,7 +314,8 @@ export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, company
       if (!t.tax_cash_basis) continue;
       const { explicit, splits } = taxRepartitionSplits(t, l, side, documentCurrency);
       for (const { row, amount, base } of splits) {
-        const account_id = row.account_id ?? (explicit ? options.lineAccount?.(l) : null) ?? null;
+        const rawAccount = row.account_id ? (options.mapAccount ? options.mapAccount(row.account_id) : row.account_id) : null;
+        const account_id = rawAccount ?? (explicit ? options.lineAccount?.(l) : null) ?? null;
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((x, y) => x - y);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;

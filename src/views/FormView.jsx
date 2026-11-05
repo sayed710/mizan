@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
+import { fieldReadonly } from '../field-metadata.js';
 import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
@@ -54,7 +55,7 @@ function Field({ db, model, name, value, onChange, readonly, record }) {
   const id = `f-${name}`;
   const label = field.custom ? field.label : t(field.label);
   const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
-  const isReadonly = readonly || (typeof field.readonly === 'function' ? field.readonly(record, db) : field.readonly);
+  const isReadonly = readonly || fieldReadonly(field, record, db);
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}

@@ -65,7 +65,7 @@ const SHEET_STEPS = {
 const SHEET_MANAGER_STEPS = new Set(['submit>approve', 'approve>draft']);
 
 /** Posting/completion must carry the accounting and expense-line effects, not just a status label. */
-function sheetBookingError(db, r) {
+function sheetBookingError(db, r, before = null) {
   if (!['post', 'done'].includes(r.state)) return null;
   const expenses = (db.records['hr.expense'] ?? []).filter((e) => e.sheet_id === r.id);
   const entry = (db.records['account.move'] ?? []).find((m) => m.id === r.move_id);
@@ -75,14 +75,22 @@ function sheetBookingError(db, r) {
     || expenses.some((e) => e.move_id !== entry.id || e.employee_id !== r.employee_id || e.state !== (r.state === 'done' ? 'paid' : 'posted'))) return 'A posted expense report needs its accounting entry and posted expenses';
   const credit = (m, accountId) => (m.line_ids ?? []).filter((l) => l.account_id === accountId).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
   const companyId = r.company_id ?? 1;
-  let expected;
-  try { expected = expenseDebits(db, r, expenses, r.payment_mode === 'own_account' ? expenseReportJournal(db, r) : null); }
-  catch (error) { return error.message; }
-  const expectedByAccount = new Map();
-  for (const line of expected) expectedByAccount.set(line.account, (expectedByAccount.get(line.account) ?? 0) + line.debit);
-  const actualByAccount = new Map();
-  for (const line of entry.line_ids ?? []) if (Number(line.debit) > 0) actualByAccount.set(line.account_id, (actualByAccount.get(line.account_id) ?? 0) + Number(line.debit));
-  if (actualByAccount.size !== expectedByAccount.size || [...expectedByAccount].some(([id, amount]) => !close(actualByAccount.get(id) ?? 0, amount))) return 'Expense report entry must use the configured expense and tax accounts';
+  const debitLines = (entry.line_ids ?? []).filter((line) => Number(line.debit) > 0);
+  if (['post', 'done'].includes(before?.state)) {
+    // Once posted, the entry's lines are the record of the accounts used; later configuration changes must not rewrite it.
+    const debitTotal = debitLines.reduce((sum, line) => sum + Number(line.debit), 0);
+    if (debitLines.some((line) => !line.account_id) || !close(debitTotal, total)) return 'Expense report entry must contain the posted expense debits';
+  } else {
+    // Being posted now: the client-built entry must use exactly the configured expense and tax accounts.
+    let expected;
+    try { expected = expenseDebits(db, r, expenses, r.payment_mode === 'own_account' ? expenseReportJournal(db, r) : null); }
+    catch (error) { return error.message; }
+    const expectedByAccount = new Map();
+    for (const line of expected) expectedByAccount.set(line.account, (expectedByAccount.get(line.account) ?? 0) + line.debit);
+    const actualByAccount = new Map();
+    for (const line of debitLines) actualByAccount.set(line.account_id, (actualByAccount.get(line.account_id) ?? 0) + Number(line.debit));
+    if (actualByAccount.size !== expectedByAccount.size || [...expectedByAccount].some(([id, amount]) => !close(actualByAccount.get(id) ?? 0, amount))) return 'Expense report entry must use the configured expense and tax accounts';
+  }
   if (r.payment_mode === 'company_account') {
     let liquidity;
     try { liquidity = paymentJournal(db, entry.journal_id, companyId).accountId; }
@@ -117,7 +125,7 @@ function sheetRule(db, before, r, ctx) {
   const owner = actingEmployee(db, ctx)?.id === before.employee_id;
   // The employee may take their own submitted report back; any other refusal, and every approval, is the manager's.
   if (before.state === 'submit' && r.state === 'draft') return owner ? null : approvalError(db, ctx, before.employee_id, before.manager_id);
-  return ((['approve', 'post', 'done'].includes(r.state) || SHEET_MANAGER_STEPS.has(`${before.state}>${r.state}`)) ? approvalError(db, ctx, before.employee_id, before.manager_id) : null) ?? sheetBookingError(db, r);
+  return ((['approve', 'post', 'done'].includes(r.state) || SHEET_MANAGER_STEPS.has(`${before.state}>${r.state}`)) ? approvalError(db, ctx, before.employee_id, before.manager_id) : null) ?? sheetBookingError(db, r, before);
 }
 
 /** Single expenses: approving or refusing needs the manager of the stored employee, and they cannot start decided. */

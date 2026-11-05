@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
-import { applyFilters, create, matches, read, search as searchRecords, unlink } from '../orm.js';
+import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
 import { display, SimulatedNote } from '../ui.jsx';
-import { fromCsv, toCsv } from '../csv.js';
+import { fromCsv, importCsvRows, toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
@@ -33,33 +33,6 @@ const download = (name, text) => {
   a.click();
   URL.revokeObjectURL(a.href);
 };
-
-/** Import rows whose headers match field labels (or technical names); many2one by record name. */
-function importRows(db, model, defaults, rows) {
-  const fields = models[model].fields;
-  const keyOf = (h) => Object.keys(fields).find((k) => k === h || fields[k].label.toLowerCase() === h.trim().toLowerCase());
-  const [header, ...body] = rows;
-  const keys = header.map(keyOf);
-  let next = db;
-  let count = 0;
-  for (const row of body.filter((r) => r.some((c) => c.trim()))) {
-    const vals = { ...defaults };
-    keys.forEach((k, i) => {
-      if (!k || fields[k].readonly || fields[k].compute) return;
-      const raw = (row[i] ?? '').trim();
-      const f = fields[k];
-      if (f.type === 'many2one') vals[k] = searchRecords(next, f.relation).find((r) => r.name?.toLowerCase() === raw.toLowerCase())?.id ?? null;
-      else if (['monetary', 'float', 'integer', 'priority'].includes(f.type)) vals[k] = raw === '' ? null : Number(raw);
-      else if (f.type === 'boolean') vals[k] = /^(1|true|yes|نعم)$/i.test(raw);
-      else if (f.type === 'tags') vals[k] = raw ? raw.split(/[;,]/).map((x) => x.trim()).filter(Boolean) : [];
-      else if (f.type === 'selection') vals[k] = f.options.find((o) => o[0] === raw || o[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
-      else vals[k] = raw;
-    });
-    next = create(next, model, vals).db;
-    count += 1;
-  }
-  return { db: next, count };
-}
 
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
@@ -98,12 +71,15 @@ export function ActionView({ leaf, base, params }) {
   };
   const exportCsv = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => ['monetary', 'float', 'integer'].includes(def.fields[f].type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, def.fields[f], r[f])))]));
+    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => {
+      const field = def.fields[f];
+      return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
+    }))]));
   };
   const importCsv = async (file) => {
     try {
       const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importRows(getDb(), model, defaults, fromCsv(text));
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importCsvRows(getDb(), model, defaults, fromCsv(text));
       // Report the import only once the server has accepted it (a refusal shows its own message).
       if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
@@ -138,8 +114,9 @@ export function ActionView({ leaf, base, params }) {
             if (date == null) return;
             const name = prompt(t('Counter (name, optional)'), '');
             if (name == null) return;
-            const user = name ? searchRecords(getDb(), 'hr.employee').find((u) => u.name === name) : null;
-            if (name && !user) throw new Error(t('Select an existing counter'));
+            const users = name ? searchRecords(getDb(), 'hr.employee').filter((u) => u.name === name) : [];
+            if (name && users.length !== 1) throw new Error(t(users.length ? 'Enter a unique counter name' : 'Select an existing counter'));
+            const user = users[0] ?? null;
             options = { date, user_id: user?.id ?? null };
           } else if (action.label === 'Snooze') {
             const duration = prompt(t('Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)'), '1 day');

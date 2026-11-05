@@ -8,6 +8,7 @@ import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money.js';
 import { parseAmount } from './models/common.js';
 import { parseDistributionInput } from './analytic_distribution.js';
+import { fieldReadonly } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
@@ -260,7 +261,7 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
 export const isLabelable = (field, readonly, record, db) => {
-  const isReadonly = readonly || (typeof field?.readonly === 'function' ? field.readonly(record, db) : field?.readonly);
+  const isReadonly = readonly || fieldReadonly(field, record, db);
   return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type);
 };
 
@@ -275,7 +276,7 @@ function DistributionInput({ value, onChange, ...props }) {
 }
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
-  const isReadonly = readonly || (typeof field.readonly === 'function' ? field.readonly(record, db) : field.readonly);
+  const isReadonly = readonly || fieldReadonly(field, record, db);
   if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {

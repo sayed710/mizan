@@ -1,4 +1,7 @@
 // RFC 4180-style CSV: quoted fields, doubled quotes, CRLF/LF line breaks.
+import { models } from './models/index.js';
+import { create, search } from './orm.js';
+import { fieldReadonly } from './field-metadata.js';
 
 const sanitizeFormula = (s) => {
   const trimmed = s.trimStart();
@@ -43,6 +46,43 @@ export function fromCsv(text) {
   if (cell || row.length) { row.push(cell); rows.push(row); }
   if (!rows.length) throw new Error('Empty file');
   return rows;
+}
+
+/** Import rows whose headers match field labels (or technical names); many2one cells hold explicit record IDs. */
+export function importCsvRows(db, model, defaults, rows) {
+  const fields = models[model].fields;
+  const keyOf = (header) => Object.keys(fields).find((key) => key === header || fields[key].label.toLowerCase() === header.trim().toLowerCase());
+  const [header, ...body] = rows;
+  const keys = header.map(keyOf);
+  let next = db;
+  let count = 0;
+  for (const row of body.filter((cells) => cells.some((cell) => cell.trim()))) {
+    const vals = { ...defaults };
+    keys.forEach((key, index) => {
+      const field = fields[key];
+      if (!key || fieldReadonly(field, vals, next)) return;
+      const raw = (row[index] ?? '').trim();
+      if (field.type === 'many2one') {
+        if (!raw) {
+          vals[key] = null;
+          return;
+        }
+        const id = Number(raw);
+        if (!Number.isSafeInteger(id) || id <= 0 || !search(next, field.relation).some((record) => record.id === id)) {
+          throw new Error(`Enter an existing record ID for ${field.label}`);
+        }
+        vals[key] = id;
+      }
+      else if (['monetary', 'float', 'integer', 'priority'].includes(field.type)) vals[key] = raw === '' ? null : Number(raw);
+      else if (field.type === 'boolean') vals[key] = /^(1|true|yes|نعم)$/i.test(raw);
+      else if (field.type === 'tags') vals[key] = raw ? raw.split(/[;,]/).map((value) => value.trim()).filter(Boolean) : [];
+      else if (field.type === 'selection') vals[key] = field.options.find((option) => option[0] === raw || option[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
+      else vals[key] = raw;
+    });
+    next = create(next, model, vals).db;
+    count += 1;
+  }
+  return { db: next, count };
 }
 
 /** Extracts 2D array of string cells from a table element or tree. */

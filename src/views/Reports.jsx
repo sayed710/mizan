@@ -17,6 +17,8 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
+import { AgedDetailRow } from './aged-detail-row.js';
+import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { balanceAnalyticColumns, balanceColumns, cashflowColumns, periodsFor, pnlAnalyticColumns, pnlColumns, supportsHorizontalGroupComparison } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
@@ -217,7 +219,7 @@ const Aged = (kind) => function AgedBody({ db, period }) {
           {buckets.map(([k]) => <td key={k} className="num">{r[k] ? money(r[k]) : ''}</td>)}
           <td className="num">{money(r.total)}</td>
         </tr>
-        {open.has(r.partner_id) && r.invoices.map((invoice) => <tr key={invoice.move_id} className="rep-detail"><td><a href={`#/open/account.move/${invoice.move_id}`}>{invoice.name}</a></td>{buckets.map(([k]) => <td key={k} className="num">{invoice[k] ? money(invoice[k]) : ''}</td>)}<td className="num">{money(invoice.total)}</td></tr>)}
+        {open.has(r.partner_id) && r.invoices.map((detail) => <AgedDetailRow key={detail.move_id} buckets={buckets} detail={detail} money={money} />)}
       </Fragment>)}
       <tr className="rep-total strong"><td>{t('Total')}</td>{buckets.map(([k]) => <td key={k} className="num">{money(sum(k))}</td>)}<td className="num">{money(sum('total'))}</td></tr>
     </tbody>
@@ -328,11 +330,13 @@ function Budget({ db, period }) {
       {search(db, 'account.budget').filter((b) => !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
         const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
         const companyMissing = !company;
+        let currency = null;
         let reportLines = [];
         let reportError = null;
-        if (!companyMissing && b.lines?.length) {
+        if (!companyMissing) {
           try {
-            reportLines = budgetReport(db, b.id, today(), { period, company_id: company.id });
+            currency = budgetCurrency(db, company.id);
+            if (b.lines?.length) reportLines = budgetReport(db, b.id, today(), { period, company_id: company.id });
           } catch (error) {
             reportError = error instanceof Error ? error.message : String(error);
           }
@@ -355,19 +359,19 @@ function Budget({ db, period }) {
             <Fragment key={`${b.id}-${i}`}>
               <tr className="rep-detail">
                 <td>{lineLabel(l)}</td>
-                <td className="num">{money(l.planned)}</td>
-                <td className="num">{money(l.practical)}</td>
-                <td className="num">{money(l.committed)}</td>
-                <td className="num">{money(l.variance)}</td>
+                <BudgetMoneyCell value={l.planned} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.practical} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.committed} currency={currency} money={money} />
+                <BudgetMoneyCell value={l.variance} currency={currency} money={money} />
                 <td className="num">{l.planned ? `${l.achievement}%` : ''}</td>
               </tr>
               {l.analytic_lines.map((item) => <tr className="rep-detail" key={item.id}>
                 <td>{Number.isInteger(item.id) ? <a href={`#/open/account.analytic.line/${item.id}`}>{item.name || item.date}</a> : (item.name || item.date)}{item.move_id && <>{' · '}<a href={`#/open/account.move/${item.move_id}`}>{read(db, 'account.move', item.move_id)?.name ?? item.move_id}</a></>}</td>
-                <td /><td className="num">{money(item.amount)}</td><td /><td /><td />
+                <td /><BudgetMoneyCell value={item.amount} currency={currency} money={money} /><td /><td /><td />
               </tr>)}
               {l.commitment_lines.map((item, index) => <tr className="rep-detail" key={`purchase-${item.purchase_id}-${index}`}>
                 <td><a href={`#/open/purchase.order/${item.purchase_id}`}>{read(db, 'purchase.order', item.purchase_id)?.name}</a></td>
-                <td /><td /><td className="num">{money(item.amount)}</td><td /><td />
+                <td /><td /><BudgetMoneyCell value={item.amount} currency={currency} money={money} /><td /><td />
               </tr>)}
             </Fragment>
           )),
