@@ -11,6 +11,7 @@ import { confirmAsset, disposeAsset } from './models/assets.js';
 import { renderAnnualReportHtml } from './models/auditreport.js';
 import { amortization } from './models/loans.js';
 import { setupDom, find } from './test-support/dom.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -22,7 +23,7 @@ test('asset disposal uses its posted invoice allocation and prevents reuse', () 
   ] });
   db = postMove(invoice.db, invoice.id);
   const makeAsset = (database, name) => {
-    const asset = create(database, 'account.asset', { name, company_id: 1, original_value: 120, acquisition_date: '2033-01-15', method: 'linear', method_number: 12, method_period: '1', prorata: true });
+    const asset = create(database, 'account.asset', { ...assetAccounts(database), name, company_id: 1, original_value: 120, acquisition_date: '2033-01-15', method: 'linear', method_number: 12, method_period: '1', prorata: true });
     return { id: asset.id, db: confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id)) };
   };
   const first = makeAsset(db, 'First');
@@ -45,7 +46,7 @@ test('asset disposal wizard accepts an invoice with an empty sale price', () => 
   let db = seed();
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2033-02-15', invoice_line_ids: [{ qty: 1, price_unit: 50, tax: 0 }] });
   db = postMove(invoice.db, invoice.id);
-  const asset = create(db, 'account.asset', { name: 'Wizard asset', original_value: 120, acquisition_date: '2033-01-15', method: 'linear', method_number: 12, method_period: '1' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Wizard asset', original_value: 120, acquisition_date: '2033-01-15', method: 'linear', method_number: 12, method_period: '1' });
   db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
   const button = models['account.asset'].form.buttons.find((item) => item.label === 'Sell or Dispose');
   const values = { date: '2033-02-15', invoice_id: invoice.id, invoice_line: '0', sale_value: '' };

@@ -1,7 +1,7 @@
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
@@ -15,8 +15,9 @@ const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.la
 const currency = (db, name) => search(db, 'res.currency').find((c) => c.name === name)?.id;
 const setup = () => {
   const base = ensureMainCompany(seed());
-  const db = createCompanyWithDefaultInvoiceJournals(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') }).db;
-  return { db, company: search(db, 'res.company').at(-1).id };
+  const made = createCompanyWithDefaultInvoiceJournals(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') });
+  const db = write(made.db, 'res.company', made.id, { expense_currency_exchange_account_id: accountId(base, '690100') });
+  return { db, company: made.id };
 };
 const invoice = (db, company, currencyId, price) => {
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, company_id: company, currency_id: currencyId, invoice_date: addDays(today(), -30), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: price, tax: 0 }] });

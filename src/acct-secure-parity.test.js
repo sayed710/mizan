@@ -387,6 +387,7 @@ test('depreciation models: asset template and bill-to-asset automatic creation',
     account_asset_id: fixedAccount.id,
     account_depreciation_id: depAccount.id,
     account_expense_id: expAccount.id,
+    account_depreciation_expense_id: expAccount.id,
     journal_id: journal.id,
   });
   db = depModel.db;

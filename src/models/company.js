@@ -1,7 +1,8 @@
 import { create, read, updateSettings, write } from '../orm.js';
-import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
-import { today } from './common.js';
+import { companyRoundingMethod, today } from './common.js';
+import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
 
@@ -12,7 +13,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['account.fiscal.category', 'account.report', 'account.report.horizontal.group', 'sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['account.budget', 'account.fiscal.category', 'account.report', 'account.report.horizontal.group', 'sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };
@@ -31,6 +32,27 @@ export function documentCompany(db, document) {
   if (!company) return null;
   const currency = company.currency_id ? read(db, 'res.currency', company.currency_id) : null;
   return { ...company, currency: currency?.name ?? null };
+}
+
+/** Postal address lines for a company or contact, in print order; blank parts are omitted. */
+export function addressLines(record, taxIdLabel = 'Tax ID') {
+  if (!record) return [];
+  return [
+    record.street,
+    [record.zip, record.city].filter(Boolean).join(' '),
+    record.country,
+    record.vat ? `${taxIdLabel}: ${record.vat}` : '',
+  ].filter(Boolean);
+}
+
+/**
+ * Per-tax base and amount for a document's lines, from their stored tax snapshots.
+ * Shared by the printed document and the emailed copy so both show the same detail.
+ */
+export function documentTaxBreakdown(db, record, lines = []) {
+  const currency = documentCurrency(db, record);
+  return taxGroups(lines, () => null, 1, currency, currency, { roundingMethod: companyRoundingMethod(db, record?.company_id) })
+    .map(({ tax_name: label, base, amount }) => ({ label, base, amount }));
 }
 
 /** Select active companies without changing the caller's database or selection. */
@@ -242,10 +264,10 @@ function companyGuard(db, before, r) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
-  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id']) {
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
-    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active deferred account belonging to this company';
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
   }
   if (r.current_year_earnings_account_id) {
     const account = record(db, 'account.account', r.current_year_earnings_account_id);
@@ -279,10 +301,27 @@ export function createCompany(db, vals) {
     accounts[field] = account.id;
   }
   const installed = new Map();
+  installed.set('212000:liability_current', accounts.deferred_revenue_account_id ?? values.deferred_revenue_account_id);
   for (const [field, [code, account_type, name]] of Object.entries(STOCK_CHART_ROLES)) {
     if (values[field]) continue;
     const key = `${code}:${account_type}`;
     if (!installed.has(key)) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db;
+      installed.set(key, account.id);
+    }
+    accounts[field] = installed.get(key);
+  }
+  for (const [field, code, name, account_type] of [
+    ['gain_account_id', '450300', 'Gain on Asset Disposal', 'income_other'], ['loss_account_id', '690300', 'Loss on Asset Disposal', 'expense_other'],
+    ['income_currency_exchange_account_id', '450100', 'Foreign Exchange Gain', 'income_other'], ['expense_currency_exchange_account_id', '690100', 'Foreign Exchange Loss', 'expense_other'],
+    ['income_early_payment_discount_account_id', '450200', 'Cash Discount Gain', 'income_other'], ['expense_early_payment_discount_account_id', '690200', 'Cash Discount Loss', 'expense_other'],
+    ['rental_deposit_account_id', '230100', 'Rental Deposits', 'liability_current'], ['rental_withheld_deposit_account_id', '450000', 'Other Income', 'income_other'],
+    ['down_payment_account_id', '212000', 'Deferred Revenue', 'liability_current'],
+  ]) {
+    if (values[field]) continue;
+    const key = `${code}:${account_type}`;
+    if (!installed.get(key)) {
       const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
       next = account.db;
       installed.set(key, account.id);
@@ -393,6 +432,10 @@ export const companyModels = {
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
+      gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
+      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },
+      rental_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Rental Deposit Liability Account' },
+      rental_withheld_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Withheld Deposit Income Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
       deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },

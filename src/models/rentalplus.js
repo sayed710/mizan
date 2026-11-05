@@ -14,6 +14,13 @@ const rentalOf = (db, id) => {
   return rental;
 };
 
+function rentalAccount(db, companyId, field, role) {
+  const company = read(db, 'res.company', companyId);
+  const account = read(db, 'account.account', company?.[field]);
+  if (!account || account.active === false || (account.company_id && account.company_id !== companyId)) throw new Error(`Configure the ${role} account on company ${company?.name ?? companyId}`);
+  return account.id;
+}
+
 /** Available fleet units, accounting for picked units already removed from on-hand stock. */
 export function availability(db, productId, from, to) {
   const [start, end] = windowOf(from, to);
@@ -32,10 +39,11 @@ export function holdDeposit(db, rentalId, amount) {
   if (!Number.isFinite(amount) || round(amount) <= 0) throw new Error('Deposit amount must be positive');
   const value = round(amount);
   const companyId = rental.company_id ?? 1;
+  const liability = rentalAccount(db, companyId, 'rental_deposit_account_id', 'rental deposit');
   const via = paymentJournal(db, null, companyId);
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Deposit ${rental.name}`, company: companyId, lines: [
     { account_id: via.accountId, debit: value, partner_id: rental.partner_id },
-    { account: '230100', credit: value, partner_id: rental.partner_id },
+    { account: liability, credit: value, partner_id: rental.partner_id },
   ] });
   return create(booked.db, 'rental.deposit', { rental_id: rentalId, company_id: rental.company_id ?? 1, amount: value, state: 'held', move_id: booked.id });
 }
@@ -50,11 +58,13 @@ export function settleDeposit(db, depositId, { damage = 0, note } = {}) {
   const withheld = round(damage), refund = round(deposit.amount - withheld);
   const partner_id = rental.partner_id;
   const companyId = rental.company_id ?? 1;
+  const liability = rentalAccount(db, companyId, 'rental_deposit_account_id', 'rental deposit');
+  const income = withheld ? rentalAccount(db, companyId, 'rental_withheld_deposit_account_id', 'withheld deposit income') : null;
   const via = paymentJournal(db, null, companyId);
   const booked = postEntry(db, { journal: via.code, journal_id: via.id, ref: `Settle deposit ${rental.name}`, company: companyId, lines: [
-    { account: '230100', debit: deposit.amount, partner_id },
+    { account: liability, debit: deposit.amount, partner_id },
     ...(refund ? [{ account_id: via.accountId, credit: refund, partner_id }] : []),
-    ...(withheld ? [{ account: '450000', credit: withheld, partner_id }] : []),
+    ...(withheld ? [{ account: income, credit: withheld, partner_id }] : []),
   ] });
   return write(booked.db, 'rental.deposit', depositId, { state: withheld ? 'withheld' : 'refunded', withheld_amount: withheld, note: note ?? deposit.note, settlement_move_id: booked.id });
 }

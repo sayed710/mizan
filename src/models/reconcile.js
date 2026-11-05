@@ -1,6 +1,6 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { accountId, ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
+import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
@@ -62,8 +62,12 @@ function writeOff(db, rule, line) {
   const balance = line.open_amount != null ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency) : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
   const counterparts = splitCounterparts(rule.line_ids ?? [], balance, currency).filter((l) => l.value);
-  const unknown = counterparts.find((l) => !accountId(db, l.account_code, line.company_id ?? 1) && !accountId(db, l.account_code));
-  if (unknown) throw new Error(`Unknown account ${unknown.account_code} in reconciliation model ${rule.name}`);
+  for (const counterpart of counterparts) {
+    const account = read(db, 'account.account', counterpart.account_id);
+    if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${rule.name}`);
+    if (!account || account.active === false) throw new Error(`Unknown account in reconciliation model ${rule.name}`);
+    if (account.company_id && account.company_id !== company) throw new Error('Reconciliation account belongs to another company');
+  }
   const partner_id = line.partner_id ?? null;
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
   const via = paymentJournal(db, line.journal_id, company);
@@ -84,7 +88,7 @@ function writeOff(db, rule, line) {
     const partner = l.partner_id ?? partner_id;
     return [
       side(net, !incoming, {
-        account: l.account_code,
+        account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
         ...(taxes.length ? {
@@ -120,7 +124,8 @@ function writeOff(db, rule, line) {
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
-  const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_code);
+  if (rule.company_id && rule.company_id !== (line.company_id ?? 1)) throw new Error('Reconciliation model belongs to another company');
+  const mappings = (rule.line_ids ?? []).filter((l) => l.partner_id && !l.account_id);
   if (mappings.length && mappings.length === (rule.line_ids ?? []).length) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
     return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
@@ -167,6 +172,7 @@ export const reconcileModels = {
     label: 'Reconciliation Models',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       sequence: { type: 'integer', label: 'Sequence' },
       rule_type: { type: 'selection', label: 'Type', options: [['writeoff_button', 'Button to generate counterpart entry'], ['writeoff_suggestion', 'Rule to suggest counterpart entry'], ['invoice_matching', 'Rule to match invoices/bills']] },
       auto_reconcile: { type: 'boolean', label: 'Auto-validate' },
@@ -182,21 +188,26 @@ export const reconcileModels = {
         type: 'one2many',
         label: 'Counterpart Entries',
         fields: {
-          account_code: { type: 'char', label: 'Account' },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
           label: { type: 'char', label: 'Label' },
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
           tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes' },
           amount_type: { type: 'selection', label: 'Amount Type', options: [['percentage', 'Percentage of balance'], ['fixed', 'Fixed']] },
           amount: { type: 'float', label: 'Amount' },
         },
-        newLine: () => ({ account_code: '690000', label: '', amount_type: 'percentage', amount: 100 }),
+        newLine: () => ({ label: '', amount_type: 'percentage', amount: 100 }),
       },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
       sequence: 10, rule_type: 'writeoff_button', match_nature: 'both', match_amount: '', match_label: '', active: true,
-      line_ids: [{ account_code: '690000', label: '', amount_type: 'percentage', amount: 100 }],
+      line_ids: [{ label: '', amount_type: 'percentage', amount: 100 }],
     }),
+    guard: (db, _before, rule) => (rule.line_ids ?? []).some((line) => {
+      if (!line.account_id) return false;
+      const account = read(db, 'account.account', line.account_id);
+      return !account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1));
+    }) ? 'Reconciliation accounts must be active and belong to the model company' : null,
     list: ['sequence', 'name', 'rule_type', 'auto_reconcile'],
     form: {
       title: 'name',

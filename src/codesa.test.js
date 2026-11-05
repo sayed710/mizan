@@ -6,7 +6,7 @@ import { seed } from './seed.js';
 import { closeSession } from './models/pos.js';
 import { postDueEntries } from './models/deferred.js';
 import { createSheet, submitSheet, approveSheet, postSheet } from './models/expenseplus.js';
-import { migrate, SCHEMA_VERSION } from './migrations.js';
+import { migrate } from './migrations.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 test('bank reconciliation uses the selected journal suspense account', () => {
@@ -101,7 +101,7 @@ test('migration maps only company-owned chart accounts by code and type', () => 
   const suspense = create(company.db, 'account.account', { name: 'Suspense', code: '101404', account_type: 'asset_current', company_id: company.id });
   const wrong = create(suspense.db, 'account.account', { name: 'Wrong type', code: '450000', account_type: 'expense', company_id: company.id });
   const journal = create(wrong.db, 'account.journal', { name: 'Branch cash', code: 'BC', type: 'cash', company_id: company.id });
-  db = { ...journal.db, schema_version: SCHEMA_VERSION - 1 };
+  db = { ...journal.db, schema_version: 29 };
   const migrated = migrate(db);
   assert.equal(read(migrated, 'account.journal', journal.id).suspense_account_id, suspense.id);
   assert.equal(read(migrated, 'account.journal', journal.id).profit_account_id ?? null, null);
@@ -112,7 +112,7 @@ test('migration resolves a stored statement counterpart code to that company acc
   const rent = search(db, 'account.account').find((a) => a.code === '630000' && (a.company_id ?? 1) === 1);
   const line = search(db, 'account.bank.statement.line').find((l) => l.counterpart_account_id === rent.id);
   const { counterpart_account_id: _drop, ...legacy } = line;
-  db = { ...db, schema_version: SCHEMA_VERSION - 1, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => (l.id === line.id ? { ...legacy, counterpart: '630000' } : l)) } };
+  db = { ...db, schema_version: 29, records: { ...db.records, 'account.bank.statement.line': db.records['account.bank.statement.line'].map((l) => (l.id === line.id ? { ...legacy, counterpart: '630000' } : l)) } };
   const migrated = read(migrate(db), 'account.bank.statement.line', line.id);
   assert.equal(migrated.counterpart_account_id, rent.id);
   assert.equal('counterpart' in migrated, false);

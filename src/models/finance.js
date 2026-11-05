@@ -1149,15 +1149,18 @@ export function analyticActualLines(db, period = {}) {
     if (period.account_id != null && line.account_id !== period.account_id) return false;
     if (period.general_account && !(line.general_account ?? '').startsWith(period.general_account)) return false;
     const move = line.move_id && read(db, 'account.move', line.move_id);
-    return !line.move_id || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
+    return (!line.move_id && !period.posted_only) || (move?.state === 'posted' && (move.company_id ?? 1) === (line.company_id ?? 1));
   });
 }
+
+/** An analytic line's amount in the reporting company's currency, translated at the line's accounting date. */
+export const analyticReportAmount = (db, line) => reportingBookedAmount(db, line, Number(line.amount) || 0);
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {
   const totals = new Map();
   for (const line of analyticActualLines(db, period)) {
-    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + (Number(line.amount) || 0)));
+    totals.set(line.account_id, round((totals.get(line.account_id) ?? 0) + analyticReportAmount(db, line)));
   }
   return totals;
 }
@@ -1212,6 +1215,7 @@ export const financeModels = {
   'account.budget': {
     label: 'Budgets',
     fields: {
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
       name: { type: 'char', label: 'Budget Name', required: true },
       date_from: { type: 'date', label: 'Start Date' },
       date_to: { type: 'date', label: 'End Date' },
@@ -1231,7 +1235,7 @@ export const financeModels = {
       statusbarClickable: true,
       buttons: [{ label: 'Budget vs Actual', run: (db) => ({ db, go: '#/accounting/budget-report' }) }],
       title: 'name',
-      groups: [['date_from'], ['date_to']],
+      groups: [['date_from', 'company_id'], ['date_to']],
       tabs: [{ label: 'Budget Lines', fields: ['lines'] }],
       chatter: true,
     },

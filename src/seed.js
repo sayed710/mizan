@@ -174,7 +174,7 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
   db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], down_payment_account_id: installedByCode['212000'], gain_account_id: installedByCode['450300'], loss_account_id: installedByCode['690300'], income_currency_exchange_account_id: installedByCode['450100'], expense_currency_exchange_account_id: installedByCode['690100'], income_early_payment_discount_account_id: installedByCode['450200'], expense_early_payment_discount_account_id: installedByCode['690200'], rental_deposit_account_id: installedByCode['230100'], rental_withheld_deposit_account_id: installedByCode['450000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,
@@ -282,7 +282,7 @@ export function seed() {
   add('account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: today(), invoice_date_due: addDays(today(), 30), invoice_line_ids: lines([[1, 4]]) });
 
   // Purchases: received PO + its posted bill, open RFQ.
-  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]) });
+  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]).map((line) => ({ ...line, purchase_line_key: crypto.randomUUID() })) });
   const po1rec = read(db, 'purchase.order', po1);
   // Received through stock valuation at the PO price, so the bill clears the interim account.
   db = moveValued(db, po1rec.order_line.map((l) => ({ ...l, unit_cost: l.price_unit })), 1, { reference: po1rec.name, date: addDays(today(), -11) });
@@ -498,7 +498,7 @@ export function seed() {
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
   const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
-  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
+  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));

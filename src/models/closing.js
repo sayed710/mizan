@@ -1,7 +1,8 @@
 // Fiscal closing and reversing exchange adjustments (comparative reports live in views/reportCompare.js).
-import { create, read, search, write } from '../orm.js';
+import { read, search, write } from '../orm.js';
 import { addDays, shiftMonth, today, validDate } from './common.js';
-import { accountId, balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
+import { balances, balanceSheet, journalItems, postEntry, profitAndLoss } from './ledger.js';
+import { exchangeAccount } from './exchange-account.js';
 import { companyCurrency, toCompany } from './currency.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { applicationActiveAt, settlementCompanyAllocations } from './settlement.js';
@@ -11,12 +12,6 @@ import { currentYearEarningsAccount } from './earnings.js';
 const pnlTypes = ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'];
 export const checkDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid date'); };
 const side = (amount) => ({ debit: Math.max(0, round(amount)), credit: Math.max(0, round(-amount)) });
-
-function ensureAccount(db, code, name, type, company = null) {
-  const account = read(db, 'account.account', accountId(db, code, company));
-  if (account && account.account_type !== type) throw new Error(`${code} must be an ${type} account`);
-  return account ? db : create(db, 'account.account', { code, name, account_type: type, ...(company ? { company_id: company } : {}) }).db;
-}
 
 const sameLines = (a, b) => a.length === b.length && a.every((l, i) => l.account_id === b[i].account_id && round(l.debit) === round(b[i].credit) && round(l.credit) === round(b[i].debit));
 
@@ -235,11 +230,11 @@ export function foreignBalanceReport(db, date, { companyId = null, companyScoped
   return [...invoices, ...manual];
 }
 
-function sameRevaluation(entry, expected, db, company) {
+function sameRevaluation(entry, expected) {
   const totals = (items) => {
     const map = new Map();
     for (const line of items) {
-      const account = line.account_id ?? accountId(db, line.account, company) ?? accountId(db, line.account);
+      const account = line.account_id;
       if (!account) return null;
       const key = `${account}:${line.partner_id ?? ''}`;
       map.set(key, round((map.get(key) ?? 0) + (Number(line.debit) || 0) - (Number(line.credit) || 0)));
@@ -251,17 +246,8 @@ function sameRevaluation(entry, expected, db, company) {
   return wanted && actual && JSON.stringify(wanted) === JSON.stringify(actual);
 }
 
-function configuredExchangeAccount(db, accountId, type, company, label) {
-  if (!accountId) return null;
-  const account = read(db, 'account.account', accountId);
-  if (!account || (account.company_id && account.company_id !== company) || account.account_type !== type) {
-    throw new Error(`${label} must be a ${type} account belonging to this company`);
-  }
-  return account.id;
-}
-
 /** Post one exchange adjustment and its next-day reversal, once per date. */
-export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode = '650100', companyScoped = false, companyId = null } = {}) {
+export function revalueForeignBalances(db, date, { companyScoped = false, companyId = null } = {}) {
   checkDate(date);
   const rows = foreignBalanceReport(db, date, { companyId, companyScoped }).filter((r) => r.difference);
   const plans = [];
@@ -269,8 +255,6 @@ export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode
   for (const company of [...new Set(rows.map((r) => r.company_id))]) {
     const settings = read(db, 'res.company', company);
     if (!settings) throw new Error('A revaluation company no longer exists');
-    const gainAccount = configuredExchangeAccount(db, settings.income_currency_exchange_account_id, 'income_other', company, 'Foreign exchange gain account');
-    const lossAccount = configuredExchangeAccount(db, settings.expense_currency_exchange_account_id, 'expense_other', company, 'Foreign exchange loss account');
     let gain = 0;
     let loss = 0;
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
@@ -283,23 +267,19 @@ export function revalueForeignBalances(db, date, { gainCode = '450100', lossCode
       return { account_id: r.account_id, partner_id: r.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
     }).filter((line) => line.debit || line.credit);
     const expected = [...lines];
-    if (gain) expected.push({ ...(gainAccount ? { account_id: gainAccount } : { account: gainCode }), credit: gain });
-    if (loss) expected.push({ ...(lossAccount ? { account_id: lossAccount } : { account: lossCode }), debit: loss });
+    if (gain) expected.push({ account_id: exchangeAccount(db, company, 1), credit: gain });
+    if (loss) expected.push({ account_id: exchangeAccount(db, company, -1), debit: loss });
     const prior = search(db, 'account.move').find((m) => (m.company_id ?? 1) === company && m.revaluation_date === date && m.state === 'posted');
     if (prior) {
-      if (!sameRevaluation(prior, expected, db, company)) {
+      if (!sameRevaluation(prior, expected)) {
         throw new Error(`Company ${settings.name || company} already has a foreign currency revaluation dated ${date}; reverse it before regenerating the updated position`);
       }
       continue;
     }
-    plans.push({ company, settings, gainAccount, lossAccount, gain, loss, lines, expected });
+    plans.push({ company, expected });
   }
 
   let next = db;
-  for (const plan of plans) {
-    if (!plan.gainAccount && plan.gain) next = ensureAccount(next, gainCode, 'Foreign Exchange Gain', 'income_other', plan.company);
-    if (!plan.lossAccount && plan.loss) next = ensureAccount(next, lossCode, 'Foreign Exchange Loss', 'expense_other', plan.company);
-  }
   for (const plan of plans) {
     const { company, expected } = plan;
     const entry = postEntry(next, { journal: 'MISC', date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company });

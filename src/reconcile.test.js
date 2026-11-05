@@ -31,9 +31,9 @@ test('ruleMatches checks label, amount, nature, partner and regex; an invalid re
 test('a write-off splits fixed then percentage counterparts into one balanced bank entry', () => {
   const { db, id } = addLine(seed(), { payment_ref: 'Card settlement', amount: 1000 });
   const r = rule({ rule_type: 'writeoff_button', line_ids: [
-    { account_code: '600000', label: 'Fee', amount_type: 'percentage', amount: 33.333 },
-    { account_code: '690000', label: 'Fixed fee', amount_type: 'fixed', amount: 10 },
-    { account_code: '450000', label: 'Rest', amount_type: 'percentage', amount: 66.667 },
+    { account_id: accountId(db, '600000'), label: 'Fee', amount_type: 'percentage', amount: 33.333 },
+    { account_id: accountId(db, '690000'), label: 'Fixed fee', amount_type: 'fixed', amount: 10 },
+    { account_id: accountId(db, '450000'), label: 'Rest', amount_type: 'percentage', amount: 66.667 },
   ] });
   const after = applyRule(db, r, read(db, LINE, id));
   const line = read(after, LINE, id);
@@ -62,8 +62,8 @@ test('invoice matching reconciles a statement line with the posted invoice for i
 
 test('autoReconcile applies the lowest-sequence auto-validated rule and skips the others', () => {
   let db = seed();
-  db = addRule(db, { sequence: 20, auto_reconcile: true, match_label: 'contains', match_label_param: 'bank', line_ids: [{ account_code: '690000', amount_type: 'percentage', amount: 100 }] });
-  db = addRule(db, { sequence: 5, auto_reconcile: true, match_label: 'contains', match_label_param: 'charges', line_ids: [{ account_code: '600000', amount_type: 'percentage', amount: 100 }] });
+  db = addRule(db, { sequence: 20, auto_reconcile: true, match_label: 'contains', match_label_param: 'bank', line_ids: [{ account_id: accountId(db, '690000'), amount_type: 'percentage', amount: 100 }] });
+  db = addRule(db, { sequence: 5, auto_reconcile: true, match_label: 'contains', match_label_param: 'charges', line_ids: [{ account_id: accountId(db, '600000'), amount_type: 'percentage', amount: 100 }] });
   db = addRule(db, { sequence: 1, auto_reconcile: false, rule_type: 'writeoff_suggestion', match_label: 'contains', match_label_param: 'rent' });
   const after = autoReconcile(db);
   const byRef = (ref) => search(after, LINE).find((l) => l.payment_ref === ref);
@@ -78,7 +78,8 @@ test('autoReconcile applies the lowest-sequence auto-validated rule and skips th
 });
 
 test('the bank line button applies the matching reconciliation model', () => {
-  const base = create(seed(), 'account.reconcile.model', { name: 'Fees', rule_type: 'writeoff_button', match_label: 'contains', match_label_param: 'fee', line_ids: [{ account_code: '690000', label: 'Fee', amount_type: 'percentage', amount: 100 }] });
+  const initial = seed();
+  const base = create(initial, 'account.reconcile.model', { name: 'Fees', rule_type: 'writeoff_button', match_label: 'contains', match_label_param: 'fee', line_ids: [{ account_id: accountId(initial, '690000'), label: 'Fee', amount_type: 'percentage', amount: 100 }] });
   const { db, id } = create(base.db, 'account.bank.statement.line', { date: '2026-05-01', payment_ref: 'Card fee May', amount: -12, state: 'to_check' });
   const button = models['account.bank.statement.line'].form.buttons.find((b) => b.label === 'Apply Reconciliation Model');
   const done = button.run(db, read(db, 'account.bank.statement.line', id)).db;

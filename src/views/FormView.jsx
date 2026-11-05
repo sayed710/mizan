@@ -8,6 +8,7 @@ import { myEmployeeId } from '../access.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
+import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
@@ -76,6 +77,38 @@ function SmartButtons({ db, rec, smart }) {
         );
       })}
     </div>
+  );
+}
+
+/** Model-driven widget (def.form.outstandingCredits): lists the posted payments with unapplied credit and applies a chosen one in full. */
+function OutstandingCredits({ db, spec, current, onApply }) {
+  const rows = spec.list(db, current);
+  if (!rows?.length) return null;
+  return (
+    <section className="outstanding-credits" aria-label={t(spec.title)}>
+      <h3>{t(spec.title)}</h3>
+      <table className="list">
+        <thead><tr>
+          {spec.fields.map((f) => <th key={f.name}>{t(f.label)}</th>)}
+          <th><span className="sr-only">{t('Actions')}</span></th>
+        </tr></thead>
+        <tbody>
+          {rows.map((row) => {
+            const currency = spec.fields.some((f) => f.money) ? companyCurrencyRecord(db, row.company_id ?? 1) : null;
+            return (
+              <tr key={row.id}>
+                {spec.fields.map((f) => (
+                  <td key={f.name} className={f.money ? 'num' : ''}>
+                    {f.money ? money(row[f.name] ?? 0, currency?.name ?? null, currency) : String(row[f.name] ?? '')}
+                  </td>
+                ))}
+                <td><button type="button" className="btn sm" onClick={() => onApply(row)}>{t(spec.applyLabel)}</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
@@ -489,6 +522,22 @@ export function FormView({ leaf, id, base, params }) {
                 </div>
               ))}
             </div>
+            {def.form.outstandingCredits && !isNew && (
+              <OutstandingCredits
+                db={db}
+                spec={def.form.outstandingCredits}
+                current={current}
+                onApply={(row) => {
+                  const savedId = current.id && !dirty ? current.id : save();
+                  if (savedId == null) return;
+                  try {
+                    const res = def.form.outstandingCredits.apply(getDb(), read(getDb(), model, savedId), row.id);
+                    commit(res.db);
+                    setError(null);
+                  } catch (e) { fail(e); }
+                }}
+              />
+            )}
             {tabs && (
               <>
                 <div className="tabs" role="tablist">
