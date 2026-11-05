@@ -98,7 +98,7 @@ export function ActionView({ leaf, base, params }) {
   };
   const exportCsv = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => display(db, def.fields[f], r[f])))]));
+    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => ['monetary', 'float', 'integer'].includes(def.fields[f].type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, def.fields[f], r[f])))]));
   };
   const importCsv = async (file) => {
     try {

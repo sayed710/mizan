@@ -24,7 +24,7 @@ export function stockAccount(db, p, role, companyId = 1) {
   const company = read(db, 'res.company', companyId);
   const candidateId = property ? productProperty(db, p, property, companyId) : null;
   const candidateAcc = candidateId ? read(db, 'account.account', candidateId) : null;
-  const id = (candidateAcc && (candidateAcc.company_id ?? 1) === companyId ? candidateId : null) || company?.[field];
+  const id = (candidateAcc && (candidateAcc.company_id == null || candidateAcc.company_id === companyId) ? candidateId : null) || company?.[field];
   const category = read(db, 'product.category', p?.categ_id);
   const message = `Configure the ${label} account on category ${category?.name ?? '(none)'} or company ${company?.name ?? companyId}`;
   if (!id) throw new Error(message);
