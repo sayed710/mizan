@@ -231,7 +231,7 @@ const validInvoiceTotal = (r, db) => total(r, db) > 0 || (total(r, db) === 0 && 
 const RECURRENCE_MONTHS = { monthly: 1, quarterly: 3, yearly: 12 };
 const RECURRING_EXCLUDED_FIELDS = new Set([
   'id', 'name', 'ref', 'payment_reference', 'state', 'line_ids', 'payments', 'amount_paid', 'payment_date',
-  'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id',
+  'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'debit_origin_id',
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
@@ -831,6 +831,52 @@ export function correctCreditNote(db, note) {
   return { db: postNote(out.db, 'account.move', note.id, `Correction invoice drafted for ${note.name}`), go: `#/accounting/${purchase ? 'bills' : 'invoices'}/${out.id}` };
 }
 
+/**
+ * Draft debit note documenting additional debt on a posted customer invoice or vendor bill:
+ * the reason, date, journal and whether the invoice lines are copied are all the caller's choice.
+ * The note stays a draft for the user to adjust and confirm; order-line links are stripped so the
+ * original's invoiced quantities are never double-counted.
+ */
+export function debitNote(db, r, options = {}) {
+  if (!r || r.state !== 'posted' || !['out_invoice', 'in_invoice'].includes(r.move_type)) {
+    throw new Error('Only posted invoices and vendor bills can be debited');
+  }
+  const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
+  const copyLines = opts.copy_lines ?? true;
+  const date = opts.date ?? today();
+  if (!validDate(date)) {
+    throw new Error('Enter a valid debit note date');
+  }
+  const journalIdVal = opts.journal_id ?? null;
+  if (journalIdVal) {
+    const j = read(db, 'account.journal', journalIdVal);
+    if (!j) throw new Error('Selected journal does not exist');
+    if (j.company_id && j.company_id !== (r.company_id ?? 1)) throw new Error('Journal belongs to another company');
+    const expectedType = isPurchase(r) ? 'purchase' : 'sale';
+    if (j.type !== expectedType) throw new Error(`Journal must be of type ${expectedType}`);
+  }
+  const reason = String(opts.reason ?? '').trim();
+  const ref = reason ? `Debit of ${r.name}, ${reason}` : `Debit of ${r.name}`;
+  const { db: next, id } = create(db, 'account.move', {
+    move_type: r.move_type,
+    partner_id: r.partner_id,
+    ...(journalIdVal ? { journal_id: journalIdVal } : {}),
+    invoice_origin: r.name,
+    invoice_date: date,
+    invoice_date_due: date,
+    debit_origin_id: r.id,
+    company_id: r.company_id,
+    currency_id: r.currency_id ?? null,
+    fiscal_position_id: r.fiscal_position_id ?? null,
+    ...(r.invoice_cash_rounding_id ? { invoice_cash_rounding_id: r.invoice_cash_rounding_id } : {}),
+    invoice_line_ids: copyLines
+      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, ...line }) => ({ ...line }))
+      : [],
+    ref,
+  });
+  return { db: next, id, go: `#/accounting/${isPurchase(r) ? 'bills' : 'invoices'}/${id}` };
+}
+
 /** Early-payment discount available on `date` for an unpaid invoice (0 when its term has none or the window passed). */
 export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
@@ -909,6 +955,23 @@ function registerPayment(db, r, values = {}) {
   if (!journalIdVal) throw new Error('Select a payment journal');
   const payment = paymentJournal(db, journalIdVal, r.company_id ?? 1);
   return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
+}
+
+export { isOutstandingCreditFor, outstandingPaymentCredits };
+
+/** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
+function isOutstandingCreditFor(db, r, p) {
+  return p.state === 'posted'
+    && Number(p.unapplied) > 0
+    && (p.company_id ?? 1) === (r.company_id ?? 1)
+    && sameCommercialPartner(db, p.partner_id, r.partner_id)
+    && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound'));
+}
+
+/** Outstanding (unapplied) payment credits for a posted open invoice or vendor bill, in record order. */
+function outstandingPaymentCredits(db, r) {
+  if (!r || r.state !== 'posted' || !isInvoice(r) || !(residual(r, db) > 0)) return [];
+  return (db?.records['account.payment'] ?? []).filter((p) => isOutstandingCreditFor(db, r, p));
 }
 
 const termDue = (db, r, { clear = false } = {}) => {
@@ -1192,6 +1255,8 @@ export const accountingModels = {
       reverse_date: { type: 'date', label: 'Reversal Date' },
       reverse_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Reversal Journal' },
       correction_of_id: { type: 'many2one', relation: 'account.move', label: 'Correction of', readonly: true },
+      // Set by the Debit Note action: the issued document this debit note adds charges to.
+      debit_origin_id: { type: 'many2one', relation: 'account.move', label: 'Debit Note of', readonly: true },
       intercompany_move_id: { type: 'many2one', relation: 'account.move', label: 'Inter-company Document', readonly: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       purchase_id: { type: 'many2one', relation: 'purchase.order', label: 'Purchase Order', readonly: true },
@@ -1260,12 +1325,7 @@ export const accountingModels = {
         },
         {
           label: 'Apply Outstanding Credit',
-          when: (r, db) => r.state === 'posted' && isInvoice(r) && residual(r, db) > 0
-            && (db?.records['account.payment'] ?? []).some((p) => p.state === 'posted'
-              && Number(p.unapplied) > 0
-              && (p.company_id ?? 1) === (r.company_id ?? 1)
-              && sameCommercialPartner(db, p.partner_id, r.partner_id)
-              && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound'))),
+          when: (r, db) => outstandingPaymentCredits(db, r).length > 0,
           wizard: (db, r) => ({
             title: 'Apply Outstanding Credit',
             fields: [
@@ -1275,11 +1335,7 @@ export const accountingModels = {
                 relation: 'account.payment',
                 label: 'Outstanding Payment',
                 required: true,
-                domain: (p) => p.state === 'posted'
-                  && Number(p.unapplied) > 0
-                  && (p.company_id ?? 1) === (r.company_id ?? 1)
-                  && sameCommercialPartner(db, p.partner_id, r.partner_id)
-                  && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound')),
+                domain: (p) => isOutstandingCreditFor(db, r, p),
               },
               { name: 'date', type: 'date', label: 'Application Date', default: today(), required: true },
             ],
@@ -1344,6 +1400,20 @@ export const accountingModels = {
           }),
           run: creditNote,
         },
+        {
+          label: 'Debit Note',
+          when: (r) => r.state === 'posted' && ['out_invoice', 'in_invoice'].includes(r.move_type),
+          wizard: (db, r) => ({
+            title: 'Debit Note',
+            fields: [
+              { name: 'copy_lines', type: 'boolean', label: 'Copy Lines', default: true },
+              { name: 'reason', type: 'char', label: 'Reason Displayed on Debit Note', default: '' },
+              { name: 'date', type: 'date', label: 'Debit Note Date', required: true, default: today() },
+              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Use Specific Journal', default: r.journal_id ?? null, domain: (j) => (!j.company_id || j.company_id === (r?.company_id ?? 1)) && j.type === (isPurchase(r) ? 'purchase' : 'sale') },
+            ],
+          }),
+          run: debitNote,
+        },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
         { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !r.inalterable_hash && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
@@ -1359,6 +1429,18 @@ export const accountingModels = {
         ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),
       footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
+      // The outstanding-credits widget lists the posted payments with unapplied credit and applies a chosen one in full.
+      outstandingCredits: {
+        title: 'Outstanding Credits',
+        applyLabel: 'Add',
+        fields: [
+          { name: 'name', label: 'Payment' },
+          { name: 'date', label: 'Paid on' },
+          { name: 'unapplied', label: 'Available Credit', money: true },
+        ],
+        list: (db, r) => outstandingPaymentCredits(db, r),
+        apply: (db, r, paymentId) => ({ db: applyPaymentCredit(db, paymentId, r.id, today()) }),
+      },
       chatter: true,
     },
   },
