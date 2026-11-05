@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
-import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
+import { amounts, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
@@ -847,20 +847,52 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
   };
 }
 
+/**
+ * First day of the fiscal year containing a date. Configured fiscal years decide it; after the last configured
+ * year the same start repeats yearly, and a company without any year uses the calendar year (the app default).
+ */
+export function fiscalYearStart(db, date, companyId) {
+  const years = search(db, 'account.fiscal.year').filter((y) => (y.company_id ?? 1) === companyId
+    && y.date_from <= date && date <= y.date_to);
+  if (years.length > 1) {
+    const company = read(db, 'res.company', companyId)?.name ?? companyId;
+    throw new Error(`Fiscal years overlap for company ${company} on ${date}`);
+  }
+  if (years.length === 1) return years[0].date_from;
+  const previous = search(db, 'account.fiscal.year')
+    .filter((y) => (y.company_id ?? 1) === companyId && y.date_to < date)
+    .sort((a, b) => a.date_from.localeCompare(b.date_from)).at(-1);
+  let start = previous?.date_from ?? `${date.slice(0, 4)}-01-01`;
+  while (shiftMonth(start, 12) <= date) start = shiftMonth(start, 12);
+  return start;
+}
+
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
 export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const items = analyticMoveItems(journalItems(db, filter), analyticAccountIds);
+  const reportDate = filter.to ?? today();
+  const items = analyticMoveItems(journalItems(db, { ...filter, to: reportDate }), analyticAccountIds);
   const rows = balances(db, weighted(items, weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
-  const equity = pick(['equity', 'equity_unaffected'], -1);
-  // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
+  let equity = pick(['equity', 'equity_unaffected'], -1);
   // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
   const reportCompanyId = filter.company_id ?? filter.company ?? db.settings?.current_company_id ?? 1;
   const earningsAccount = configuredEarningsAccount(db, reportCompanyId);
+  // Closing entries carry no analytic allocation, so an analytic report keeps a closed year's P&L visible.
+  // Split it from the current year and fold it into equity as prior unallocated earnings; their sum is unchanged.
+  const yearStart = fiscalYearStart(db, reportDate, reportCompanyId);
+  const currentFilter = { ...filter, to: reportDate, from: filter.from && filter.from > yearStart ? filter.from : yearStart };
+  const priorFilter = { ...filter, to: addDays(yearStart, -1) };
+  let earnings = profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+  const priorEarnings = profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net;
+  if (priorEarnings) {
+    const index = earningsAccount ? equity.findIndex((r) => r.account.id === earningsAccount.id) : -1;
+    if (index >= 0) equity = equity.map((r, i) => (i === index ? { ...r, balance: round(r.balance + priorEarnings) } : r));
+    else if (earningsAccount) equity.push({ account: earningsAccount, balance: round(priorEarnings) });
+    else earnings = round(earnings + priorEarnings);
+  }
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,
