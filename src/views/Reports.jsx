@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search } from '../orm.js';
 import { today } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
-import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
+import { balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
@@ -17,7 +17,7 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
-import { balanceAnalyticColumns, balanceColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
+import { balanceAnalyticColumns, balanceColumns, cashflowColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
 import { SalesReview } from './SalesReview.jsx';
@@ -80,11 +80,13 @@ function Comparison({ data, report }) {
   const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance?.[data.sections.length + i]} showVariance={showVariance} />;
   return <tbody>{report === 'pnl'
     ? [section(0), section(1), total(0), section(2), total(1), section(3), section(4), total(2)]
-    : [section(0), total(0), section(1), section(2), section(3), total(1)]}</tbody>;
+    : report === 'balance'
+      ? [section(0), total(0), section(1), section(2), section(3), total(1)]
+      : [...data.sections.map((_, i) => section(i)), ...data.totals.map((_, i) => total(i))]}</tbody>;
 }
 
-function Pnl({ db, period }) {
-  const p = profitAndLoss(db, period);
+function Pnl({ db, period, analyticAccountIds }) {
+  const p = profitAndLoss(db, period, { analyticAccountIds });
   return (
     <tbody>
       <Section title="Revenue" total={p.revenue} rows={p.detail.revenue} />
@@ -99,8 +101,8 @@ function Pnl({ db, period }) {
   );
 }
 
-function Balance({ db, period }) {
-  const b = balanceSheet(db, period.to);
+function Balance({ db, period, analyticAccountIds }) {
+  const b = balanceSheet(db, period.to, { analyticAccountIds });
   return (
     <tbody>
       <Section title="Assets" total={b.totalAssets} rows={b.assets} />
@@ -113,9 +115,9 @@ function Balance({ db, period }) {
   );
 }
 
-function Ledger({ db, period }) {
-  const items = journalItems(db, period);
-  const opening = period.from ? journalItems(db, { to: period.from }).filter((l) => l.date < period.from) : [];
+function Ledger({ db, period, analyticAccountIds }) {
+  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds);
+  const opening = period.from ? filterByAnalytic(journalItems(db, { to: period.from }), analyticAccountIds).filter((l) => l.date < period.from) : [];
   const accounts = [...new Set([...items, ...opening].map((l) => l.account_id))]
     .map((id) => read(db, 'account.account', id)).filter(Boolean).sort((a, b) => a.code.localeCompare(b.code));
   const [open, setOpen] = useState(() => new Set());
@@ -531,6 +533,7 @@ function ReportPage({ leaf }) {
   const [ledgerId, setLedgerId] = useState('');
   const [journalId, setJournalId] = useState('');
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
+  const [analyticAccountIds, setAnalyticAccountIds] = useState([]);
   const ledgerReports = ['pnl', 'balance', 'ledger', 'trial', 'journalAudit'];
   const ledgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
   const ledger = ledgerReports.includes(leaf.report) ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
@@ -557,16 +560,20 @@ function ReportPage({ leaf }) {
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
-  const comparable = ['pnl', 'balance'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
+  const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
+  const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
   const horizontalGroups = comparable ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
     (g.company_id ?? 1) === (selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany))
   ) : [];
   const horizontalGroup = comparable ? horizontalGroups.find((g) => g.id === Number(horizontalGroupId)) : null;
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
+  const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const data = horizontalGroup
     ? (leaf.report === 'pnl' ? pnlAnalyticColumns(db, horizontalGroup, period) : balanceAnalyticColumns(db, horizontalGroup, period))
     : periods
-      ? (leaf.report === 'pnl' ? pnlColumns(db, periods) : balanceColumns(db, periods))
+      ? ({ pnl: pnlColumns, balance: balanceColumns, cashflow: cashflowColumns }[leaf.report])(db, periods, {
+        analyticAccountIds, ...(leaf.report === 'cashflow' && selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
+      })
       : null;
   const tableRef = useRef(null);
   const exportCsv = () => {
@@ -608,6 +615,17 @@ function ReportPage({ leaf }) {
             </select>
           </label>
         )}
+        {showAnalyticFilter && analyticAccounts.length > 0 && (
+          <label className="inline-select">
+            {t('Analytic Accounts')}
+            <select aria-label={t('Analytic Accounts')} multiple value={analyticAccountIds} onChange={(e) => {
+              const selected = Array.from(e.target.selectedOptions).map((o) => Number(o.value));
+              setAnalyticAccountIds(selected);
+            }}>
+              {analyticAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+        )}
         {comparable && <label className="inline-select">
           {t('Comparison')}
           <select value={comparison} onChange={(e) => { setComparison(e.target.value); if (e.target.value !== 'none') setHorizontalGroupId(''); }}>
@@ -632,7 +650,7 @@ function ReportPage({ leaf }) {
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} />}
         </table>
       </div>
     </main>

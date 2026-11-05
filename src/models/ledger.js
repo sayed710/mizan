@@ -595,14 +595,24 @@ export function balances(db, items) {
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
+/** Journal items whose analytic distribution (or legacy analytic account) touches one of the selected analytic accounts; no selection keeps every item. */
+export function filterByAnalytic(items, analyticAccountIds) {
+  if (!analyticAccountIds?.length) return items;
+  const selected = new Set(analyticAccountIds.map(Number));
+  return items.filter((l) => l.analytic_distribution
+    ? Object.keys(l.analytic_distribution).some((key) => key.split(',').some((id) => selected.has(Number(id))))
+    : selected.has(Number(l.analytic_account_id)));
+}
+
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
 const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
 const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + sign * r.balance, 0));
 
 /** Profit & loss figures (income shown positive); year-end closing entries are left out unless asked for. */
-export function profitAndLoss(db, period, { includeClosing = false, weight } = {}) {
-  const rows = balances(db, weighted(journalItems(db, period).filter((l) => includeClosing || !l.is_closing), weight));
+export function profitAndLoss(db, period, { includeClosing = false, weight, analyticAccountIds } = {}) {
+  const items = filterByAnalytic(journalItems(db, period), analyticAccountIds).filter((l) => includeClosing || !l.is_closing);
+  const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
   const expense = sumTypes(rows, ['expense']);
@@ -617,15 +627,15 @@ export function profitAndLoss(db, period, { includeClosing = false, weight } = {
 }
 
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
-export function balanceSheet(db, at = today(), { weight } = {}) {
+export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const rows = balances(db, weighted(journalItems(db, filter), weight));
+  const rows = balances(db, weighted(filterByAnalytic(journalItems(db, filter), analyticAccountIds), weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
   const liabilities = pick(['liability_payable', 'liability_current', 'liability_non_current', 'liability_credit_card'], -1);
   const equity = pick(['equity', 'equity_unaffected'], -1);
   // Closed years already sit in retained earnings, so their closing entries count here.
-  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight }).net;
+  const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
   const earningsAccount = currentYearEarningsAccount(db, db.settings?.current_company_id ?? 1);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
