@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, messagesOf, search, updateSettings, write } from './orm.js';
+import { create, messagesOf, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { invoiceDue } from './models/subscriptionplus.js';
 import { runScheduledJobs } from './models/scheduler.js';
@@ -18,7 +18,7 @@ test('one contract with an invalid customer no longer stops the others from bein
   // Simulate a legacy broken contract without bypassing validation for new contracts.
   a.db = { ...a.db, records: { ...a.db.records, [model]: a.db.records[model].map((r) => r.id === a.id ? { ...r, partner_id: null } : r) } };
   const b = addSub(a.db, { next_invoice_date: '2024-03-01' });
-  const locked = updateSettings(b.db, { lock_date: '2024-02-15' });
+  const locked = write(b.db, 'res.company', 1, { lock_date: '2024-02-15' });
   const once = invoiceDue(locked, '2024-03-01');
   assert.deepEqual(invoices(once, b.id).map((r) => r.invoice_date), ['2024-03-01']);
   assert.equal(invoices(once, a.id).length, 0);

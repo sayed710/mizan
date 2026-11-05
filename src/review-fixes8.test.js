@@ -1,7 +1,7 @@
 // Regressions for review round 8 (valuation wiring, fiscal closing, timesheets).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, write, updateSettings } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { addDays, today } from './models/common.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
@@ -69,7 +69,7 @@ test('vendor bill matching recommends review without blocking posting and allows
   const plainPosted = confirm.run(plain.db, read(plain.db, 'account.move', plain.id)).db;
   assert.equal(read(plainPosted, 'account.move', plain.id).state, 'posted');
   assert.equal(read(plainPosted, 'account.move', plain.id).should_be_paid, 'yes');
-  const matched = bill(write(updateSettings(po.db, { three_way_matching: true }), 'res.company', 1, { three_way_matching: true }));
+  const matched = bill(write(po.db, 'res.company', 1, { three_way_matching: true }));
   const posted = confirm.run(matched.db, read(matched.db, 'account.move', matched.id)).db;
   assert.equal(read(posted, 'account.move', matched.id).state, 'posted');
   assert.equal(read(posted, 'account.move', matched.id).should_be_paid, 'exception');

@@ -1,19 +1,23 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { read } from './orm.js';
 import { applyDiff } from './sync.js';
 import { withCompany } from './models/company.js';
 import { seed } from './seed.js';
 
 test('applyDiff without an isAdmin flag is treated as a non-admin change (ARCH-005)', () => {
   const db = seed();
-  const settings = { company: 'Renamed Co', lock_date: '2026-03-31' };
+  const settings = { company: 'Renamed Co' };
   const plain = applyDiff(db, { upserts: {}, deletes: {}, settings });
   assert.equal(plain.settings.company, db.settings.company);
-  assert.equal(plain.settings.lock_date, db.settings.lock_date);
   const admin = applyDiff(db, { upserts: {}, deletes: {}, settings }, { isAdmin: true });
   assert.equal(admin.settings.company, 'Renamed Co');
-  assert.equal(admin.settings.lock_date, '2026-03-31');
+
+  const comp = read(db, 'res.company', 1);
+  assert.throws(() => applyDiff(db, { upserts: { 'res.company': [{ ...comp, lock_date: '2026-03-31' }] } }), /administrators/i);
+  const adminComp = applyDiff(db, { upserts: { 'res.company': [{ ...comp, lock_date: '2026-03-31' }] } }, { isAdmin: true });
+  assert.equal(read(adminComp, 'res.company', 1).lock_date, '2026-03-31');
 });
 
 test('the company wrapper passes the caller context to the model guard', () => {

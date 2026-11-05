@@ -1,7 +1,7 @@
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, updateSettings, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { accountId, balances, balanceSheet, isBalanced, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
@@ -83,10 +83,10 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   assert.ok(isBalanced(reversal.line_ids));
   assert.throws(() => reopenFiscalYear(reopened, id), /already open/);
   assert.equal(profitAndLoss(closeFiscalYear(reopened, id), period, { includeClosing: true }).net, 0);
-  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' }), id), /locked/);
-  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { hard_lock_date: period.to }), 'res.company', 1, { hard_lock_date: period.to }), id), /locked/);
-  const differentLock = reopenFiscalYear(write(updateSettings(closed, { lock_date: '2023-12-31' }), 'res.company', 1, { lock_date: '2023-12-31' }), id);
-  assert.equal(differentLock.settings.lock_date, '2023-12-31');
+  assert.throws(() => reopenFiscalYear(write(closed, 'res.company', 1, { lock_date: '2025-12-31' }), id), /locked/);
+  assert.throws(() => reopenFiscalYear(write(closed, 'res.company', 1, { hard_lock_date: period.to }), id), /locked/);
+  const differentLock = reopenFiscalYear(write(closed, 'res.company', 1, { lock_date: '2023-12-31' }), id);
+  assert.equal(read(differentLock, 'res.company', 1).lock_date, '2023-12-31');
 });
 
 test('loss years debit retained earnings; empty years close with a balanced zero entry', () => {

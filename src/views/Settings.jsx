@@ -266,7 +266,7 @@ export function Settings() {
             <input id="lock_date" type="date" disabled={readOnly || !company} value={company?.lock_date ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { lock_date: e.target.value || null }))} />
           </div>
         </div>
-        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date']].map(([key, label]) => (
+        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date'], ['tax_lock_date', 'Tax Return Lock Date']].map(([key, label]) => (
           <div className="field" key={key}>
             <label htmlFor={key}>{t(label)}</label>
             <div className="field-value">

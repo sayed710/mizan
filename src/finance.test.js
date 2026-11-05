@@ -1,7 +1,7 @@
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, updateSettings, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { agedBalance, analyticActuals, followUps, journalCards, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
 import { addDays, today } from './models/common.js';
@@ -26,7 +26,7 @@ test('confirming a quotation over the credit limit warns without blocking', () =
 });
 
 test('posting into a locked period is refused', () => {
-  const db = write(updateSettings(seed(), { lock_date: today() }), 'res.company', 1, { lock_date: today() });
+  const db = write(seed(), 'res.company', 1, { lock_date: today() });
   assert.throws(() => invoice(db, { invoice_date: addDays(today(), -1) }), /locked/);
   assert.equal(read(invoice(db, { invoice_date: addDays(today(), 1) }).db, 'account.move', invoice(db, { invoice_date: addDays(today(), 1) }).id).state, 'posted');
 });
@@ -59,7 +59,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
   const { applyDiff, diffDb } = await import('./sync.js');
   const { payMove } = await import('./models/accounting.js');
   const { db: posted, id } = invoice(seed(), { invoice_date: addDays(today(), -10) });
-  const locked = write(updateSettings(posted, { lock_date: addDays(today(), -1) }), 'res.company', 1, { lock_date: addDays(today(), -1) });
+  const locked = write(posted, 'res.company', 1, { lock_date: addDays(today(), -1) });
   const edited = { ...locked, records: { ...locked.records, 'account.move': locked.records['account.move'].map((m) => (m.id === id ? { ...m, invoice_date: today() } : m)) } };
   assert.throws(() => applyDiff(locked, diffDb(locked, edited)), /locked/);
   assert.throws(() => applyDiff(locked, { upserts: {}, deletes: { 'account.move': [id] } }), /locked/);
@@ -68,13 +68,15 @@ test('the lock date also guards synced changes and deletes; payments on locked i
 
 test('the audit trail logs every change, keeps numbered entries and cannot be switched off', async () => {
   const { applyDiff } = await import('./sync.js');
-  const { unlink } = await import('./orm.js');
-  const db0 = write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true });
+  const { unlink, read } = await import('./orm.js');
+  const db0 = write(seed(), 'res.company', 1, { audit_trail: true });
   const { db, id } = invoice(db0, {});
   const noted = write(db, 'account.move', id, { ref: 'PO-77' });
   assert.ok(noted.messages.some((m) => m.res_id === id && m.model === 'account.move' && /Reference/.test(m.body)));
   assert.throws(() => unlink(noted, 'account.move', [id]), /audit trail/);
-  assert.equal(applyDiff(noted, { upserts: {}, deletes: {}, settings: { audit_trail: false } }).settings.audit_trail, true);
+  const comp = read(noted, 'res.company', 1);
+  assert.throws(() => applyDiff(noted, { upserts: { 'res.company': [{ ...comp, audit_trail: false }] } }, { isAdmin: true }), /audit trail/i);
+  assert.equal(read(noted, 'res.company', 1).audit_trail, true);
   const msg = noted.messages.find((m) => m.model === 'account.move' && m.res_id === id);
   assert.ok(applyDiff(noted, { upserts: {}, deletes: {}, removedMessages: [msg.id] }).messages.some((m) => m.id === msg.id));
 });

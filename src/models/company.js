@@ -1,7 +1,7 @@
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
-import { companyRoundingMethod, today } from './common.js';
+import { companyRoundingMethod, today, validDate } from './common.js';
 import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { defaultPayrollRules } from './payroll.js';
@@ -243,14 +243,21 @@ export function withCompany(models) {
   }));
 }
 
-// Period locks and the audit trail are accounting controls: over sync only administrators may change them.
-const CONTROL_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date', 'tax_lock_dates', 'audit_trail'];
+// Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
+const CONTROL_FIELDS = [
+  'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
+  'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date',
+];
+const LOCK_DATE_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date'];
 
 function companyGuard(db, before, r, ctx) {
+  for (const field of LOCK_DATE_FIELDS) {
+    if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
+  }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null))) {
-    return 'Only administrators can change lock dates or the audit trail';
+    return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
@@ -486,6 +493,7 @@ export const companyModels = {
       lock_date: { type: 'date', label: 'Lock Date' },
       sale_lock_date: { type: 'date', label: 'Sales Lock Date' },
       purchase_lock_date: { type: 'date', label: 'Purchase Lock Date' },
+      tax_lock_date: { type: 'date', label: 'Tax Return Lock Date' },
       hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },

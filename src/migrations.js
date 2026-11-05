@@ -11,7 +11,7 @@ import { migrateTimeOff } from './models/timeoff.js';
 import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
-import { today } from './models/common.js';
+import { today, validDate } from './models/common.js';
 import { CHART, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
@@ -859,6 +859,116 @@ MIGRATIONS.push({ version: 34, name: 'Default general journal for companies with
   return unresolved.reduce((next, [id, count]) => postNote(next, 'res.company', id,
     `Upgrade: this company has ${count} general journals, so no default general journal was chosen. Set the default general journal in the company settings before revaluing foreign balances.`),
   { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
+} });
+
+MIGRATIONS.push({ version: 35, name: 'Per-company lock dates and accounting settings on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const companyRows = db.records?.['res.company'] ?? [];
+  const companyIds = new Set(companyRows.map((c) => c.id));
+  // Same placement as migration 26, which already moved QR/VAT/IBAN onto the company the user was working in.
+  const currentCompanyId = settings.current_company_id ?? 1;
+  const lockFields = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date'];
+  const removedKeys = [
+    ...lockFields, 'tax_lock_date', 'tax_lock_dates', 'audit_trail', 'three_way_matching', 'tax_periodicity',
+    'invoice_qr', 'company_vat', 'vat', 'company_iban',
+  ];
+  const unplacedSettings = { ...(settings.unplaced_company_accounting_settings ?? {}) };
+  const unplacedTaxLocks = { ...(settings.unplaced_tax_lock_dates ?? {}) };
+  const keep = (key, value) => { unplacedSettings[key] = value; };
+  const latestDate = (...values) => values.filter(validDate).sort().at(-1) ?? null;
+  const globalSettingsHaveTarget = companyRows.length > 0;
+
+  for (const field of lockFields) {
+    const value = settings[field];
+    if (value == null || value === '') continue;
+    if (!validDate(value) || !globalSettingsHaveTarget) {
+      keep(field, value);
+      continue;
+    }
+  }
+
+  const taxLocks = settings.tax_lock_dates;
+  if (taxLocks !== undefined && (!taxLocks || typeof taxLocks !== 'object' || Array.isArray(taxLocks))) keep('tax_lock_dates', taxLocks);
+  else for (const [idText, value] of Object.entries(taxLocks ?? {})) {
+    const id = /^[1-9]\d*$/.test(idText) && Number.isSafeInteger(Number(idText)) ? Number(idText) : null;
+    if (id == null || !companyIds.has(id)) {
+      unplacedTaxLocks[idText] = value;
+      continue;
+    }
+    if (value == null || value === '') continue;
+    if (!validDate(value)) {
+      unplacedTaxLocks[idText] = value;
+      continue;
+    }
+  }
+
+  const legacyTaxLock = Object.hasOwn(settings, 'tax_lock_date') ? settings.tax_lock_date : undefined;
+  if (legacyTaxLock != null && legacyTaxLock !== '' && !validDate(legacyTaxLock)) keep('tax_lock_date', legacyTaxLock);
+  else if (legacyTaxLock !== undefined && !companyIds.has(1)) keep('tax_lock_date', legacyTaxLock);
+
+  for (const field of ['audit_trail', 'three_way_matching']) {
+    if (settings[field] !== undefined && typeof settings[field] !== 'boolean') keep(field, settings[field]);
+    else if (settings[field] !== undefined && !globalSettingsHaveTarget) keep(field, settings[field]);
+  }
+
+  const rawPeriodicity = settings.tax_periodicity;
+  const periodicity = rawPeriodicity === 'quarterly' ? 'trimester' : rawPeriodicity;
+  if (rawPeriodicity !== undefined && (!['monthly', 'quarterly', 'trimester', 'semester', 'year'].includes(rawPeriodicity) || !globalSettingsHaveTarget)) {
+    keep('tax_periodicity', rawPeriodicity);
+  }
+
+  const qrMode = settings.invoice_qr;
+  if (qrMode != null && qrMode !== '' && !['zatca', 'epc'].includes(qrMode)) keep('invoice_qr', qrMode);
+  else if (qrMode && !companyIds.has(currentCompanyId)) keep('invoice_qr', qrMode);
+  const vatValues = ['company_vat', 'vat'].filter((key) => Object.hasOwn(settings, key) && settings[key] != null && settings[key] !== '');
+  const conflictingVat = vatValues.length > 1 && settings.company_vat !== settings.vat;
+  if (conflictingVat) for (const key of vatValues) keep(key, settings[key]);
+  else if (vatValues.length && (typeof settings[vatValues[0]] !== 'string' || !companyIds.has(currentCompanyId))) {
+    for (const key of vatValues) keep(key, settings[key]);
+  }
+  if (settings.company_iban != null && settings.company_iban !== ''
+    && (typeof settings.company_iban !== 'string' || !companyIds.has(currentCompanyId))) keep('company_iban', settings.company_iban);
+
+  const companySettings = { ...settings };
+  for (const key of removedKeys) delete companySettings[key];
+  if (Object.keys(unplacedSettings).length) companySettings.unplaced_company_accounting_settings = unplacedSettings;
+  else delete companySettings.unplaced_company_accounting_settings;
+  if (Object.keys(unplacedTaxLocks).length) companySettings.unplaced_tax_lock_dates = unplacedTaxLocks;
+  else delete companySettings.unplaced_tax_lock_dates;
+
+  const companies = companyRows.map((company) => {
+    const updated = { ...company };
+    for (const field of lockFields) {
+      const globalDate = settings[field];
+      if (validDate(globalDate)) updated[field] = latestDate(company[field], globalDate);
+    }
+    for (const [idText, value] of Object.entries(taxLocks && typeof taxLocks === 'object' && !Array.isArray(taxLocks) ? taxLocks : {})) {
+      if (Number(idText) !== company.id) continue;
+      updated.tax_lock_date = value == null || value === '' ? null : validDate(value) ? latestDate(company.tax_lock_date, value) : company.tax_lock_date;
+    }
+    if (company.id === 1 && legacyTaxLock !== undefined && (legacyTaxLock == null || legacyTaxLock === '' || validDate(legacyTaxLock))) {
+      updated.tax_lock_date = legacyTaxLock == null || legacyTaxLock === '' ? null : latestDate(updated.tax_lock_date, legacyTaxLock);
+    }
+    if (typeof settings.three_way_matching === 'boolean') updated.three_way_matching = settings.three_way_matching;
+    if (typeof settings.audit_trail === 'boolean') updated.audit_trail = company.audit_trail === true || settings.audit_trail;
+    if (typeof periodicity === 'string' && ['monthly', 'trimester', 'semester', 'year'].includes(periodicity)) updated.tax_periodicity = periodicity;
+
+    if (company.id === currentCompanyId) {
+      if (['zatca', 'epc'].includes(qrMode) && !company.invoice_qr) updated.invoice_qr = qrMode;
+      const vat = conflictingVat ? undefined : vatValues.length ? settings[vatValues[0]] : undefined;
+      if (typeof vat === 'string' && !company.vat) updated.vat = vat;
+      if (typeof settings.company_iban === 'string' && !company.company_iban) updated.company_iban = settings.company_iban;
+    }
+    return updated;
+  });
+
+  let nextDb = { ...db, settings: companySettings, records: { ...db.records, 'res.company': companies } };
+  const reportKeys = [...Object.keys(unplacedSettings), ...Object.keys(unplacedTaxLocks)];
+  if (reportKeys.length && companyIds.has(1)) {
+    nextDb = postNote(nextDb, 'res.company', 1,
+      `Migration 35 retained company accounting values that could not be placed: ${[...new Set(reportKeys)].join(', ')}. See the unplaced company accounting settings in General Settings data.`);
+  }
+  return nextDb;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
