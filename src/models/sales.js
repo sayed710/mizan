@@ -214,9 +214,8 @@ function downPaymentLines(db, order, method, input) {
   const ratio = method === 'percentage' ? amount / 100 : amount / total;
   const company = read(db, 'res.company', order.company_id ?? 1);
   const configured = company?.down_payment_account_id;
-  const accountRecord = configured ? read(db, 'account.account', configured) : (db.records['account.account'] ?? [])
-    .find((a) => a.code === '212000' && a.active !== false && (!a.company_id || a.company_id === (order.company_id ?? 1)));
-  if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error('Set up the deferred revenue account before creating a down payment');
+  const accountRecord = configured ? read(db, 'account.account', configured) : null;
+  if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error(`Configure the down payment account on company ${company?.name ?? order.company_id ?? 1}`);
   const account = accountRecord.id;
   const lines = order.order_line.filter((l) => Number(l.qty) > 0).map(({ qty_invoiced, qty_delivered, sale_line_key, purchase_method, product_id, uom_id, ...line }) => ({
     ...line, name: 'Down Payment', account_id: account, qty: Number(line.qty) * ratio, down_payment_key: crypto.randomUUID(),

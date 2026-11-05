@@ -7,6 +7,7 @@ import { confirmAsset, disposeAsset } from './models/assets.js';
 import { postEntry } from './models/ledger.js';
 import { closeFiscalYear, reopenFiscalYear } from './models/closing.js';
 import { applyDiff, diffDb } from './sync.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 test('imported depreciation cannot exceed the depreciable value', () => {
   const asset = create(seed(), 'account.asset', { name: 'Imported asset', original_value: 1000, salvage_value: 200, already_depreciated: 900, acquisition_date: '2025-01-01' });
@@ -21,7 +22,8 @@ test('a manual entry resembling a closing cannot be linked to a fiscal year', ()
 });
 
 test('asset disposal rejects a sale price without a customer invoice', () => {
-  const asset = create(seed(), 'account.asset', { name: 'Sale asset', original_value: 1000, acquisition_date: '2025-01-01' });
+  const base = seed();
+  const asset = create(base, 'account.asset', { ...assetAccounts(base), name: 'Sale asset', original_value: 1000, acquisition_date: '2025-01-01' });
   const db = confirmAsset(asset.db, read(asset.db, 'account.asset', asset.id));
   assert.throws(() => disposeAsset(db, read(db, 'account.asset', asset.id), { date: '2025-02-01', saleValue: 1000 }), /Select the customer invoice for this sale/);
 });

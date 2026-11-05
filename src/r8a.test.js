@@ -13,6 +13,7 @@ import { taxReport, validateTaxReturnPeriod } from './models/finance.js';
 import { computeAuditChecks } from './models/taxreturn.js';
 import { rateAt, toCompany } from './models/currency.js';
 import { taxSnapshot } from './models/taxes.js';
+import { configureRevaluationLoss } from './test-support/revaluation-accounts.js';
 
 const LINE = 'account.bank.statement.line';
 const run = (db, model, id, label, values = []) => models[model].form.buttons.find((button) => button.label === label)
@@ -129,7 +130,7 @@ test('tax return periods and tax locks use accounting date rather than invoice d
 });
 
 test('foreign balance report and revaluation include manual foreign journal items', () => {
-  const currency = create(seed(), 'res.currency', { name: 'R8A_LOAN_FX', rate_ids: [{ date: '2030-01-01', rate: 2 }, { date: '2030-02-01', rate: 1 }] });
+  const currency = create(configureRevaluationLoss(seed()), 'res.currency', { name: 'R8A_LOAN_FX', rate_ids: [{ date: '2030-01-01', rate: 2 }, { date: '2030-02-01', rate: 1 }] });
   const loan = accountId(currency.db, '260000');
   const entry = postEntry(currency.db, {
     journal: 'MISC', date: '2030-01-15', company: 1,

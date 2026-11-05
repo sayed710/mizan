@@ -7,6 +7,7 @@ import { accountId, balances, balanceSheet, isBalanced, journalItems, postEntry,
 import { payMove, postMove } from './models/accounting.js';
 import { closeFiscalYear, closingModels, reopenFiscalYear, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
 import { closedYearLock } from './models/finance.js';
+import { configureRevaluationLoss } from './test-support/revaluation-accounts.js';
 
 const period = { from: '2024-01-01', to: '2024-12-31' };
 const year = (db) => create(db, 'account.fiscal.year', { name: 'FY 2024', date_from: period.from, date_to: period.to });
@@ -101,6 +102,7 @@ test('loss years debit retained earnings; empty years close with a balanced zero
 });
 
 function foreign(moveType = 'out_invoice', amount = 100, db = seed()) {
+  db = configureRevaluationLoss(db);
   const currency = create(db, 'res.currency', { name: 'FX', rate_ids: [{ date: '2024-01-01', rate: 2 }, { date: '2024-02-01', rate: 1 }] });
   const invoice = create(currency.db, 'account.move', { move_type: moveType, partner_id: 1, currency_id: currency.id,
     invoice_date: '2024-01-15', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: amount, tax: 0 }] });

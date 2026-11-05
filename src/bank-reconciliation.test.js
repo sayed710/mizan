@@ -69,7 +69,7 @@ test('bank actions and reconciliation models never match another company invoice
   assert.equal(applyRule(onlyForeign.db, rule, read(onlyForeign.db, LINE, onlyForeign.id)), onlyForeign.db);
   assert.throws(() => run(onlyForeign.db, onlyForeign.id, 'Reconcile'), /No open invoice/);
   const account = create(onlyForeign.db, 'account.account', { name: 'Branch only', code: '987655', account_type: 'expense', company_id: branch.id });
-  const writeoff = { name: 'Foreign account', rule_type: 'writeoff_button', line_ids: [{ account_code: '987655', amount_type: 'percentage', amount: 100 }] };
+  const writeoff = { name: 'Foreign account', rule_type: 'writeoff_button', line_ids: [{ account_id: account.id, amount_type: 'percentage', amount: 100 }] };
   assert.throws(() => applyRule(account.db, writeoff, read(account.db, LINE, onlyForeign.id)), /belongs to another company/);
 });
 

@@ -17,7 +17,7 @@ import { t } from '../i18n.js';
 import { createInvoiceDeferrals, reverseInvoiceDeferrals } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { ASSET_DEPRECIATION_DEFAULTS } from './assets.js';
+import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 
 export { invoiceTaxAmount, total, applyPaymentCredit };
@@ -544,14 +544,14 @@ function draftAssetsFromBill(db, bill) {
         method_progress_factor: model.method_progress_factor ?? 0.3,
         prorata: Boolean(model.prorata),
         account_depreciation_id: model.account_depreciation_id ?? null,
-        account_expense_id: model.account_expense_id ?? null,
+        account_depreciation_expense_id: model.account_depreciation_expense_id ?? null,
         journal_id: model.journal_id ?? null,
         analytic_distribution: model.analytic_distribution ?? null,
       } : {
         model_id: null,
         ...ASSET_DEPRECIATION_DEFAULTS,
         account_depreciation_id: null,
-        account_expense_id: null,
+        account_depreciation_expense_id: null,
         journal_id: null,
         analytic_distribution: null,
       }),
@@ -864,14 +864,15 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const due = residual(r, db);
-  const paid = payMove(db, id, amount, date, { journalId: journalIdVal, ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}) });
   const gap = docRound(due - amount);
   const discount = Math.min(discountAvailable(db, r, date), gap);
-  if (!(gap > 0) || discount < gap) return paid;
   const sale = isInbound(r);
-  const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const company = read(db, 'res.company', r.company_id ?? 1);
-  const discountAccount = sale ? company?.expense_early_payment_discount_account_id ?? '690200' : company?.income_early_payment_discount_account_id ?? '450200';
+  const discountAccount = sale ? company?.expense_early_payment_discount_account_id : company?.income_early_payment_discount_account_id;
+  if (gap > 0 && discount >= gap && !discountAccount) throw new Error(`Configure the early payment discount ${sale ? 'expense' : 'income'} account on company ${company?.name ?? r.company_id ?? 1}`);
+  const paid = payMove(db, id, amount, date, { journalId: journalIdVal, ...(opts.checkNumber != null ? { checkNumber: opts.checkNumber } : {}) });
+  if (!(gap > 0) || discount < gap) return paid;
+  const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const counterpart = invoiceCounterpartAccount(db, r);
   const taxes = discountTaxLines(db, r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
   const taxValue = companyRound(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
@@ -1479,8 +1480,10 @@ Object.assign(accountingModels, {
 
   'account.asset.model': {
     label: 'Depreciation Models',
+    guard: assetAccountGuard,
     fields: {
       name: { type: 'char', label: 'Model Name', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
       method: {
         type: 'selection',
         label: 'Depreciation Method',
@@ -1505,16 +1508,17 @@ Object.assign(accountingModels, {
       prorata: { type: 'boolean', label: 'Prorata Temporis' },
       account_asset_id: { type: 'many2one', relation: 'account.account', label: 'Asset Account' },
       account_depreciation_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Account' },
-      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Expense Account' },
+      account_depreciation_expense_id: { type: 'many2one', relation: 'account.account', label: 'Depreciation Expense Account' },
+      account_expense_id: { type: 'many2one', relation: 'account.account', label: 'Legacy Expense Account', readonly: true, compute: (r) => r.account_depreciation_expense_id ?? null },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution' },
     },
     defaults: () => ({ method: 'linear', method_number: 5, method_period: '12', method_progress_factor: 0.3, prorata: false }),
-    list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_expense_id'],
+    list: ['name', 'method', 'method_number', 'method_period', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
     form: {
       title: 'name',
       groups: [
-        ['name', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_expense_id'],
+        ['name', 'company_id', 'journal_id', 'account_asset_id', 'account_depreciation_id', 'account_depreciation_expense_id'],
         ['method', 'method_number', 'method_period', 'method_progress_factor', 'prorata', 'analytic_distribution'],
       ],
     },
