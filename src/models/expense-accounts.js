@@ -3,10 +3,18 @@ import { round } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { taxRepartitionLine } from './taxes.js';
 
-/** Resolve each expense's debit accounts from its configured product, journal and tax. */
-export function expenseDebits(db, report, expenses) {
+export function expenseReportJournal(db, report) {
   const company = report.company_id ?? 1;
-  const journal = read(db, 'account.journal', report.expense_journal_id ?? read(db, 'res.company', company)?.default_purchase_journal_id);
+  const journal = read(db, 'account.journal', report.expense_journal_id ?? read(db, 'res.company', company)?.default_general_journal_id);
+  if (!journal || (journal.company_id && journal.company_id !== company)) throw new Error('Select an expense journal or configure a default general journal for this company');
+  return journal;
+}
+
+/** Resolve each expense's debit accounts from its configured product, journal and tax. */
+export function expenseDebits(db, report, expenses, postingJournal = null) {
+  const company = report.company_id ?? 1;
+  const journalId = report.expense_journal_id ?? read(db, 'res.company', company)?.default_purchase_journal_id ?? postingJournal?.id;
+  const journal = read(db, 'account.journal', journalId);
   if (!journal || (journal.company_id && journal.company_id !== company)) throw new Error('Configure an expense journal for this company');
   return expenses.flatMap((line) => {
     const product = read(db, 'product', line.product_id);

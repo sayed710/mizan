@@ -3,7 +3,7 @@
 // requester (never the requester themselves), checked on the server for every non-admin change.
 import { leaveAuthorization } from './timeoff.js';
 import { paymentJournal, partnerAccount } from './ledger.js';
-import { expenseDebits } from './expense-accounts.js';
+import { expenseDebits, expenseReportJournal } from './expense-accounts.js';
 
 let actor = null;
 /** The signed-in user ({ login, name }) on the client; null in local mode. */
@@ -76,7 +76,7 @@ function sheetBookingError(db, r) {
   const credit = (m, accountId) => (m.line_ids ?? []).filter((l) => l.account_id === accountId).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
   const companyId = r.company_id ?? 1;
   let expected;
-  try { expected = expenseDebits(db, r, expenses); }
+  try { expected = expenseDebits(db, r, expenses, r.payment_mode === 'own_account' ? expenseReportJournal(db, r) : null); }
   catch (error) { return error.message; }
   const expectedByAccount = new Map();
   for (const line of expected) expectedByAccount.set(line.account, (expectedByAccount.get(line.account) ?? 0) + line.debit);
