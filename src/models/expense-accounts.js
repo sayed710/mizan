@@ -14,6 +14,8 @@ export function expenseDebits(db, report, expenses) {
     if (!account || account.active === false || (account.company_id && account.company_id !== company)) throw new Error('Configure the expense account on the product, category or expense journal');
     const taxAmount = round(Number(line.total_amount) - Number(line.total_amount) / (1 + Number(line.tax ?? 0) / 100));
     const tax = taxAmount ? read(db, 'account.tax', line.tax_id) : null;
+    // Expenses saved with only a tax percentage need their purchase tax selected; reset an approved expense to draft to set it.
+    if (taxAmount && !line.tax_id) throw new Error(`Configure the expense tax on ${line.name || 'the expense'}`);
     const taxAccount = tax && read(db, 'account.account', taxRepartitionLine(tax)?.account_id);
     if (taxAmount && (!tax || tax.type_tax_use !== 'purchase' || tax.amount_type !== 'percent' || Number(tax.amount) !== Number(line.tax) || !taxAccount || taxAccount.active === false || (tax.company_id && tax.company_id !== company) || (taxAccount.company_id && taxAccount.company_id !== company))) throw new Error('Configure the expense tax and its account');
     const base = round(Number(line.total_amount) - taxAmount);

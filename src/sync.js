@@ -449,7 +449,8 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
 export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
-  d = rebaseConcurrentInvoiceSequence(db, d);
+  // Renumbering events are produced here by the server only; a client-sent list is discarded (Qodo 5).
+  d = rebaseConcurrentInvoiceSequence(db, { ...d, sequenceRenamed: [] });
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
@@ -563,7 +564,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db);
       if (err) throw new Error(err);
     }
   }
@@ -629,7 +630,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.
       hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
-      audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
       company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),
       company_iban: String(s.company_iban ?? db.settings.company_iban ?? '').slice(0, 40),

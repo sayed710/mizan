@@ -2,7 +2,7 @@ import { create, postNote, read, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, reverseEntry } from './pay.js';
+import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
@@ -238,6 +238,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
   'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
+  'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
 ]);
 function recurringReversalDate(origin, nextDate) {
   const start = origin.invoice_date ?? origin.date;
@@ -461,6 +462,8 @@ export function reverseDepreciation(db, move, options = {}) {
   if ((db.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === move.id)) throw new Error('This depreciation has already been reversed');
   const opts = options && typeof options === 'object' && !Array.isArray(options) ? options : {};
   const revDate = opts.date ?? today();
+  // A reversal cannot be booked before the depreciation it reverses (Qodo 52).
+  if (!validDate(revDate) || revDate < (move.date ?? move.invoice_date)) throw new Error('The reversal date cannot be before the depreciation entry date');
   const revJournal = opts.journal_id ?? move.journal_id;
   const reason = String(opts.reason ?? '').trim();
   const ref = reason ? `Reversal of ${move.name}, ${reason}` : `Reversal of ${move.name}`;
@@ -642,7 +645,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
   const release = releaseCashBasis(withPayment, r, value / total(r, db), date, { final });
-  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, cash_basis_move_id: release.id }];
+  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, payment_company_amount: bank, cash_basis_move_id: release.id }];
   const next = write(release.db, 'account.move', id, { amount_paid: docRound((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
@@ -760,6 +763,9 @@ export function creditNote(db, r, options = {}) {
   if (!validDate(date)) {
     throw new Error('Enter a valid credit note date');
   }
+  if (date < (r.invoice_date ?? '')) {
+    throw new Error('Credit note date cannot be before the invoice date');
+  }
   const journalIdVal = opts.journal_id ?? null;
   if (journalIdVal) {
     const j = read(db, 'account.journal', journalIdVal);
@@ -876,8 +882,9 @@ export function debitNote(db, r, options = {}) {
     currency_id: r.currency_id ?? null,
     fiscal_position_id: r.fiscal_position_id ?? null,
     ...(r.invoice_cash_rounding_id ? { invoice_cash_rounding_id: r.invoice_cash_rounding_id } : {}),
+    // Order and rental links stay on the source: a debit note never counts as a billed rental charge (Qodo 62).
     invoice_line_ids: copyLines
-      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, ...line }) => ({ ...line }))
+      ? r.invoice_line_ids.map(({ sale_line_key, purchase_line_key, down_payment_key, rental_id, rental_charge, ...line }) => ({ ...line }))
       : [],
     ref,
   });
@@ -968,11 +975,17 @@ export { isOutstandingCreditFor, outstandingPaymentCredits };
 
 /** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
 function isOutstandingCreditFor(db, r, p) {
-  return p.state === 'posted'
+  return p?.state === 'posted'
     && Number(p.unapplied) > 0
+    && !p.destination_account_id
+    && !p.destination_account_code
+    && !p.is_tax_payment
+    && !p.return_id
     && (p.company_id ?? 1) === (r.company_id ?? 1)
     && sameCommercialPartner(db, p.partner_id, r.partner_id)
-    && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound'));
+    && Boolean(SETTLES[p.partner_type]?.[p.payment_type]?.includes(r.move_type))
+    && (!p.partner_bank_id || !r.partner_bank_id || p.partner_bank_id === r.partner_bank_id)
+    && shouldBePaid(db, r) !== 'exception';
 }
 
 /** Outstanding (unapplied) payment credits for a posted open invoice or vendor bill, in record order. */
@@ -1163,7 +1176,7 @@ export const accountingModels = {
       }
       return moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (before?.state === 'posted' && after.state !== 'posted' && ['out_invoice', 'out_refund'].includes(before.move_type) && read(db, 'account.move', before.intercompany_move_id)?.state === 'posted' ? 'The inter-company bill is posted; issue a credit note instead' : null) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
-    invariant: (db, after, before) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before),
+    invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
     // The restrictive audit trail is a setting of the move's own company.
     audited: (db, move) => read(db, 'res.company', move?.company_id ?? 1)?.audit_trail === true,
@@ -1236,7 +1249,7 @@ export const accountingModels = {
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
-        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
+        fields: { date: { type: 'date', label: 'Paid on' }, amount: { type: 'monetary', label: 'Amount' }, move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment' }, company_amount: { type: 'monetary', label: 'Company Amount', currency: 'company' }, line_index: { type: 'integer', label: 'Closing Line Index', hidden: true }, payment_company_amount: { type: 'monetary', label: 'Payment Company Amount', currency: 'company' }, payment_fx_move_id: { type: 'many2one', relation: 'account.move', label: 'Exchange Entry' }, cash_basis_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, discount: { type: 'boolean', label: 'Early Payment Discount' }, reversed: { type: 'boolean', label: 'Reversed' }, unapplied: { type: 'boolean', label: 'Unreconciled' }, reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry' }, reversal_date: { type: 'date', label: 'Reversal Date' } },
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
