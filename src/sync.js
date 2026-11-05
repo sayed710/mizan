@@ -8,7 +8,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
-import { intercompanyBill, journalInvoiceSequence } from './models/accounting.js';
+import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './models/accounting.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
@@ -659,12 +659,36 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     }
     const values = intercompanyBill(staged, { ...source, intercompany_move_id: null });
     if (!values) throw new Error('Invalid inter-company counterpart: rule is not configured');
-    const expected = cleanRecord('account.move', { ...(models['account.move'].defaults?.(counterpart.id) ?? {}), ...values, id: counterpart.id });
+    if (!['draft', 'posted'].includes(counterpart.state)) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+    const isPosted = counterpart.state === 'posted';
+    if (isPosted && (!counterpart.name || counterpart.name === '/')) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+    const linesWithIds = (values.invoice_line_ids ?? []).map((line, i) => ({
+      ...line,
+      ...(counterpart.invoice_line_ids?.[i]?.line_id ? { line_id: counterpart.invoice_line_ids[i].line_id } : {}),
+    }));
+    const { line_ids: expectedLineIds, resolvedLines } = isPosted
+      ? postedInvoiceLines(staged, { ...values, id: counterpart.id, invoice_line_ids: linesWithIds }, counterpart.name)
+      : { line_ids: [], resolvedLines: values.invoice_line_ids };
+    const expected = cleanRecord('account.move', {
+      ...(models['account.move'].defaults?.(counterpart.id) ?? {}),
+      ...values,
+      id: counterpart.id,
+      ...(isPosted ? {
+        state: 'posted',
+        name: counterpart.name,
+        line_ids: expectedLineIds,
+        invoice_line_ids: resolvedLines,
+      } : {}),
+    });
     const actual = cleanRecord('account.move', counterpart);
     const stripVolatiles = (val) => {
       if (val == null || typeof val !== 'object') return val;
       if (Array.isArray(val)) return val.map(stripVolatiles);
-      const { line_id: _ignoredLineId, ...rest } = val;
+      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, ...rest } = val;
       return Object.fromEntries(Object.keys(rest).filter((k) => rest[k] !== undefined).sort().map((k) => [k, stripVolatiles(rest[k])]));
     };
     if (JSON.stringify(stripVolatiles(expected)) !== JSON.stringify(stripVolatiles(actual))) {

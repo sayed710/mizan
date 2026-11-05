@@ -423,6 +423,27 @@ function copyInvoiceLines(lines, { sourceCredit = false, preserveSourceLineId = 
   });
 }
 
+/** Generate balanced journal lines and resolve analytic distributions for a posted invoice or vendor bill. */
+export function postedInvoiceLines(db, move, name = move.name) {
+  const journalRecord = resolveDocumentJournal(db, move, { required: true });
+  const journal = journalRecord.id;
+  const postingMove = { ...move, journal_id: journal };
+  const resolvedLines = (move.invoice_line_ids ?? []).map((line) => {
+    if (line.analytic_distribution && Object.keys(line.analytic_distribution).length > 0) return line;
+    const dist = distributionOfLine(line, db, postingMove);
+    return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
+  });
+  const updatedR = { ...move, journal_id: journal, invoice_line_ids: resolvedLines };
+  let line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
+  if (line_ids.some((line) => {
+    const account = read(db, 'account.account', line.account_id);
+    return account?.company_id && account.company_id !== (move.company_id ?? 1);
+  })) throw new Error('Journal account belongs to another company');
+  line_ids = line_ids.map((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)
+    ? { ...line, name } : line);
+  return { line_ids, resolvedLines, journalRecord, journal };
+}
+
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   let r = read(db, 'account.move', id);
@@ -502,24 +523,11 @@ export function postMove(db, id) {
   checkMandatoryPlans(db, r);
   // Vendor bills are matched against the PO and receipts; price differences leave the interim account.
   const matchWarnings = checkBillMatch(db, r);
-  const postingMove = { ...r, journal_id: journal };
-  const resolvedLines = (r.invoice_line_ids ?? []).map((line) => {
-    if (line.analytic_distribution && Object.keys(line.analytic_distribution).length > 0) return line;
-    const dist = distributionOfLine(line, db, postingMove);
-    return Object.keys(dist).length ? { ...line, analytic_distribution: dist } : line;
-  });
   const sequence = journalInvoiceSequence(journalRecord, r);
   const name = enteredName ?? sequence.name;
-  const updatedR = { ...r, journal_id: journal, invoice_line_ids: resolvedLines };
-  let line_ids = [...invoiceLines(db, { ...updatedR, name }), ...priceDifferenceLines(db, { ...updatedR, name })];
-  if (line_ids.some((line) => {
-    const account = read(db, 'account.account', line.account_id);
-    return account?.company_id && account.company_id !== (r.company_id ?? 1);
-  })) throw new Error('Journal account belongs to another company');
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const counterpart = intercompanyBill(db, r);
-  line_ids = line_ids.map((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)
-    ? { ...line, name } : line);
+  const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
   let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
