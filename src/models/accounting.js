@@ -797,9 +797,10 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     // The base is signed independently of the tax amount, including reversals and refunds.
     const transition = cashBasisTransitionAccount(db, tax_id, r.company_id);
     const tax = { account_id: account, partner_id: r.partner_id, name: tax_name, tax_id, tax_name, tax_tag_ids, tax_grid_release: true, tax_base: refund ? -base : base, tax_base_signed: true, tax_side: sale ? 'sale' : 'purchase' };
-    return (sale !== refund) === (share > 0)
-      ? [{ account: transition, debit: amount, partner_id: r.partner_id }, { ...tax, credit: amount }]
-      : [{ ...tax, debit: amount }, { account: transition, credit: amount, partner_id: r.partner_id }];
+    const value = Math.abs(amount);
+    return ((sale !== refund) === (share > 0)) !== (amount < 0)
+      ? [{ account: transition, debit: value, partner_id: r.partner_id }, { ...tax, credit: value }]
+      : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id }];
   });
   const posted = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
   return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id }) };
