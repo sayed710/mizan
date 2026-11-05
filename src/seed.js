@@ -282,7 +282,7 @@ export function seed() {
   add('account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: today(), invoice_date_due: addDays(today(), 30), invoice_line_ids: lines([[1, 4]]) });
 
   // Purchases: received PO + its posted bill, open RFQ.
-  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]) });
+  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]).map((line) => ({ ...line, purchase_line_key: crypto.randomUUID() })) });
   const po1rec = read(db, 'purchase.order', po1);
   // Received through stock valuation at the PO price, so the bill clears the interim account.
   db = moveValued(db, po1rec.order_line.map((l) => ({ ...l, unit_cost: l.price_unit })), 1, { reference: po1rec.name, date: addDays(today(), -11) });
@@ -498,7 +498,7 @@ export function seed() {
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
   const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
-  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
+  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));

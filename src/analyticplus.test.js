@@ -5,6 +5,7 @@ import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { moreModels } from './models/more.js';
+import { postMove } from './models/accounting.js';
 import { analyticPlusModels, normalizeDistribution, distributionOfLine, analyticLinesForMove, postAnalytic, removeAnalytic, analyticBalance, budgetReport, checkMandatoryPlans } from './models/analyticplus.js';
 
 /** Test fixture: set fields directly, as stored data, without the workflow rules. */
@@ -117,13 +118,14 @@ test('analytic balances include date boundaries and exclude other accounts', () 
 
 test('budget reports filter account prefixes and periods and prorate inclusive days with achievement', () => {
   const { db: base, a, b } = setup();
+  const posted = create(base, 'account.move', { move_type: 'out_invoice', partner_id: 1, date: '2026-01-01', invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 200, tax: 0 }] });
   const actuals = [
     { date: '2026-01-01', amount: -120, general_account: '600000' },
     { date: '2026-01-10', amount: -80, general_account: '600100' },
     { date: '2026-01-05', amount: 30, general_account: '400000' },
     { date: '2026-01-11', amount: -500, general_account: '600000' },
     { date: '2026-01-02', amount: -999, general_account: '600000', account_id: b },
-  ].reduce((next, vals) => create(next, 'account.analytic.line', { account_id: a, ...vals }).db, base);
+  ].reduce((next, vals) => create(next, 'account.analytic.line', { account_id: a, move_id: posted.id, ...vals }).db, postMove(posted.db, posted.id));
   const { db, id } = create(actuals, 'account.budget', { name: 'Ten days', date_from: '2026-01-01', date_to: '2026-01-10', lines: [
     { analytic_account_id: a, general_account: '600', planned: -1000 },
     { analytic_account_id: a, planned: 0 },

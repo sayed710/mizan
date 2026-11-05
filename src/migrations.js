@@ -757,6 +757,14 @@ MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.asset': assets(db.records['account.asset']), 'account.asset.model': assets(db.records['account.asset.model']), 'account.reconcile.model': rules } };
 } });
 
+MIGRATIONS.push({ version: 32, name: 'Budget company', up: (db) => {
+  // Only a single-company database identifies the budget's company; otherwise the report asks the user to select one.
+  const companies = db.records['res.company'] ?? [];
+  if (companies.length !== 1) return db;
+  const budgets = (db.records['account.budget'] ?? []).map((budget) => budget.company_id ? budget : { ...budget, company_id: companies[0].id });
+  return { ...db, records: { ...db.records, 'account.budget': budgets } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

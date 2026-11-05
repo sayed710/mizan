@@ -13,7 +13,7 @@ import { STOCK_CHART_ROLES } from './stock-accounts.js';
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['account.fiscal.category', 'account.report', 'account.report.horizontal.group', 'sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['account.budget', 'account.fiscal.category', 'account.report', 'account.report.horizontal.group', 'sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };

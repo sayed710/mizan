@@ -1,10 +1,12 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, read, search, unlink, write } from '../orm.js';
-import { today } from './common.js';
+import { dayOf, subtotal, today } from './common.js';
+import { toCompany } from './currency.js';
+import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
-import { round } from '../money.js';
+import { documentCurrency, round } from '../money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
 export { isSectionOrNote } from './taxes.js';
@@ -245,10 +247,61 @@ const day = (date) => {
   return value / 86400000;
 };
 
+const budgetCompanyError = (db, budget) => !budget.company_id || !read(db, 'res.company', budget.company_id)
+  ? 'Select an existing company for the budget' : null;
+
+/** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
+function postedPurchaseQuantities(db, order) {
+  const billed = new Map();
+  const keyedLines = (order.order_line ?? []).filter((line) => line.purchase_line_key);
+  const byKey = new Map(keyedLines.map((line) => [line.purchase_line_key, line]));
+  if (byKey.size !== keyedLines.length) throw new Error('Configure a unique purchase order line link for each line');
+  for (const move of search(db, 'account.move').filter((move) => move.purchase_id === order.id && move.state === 'posted' && ['in_invoice', 'in_refund'].includes(move.move_type))) {
+    if (move.company_id !== order.company_id) throw new Error('Purchase order and posted bill must belong to the same company');
+    for (const line of move.invoice_line_ids ?? []) {
+      if (isSectionOrNote(line)) continue;
+      const source = byKey.get(line.purchase_line_key);
+      if (!source || source.product_id !== line.product_id) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
+      let qty = Number(line.qty) || 0;
+      if (line.uom_id !== source.uom_id) {
+        if (!line.uom_id || !source.uom_id) throw new Error('Configure units of measure on the purchase order and bill lines');
+        qty = convert(db, qty, line.uom_id, source.uom_id, { round: false });
+      }
+      billed.set(line.purchase_line_key, (billed.get(line.purchase_line_key) ?? 0) + qty * (move.move_type === 'in_refund' ? -1 : 1));
+    }
+  }
+  return billed;
+}
+
+/** Unbilled confirmed purchase allocations in company currency (costs negative), derived on every report. */
+function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
+  return search(db, 'purchase.order').filter((order) => ['purchase', 'done'].includes(order.state) && order.company_id === company_id
+    && inPeriod({ date: dayOf(order.date_order) }, from, to)).flatMap((order) => {
+    const billed = postedPurchaseQuantities(db, order);
+    return (order.order_line ?? []).flatMap((line) => {
+      if (isSectionOrNote(line)) return [];
+      const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.purchase_line_key) ?? 0));
+      if (!qty) return [];
+      const distribution = distributionOfLine(line);
+      if (budgetLine.analytic_account_id && !normalizeDistribution(distribution, db)[budgetLine.analytic_account_id]) return [];
+      const accountId = budgetLine.account_id || budgetLine.general_account
+        ? invoiceLineAccount(db, { ...order, move_type: 'in_invoice' }, line) : null;
+      const code = accountId ? read(db, 'account.account', accountId)?.code : '';
+      if ((budgetLine.account_id && accountId !== budgetLine.account_id) || (budgetLine.general_account && !code?.startsWith(budgetLine.general_account))) return [];
+      const amount = -toCompany(db, documentCurrency(db, order).id, subtotal({ ...line, qty }), dayOf(order.date_order), company_id);
+      const allocated = budgetLine.analytic_account_id ? allocatedShares(db, distribution, amount).find(([id]) => Number(id) === budgetLine.analytic_account_id)?.[1] ?? 0 : amount;
+      return [{ purchase_id: order.id, purchase_line_key: line.purchase_line_key, date: dayOf(order.date_order), amount: allocated }];
+    });
+  });
+}
+
 /** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
 export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
+  const companyError = budgetCompanyError(db, budget);
+  if (companyError) throw new Error(companyError);
+  const companyId = budget.company_id;
   const start = day(budget.date_from);
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
@@ -260,11 +313,10 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
     const fraction = Math.min(1, Math.max(0, (day(atDate) - lineStart + 1) / (lineEnd - lineStart + 1)));
     const from = [budget.date_from, line.date_from, period.from].filter(Boolean).sort().at(-1);
     const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
-    const companyId = budget.company_id ?? 1;
     const targetAccount = line.account_id ? read(db, 'account.account', line.account_id) : null;
     if (line.account_id && !targetAccount) throw new Error('Budget account not found');
     const analytic_lines = line.analytic_account_id
-      ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account })
+      ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account, posted_only: true })
           .filter((item) => !targetAccount || item.general_account === targetAccount.code)
       : (line.account_id || line.general_account)
         ? journalItems(db, { from, to, company_id: companyId })
@@ -284,8 +336,11 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
             .filter((item) => item.amount !== 0)
         : [];
     const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+    const commitment_lines = line.analytic_account_id || line.account_id || line.general_account
+      ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
+    const committed = round(commitment_lines.reduce((sum, line) => sum + line.amount, 0));
     const theoretical = round(planned * fraction);
-    return { ...line, planned, practical, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines };
+    return { ...line, planned, practical, committed, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 
@@ -365,6 +420,8 @@ export const analyticPlusModels = {
   },
   'account.budget': {
     ...budgetModel,
+    prepareCreate: (db, vals) => ({ db, vals: { company_id: currentCompany(db), ...vals } }),
+    guard: (db, before, budget) => budgetCompanyError(db, budget),
     fields: {
       ...budgetModel.fields,
       lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
