@@ -9,8 +9,36 @@ import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency }
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const DAY = 86400000;
 
-function postedReversalIds(moves) {
-  return new Set(moves.filter((move) => move.state === 'posted' && move.reversed_entry_id).map((move) => move.reversed_entry_id));
+export function effectivelyReversedEntryIds(moves) {
+  const posted = (moves ?? []).filter((m) => m.state === 'posted');
+  const reversalsBySource = new Map();
+  for (const m of posted) {
+    if (m.reversed_entry_id) {
+      const list = reversalsBySource.get(m.reversed_entry_id) ?? [];
+      list.push(m);
+      reversalsBySource.set(m.reversed_entry_id, list);
+    }
+  }
+
+  const memo = new Map();
+  function isReversed(id, visited = new Set()) {
+    if (!id || visited.has(id)) return false;
+    if (memo.has(id)) return memo.get(id);
+    visited.add(id);
+    const reversals = reversalsBySource.get(id) ?? [];
+    const reversed = reversals.some((rev) => !isReversed(rev.id, new Set(visited)));
+    memo.set(id, reversed);
+    return reversed;
+  }
+
+  const result = new Set();
+  for (const m of posted) {
+    if (isReversed(m.id)) result.add(m.id);
+  }
+  for (const sourceId of reversalsBySource.keys()) {
+    if (isReversed(sourceId)) result.add(sourceId);
+  }
+  return result;
 }
 
 function groupedBoardLines(schedule, date, method, currency) {
@@ -289,14 +317,15 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       if (revCorrection.id) adjustmentMoveIds.push(revCorrection.id);
     }
 
-    const reversed = postedReversalIds(next.records['account.move'] ?? []);
+    const reversed = effectivelyReversedEntryIds(next.records['account.move'] ?? []);
     const reversalByDate = new Map();
     const eligiblePosted = [];
 
     for (let index = 0; index < board.length; index++) {
       const line = board[index];
       if (!line.posted || !line.move_id || groupedIds.has(line.move_id)) continue;
-      if (line.reversal_move_id || reversed.has(line.move_id)) continue;
+      const isReversed = reversed.has(line.move_id) || (line.reversal_move_id && !reversed.has(line.reversal_move_id));
+      if (isReversed) continue;
       const recognitionMove = read(next, 'account.move', line.move_id);
       if (!recognitionMove || recognitionMove.state !== 'posted' || recognitionMove.move_type !== 'entry') {
         throw new Error('A posted deferral board line is missing its recognition entry');
@@ -308,13 +337,18 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
 
     if (item.full && item.previousAmount === 0) {
       if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse posted recognition entries');
-      for (const { line, recognitionMove } of eligiblePosted) {
+      for (const { line, recognitionMove, outstanding } of eligiblePosted) {
         const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
         const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
-        const reversal = reverseEntryFn(next, recognitionMove, { date, reason: `Credit note ${note.name}` });
-        next = reversal.db;
-        reversalByDate.set(line.date, reversal.id);
-        if (reversal.id) adjustmentMoveIds.push(reversal.id);
+        const hasExistingReversal = (next.records['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === recognitionMove.id);
+        const { db: stepDb, id: reversalId } = !hasExistingReversal
+          ? reverseEntryFn(next, recognitionMove, { date, reason: `Credit note ${note.name}` })
+          : postRecognitionCorrection(next, schedule, recognitionMove, outstanding, date, note, true);
+        next = stepDb;
+        if (reversalId) {
+          reversalByDate.set(line.date, reversalId);
+          adjustmentMoveIds.push(reversalId);
+        }
       }
     } else if (eligiblePosted.length) {
       const totalOutstanding = roundCurrency(eligiblePosted.reduce((sum, lineItem) => sum + lineItem.outstanding, 0), currency);
@@ -344,8 +378,11 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       let updatedLine = reversalByDate.has(line.date)
         ? { ...line, reversal_move_id: reversalByDate.get(line.date), credit_adjusted_amount: roundCurrency(Math.abs(Number(line.amount) || 0), currency) }
         : line;
+      if (updatedLine.reversal_move_id && reversed.has(updatedLine.reversal_move_id)) {
+        updatedLine = { ...updatedLine, reversal_move_id: null };
+      }
       if (reversed.has(line.move_id) && !updatedLine.reversal_move_id) {
-        const revMove = (next.records['account.move'] ?? []).find((m) => m.state === 'posted' && m.reversed_entry_id === line.move_id);
+        const revMove = (next.records['account.move'] ?? []).find((m) => m.state === 'posted' && m.reversed_entry_id === line.move_id && !reversed.has(m.id));
         if (revMove) updatedLine = { ...updatedLine, reversal_move_id: revMove.id };
       }
       if (updatedLine.posted || updatedLine.cancelled) return updatedLine;
@@ -424,9 +461,24 @@ export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn) 
     // The board snapshot predates later credit notes, so only the latest adjustment can be undone.
     if (adjustments[adjustments.length - 1] !== adjustment) throw new Error('Reset the later credit notes for this deferred invoice line first');
     if (typeof reverseEntryFn !== 'function') throw new Error('A reversal service is required to reverse deferral corrections');
+    const effectivelyReversed = effectivelyReversedEntryIds(next.records['account.move'] ?? []);
     for (const moveId of adjustment.move_ids ?? []) {
       const move = read(next, 'account.move', moveId);
       if (!move || move.state !== 'posted') continue;
+      if (effectivelyReversed.has(move.id)) continue;
+      next = reverseEntryFn(next, move, { date: correctionDate(next, move), reason: `Reset of credit note ${note.name}` }).db;
+    }
+    const beforeByDate = new Map((adjustment.board_before ?? []).map((l) => [l.date, l]));
+    const postedSinceAdjustment = (schedule.board ?? []).filter((l) => {
+      if (!l.posted || !l.move_id) return false;
+      const before = beforeByDate.get(l.date);
+      return !before || !before.posted;
+    });
+    for (const line of postedSinceAdjustment) {
+      const move = read(next, 'account.move', line.move_id);
+      if (!move || move.state !== 'posted') continue;
+      const currentReversed = effectivelyReversedEntryIds(next.records['account.move'] ?? []);
+      if (currentReversed.has(move.id)) continue;
       next = reverseEntryFn(next, move, { date: correctionDate(next, move), reason: `Reset of credit note ${note.name}` }).db;
     }
     for (const entry of adjustment.grouped_contributions_before ?? []) {
@@ -710,12 +762,13 @@ function cancelDeferralError(db, schedule, { grouped = false } = {}) {
   const moves = db.records['account.move'] ?? [];
   // A board entry reversed through the journal-entry action counts as reversed (Qodo 48). A grouped entry's own
   // next-day reversal is part of its period snapshot, so grouped recognition still blocks until it is handled.
-  const reversed = new Set(moves.filter((m) => m.state === 'posted' && m.reversed_entry_id).map((m) => m.reversed_entry_id));
+  const reversed = effectivelyReversedEntryIds(moves);
   const openGrouped = grouped && moves.some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id));
   const currency = companyCurrencyRecord(db, schedule.company_id);
   const unreversedBoard = (schedule.board ?? []).some((line) => {
     if (!line.move_id) return false;
-    if (line.reversal_move_id || reversed.has(line.move_id)) return false;
+    const isReversed = reversed.has(line.move_id) || (line.reversal_move_id && !reversed.has(line.reversal_move_id));
+    if (isReversed) return false;
     return adjustedRecognitionOutstanding(line, currency) > 0;
   });
   return openGrouped || unreversedBoard ? 'Reverse the recognition entries before cancelling this deferral' : null;
