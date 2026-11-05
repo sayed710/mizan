@@ -13,24 +13,21 @@ import { receive } from './models/valuation.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
-test('stock receipt uses a shared category valuation account for another company', () => {
+test('a category stock account without a company counts as the first company, so another company uses its own configured account', () => {
   const branch = accountingCompany(seed());
-  const shared = create(branch.db, 'account.account', { name: 'Shared valuation', code: 'TEST-SHARED-STOCK', account_type: 'asset_current', company_id: null });
-  const input = create(shared.db, 'account.account', { name: 'Branch stock input', code: 'TEST-BRANCH-INPUT', account_type: 'asset_current', company_id: branch.id });
-  const category = create(input.db, 'product.category', { name: 'Shared stock category', company_id: branch.id, property_stock_valuation_account_id: shared.id, property_stock_account_input_categ_id: input.id });
+  const legacy = create(branch.db, 'account.account', { name: 'Legacy valuation', code: 'TEST-LEGACY-STOCK', account_type: 'asset_current', company_id: null });
+  const own = create(legacy.db, 'account.account', { name: 'Branch valuation', code: 'TEST-BRANCH-STOCK', account_type: 'asset_current', company_id: branch.id });
+  const input = create(own.db, 'account.account', { name: 'Branch stock input', code: 'TEST-BRANCH-INPUT', account_type: 'asset_current', company_id: branch.id });
+  const category = create(input.db, 'product.category', { name: 'Legacy stock category', company_id: branch.id, property_stock_valuation_account_id: legacy.id, property_stock_account_input_categ_id: input.id });
   const product = create(category.db, 'product', { name: 'Stock item', type: 'goods', company_id: branch.id, categ_id: category.id, cost: 10, qty_available: 0, cost_method: 'fifo', valuation: 'real_time' });
-  const db = write(product.db, 'res.company', branch.id, { account_stock_valuation_id: null });
-  assert.equal(read(db, 'account.account', shared.id).company_id, null);
-  const archived = write(db, 'account.account', shared.id, { active: false });
-  assert.throws(() => receive(archived, product.id, 2, 10, { date: '2026-06-01', company_id: branch.id }), /archived/);
-  const foreign = create(db, 'account.account', { name: 'Other company valuation', code: 'TEST-FOREIGN-STOCK', account_type: 'asset_current', company_id: 1 });
-  const foreignCategory = write(foreign.db, 'product.category', category.id, { property_stock_valuation_account_id: foreign.id });
-  assert.throws(() => receive(foreignCategory, product.id, 2, 10, { date: '2026-06-01', company_id: branch.id }), /Configure the stock valuation account/);
+  const missing = write(product.db, 'res.company', branch.id, { account_stock_valuation_id: null });
+  assert.throws(() => receive(missing, product.id, 2, 10, { date: '2026-06-01', company_id: branch.id }), /Configure the stock valuation account/);
+  const db = write(product.db, 'res.company', branch.id, { account_stock_valuation_id: own.id });
   const posted = receive(db, product.id, 2, 10, { date: '2026-06-01', company_id: branch.id });
   const layer = search(posted, 'stock.valuation.layer').find((row) => row.product_id === product.id);
   const move = read(posted, 'account.move', layer.move_id);
-  assert.ok(move.line_ids.some((line) => line.account_id === shared.id && line.debit === 20));
-  assert.ok(move.line_ids.some((line) => line.account_id === input.id && line.credit === 20));
+  assert.ok(move.line_ids.some((line) => line.account_id === own.id && line.debit === 20));
+  assert.ok(!move.line_ids.some((line) => line.account_id === legacy.id));
 });
 
 test('cash basis payment releases accountless tax rows to each invoice line account', () => {
