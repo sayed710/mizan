@@ -9,13 +9,13 @@ export function categoryPath(db, id) {
   return names.join(' / ');
 }
 
-export function productProperty(db, product, key) {
+export function productProperty(db, product, key, companyId = null) {
   const productKey = key === 'property_cost_method' ? 'cost_method' : key === 'property_valuation' ? 'valuation' : key;
   if (product?.[productKey] != null && product[productKey] !== '') return product[productKey];
   const seen = new Set();
   for (let c = read(db, 'product.category', product?.categ_id); c && !seen.has(c.id); c = read(db, 'product.category', c.parent_id)) {
     seen.add(c.id);
-    if (c[key] != null && c[key] !== '') return c[key];
+    if ((companyId == null || c.company_id == null || c.company_id === companyId) && c[key] != null && c[key] !== '') return c[key];
   }
   return null;
 }

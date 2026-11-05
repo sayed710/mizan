@@ -2,26 +2,40 @@
 import { create, read, search, write } from '../orm.js';
 import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
-import { accountId, invoiceLines, postEntry } from './ledger.js';
+import { roundingAccount } from './configured-account.js';
+import { stockAccount } from './stock-accounts.js';
+import { assertCompanyAccount, invoiceLineAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
-import { cashRound, round } from '../money.js';
+import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
+import { findAnalyticDistribution } from './analytic-distribution-models.js';
+import { normalizeDistribution } from '../analytic_distribution.js';
 
-const CASH = '101501';
 export const openSession = (db) => search(db, 'pos.session').find((s) => s.state === 'opened') ?? null;
 
 /** Open the register with the counted opening cash. */
 export function startSession(db, openingCash = 0, configId = null) {
   if (openSession(db)) throw new Error('A session is already open');
-  const config = configId ? read(db, 'pos.config', configId) : (search(db, 'pos.config')[0] ?? null);
+  const selectedConfigId = configId ?? db.settings?.default_pos_config_id ?? null;
+  if (!selectedConfigId) throw new Error('Select a point of sale configuration or configure a default point of sale');
+  const config = read(db, 'pos.config', selectedConfigId);
+  if (!config) throw new Error('Selected point of sale configuration does not exist');
+  const company_id = config.company_id ?? db.settings?.current_company_id ?? null;
+  if (!company_id) throw new Error('Select a company on the point of sale configuration');
+  const journal = config.journal_id ? read(db, 'account.journal', config.journal_id) : null;
+  if (!journal || journal.type !== 'sale' || (journal.company_id != null && journal.company_id !== company_id)) {
+    throw new Error('Configure a sales journal for this point of sale configuration and company');
+  }
+  const journal_id = journal.id;
   return create(db, 'pos.session', {
     name: nextName(db, 'pos.session', 'POS/S/'),
     state: 'opened',
     start_at: today(),
-    cash_start: round(Number(openingCash) || 0),
-    config_id: config?.id ?? (configId || null),
-    company_id: config?.company_id ?? 1,
+    cash_start: roundCurrency(Number(openingCash) || 0, companyCurrencyRecord(db, company_id)),
+    config_id: config.id,
+    journal_id,
+    company_id,
   });
 }
 
@@ -29,15 +43,24 @@ export function startSession(db, openingCash = 0, configId = null) {
  * Lines of a cart priced from the products: sales price and the product's sales tax record
  * (price-included or not), mapped through the customer's fiscal position.
  */
-export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null } = {}) => cart.map((l) => {
+export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1, journalId = openSession(db)?.journal_id ?? null } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
-  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId);
-  const tax = productTax(db, p, 'sale', fp) ?? { tax: p?.sale_tax ?? 14 };
+  const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
+  const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
   const uom_id = l.uom_id || p?.uom_id;
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
   const price = uom_id && stock ? convertPrice(db, rawPrice, stock, uom_id) : rawPrice;
-  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: price, discount: Number(l.discount ?? 0), ...tax };
+  const line = { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: price, discount: Number(l.discount ?? 0), ...tax };
+  const analytic_distribution = l.analytic_distribution != null
+    ? normalizeDistribution(l.analytic_distribution, db)
+    : findAnalyticDistribution(db, {
+        partner_id: partnerId,
+        product_id: l.product_id,
+        account_id: invoiceLineAccount(db, { move_type: 'out_invoice', journal_id: journalId, company_id: companyId, partner_id: partnerId, fiscal_position_id: fp }, line),
+        company_id: companyId,
+      });
+  return { ...line, ...(l.analytic_distribution != null || Object.keys(analytic_distribution).length ? { analytic_distribution } : {}) };
 });
 
 // Resolve both configured tenders and, when requested, historical ID-based tenders.
@@ -75,15 +98,16 @@ export const tendersOf = (order, db = null) => (order.payment_ids?.length
         const type = (order.payment_method_id && db ? matchMethod(db, [], order.payment_method_id, true)?.type : null) ?? order.payment_method;
         return type === 'cash' ? 'cash' : (type === 'bank' || type === 'card' ? 'bank' : type);
       })(),
-      amount: amounts(order.lines).total,
+      amount: amounts(order.lines, companyCurrencyRecord(db, orderCompany(db, order))).total,
     }]);
 
-export function posOrderTotal(db, lines, { configId = null, method = null, payments = null } = {}) {
-  const total = amounts(lines);
+export function posOrderTotal(db, lines, { configId = null, companyId = null, method = null, payments = null } = {}) {
   const config = configId ? read(db, 'pos.config', configId) : null;
+  const currency = companyCurrencyRecord(db, companyId ?? config?.company_id ?? openSession(db)?.company_id);
+  const total = amounts(lines, currency);
   const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
   if (!rounding) {
-    return { ...total, roundedTotal: round(total.total), roundingDifference: 0, isCash: false };
+    return { ...total, roundedTotal: roundCurrency(total.total, currency), roundingDifference: 0, isCash: false };
   }
   const rawPayments = payments ?? [{ payment_method_id: method, amount: total.total }];
   const isCash = rawPayments.some((p) => {
@@ -93,8 +117,8 @@ export function posOrderTotal(db, lines, { configId = null, method = null, payme
     return match ? match.type === 'cash' : String(value ?? '').toLowerCase() === 'cash';
   });
   const shouldRound = Boolean(!config?.only_round_cash_method || isCash);
-  const roundedTotal = shouldRound ? cashRound(total.total, rounding.rounding, rounding.rounding_method) : round(total.total);
-  const roundingDifference = shouldRound ? round(roundedTotal - total.total) : 0;
+  const roundedTotal = roundCurrency(shouldRound ? cashRound(total.total, rounding.rounding, rounding.rounding_method) : total.total, currency);
+  const roundingDifference = shouldRound ? roundCurrency(roundedTotal - total.total, currency) : 0;
   return { ...total, roundedTotal, roundingDifference, isCash };
 }
 
@@ -170,8 +194,13 @@ export function resolvePosConfigAndPreset(db, {
   }
 
   const rawConfigId = config_id != null && config_id !== '' ? Number(config_id) : null;
-  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? (search(db, 'pos.config')[0]?.id ?? null);
+  const resolvedConfigId = rawConfigId ?? orig?.config_id ?? sess.config_id ?? db.settings?.default_pos_config_id ?? null;
   const config = resolvedConfigId ? read(db, 'pos.config', resolvedConfigId) : null;
+  if (!config) {
+    throw new Error(resolvedConfigId
+      ? 'Selected point of sale configuration does not exist'
+      : 'Select a point of sale configuration or configure a default point of sale');
+  }
 
   if (sess.config_id && resolvedConfigId !== sess.config_id) {
     throw new Error('POS configuration does not match the session');
@@ -208,7 +237,7 @@ export function resolvePosConfigAndPreset(db, {
     is_return: isReturn,
     identification: preset?.identification ?? 'none',
     pricelist_id: preset?.pricelist_id ?? null,
-    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId) ?? null,
+    fiscal_position_id: preset?.fiscal_position_id ?? fiscalPositionFor(db, effectivePartnerId, config?.company_id ?? sess?.company_id ?? 1) ?? null,
   };
 
   return {
@@ -262,7 +291,7 @@ function validateRefundSource(db, { lines, refund_of, config_id, session }) {
   return original;
 }
 
-function originalTenders(db, original, enabledMethods, expectedTotal) {
+function originalTenders(db, original, enabledMethods, expectedTotal, currency) {
   if (!original) return null;
   if (Array.isArray(original.payment_ids) && original.payment_ids.length > 0) {
     return original.payment_ids.map((p) => {
@@ -271,7 +300,7 @@ function originalTenders(db, original, enabledMethods, expectedTotal) {
       return {
         payment_method_id: match?.id ?? (typeof p.payment_method_id === 'number' ? p.payment_method_id : null),
         method: methodType,
-        amount: round(Number(p.amount) || 0),
+        amount: roundCurrency(Number(p.amount) || 0, currency),
       };
     });
   }
@@ -284,7 +313,7 @@ function originalTenders(db, original, enabledMethods, expectedTotal) {
   }];
 }
 
-function resolveRefundTenders(db, { original, payments, method, enabledMethods, recordedOriginalTenders }) {
+function resolveRefundTenders(db, { original, payments, method, enabledMethods, recordedOriginalTenders, currency }) {
   const rawTenders = original.payment_ids?.length ? original.payment_ids : [{ payment_method_id: original.payment_method_id }];
   const matchesRecorded = (rec, raw, match) => raw.payment_method_id != null
     ? String(match.id) === String(raw.payment_method_id)
@@ -299,7 +328,7 @@ function resolveRefundTenders(db, { original, payments, method, enabledMethods, 
       const cand = p.payment_method_id ?? p.method;
       const match = matchMethod(db, enabledMethods, cand, true);
       if (!match) throw new Error('Invalid payments: refund tenders must match the original order');
-      const pAmt = round(Number(p.amount));
+      const pAmt = roundCurrency(Number(p.amount), currency);
       const idx = remaining.findIndex(({ rec, raw }) => {
         const methodMatches = matchesRecorded(rec, raw, match);
         const amtMatches = pAmt === rec.amount || pAmt === -rec.amount;
@@ -324,7 +353,7 @@ function resolveRefundTenders(db, { original, payments, method, enabledMethods, 
   return recordedOriginalTenders;
 }
 
-function resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn }) {
+function resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency }) {
   if (payments !== null && payments !== undefined && (!Array.isArray(payments) || !payments.length)) {
     throw new Error('Invalid payments');
   }
@@ -346,20 +375,20 @@ function resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMe
     }
     const amt = Number(p.amount);
     if (!Number.isFinite(amt)) throw new Error(paymentError(payments, 'Invalid payment amount'));
-    if (round(expectedTotal) !== 0) {
+    if (roundCurrency(expectedTotal, currency) !== 0) {
       if (Math.abs(amt) === 0) throw new Error(paymentError(payments, 'Invalid payment amount'));
       if (isReturn ? amt > 0 : amt < 0) throw new Error(paymentError(payments, 'Invalid payment amount'));
-    } else if (round(amt) !== 0 || Math.abs(amt) !== 0) {
+    } else if (roundCurrency(amt, currency) !== 0 || Math.abs(amt) !== 0) {
       throw new Error(paymentError(payments, 'Invalid payment amount'));
     }
     return {
       payment_method_id: match.id,
       method: tenderType(match),
-      amount: round(amt),
+      amount: roundCurrency(amt, currency),
     };
   });
 
-  if (round(resolvedPayments.reduce((s, p) => s + p.amount, 0)) !== round(expectedTotal)) {
+  if (roundCurrency(resolvedPayments.reduce((s, p) => s + p.amount, 0), currency) !== roundCurrency(expectedTotal, currency)) {
     throw new Error('The payments must add up to the order total');
   }
   return resolvedPayments;
@@ -389,9 +418,9 @@ function validateReturnValuation(db, { original, lines, session }) {
   }
 }
 
-function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments }) {
+function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id }) {
   if (original) {
-    if (round(total.total) !== 0) {
+    if (roundCurrency(total.total, currency) !== 0) {
       const valuationMoveIds = new Set(
         (db.records['stock.valuation.layer'] ?? [])
           .map((l) => l.move_id)
@@ -410,15 +439,15 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
         if (!journal) throw new Error('Original POS journal was not found');
       }
     }
-  } else if (round(expectedTotal) !== 0) {
-    const counterpart = accountId(db, '121000', session.company_id);
-    if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
+  } else if (roundCurrency(expectedTotal, currency) !== 0) {
+    partnerAccount(db, partner_id, session.company_id, 'receivable');
     for (const p of resolvedPayments) {
       const m = read(db, 'pos.payment.method', p.payment_method_id);
       if (m && m.type !== 'pay_later') {
-        const journal = read(db, 'account.journal', m.journal_id);
-        const account = read(db, 'account.account', m.outstanding_account_id || journal?.default_account_id)?.code;
-        if (!account) throw new Error('Payment account is required');
+        const journal = paymentJournal(db, m.journal_id, session.company_id ?? 1);
+        const account = m.outstanding_account_id ?? journal.accountId;
+        const configured = read(db, 'account.account', account);
+        if (!configured || (configured.company_id && configured.company_id !== (session.company_id ?? 1))) throw new Error('Payment account must belong to the POS company');
       }
     }
   }
@@ -472,21 +501,22 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     }
   }
 
-  const total = amounts(lines);
-  const calculated = original ? null : posOrderTotal(db, lines, { configId: resolvedConfigId, method, payments });
-  const expectedTotal = original ? round(total.total + (Number(original.rounding_difference) || 0)) : calculated.roundedTotal;
+  const currency = companyCurrencyRecord(db, session.company_id);
+  const total = amounts(lines, currency);
+  const calculated = original ? null : posOrderTotal(db, lines, { configId: resolvedConfigId, companyId: session.company_id, method, payments });
+  const expectedTotal = original ? roundCurrency(total.total + (Number(original.rounding_difference) || 0), currency) : calculated.roundedTotal;
   const roundingDiff = original ? Number(original.rounding_difference) || 0 : calculated.roundingDifference;
 
   const enabledMethods = posPaymentMethods(db, resolvedConfigId);
 
-  const recordedOriginalTenders = originalTenders(db, original, enabledMethods, expectedTotal);
+  const recordedOriginalTenders = originalTenders(db, original, enabledMethods, expectedTotal, currency);
 
   const resolvedPayments = original
-    ? resolveRefundTenders(db, { original, payments, method, enabledMethods, recordedOriginalTenders })
-    : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn });
+    ? resolveRefundTenders(db, { original, payments, method, enabledMethods, recordedOriginalTenders, currency })
+    : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency });
 
   validateReturnValuation(db, { original, lines, session });
-  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments });
+  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId });
 
   return {
     session,
@@ -526,7 +556,8 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
     } else {
       const unit_cost = original?.stock_costs?.find((c) => c.index === index)?.unit_cost ?? p.cost;
       const before = new Set((stocked.records['stock.valuation.layer'] ?? []).map((layer) => layer.id));
-      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, counterpart: '500000', company_id: session.company_id });
+      stocked = moveValued(stocked, [{ ...l, qty: Math.abs(qty), unit_cost }], qty < 0 ? sign : -sign, { reference: name, // Periodic goods move quantities only, so they need no cost-of-goods-sold account.
+        counterpart: periodic ? null : stockAccount(stocked, p, 'cogs', session.company_id), company_id: session.company_id });
       if (!original && qty < 0) {
         const layer = (stocked.records['stock.valuation.layer'] ?? []).find((item) => !before.has(item.id) && item.kind === 'in' && item.product_id === p.id);
         returnLayers.push({ index, layer_id: layer?.id ?? null });
@@ -562,22 +593,30 @@ function reverseOrderEntries(db, { stocked, original, session, name, id, expecte
 }
 
 function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, isReturn, id, expectedTotal }) {
+  const posJournal = resolveDocumentJournal(stocked, {
+    move_type: refund_of ? 'out_refund' : 'out_invoice',
+    company_id: session.company_id,
+    session_id: session.id,
+    config_id: session.config_id,
+    journal_id: session.journal_id,
+  }, { required: true });
+  const posJournalId = posJournal.id;
   const sale = invoiceLines(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
+    journal_id: posJournalId,
     company_id: session.company_id,
     partner_id,
     fiscal_position_id: presetSnapshot.fiscal_position_id,
     name,
     invoice_line_ids: lines.map((l) => ({ ...l, tax_cash_basis: false })),
   });
-  const counterpart = accountId(db, '121000', session.company_id);
-  if (!counterpart) throw new Error('POS needs a receivable counterpart account (121000)');
-  const profitAcc = (rounding?.profit_account_id && read(db, 'account.account', rounding.profit_account_id)?.code) || '450000';
-  const lossAcc = (rounding?.loss_account_id && read(db, 'account.account', rounding.loss_account_id)?.code) || '690000';
+  const counterpart = partnerAccount(db, partner_id, session.company_id, 'receivable');
   const saleLines = [
     ...sale.filter((l) => l.account_id !== counterpart),
     ...resolvedPayments.map((p) => ({
-      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id || counterpart,
+      account_id: read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id
+        ? assertCompanyAccount(db, read(db, 'pos.payment.method', p.payment_method_id).receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account')
+        : counterpart,
       partner_id,
       debit: (refund_of || isReturn || Number(p.amount) < 0) ? 0 : Math.abs(Number(p.amount)),
       credit: (refund_of || isReturn || Number(p.amount) < 0) ? Math.abs(Number(p.amount)) : 0,
@@ -585,20 +624,19 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
   ];
   if (roundingDiff !== 0) {
     const isProfit = (refund_of ? -roundingDiff : roundingDiff) > 0;
-    const acc = isProfit ? profitAcc : lossAcc;
+    const acc = roundingAccount(db, rounding, isProfit, session.company_id);
     const amt = Math.abs(roundingDiff);
     saleLines.push(isProfit ? { account: acc, credit: amt, partner_id, name: 'Cash Rounding' } : { account: acc, debit: amt, partner_id, name: 'Cash Rounding' });
   }
-  const saleEntry = postEntry(stocked, { journal: 'POSS', company: session.company_id, ref: name, lines: saleLines.map((l) => ({ ...l, account: l.account ?? read(stocked, 'account.account', l.account_id)?.code })) });
+  const saleEntry = postEntry(stocked, { journal: posJournal?.code || 'POSS', journal_id: posJournalId, company: session.company_id, ref: name, lines: saleLines });
   let booked = saleEntry.db;
   const moveIds = [saleEntry.id];
   for (const p of resolvedPayments) {
     const m = read(booked, 'pos.payment.method', p.payment_method_id);
     if (m.type === 'pay_later') continue;
     const journal = read(booked, 'account.journal', m.journal_id);
-    const account = read(booked, 'account.account', m.outstanding_account_id || journal.default_account_id)?.code;
-    const receivable = read(booked, 'account.account', m.receivable_account_id)?.code ?? '121000';
-    if (!account) throw new Error('Payment account is required');
+    const account = m.outstanding_account_id ?? paymentJournal(booked, journal.id, session.company_id ?? 1).accountId;
+    const receivable = m.receivable_account_id ? assertCompanyAccount(booked, m.receivable_account_id, session.company_id ?? 1, 'asset_receivable', 'The selected counterpart account') : counterpart;
     const amount = Number(p.amount);
     const isOutbound = refund_of || isReturn || amount < 0;
     const tenderEntry = postEntry(booked, {
@@ -607,8 +645,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
       company: session.company_id,
       ref: name,
       lines: isOutbound
-        ? [{ account, credit: Math.abs(amount), partner_id }, { account: receivable, debit: Math.abs(amount), partner_id }]
-        : [{ account, debit: Math.abs(amount), partner_id }, { account: receivable, credit: Math.abs(amount), partner_id }],
+        ? [{ account_id: account, credit: Math.abs(amount), partner_id }, { account_id: receivable, debit: Math.abs(amount), partner_id }]
+        : [{ account_id: account, debit: Math.abs(amount), partner_id }, { account_id: receivable, credit: Math.abs(amount), partner_id }],
     });
     booked = tenderEntry.db;
     moveIds.push(tenderEntry.id);
@@ -648,7 +686,7 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
   });
   const name = read(next, 'pos.order', id).name;
   let stocked = moveOrderStock(db, { next, id, name, lines, refund_of, original, session });
-  if (round(total.total) === 0) {
+  if (roundCurrency(total.total, companyCurrencyRecord(db, session.company_id)) === 0) {
     if (original) stocked = write(stocked, 'pos.order', original.id, { state: 'refunded' });
     return { db: stocked, id, name, total: expectedTotal };
   }
@@ -662,14 +700,23 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
 export function payCart(db, { cart = [], lines: inputLines = null, method, payments = null, partner_id = null, request_key = null, config_id = null, preset_id = null, refund_of = null }) {
   const original = refund_of ? read(db, 'pos.order', Number(refund_of)) : null;
   const rawCart = inputLines ?? cart;
-  const normalized = original ? original.lines : rawCart.map((l) => ({ product_id: Number(l.product_id), qty: Number(l.qty), discount: Number(l.discount ?? 0), ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}) }));
+  const normalized = original ? original.lines : rawCart.map((l) => {
+    const distribution = l?.analytic_distribution != null ? normalizeDistribution(l.analytic_distribution, db) : null;
+    return {
+      product_id: Number(l.product_id),
+      qty: Number(l.qty),
+      discount: Number(l.discount ?? 0),
+      ...(l.uom_id ? { uom_id: Number(l.uom_id) } : {}),
+      ...(distribution != null ? { analytic_distribution: distribution } : {}),
+    };
+  });
   const fingerprint = JSON.stringify([normalized, method, payments, partner_id, config_id, preset_id, refund_of]);
   if (request_key !== null && (typeof request_key !== 'string' || !/^[\w:-]{8,200}$/.test(request_key))) throw new Error('Invalid payment request key');
   const prior = request_key && search(db, 'pos.order').find((o) => o.request_key === request_key);
   if (prior) {
     if (prior.request_fingerprint !== fingerprint) throw new Error('This request key was already used for a different payment');
     const order = read(db, 'pos.order', prior.id);
-    const total = round(order.amount_total + (Number(order.rounding_difference) || 0));
+    const total = roundCurrency(order.amount_total + (Number(order.rounding_difference) || 0), companyCurrencyRecord(db, orderCompany(db, order)));
     return { db, id: prior.id, name: order.name, total };
   }
   const resolved = resolvePosConfigAndPreset(db, {
@@ -694,6 +741,8 @@ export function payCart(db, { cart = [], lines: inputLines = null, method, payme
   const lines = original ? original.lines : priceLines(db, normalized, resolved.effectivePartnerId, {
     pricelistId: resolved.presetSnapshot.pricelist_id,
     fiscalPositionId: resolved.presetSnapshot.fiscal_position_id,
+    companyId: resolved.config?.company_id ?? resolved.session?.company_id ?? 1,
+    journalId: resolved.config?.journal_id ?? resolved.session?.journal_id ?? null,
   });
   const out = payOrder(db, {
     lines,
@@ -728,24 +777,57 @@ export function refundOrder(db, order) {
 /** Session totals by payment method (refunds negative) and the cash expected in the drawer. */
 export function sessionTotals(db, session) {
   const orders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
-  const sum = (method) => round(orders.reduce((s, o) => {
+  const currency = companyCurrencyRecord(db, session.company_id);
+  const sum = (method) => roundCurrency(orders.reduce((s, o) => {
     // Reversals retain the original signed tenders, so invert them once.
     const sign = o.refund_of || o.state === 'refund' ? -1 : 1;
     return s + sign * tendersOf(o, db).filter((t) => t.method === method).reduce((a, t) => a + t.amount, 0);
-  }, 0));
+  }, 0), currency);
   const cash = sum('cash');
-  return { orders: orders.length, cash, card: sum('bank'), expected: round((Number(session.cash_start) || 0) + cash) };
+  return { orders: orders.length, cash, card: sum('bank'), expected: roundCurrency((Number(session.cash_start) || 0) + cash, currency) };
 }
 
 /** Close with the counted cash; a difference is booked as a cash gain or loss. */
 export function closeSession(db, session, countedCash) {
   if (session.state !== 'opened') throw new Error('The session is not open');
   const { cash, card, expected } = sessionTotals(db, session);
-  const counted = round(Number(countedCash) || 0);
-  const difference = round(counted - expected);
+  const currency = companyCurrencyRecord(db, session.company_id);
+  const counted = roundCurrency(Number(countedCash) || 0, currency);
+  const difference = roundCurrency(counted - expected, currency);
+  let cashJournal;
+  let differenceAccount;
+  if (difference) {
+    const sessionOrders = search(db, 'pos.order').filter((o) => o.session_id === session.id);
+    const usedMethodIds = new Set();
+    for (const o of sessionOrders) {
+      if (o.payment_ids?.length) {
+        for (const p of o.payment_ids) {
+          if (p.payment_method_id) usedMethodIds.add(p.payment_method_id);
+        }
+      } else if (o.payment_method_id) {
+        usedMethodIds.add(o.payment_method_id);
+      }
+    }
+    const usedCashMethods = [...usedMethodIds]
+      .map((id) => read(db, 'pos.payment.method', id))
+      .filter((m) => m && m.type === 'cash' && (m.company_id ?? 1) === (session.company_id ?? 1));
+
+    const config = read(db, 'pos.config', session.config_id);
+    const configuredMethods = (db.records['pos.payment.method'] ?? []).filter((m) => m.type === 'cash' && m.active !== false && (m.company_id ?? 1) === (session.company_id ?? 1) && (config?.payment_method_ids != null ? config.payment_method_ids.includes(m.id) : (m.config_ids ?? []).includes(config?.id)));
+
+    const methods = usedCashMethods.length ? usedCashMethods : configuredMethods;
+    const journals = [...new Set(methods.map((m) => m.journal_id).filter(Boolean))];
+    if (journals.length !== 1 || methods.some((m) => !m.journal_id)) throw new Error('Configure one cash journal on the point of sale cash payment methods');
+    cashJournal = read(db, 'account.journal', journals[0]);
+    if (!cashJournal || cashJournal.type !== 'cash' || (cashJournal.company_id && cashJournal.company_id !== (session.company_id ?? 1))) throw new Error('Configure a cash journal for this company');
+    paymentJournal(db, cashJournal.id, session.company_id ?? 1);
+    const field = difference > 0 ? 'profit_account_id' : 'loss_account_id';
+    differenceAccount = read(db, 'account.account', cashJournal[field]);
+    if (!differenceAccount || differenceAccount.active === false || (differenceAccount.company_id && differenceAccount.company_id !== (session.company_id ?? 1))) throw new Error(`Configure the ${difference > 0 ? 'profit' : 'loss'} account on cash journal ${cashJournal.name}`);
+  }
   const booked = difference ? postEntry(db, {
-    journal: 'POSS', company: session.company_id, ref: `${session.name} cash difference`,
-    lines: difference > 0 ? [{ account: CASH, debit: difference }, { account: '450000', credit: difference }] : [{ account: '690000', debit: -difference }, { account: CASH, credit: -difference }],
+    journal: cashJournal.id, company: session.company_id, ref: `${session.name} cash difference`,
+    lines: difference > 0 ? [{ account: cashJournal.default_account_id, debit: difference }, { account: differenceAccount.id, credit: difference }] : [{ account: differenceAccount.id, debit: -difference }, { account: cashJournal.default_account_id, credit: -difference }],
   }).db : db;
   return write(booked, 'pos.session', session.id, { state: 'closed', stop_at: today(), total_cash: cash, total_card: card, cash_expected: expected, cash_end: counted, cash_difference: difference });
 }

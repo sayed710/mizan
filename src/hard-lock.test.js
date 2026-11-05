@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { payMove } from './models/accounting.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
@@ -8,7 +8,7 @@ import { applyDiff, diffDb } from './sync.js';
 const LOCK = '2026-12-31';
 const locked = () => {
   const db = seed();
-  return { ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } };
+  return write({ ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
 };
 const invoiceIn = (db) => db.records['account.move'].map((m) => read(db, 'account.move', m.id))
   .find((m) => m.state === 'posted' && m.move_type === 'out_invoice' && m.invoice_date <= LOCK && m.amount_residual > 0);
@@ -69,7 +69,7 @@ test('an early-payment discount after the lock settles a locked invoice', async 
   const made = create(base, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-12-30', invoice_payment_term_id: term, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const { models } = await import('./models/index.js');
   const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(made.db, read(made.db, 'account.move', made.id)).db;
-  const db = { ...posted, settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } };
+  const db = write({ ...posted, settings: { ...posted.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
   const saved = save(db, payWithDiscount(db, made.id, 98, '2027-01-02'));
   assert.equal(read(saved, 'account.move', made.id).amount_residual, 0);
 });
@@ -77,7 +77,8 @@ test('an early-payment discount after the lock settles a locked invoice', async 
 test('posted payments and reconciled bank lines inside the lock cannot be deleted or renumbered', () => {
   const db = locked();
   const pay = { id: 9001, name: 'PBNK1/2026/9001', state: 'posted', amount: 10, date: '2026-06-01', payment_type: 'inbound', partner_type: 'customer' };
-  const line = { id: 9002, payment_ref: 'Old', state: 'reconciled', amount: 10, date: '2026-06-01', unique_import_id: 'abc' };
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = { id: 9002, journal_id: bankJournal.id, payment_ref: 'Old', state: 'reconciled', amount: 10, date: '2026-06-01', unique_import_id: 'abc' };
   const withThem = { ...db, records: { ...db.records, 'account.payment': [...(db.records['account.payment'] ?? []), pay], 'account.bank.statement.line': [...(db.records['account.bank.statement.line'] ?? []), line] } };
   const opts = { author: 'clerk', isAdmin: false };
   assert.throws(() => applyDiff(withThem, { upserts: {}, deletes: { 'account.payment': [pay.id] } }, opts), /locked/);

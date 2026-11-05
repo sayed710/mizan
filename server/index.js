@@ -4,7 +4,7 @@
 import { createServer } from 'node:http';
 import { constants as zlibConstants, gzip } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { closeSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -24,7 +24,7 @@ import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
-import { smtpConfig } from './smtp.js';
+import { smtpConfig, sendMail } from './smtp.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
@@ -326,9 +326,21 @@ const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; P
 // Sessions use opaque random tokens, not a signing secret. Persist a separate key in the existing kv store.
 writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)", randomBytes(32).toString('hex'));
 const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
-const pageToken = (p) => createHmac('sha256', PAGE_SECRET).update(`${p.id}:${p.visibility_password}`).digest('hex');
+// Page unlock cookie: a scrypt key bound to the page and its current password, so a password change revokes old cookies.
+// Cached per page and password (both server-side), so request cookies never trigger a fresh scrypt run.
+const pageTokens = new Map();
+const pageToken = (p) => {
+  const key = `${p.id} ${p.visibility_password ?? ''}`;
+  if (!pageTokens.has(key)) {
+    if (pageTokens.size >= 1000) pageTokens.clear(); // ponytail: wholesale reset, an LRU if sites ever hold more pages
+    pageTokens.set(key, scryptSync(String(p.visibility_password ?? ''), `${PAGE_SECRET}:${p.id}`, 32).toString('hex'));
+  }
+  return pageTokens.get(key);
+};
+// The cookie name carries a keyed hash of the page id, not the record id itself.
+const pageCookie = (p) => `mizan_page_${createHash('sha256').update(`${PAGE_SECRET}:${p.id}`).digest('hex').slice(0, 24)}`;
 const pageUnlocked = (req, p) => {
-  const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`mizan_page_${p.id}=`))?.split('=')[1] ?? '';
+  const given = (req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${pageCookie(p)}=`))?.split('=')[1] ?? '';
   return /^[a-f0-9]{64}$/.test(given) && timingSafeEqual(Buffer.from(given), Buffer.from(pageToken(p)));
 };
 const pageAccess = (req) => (p) => p.visibility === 'password' ? pageUnlocked(req, p) : !!sessionUser(req);
@@ -1012,7 +1024,7 @@ async function website(req, res, path) {
       let raw;
       try { raw = await readRaw(req, 4096); } catch { return send(res, 413, { error: 'Request too large' }); }
       if (checkPagePassword(page, new URLSearchParams(raw.toString('utf8')).get('password'))) {
-        res.writeHead(303, { Location: path, 'Cache-Control': 'no-store', 'Set-Cookie': `mizan_page_${page.id}=${pageToken(page)}; HttpOnly; SameSite=Lax; Path=${/^[\w\-./%~]*$/.test(path) ? path : '/'}; Max-Age=1209600${SECURE ? '; Secure' : ''}` });
+        res.writeHead(303, { Location: path, 'Cache-Control': 'no-store', 'Set-Cookie': `${pageCookie(page)}=${pageToken(page)}; HttpOnly; SameSite=Lax; Path=${/^[\w\-./%~]*$/.test(path) ? path : '/'}; Max-Age=1209600${SECURE ? '; Secure' : ''}` });
         return res.end();
       }
       status = 403;
@@ -1084,12 +1096,23 @@ listen();
 
 // Scheduled actions (recurring invoices, accruals): at start, then hourly; saved only when something changed.
 const JOB_INTERVAL_MS = 60 * 60 * 1000;
-const runJobs = () => {
+let jobsRunning = false;
+const runJobs = async () => {
+  if (jobsRunning) return;
+  jobsRunning = true;
   try {
-    const next = runScheduledJobs(db, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }) });
-    if (next !== db) commitDb(applyDiff(db, diffDb(db, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+    let base = db;
+    const commitFollowUps = (_before, after) => {
+      commitDb(applyDiff(db, diffDb(base, after), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
+      base = db;
+      return db;
+    };
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null, commitFollowUps });
+    if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
+  } finally {
+    jobsRunning = false;
   }
 };
 // The first run waits until the server is listening, so a restart answers requests before the jobs finish.

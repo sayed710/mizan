@@ -62,7 +62,8 @@ export function periodRates(db, period) {
   return (chart.company_ids ?? []).map(({ company_id }) => {
     const company = read(db, 'res.company', company_id);
     if (!company) throw new Error('Select an existing company');
-    const convert = (date) => rateAt(db, chart.currency_id, date) / rateAt(db, company.currency_id, date);
+    // Chart currency per unit of the member's currency, with the member's own company-specific rates.
+    const convert = (date) => rateAt(db, chart.currency_id, date, company.id);
     let sum = 0;
     let days = 0;
     for (let date = period.date_from; date <= period.date_to; date = addDays(date, 1)) { sum += convert(date); days++; }
@@ -79,7 +80,7 @@ function getPeriod(db, id) {
 /** Consolidate posted company balances; closed periods return their immutable snapshot. */
 export function consolidate(db, periodId) {
   const period = getPeriod(db, periodId);
-  if (period.state === 'closed') return structuredClone({ lines: period.lines ?? [], unmapped: period.unmapped ?? [] });
+  if (period.state === 'closed') return structuredClone({ lines: period.lines ?? [], unmapped: period.unmapped ?? [], unmatched: period.unmatched ?? [] });
   const chart = read(db, 'consolidation.chart', period.chart_id);
   const error = periodGuard(db, null, period) || (chart && chartGuard(db, chart, chart));
   if (error) throw new Error(error);
@@ -89,6 +90,7 @@ export function consolidate(db, periodId) {
   const mapping = new Map((chart.account_ids ?? []).flatMap((a, i) => codes(a).map((code) => [code, lines[i]])));
   const partners = new Map(chart.company_ids.map((c) => [read(db, 'res.company', c.company_id).partner_id, c]));
   const unmapped = new Set();
+  const unmatched = [];
   let fxElimination = 0;
   // Group lines the method adds itself; the EQUITY: namespace is reserved for them.
   const systemLine = (code, name) => {
@@ -103,13 +105,13 @@ export function consolidate(db, periodId) {
     const share = Number(member.ownership ?? 100) / 100;
     const factor = member.method === 'full' || !member.method ? 1 : share;
     // Equity and earlier results keep the rate of the day they were booked (historical rate).
-    const historical = (date) => rateAt(db, chart.currency_id, date) / rateAt(db, company.currency_id, date);
+    const historical = (date) => rateAt(db, chart.currency_id, date, company.id);
     const balances = new Map();
     // Translated totals: net assets at the closing rate, equity and earlier results historical, the period's result at the average rate.
     const sums = { assets: 0, equity: 0, retained: 0, result: 0 };
     const pending = [];
     for (const move of db.records['account.move'] ?? []) {
-      const date = move.invoice_date ?? move.date;
+      const date = move.date ?? move.invoice_date;
       if ((move.company_id ?? 1) !== company.id || move.state !== 'posted' || !date || date > period.date_to) continue;
       for (const item of move.line_ids ?? []) {
         const account = read(db, 'account.account', item.account_id);
@@ -129,10 +131,26 @@ export function consolidate(db, periodId) {
         const other = partners.get(item.partner_id ?? move.partner_id);
         if (other && other.company_id !== company.id && other.method !== 'equity'
           && (pnl(account.account_type) || ['asset_receivable', 'liability_payable'].includes(account.account_type))) {
-          line.eliminations -= amount;
+          const counterpart = read(db, 'account.move', move.intercompany_move_id);
+          const otherDate = counterpart?.date ?? counterpart?.invoice_date;
+          const linked = counterpart?.state === 'posted' && counterpart.company_id === other.company_id
+            && counterpart.intercompany_move_id === move.id && otherDate && otherDate <= period.date_to;
+          const translatedCounterpart = (entry, memberRow) => {
+            const closing = rates.find((r) => r.company_id === memberRow.company_id)?.rate_closing;
+            const multiplier = memberRow.method === 'proportional' ? Number(memberRow.ownership ?? 100) / 100 : 1;
+            return (entry.line_ids ?? []).reduce((sum, entryLine) => {
+              const type = read(db, 'account.account', entryLine.account_id)?.account_type;
+              return ['asset_receivable', 'liability_payable'].includes(type) ? sum + ((Number(entryLine.debit) || 0) - (Number(entryLine.credit) || 0)) * Number(closing) * multiplier : sum;
+            }, 0);
+          };
+          const own = translatedCounterpart(move, member);
+          const theirs = linked ? translatedCounterpart(counterpart, other) : 0;
+          const fraction = own && theirs && Math.sign(own) !== Math.sign(theirs) ? Math.min(1, Math.abs(theirs / own)) : 0;
+          if (fraction < 1) unmatched.push({ move_id: move.id, account_id: item.account_id, amount: round(amount * (1 - fraction)) });
+          line.eliminations -= amount * fraction;
           // Both sides of a pair match at the rate of the day they were booked; what closing/average rates add on top is
           // a translation difference, not a mismatch, and is carried to its own line below.
-          fxElimination += amount - balance * historical(date) * factor;
+          fxElimination += (amount - balance * historical(date) * factor) * fraction;
         }
       }
     }
@@ -167,7 +185,7 @@ export function consolidate(db, periodId) {
   const exact = lines.reduce((s, l) => s + Object.values(l.by_company).reduce((t, a) => t + a, 0) + l.eliminations, 0);
   const drift = round(rounded.reduce((s, l) => s + l.total, 0));
   if (Math.abs(exact) < 0.005 && drift) rounded.push({ group_code: 'EQUITY:ROUNDING', name: 'Rounding Difference', by_company: {}, eliminations: -drift, total: -drift });
-  return { lines: rounded, unmapped: [...unmapped].sort() };
+  return { lines: rounded, unmapped: [...unmapped].sort(), unmatched };
 }
 
 /** Store a fresh draft report and its effective rates through the ORM. */
@@ -233,6 +251,7 @@ export const consolidationModels = {
         compute: (r) => (r.lines ?? []).map((line) => ({ ...line, by_company: JSON.stringify(line.by_company ?? {}) })),
       },
       unmapped: { type: 'tags', label: 'Unmapped Accounts', readonly: true },
+      unmatched: { type: 'one2many', label: 'Unmatched Inter-company Items', readonly: true, fields: { move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' }, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, amount: { type: 'monetary', label: 'Amount' } } },
     },
     defaults: () => ({ state: 'draft', date_from: `${today().slice(0, 4)}-01-01`, date_to: today(), rate_ids: [], lines: [], unmapped: [] }),
     guard: periodGuard,
@@ -242,7 +261,7 @@ export const consolidationModels = {
     kanban: { title: 'name', lines: ['chart_id', 'date_from', 'date_to'], badge: 'state' },
     form: {
       title: 'name', statusbar: 'state', lockedWhen: (r) => r.state === 'closed', groups: [['chart_id'], ['date_from', 'date_to']],
-      tabs: [{ label: 'Translation Rates', fields: ['rate_ids'] }, { label: 'Consolidated Balances', readonly: true, fields: ['display_lines', 'unmapped'] }],
+      tabs: [{ label: 'Translation Rates', fields: ['rate_ids'] }, { label: 'Consolidated Balances', readonly: true, fields: ['display_lines', 'unmapped', 'unmatched'] }],
       buttons: [
         { label: 'Consolidate', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: consolidatePeriod(db, r.id) }) },
         { label: 'Close Period', when: (r) => r.state === 'draft', run: (db, r) => ({ db: closePeriod(db, r.id) }) },

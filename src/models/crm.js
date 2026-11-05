@@ -17,6 +17,13 @@ export function isRotting(db, model, r) {
   return diffDays > stage.rotting_threshold_days;
 }
 
+/** First active stage available to the selected team or project, or no stage. */
+export function defaultStage(db, stageModel, scopeField, scopeId) {
+  return (db.records?.[stageModel] ?? [])
+    .filter((stage) => stage.active !== false && (!stage[scopeField]?.length || (scopeId && stage[scopeField].includes(scopeId))))
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.id - b.id)[0]?.id ?? null;
+}
+
 export function stageColumnsFor(db, model, context = {}) {
   const stageModel = model === 'crm.lead' ? 'crm.stage' : model === 'project.task' ? 'project.task.type' : null;
   if (!stageModel) return [];
@@ -112,7 +119,10 @@ export const crmModels = {
       pricelist_id: { type: 'many2one', relation: 'product.pricelist', label: 'Pricelist' },
       credit_limit: { type: 'monetary', label: 'Credit Limit' },
       property_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
+      property_supplier_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Supplier Payment Terms' },
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
+      property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',
@@ -124,7 +134,10 @@ export const crmModels = {
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },
+          followup_delivery_state: { type: 'selection', label: 'Delivery State', options: [['sent', 'Sent'], ['not_sent', 'Not Sent'], ['not_configured', 'Not Configured']], hidden: true },
           followup_next_action_date: { type: 'date', label: 'Next Action Date', hidden: true },
+          followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']], hidden: true },
+          no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
       tag_ids: { type: 'tags', label: 'Tags' },
@@ -161,7 +174,7 @@ export const crmModels = {
         { label: 'Invoiced', model: 'account.move', field: 'partner_id', target: 'accounting/invoices', sum: 'amount_total' },
       ],
       buttons: [{ label: 'WhatsApp', server: '/api/integrations/whatsapp', requires: 'whatsapp', when: (r) => r.phone, run: (db, r) => { window.open(`https://wa.me/${String(r.phone).replace(/[^\d]/g, '')}`, '_blank', 'noopener'); return { db }; } }],
-      groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'country', 'pricelist_id', 'property_payment_term_id', 'credit_limit', 'tag_ids']],
+      groups: [['is_company', 'email', 'phone', 'vat'], ['city', 'country', 'pricelist_id', 'property_payment_term_id', 'property_supplier_payment_term_id', 'property_account_receivable_id', 'property_account_payable_id', 'credit_limit', 'tag_ids']],
       tabs: [{ label: 'Bank Accounts', fields: ['bank_ids'] }],
       chatter: true,
     },
@@ -239,7 +252,8 @@ export const crmModels = {
       const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
       return p ? { email: r.email || p.email || '', phone: r.phone || p.phone || '' } : {};
     },
-    defaults: () => ({ type: 'opportunity', stage_id: 1, probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today(), date_last_stage_update: today() }),
+    defaults: () => ({ type: 'opportunity', probability: 10, user: 'Admin', priority: 0, tag_ids: [], create_date: today(), date_last_stage_update: today() }),
+    createDefaults: (db, vals) => ({ stage_id: defaultStage(db, 'crm.stage', 'team_ids', vals.team_id) }),
     filters: [
       [{ id: 'mine', label: 'My Pipeline', fn: (r) => r.user === 'Admin' }, { id: 'unassigned', label: 'Unassigned', fn: (r) => !r.user }],
       [

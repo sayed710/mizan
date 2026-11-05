@@ -3,8 +3,9 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, amounts, nextName, productLines, promptedAmount, today } from './common.js';
 import { interCompanyRules } from './company.js';
 import { ecommerceModels } from './ecommerce.js';
-import { paymentJournal, postEntry } from './ledger.js';
-import { round } from '../money.js';
+import { paymentJournal, postEntry, partnerAccount } from './ledger.js';
+import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
+import { toCompany } from './currency.js';
 
 const order = ecommerceModels['sale.order'];
 const editable = (r) => ['draft', 'sent'].includes(r.state);
@@ -93,34 +94,43 @@ export function signQuote(db, orderId, { name, signature, date = today() } = {})
   return r.require_payment ? next : confirm(next, orderId);
 }
 
-/** Amount due upfront, rounded to cents; zero percent with required payment means full payment. */
-export function prepaymentAmount(order) {
+/** Amount due upfront in document currency; required zero percent means full payment. */
+export function prepaymentAmount(order, db = null) {
   const p = percent(order);
-  const total = order.order_line ? amounts(order.order_line).total : Number(order.amount_total ?? 0);
-  return round(total * (order.require_payment && p === 0 ? 100 : p) / 100);
+  const currency = documentCurrency(db, order);
+  const total = order.order_line ? amounts(order.order_line, currency).total : Number(order.amount_total ?? 0);
+  return roundCurrency(total * (order.require_payment && p === 0 ? 100 : p) / 100, currency);
 }
 
 /** Book a quotation-specific customer credit and confirm through the existing sales workflow. */
 export function payQuote(db, orderId, amount, { date = today(), journal } = {}) {
   const r = quotation(db, orderId);
-  const value = Number(amount);
-  if (!Number.isFinite(value) || round(value) <= 0) throw new Error('The payment amount must be positive and finite');
-  if (value < prepaymentAmount(r)) throw new Error(`The payment must cover the prepayment amount (${prepaymentAmount(r)})`);
+  const input = Number(amount);
+  const currency = documentCurrency(db, r);
+  const value = roundCurrency(input, currency);
+  const due = prepaymentAmount(r, db);
+  if (!Number.isFinite(input) || value <= 0) throw new Error('The payment amount must be positive and finite');
+  if (value < due) throw new Error(`The payment must cover the prepayment amount (${due})`);
+  const companyId = r.company_id ?? 1;
+  const companyValue = toCompany(db, currency?.id, value, date, companyId);
+  if (!(companyValue > 0)) throw new Error('The payment amount is too small in company currency');
+  const foreign = currency?.id && currency.id !== companyCurrencyRecord(db, companyId)?.id;
   if (!read(db, 'res.partner', r.partner_id)) throw new Error('Set the customer before registering payment');
   const journalId = typeof journal === 'string' ? search(db, 'account.journal').find((j) => j.code === journal)?.id : journal;
   if (journal != null && (!journalId || !['bank', 'cash'].includes(read(db, 'account.journal', journalId)?.type))) throw new Error('Select a bank or cash journal');
-  const via = paymentJournal(db, journalId);
+  const via = paymentJournal(db, journalId, companyId);
   const name = nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
-  const booked = postEntry(db, { journal: via.code, journal_id: journalId ?? null, date, ref: `Prepayment ${r.name}`, company: r.company_id ?? 1, lines: [
-    { account: via.account, debit: round(value), partner_id: r.partner_id },
-    { account: '121000', credit: round(value), partner_id: r.partner_id },
+  const counterpart = partnerAccount(db, r.partner_id, companyId, 'receivable');
+  const booked = postEntry(db, { journal: via.code, journal_id: via.id, date, ref: `Prepayment ${r.name}`, company: companyId, lines: [
+    { account_id: via.accountId, debit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: value } : {}) },
+    { account_id: counterpart, credit: companyValue, partner_id: r.partner_id, ...(foreign ? { currency_id: currency.id, amount_currency: -value } : {}) },
   ] });
   const payment = create(booked.db, 'account.payment', {
     name, state: 'posted', partner_type: 'customer', payment_type: 'inbound', partner_id: r.partner_id,
-    sale_id: orderId, amount: round(value), unapplied: round(value), date, journal_id: journalId ?? null,
+    sale_id: orderId, currency_id: currency?.id ?? null, amount: value, unapplied: value, date, journal_id: via.id,
     memo: `Prepayment ${r.name}`, move_id: booked.id, company_id: r.company_id ?? 1,
   });
-  return confirm(postNote(payment.db, 'sale.order', orderId, `Prepayment ${name}: ${round(value)}`), orderId);
+  return confirm(postNote(payment.db, 'sale.order', orderId, `Prepayment ${name}: ${value}`), orderId);
 }
 
 /** Mark expired quotations for a scheduler date and post one note per validity deadline. */
@@ -208,7 +218,7 @@ export const quotePlusModels = {
           run: (db, r, v = {}) => ({ db: signQuote(db, r.id, { name: v.name, signature: r.signature || v.signature }) }) },
         { label: 'Register Prepayment', server: '/api/op/sale.prepay', prompt: 'Prepayment amount', promptDefault: (r) => String(prepaymentAmount(r)), when: (r) => editable(r) && r.require_payment,
           wizard: (db, r) => ({ title: 'Register Prepayment', fields: [
-            { name: 'amount', type: 'char', label: 'Amount', required: true, default: String(prepaymentAmount(r)) },
+            { name: 'amount', type: 'char', label: 'Amount', required: true, default: String(prepaymentAmount(r, db)) },
           ] }),
           run: (db, r, v = {}) => {
             const amount = promptedAmount(v.amount);

@@ -6,6 +6,7 @@ import { schedulePreventive } from './maintplus.js';
 import { replenish } from './routes.js';
 import { runFollowUps } from './finance.js';
 import { postDepreciation } from './assets.js';
+import { postAutoPostMoves } from './accounting.js';
 import { autoReconcile } from './reconcile.js';
 import { processDue } from './automation.js';
 import { publishDue } from './social.js';
@@ -27,7 +28,7 @@ const helpdeskJobs = (db, at) => autoCloseStale((db.records['helpdesk.ticket'] ?
  * Apply every installed app's scheduled action due at `at`; returns the same db object when nothing changed. A job that throws
  * (e.g. a locked period) leaves db unchanged so the other jobs still run, and is reported through `onError`.
  */
-export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) {
+export function runScheduledJobs(db, at = today(), { onError = () => {}, deliverFollowUp = null, commitFollowUps = null } = {}) {
   const tolerant = (step) => (d, ...args) => {
     try {
       return step(d, ...args);
@@ -46,10 +47,19 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
     ['timeoff', (db, at) => (db.records['hr.leave.allocation'] ?? []).filter((a) => a.state === 'validate' && a.allocation_type === 'accrual').reduce((acc, a) => accrue(acc, a, at), db)],
     ['accounting', (db, at) => (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
       .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
+    ['accounting', tolerant(function postAutoPostMovesJob(d, when) {
+      return postAutoPostMoves(d, when, { onError: (job, e) => { try { onError(job, e); } catch (reporter) { console.error(`Scheduler error reporter failed for ${job}:`, reporter); } } });
+    })],
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
     ['inventory', (db, at) => replenish(db, at)],
-    ['accounting', runFollowUps],
+    // Sent reminders are saved at once (commitFollowUps returns the db to continue from), so a later failing job
+    // or conflict cannot leave an already-emailed follow-up eligible again (Qodo 11).
+    ['accounting', (db, at) => {
+      const sent = runFollowUps(db, at, deliverFollowUp);
+      const save = (state) => (commitFollowUps && state !== db ? commitFollowUps(db, state) : state);
+      return sent && typeof sent.then === 'function' ? sent.then(save) : save(sent);
+    }],
     ['accounting', (db) => autoReconcile(db)],
     ['automation', tolerant(processDue)],
     ['social', publishDue],
@@ -67,5 +77,7 @@ export function runScheduledJobs(db, at = today(), { onError = () => {} } = {}) 
   ];
 
   const uninstalled = new Set(db.settings?.uninstalled ?? []);
-  return JOBS.filter(([app]) => !uninstalled.has(app)).reduce((acc, [, job]) => job(acc, at), db);
+  return JOBS.filter(([app]) => !uninstalled.has(app)).reduce((acc, [, job]) => (
+    acc && typeof acc.then === 'function' ? acc.then((state) => job(state, at)) : job(acc, at)
+  ), db);
 }

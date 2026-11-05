@@ -77,23 +77,23 @@ export function productVariants(db, template) {
 }
 
 /** Auto-applied fiscal position for a country (the visitor has no partner record yet). */
-function fiscalPositionOf(db, country) {
+function fiscalPositionOf(db, country, companyId) {
   const c = String(country ?? '').trim().toLowerCase();
-  return c ? search(db, 'account.fiscal.position').find((fp) => fp.auto_apply && String(fp.country ?? '').trim().toLowerCase() === c)?.id ?? null : null;
+  return c ? search(db, 'account.fiscal.position').find((fp) => fp.auto_apply && (!fp.company_id || fp.company_id === companyId) && String(fp.country ?? '').trim().toLowerCase() === c)?.id ?? null : null;
 }
 
 /** Order line for a product at its website price (pricelist applied) with its sales tax. */
-export function shopLine(db, productId, qty, { pricelistId = null, fiscalPositionId = null } = {}) {
+export function shopLine(db, productId, qty, { pricelistId = null, fiscalPositionId = null, companyId = db.settings?.current_company_id ?? 1 } = {}) {
   const product = read(db, 'product', productId);
   const base = Number(product?.list_price) || 0;
   const price_unit = pricelistId ? priceFor(db, pricelistId, productId, qty, base) : base;
-  return { product_id: productId, qty, price_unit, discount: 0, ...(productTax(db, product, 'sale', fiscalPositionId) ?? { tax: 0 }) };
+  return { product_id: productId, qty, price_unit, discount: 0, ...(productTax(db, product, 'sale', fiscalPositionId, companyId) ?? { tax: 0 }) };
 }
 
 /** Delivery line on the shipping service product (reference SHIP) when it exists. */
-export function deliveryLine(db, price, fiscalPositionId = null) {
+export function deliveryLine(db, price, fiscalPositionId = null, companyId = db.settings?.current_company_id ?? 1) {
   const ship = search(db, 'product', { includeArchived: true }).find((p) => p.default_code === 'SHIP');
-  return { product_id: ship?.id ?? null, qty: 1, price_unit: round(price), discount: 0, ...(productTax(db, ship, 'sale', fiscalPositionId) ?? { tax: 0 }) };
+  return { product_id: ship?.id ?? null, qty: 1, price_unit: round(price), discount: 0, ...(productTax(db, ship, 'sale', fiscalPositionId, companyId) ?? { tax: 0 }) };
 }
 
 /** Carriers offered on the website: published and priced locally (API carriers need the server integration). */
@@ -103,13 +103,13 @@ export const websiteCarriers = (db) => search(db, 'delivery.carrier').filter((c)
  * Cart summary with server-side prices: pricelist, product taxes (after the country's fiscal position) and delivery.
  * @returns {{ lines: { product_id: number, qty: number, price_unit: number, subtotal: number, tax: number }[], untaxed: number, tax: number, delivery: number, total: number, orderLines: object[] }}
  */
-export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '' } = {}) {
-  const fiscalPositionId = fiscalPositionOf(db, partnerCountry);
-  const productLines = (lines ?? []).map((l) => shopLine(db, l.product_id, l.qty, { pricelistId, fiscalPositionId }));
+export function cartTotals(db, lines, { pricelistId = null, carrierId = null, partnerCountry = '', companyId = db.settings?.current_company_id ?? 1 } = {}) {
+  const fiscalPositionId = fiscalPositionOf(db, partnerCountry, companyId);
+  const productLines = (lines ?? []).map((l) => shopLine(db, l.product_id, l.qty, { pricelistId, fiscalPositionId, companyId }));
   const untaxed = amounts(productLines).untaxed;
   const carrier = carrierId ? read(db, 'delivery.carrier', carrierId) : null;
   const delivery = carrier ? round(shippingPrice(db, carrier, { amount_untaxed: untaxed, order_line: productLines })) : 0;
-  const orderLines = carrier ? [...productLines, deliveryLine(db, delivery, fiscalPositionId)] : productLines;
+  const orderLines = carrier ? [...productLines, deliveryLine(db, delivery, fiscalPositionId, companyId)] : productLines;
   const all = amounts(orderLines);
   return {
     lines: productLines.map((l) => ({ product_id: l.product_id, qty: l.qty, price_unit: l.price_unit, subtotal: round(subtotal(l)), tax: round(lineTaxOf(l)) })),

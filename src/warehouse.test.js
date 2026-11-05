@@ -173,6 +173,7 @@ test('non-default company MTO orders receive and deliver through their own wareh
   let db = seed();
   let company, wh, product, sale;
   ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  db = write(db, 'res.company', company, Object.fromEntries(['account_stock_valuation_id', 'account_stock_input_id', 'account_stock_output_id', 'account_cogs_id', 'account_price_difference_id', 'account_production_id'].map((field) => [field, read(db, 'res.company', 1)[field]])));
   ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Other Warehouse', code: 'OTHER', company_id: company, reception_steps: 'two_steps', delivery_steps: 'pick_ship' }));
   ({ db, id: product } = create(db, 'product', { name: 'Company MTO', type: 'goods', route: 'mto_buy', vendor_id: 2, qty_available: 0, cost: 20 }));
   ({ db, id: sale } = create(db, 'sale.order', { company_id: company, partner_id: 1, order_line: [{ product_id: product, qty: 3, price_unit: 40, tax: 0 }] }));
@@ -203,6 +204,7 @@ test('MTO purchase receipt follows the warehouse explicitly selected on the sale
   let db = seed();
   let company, wh, product, sale;
   ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  db = write(db, 'res.company', company, Object.fromEntries(['account_stock_valuation_id', 'account_stock_input_id', 'account_stock_output_id', 'account_cogs_id', 'account_price_difference_id', 'account_production_id'].map((field) => [field, read(db, 'res.company', 1)[field]])));
   ({ db } = create(db, 'stock.warehouse', { name: 'First Warehouse', code: 'FIRST', company_id: company }));
   ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Selected Warehouse', code: 'SECOND', company_id: company }));
   ({ db, id: product } = create(db, 'product', { name: 'Ordered product', type: 'goods', route: 'mto_buy', vendor_id: 2, qty_available: 0, cost: 10 }));

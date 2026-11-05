@@ -7,6 +7,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { accountId, invoiceLines, postEntry, profitAndLoss } from './models/ledger.js';
 import { closeFiscalYear, reopenFiscalYear } from './models/closing.js';
+import { closedYearLock } from './models/finance.js';
 import { adjustQuantity, receive } from './models/valuation.js';
 
 test('the registered product model keeps costing method and valuation, so goods bills clear 110200', () => {
@@ -31,9 +32,9 @@ test('closed years still report their result and reopening keeps the earlier loc
   const p24 = { from: '2024-01-01', to: '2024-12-31' };
   assert.deepEqual([profitAndLoss(db, p23).revenue, profitAndLoss(db, p24).revenue], [500, 1000]);
   assert.equal(profitAndLoss(db, p24).net, 1000);
-  assert.equal(db.settings.lock_date, '2024-12-31');
+  assert.equal(closedYearLock(db, 1), '2024-12-31');
   const reopened = reopenFiscalYear(db, y24.id);
-  assert.equal(reopened.settings.lock_date, '2023-12-31');
+  assert.equal(closedYearLock(reopened, 1), '2023-12-31');
   assert.equal(profitAndLoss(reopened, p24).net, 1000);
 });
 
@@ -68,7 +69,7 @@ test('vendor bill matching recommends review without blocking posting and allows
   const plainPosted = confirm.run(plain.db, read(plain.db, 'account.move', plain.id)).db;
   assert.equal(read(plainPosted, 'account.move', plain.id).state, 'posted');
   assert.equal(read(plainPosted, 'account.move', plain.id).should_be_paid, 'yes');
-  const matched = bill(updateSettings(po.db, { three_way_matching: true }));
+  const matched = bill(write(updateSettings(po.db, { three_way_matching: true }), 'res.company', 1, { three_way_matching: true }));
   const posted = confirm.run(matched.db, read(matched.db, 'account.move', matched.id)).db;
   assert.equal(read(posted, 'account.move', matched.id).state, 'posted');
   assert.equal(read(posted, 'account.move', matched.id).should_be_paid, 'exception');

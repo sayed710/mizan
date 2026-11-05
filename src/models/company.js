@@ -1,8 +1,11 @@
 import { create, read, updateSettings, write } from '../orm.js';
-import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
-import { today } from './common.js';
+import { companyRoundingMethod, today } from './common.js';
+import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
+import { defaultPayrollRules } from './payroll.js';
+import { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -11,7 +14,7 @@ import { ensureReturnTypes } from './taxreturn.js';
 // The legacy ORM lacks database-aware defaults/create hooks: use createForCompany and createCompany until extended.
 // Keep its process-global setActiveCompany(null) when using allowed-company filtering.
 
-const scoped = new Set(['sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
+const scoped = new Set(['account.budget', 'account.fiscal.category', 'account.report', 'account.report.horizontal.group', 'sale.order', 'purchase.order', 'account.move', 'account.payment', 'account.journal', 'account.asset', 'stock.picking', 'stock.quant', 'stock.warehouse.orderpoint', 'hr.employee', 'project.project', 'crm.lead', 'helpdesk.ticket', 'product']);
 // Mirrors the ORM's shared master data (importing SHARED_MODELS here would be circular: orm.js loads this registry).
 const sharedScoped = new Set(['product', 'account.journal']);
 const companyField = { type: 'many2one', relation: 'res.company', label: 'Company' };
@@ -20,6 +23,49 @@ const shared = (id) => id == null || id === false || id === '';
 
 /** Current company ID, defaulting to the main company before initialization. */
 export const currentCompany = (db) => db.settings?.current_company_id ?? 1;
+
+/** Resolve the company for a document or a single-company batch without consulting the active UI company. */
+export function documentCompany(db, document) {
+  if (!document) return null;
+  let companyIds;
+  if (document.company_id != null) {
+    companyIds = new Set([document.company_id]);
+  } else if (Array.isArray(document.lines)) {
+    companyIds = new Set(document.lines.map((line) => {
+      const move = line.move_id ? read(db, 'account.move', line.move_id) : null;
+      const payment = line.payment_id ? read(db, 'account.payment', line.payment_id) : null;
+      return move?.company_id ?? payment?.company_id ?? 1;
+    }));
+  } else {
+    companyIds = new Set([1]);
+  }
+  if (companyIds.size !== 1) return null;
+  const company = read(db, 'res.company', [...companyIds][0]);
+  if (!company) return null;
+  const currency = company.currency_id ? read(db, 'res.currency', company.currency_id) : null;
+  return { ...company, currency: currency?.name ?? null };
+}
+
+/** Postal address lines for a company or contact, in print order; blank parts are omitted. */
+export function addressLines(record, taxIdLabel = 'Tax ID') {
+  if (!record) return [];
+  return [
+    record.street,
+    [record.zip, record.city].filter(Boolean).join(' '),
+    record.country,
+    record.vat ? `${taxIdLabel}: ${record.vat}` : '',
+  ].filter(Boolean);
+}
+
+/**
+ * Per-tax base and amount for a document's lines, from their stored tax snapshots.
+ * Shared by the printed document and the emailed copy so both show the same detail.
+ */
+export function documentTaxBreakdown(db, record, lines = []) {
+  const currency = documentCurrency(db, record);
+  return taxGroups(lines, () => null, 1, currency, currency, { roundingMethod: companyRoundingMethod(db, record?.company_id) })
+    .map(({ tax_name: label, base, amount }) => ({ label, base, amount }));
+}
 
 /** Select active companies without changing the caller's database or selection. */
 export function setCompanies(db, { current, allowed }) {
@@ -30,6 +76,8 @@ export function setCompanies(db, { current, allowed }) {
 }
 
 // Configuration is shared even when older ORM versions stamped it with company 1.
+// Accounting configuration belongs to its company; other configuration is readable across companies.
+const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
   'account.incoterm', 'account.account.tag', 'account.asset.model']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
@@ -47,7 +95,7 @@ export function visibleTo(companies, model, r, db = null) {
   if (!companies) return true;
   if (model === 'res.company') return companies.has(r?.id);
   if (GROUP_WIDE.has(model)) return false;
-  if (CONFIG_MODELS.has(model)) return true;
+  if (CONFIG_MODELS.has(model)) return !COMPANY_CONFIG.has(model) || shared(r?.company_id) || companies.has(r?.company_id);
   if (model === 'res.partner' && db && r && (db.records['res.company'] ?? []).some((c) => c.partner_id === r.id && !companies.has(c.id))) return false;
   if (shared(r?.company_id)) return SHARED_MODELS.has(model) || companies.has(1);
   return companies.has(r.company_id);
@@ -159,8 +207,8 @@ export function restrictRecords(db, companies) {
 
 /** Keep shared records and records belonging to an allowed company. */
 export function companyFilter(db, records, model = null) {
-  if (CONFIG_MODELS.has(model)) return records;
   const allowed = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  if (CONFIG_MODELS.has(model)) return COMPANY_CONFIG.has(model) ? records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id)) : records;
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }
 
@@ -195,8 +243,15 @@ export function withCompany(models) {
   }));
 }
 
-function companyGuard(db, before, r) {
+// Period locks and the audit trail are accounting controls: over sync only administrators may change them.
+const CONTROL_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date', 'tax_lock_dates', 'audit_trail'];
+
+function companyGuard(db, before, r, ctx) {
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
+  if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
+  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null))) {
+    return 'Only administrators can change lock dates or the audit trail';
+  }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);
@@ -207,9 +262,39 @@ function companyGuard(db, before, r) {
   if (parent && r.currency_id !== parent.currency_id) return 'A branch must use its parent company currency';
   if ((db.records['res.company'] ?? []).some((c) => c.parent_id === r.id && c.currency_id !== r.currency_id)) return 'Branches must share their parent company currency';
   if (r.currency_id && !record(db, 'res.currency', r.currency_id)) return 'Select an existing currency';
+  for (const [field, type, label] of [
+    ['default_sale_journal_id', 'sale', 'Default Sales Journal'],
+    ['default_purchase_journal_id', 'purchase', 'Default Purchase Journal'],
+    ['default_general_journal_id', 'general', 'Default General Journal'],
+  ]) {
+    if (!r[field]) continue;
+    const journal = record(db, 'account.journal', r[field]);
+    if (!journal || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
+      return `${label} must be a ${type} journal shared with or belonging to this company`;
+    }
+  }
+  for (const [field, type, label] of [['account_default_receivable_id', 'asset_receivable', 'receivable'], ['account_default_payable_id', 'liability_payable', 'payable']]) {
+    if (!r[field]) continue;
+    const account = record(db, 'account.account', r[field]);
+    if (!account || account.company_id !== r.id || account.account_type !== type || account.active === false) return `Select an active ${label} account belonging to this company`;
+  }
   if (r.down_payment_account_id) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
+  }
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
+    if (!r[field]) continue;
+    const account = record(db, 'account.account', r[field]);
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
+  }
+  if (r.current_year_earnings_account_id) {
+    const account = record(db, 'account.account', r.current_year_earnings_account_id);
+    if (!account || !['equity', 'equity_unaffected'].includes(account.account_type)
+      || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an equity earnings account shared with or belonging to this company';
+  }
+  if (r.default_payroll_structure_id) {
+    const structure = record(db, 'hr.payroll.structure', r.default_payroll_structure_id);
+    if (!structure || (structure.company_id && structure.company_id !== r.id)) return 'Select a payroll structure belonging to this company';
   }
   if (r.partner_id && !record(db, 'res.partner', r.partner_id)) return 'Select an existing company contact';
   if (r.partner_id && (db.records['res.company'] ?? []).some((c) => c.id !== r.id && c.partner_id === r.partner_id)) return 'Each company needs its own contact';
@@ -226,11 +311,58 @@ export function createCompany(db, vals) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
     next = partner.db;
-    const res = create(next, 'res.company', { ...values, partner_id: partner.id });
-    return { ...res, db: ensureReturnTypes(res.db) };
+    values.partner_id = partner.id;
   }
   const res = create(next, 'res.company', values);
-  return { ...res, db: ensureReturnTypes(res.db) };
+  next = res.db;
+  const accounts = {};
+  for (const [field, code, name, account_type] of [['current_year_earnings_account_id', '302000', 'Retained Earnings', 'equity'], ['account_default_receivable_id', '121000', 'Account Receivable', 'asset_receivable'], ['account_default_payable_id', '211000', 'Account Payable', 'liability_payable'], ['deferred_revenue_account_id', '212000', 'Deferred Revenue', 'liability_current'], ['deferred_expense_account_id', '132000', 'Prepaid Expenses', 'asset_current']]) {
+    if (values[field]) continue;
+    const account = create(next, 'account.account', { code, name, account_type, company_id: res.id, reconcile: ['asset_receivable', 'liability_payable'].includes(account_type) });
+    next = account.db;
+    accounts[field] = account.id;
+  }
+  const installed = new Map();
+  installed.set('212000:liability_current', accounts.deferred_revenue_account_id ?? values.deferred_revenue_account_id);
+  for (const [field, [code, account_type, name]] of Object.entries(STOCK_CHART_ROLES)) {
+    if (values[field]) continue;
+    const key = `${code}:${account_type}`;
+    if (!installed.has(key)) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db;
+      installed.set(key, account.id);
+    }
+    accounts[field] = installed.get(key);
+  }
+  for (const [field, code, name, account_type] of [
+    ['gain_account_id', '450300', 'Gain on Asset Disposal', 'income_other'], ['loss_account_id', '690300', 'Loss on Asset Disposal', 'expense_other'],
+    ['income_currency_exchange_account_id', '450100', 'Foreign Exchange Gain', 'income_other'], ['expense_currency_exchange_account_id', '690100', 'Foreign Exchange Loss', 'expense_other'],
+    ['income_early_payment_discount_account_id', '450200', 'Cash Discount Gain', 'income_other'], ['expense_early_payment_discount_account_id', '690200', 'Cash Discount Loss', 'expense_other'],
+    ['rental_deposit_account_id', '230100', 'Rental Deposits', 'liability_current'], ['rental_withheld_deposit_account_id', '450000', 'Other Income', 'income_other'],
+    ['down_payment_account_id', '212000', 'Deferred Revenue', 'liability_current'],
+  ]) {
+    if (values[field]) continue;
+    const key = `${code}:${account_type}`;
+    if (!installed.get(key)) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db;
+      installed.set(key, account.id);
+    }
+    accounts[field] = installed.get(key);
+  }
+  if (!values.opening_equity_account_id) accounts.opening_equity_account_id = accounts.current_year_earnings_account_id ?? values.current_year_earnings_account_id;
+  if (!values.default_payroll_structure_id) {
+    const payroll = {};
+    for (const [role, code, name, account_type] of [['expense', '620000', 'Salaries & Wages', 'expense'], ['payable', '230000', 'Salaries Payable', 'liability_current'], ['insurance', '240000', 'Social Insurance Payable', 'liability_current'], ['tax', '250100', 'Payroll Tax Payable', 'liability_current']]) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db; payroll[role] = account.id;
+    }
+    const journal = create(next, 'account.journal', { name: 'Salaries', code: 'SAL', type: 'general', company_id: res.id, default_account_id: payroll.expense });
+    const structure = create(journal.db, 'hr.payroll.structure', { name: 'Employees', company_id: res.id, journal_id: journal.id, salary_expense_account_id: payroll.expense, salary_payable_account_id: payroll.payable, rules: defaultPayrollRules({ insurance: payroll.insurance, tax: payroll.tax }) });
+    next = structure.db;
+    accounts.default_payroll_structure_id = structure.id;
+  }
+  return { ...res, db: ensureReturnTypes(write(next, 'res.company', res.id, accounts)) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -239,13 +371,18 @@ export function createForCompany(db, model, vals) {
 }
 
 /** Initialize the demo's main company once; call after seed to preserve existing IDs. */
-export function ensureMainCompany(db) {
+export function ensureMainCompany(db, accounts = {}) {
   if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const code = db.settings?.currency ?? 'USD';
   const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const base = currency ? { db, id: currency.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
-  const created = createCompany(base.db, { name: 'Mizan Demo Co', currency_id: base.id }).db;
+  const unitName = db.settings?.currency_unit_currency === code ? String(db.settings?.currency_unit ?? '').trim() : '';
+  if (!currency && !unitName) throw new Error('Configure the whole currency unit name before initializing the company');
+  const base = currency
+    ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
+    : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
+  const configured = updateSettings(base.db, { base_currency_id: base.id });
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: base.id, ...accounts }).db;
   return ensureReturnTypes(created);
 }
 
@@ -265,20 +402,20 @@ export function setCompanyCurrency(db, companyId, code) {
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 
-const TAX_KEYS = Object.keys(taxSnapshot(null));
+const TAX_KEYS = [...Object.keys(taxSnapshot(null)), 'tax_source_id', 'tax_ids', 'tax_include_base_amount', 'tax_is_base_affected', 'tax_sequence', 'tax_breakdown'];
 
 /**
  * The buyer's purchase line for a sold line: same product, quantity, discount and net price,
  * but the buyer's purchase tax (through the seller's fiscal position) instead of the seller's output VAT.
  */
-function purchaseLine(db, line, fpId) {
+function purchaseLine(db, line, fpId, companyId) {
   const { qty_delivered, qty_invoiced, ...rest } = line;
   const kept = Object.fromEntries(Object.entries(rest).filter(([k]) => !TAX_KEYS.includes(k)));
   const qty = Number(line.qty) || 0;
   const factor = qty * (1 - (Number(line.discount) || 0) / 100);
   const included = line.tax_include && factor ? lineTaxOf(line) / factor : 0;
   const net = Math.round(((Number(line.price_unit) || 0) - included) * 1e6) / 1e6;
-  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId) ?? taxSnapshot(null);
+  const tax = productTax(db, read(db, 'product', line.product_id), 'purchase', fpId, companyId) ?? taxSnapshot(null);
   // A price-included tax is part of the price: a percentage scales it, a fixed amount per unit is added back (it sits
   // inside the discounted price, so the discount is undone for it).
   const kept_share = 1 - (Number(line.discount) || 0) / 100;
@@ -300,10 +437,10 @@ export function interCompanyRules(db, saleOrderId) {
   if (!seller?.partner_id) throw new Error('Set the selling company and its contact first');
   const existing = (db.records['purchase.order'] ?? []).find((p) => p.auto_sale_id === sale.id);
   if (existing) return write(db, 'sale.order', sale.id, { auto_purchase_id: existing.id });
-  const fpId = fiscalPositionFor(db, seller.partner_id);
+  const fpId = fiscalPositionFor(db, seller.partner_id, buyer.id);
   const purchase = create(db, 'purchase.order', {
     company_id: buyer.id, partner_id: seller.partner_id, auto_sale_id: sale.id, origin: sale.name, fiscal_position_id: fpId ?? null,
-    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId)),
+    order_line: (sale.order_line ?? []).map((line) => purchaseLine(db, line, fpId, buyer.id)),
     ...(sale.currency_id ? { currency_id: sale.currency_id } : {}),
   });
   return write(purchase.db, 'sale.order', sale.id, { auto_purchase_id: purchase.id });
@@ -315,13 +452,30 @@ export const companyModels = {
     fields: {
       name: { type: 'char', label: 'Company Name', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Company Contact' },
+      account_default_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Default Receivable Account' },
+      account_default_payable_id: { type: 'many2one', relation: 'account.account', label: 'Default Payable Account' },
+      ...Object.fromEntries(Object.entries({ account_stock_valuation_id: 'Stock Valuation Account', account_stock_input_id: 'Stock Input Account', account_stock_output_id: 'Stock Output Account', account_cogs_id: 'Cost of Goods Sold Account', account_price_difference_id: 'Price Difference Account', account_production_id: 'Production Cost Account' }).map(([field, label]) => [field, { type: 'many2one', relation: 'account.account', label }])),
+      intercompany_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Inter-company Purchase Journal' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      default_sale_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Sales Journal' },
+      default_purchase_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default Purchase Journal' },
+      default_general_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Default General Journal' },
+      default_payroll_structure_id: { type: 'many2one', relation: 'hr.payroll.structure', label: 'Default Payroll Structure' },
+      current_year_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account' },
+      opening_equity_account_id: { type: 'many2one', relation: 'account.account', label: 'Opening Balance Equity Account' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
+      company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
+      invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
+      gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
+      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },
+      rental_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Rental Deposit Liability Account' },
+      rental_withheld_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Withheld Deposit Income Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
-      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual']] },
+      deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },
+      deferred_amount_computation_method: { type: 'selection', label: 'Based on', options: [['months', 'Months'], ['full_months', 'Full Months'], ['days', 'Days']] },
       income_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Gain Account' },
       expense_currency_exchange_account_id: { type: 'many2one', relation: 'account.account', label: 'Currency Exchange Loss Account' },
       expense_early_payment_discount_account_id: { type: 'many2one', relation: 'account.account', label: 'Early Payment Discount Expense Account' },
@@ -329,16 +483,25 @@ export const companyModels = {
       resource_calendar_id: { type: 'many2one', relation: 'resource.calendar', label: 'Default Working Calendar' },
       parent_id: { type: 'many2one', relation: 'res.company', label: 'Parent Company' },
       email: { type: 'char', label: 'Email' }, phone: { type: 'char', label: 'Phone' },
+      lock_date: { type: 'date', label: 'Lock Date' },
+      sale_lock_date: { type: 'date', label: 'Sales Lock Date' },
+      purchase_lock_date: { type: 'date', label: 'Purchase Lock Date' },
       hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },
       logo: { type: 'text', label: 'Logo' }, active: { type: 'boolean', label: 'Active' },
-      intercompany_rule: { type: 'selection', label: 'Inter-Company Rule', options: [['none', 'None'], ['sale_purchase', 'Create Purchase from Sale']] },
+      intercompany_rule: { type: 'selection', label: 'Inter-Company Rule', options: [['none', 'None'], ['sale_purchase', 'Create Purchase from Sale'], ['invoice_bill', 'Synchronize invoices/bills']] },
+      tax_calculation_rounding_method: { type: 'selection', label: 'Tax Calculation Rounding Method', options: [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']] },
       tax_periodicity: { type: 'selection', label: 'Tax Periodicity', options: [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']] },
       tax_start_date: { type: 'date', label: 'Tax Period Start' },
+      account_sale_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Sales Tax' },
+      account_purchase_tax_id: { type: 'many2one', relation: 'account.tax', label: 'Default Purchase Tax' },
+      three_way_matching: { type: 'boolean', label: 'Three-Way Matching' },
+      audit_trail: { type: 'boolean', label: 'Restrictive Audit Trail' },
     },
-    defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly' }),
+    defaults: () => ({ active: true, intercompany_rule: 'none', tax_periodicity: 'monthly', deferred_amount_computation_method: 'days' }),
     guard: companyGuard,
+    onWrite: (db, after, before, vals) => (vals && (vals.tax_periodicity !== undefined || vals.tax_start_date !== undefined) ? ensureReturnTypes(db) : db),
     onchange: (r, key, db) => key === 'parent_id' && r.parent_id ? { currency_id: record(db, 'res.company', r.parent_id)?.currency_id } : {},
     list: ['name', 'parent_id', 'currency_id', 'email', 'active'],
     kanban: { title: 'name', lines: ['parent_id', 'currency_id', 'email'] },
@@ -350,8 +513,8 @@ export const companyModels = {
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) throw new Error('Set a valid period end date');
         return { db: postCompanyDeferrals(db, r.id, date) };
       } }],
-      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method'], ['email', 'phone', 'vat', 'tax_periodicity', 'tax_start_date'], ['street', 'city', 'country']],
-      tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule'] }, { label: 'Logo', fields: ['logo'] }],
+      title: 'name', groups: [['partner_id', 'parent_id', 'currency_id', 'default_sale_journal_id', 'default_purchase_journal_id', 'default_general_journal_id', 'default_payroll_structure_id', 'current_year_earnings_account_id', 'opening_equity_account_id', 'account_default_receivable_id', 'account_default_payable_id', 'resource_calendar_id', 'down_payment_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'expense_early_payment_discount_account_id', 'income_early_payment_discount_account_id', 'active'], Object.keys(STOCK_CHART_ROLES), ['deferred_revenue_account_id', 'deferred_expense_account_id', 'deferred_generation_method', 'deferred_amount_computation_method'], ['email', 'phone', 'vat', 'company_iban', 'invoice_qr', 'tax_periodicity', 'tax_start_date', 'account_sale_tax_id', 'account_purchase_tax_id'], ['street', 'city', 'country']],
+      tabs: [{ label: 'Inter-Company', fields: ['intercompany_rule', 'intercompany_journal_id'] }, { label: 'Logo', fields: ['logo'] }],
       smart: [{ label: 'Branches', model: 'res.company', field: 'parent_id' }], chatter: true,
     },
   },

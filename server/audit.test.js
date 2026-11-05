@@ -8,9 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { diffDb } from '../src/sync.js';
-import { create, postTracking, read, search, unlink, updateSettings } from '../src/orm.js';
+import { create, postTracking, read, search, unlink, updateSettings, write } from '../src/orm.js';
 import { models } from '../src/models/index.js';
 import { createCompany } from '../src/models/company.js';
+import { createCompanyWithDefaultInvoiceJournals } from '../src/test-support/accounting-company.js';
 import { companyViewDb } from '../src/companyView.js';
 import { logManualFollowUp, runFollowUps } from '../src/models/finance.js';
 import { seed } from '../src/seed.js';
@@ -95,7 +96,7 @@ test('company-owned partner reminders stay private in local views, server snapsh
     const admin = client(url);
     await admin('POST', '/api/login', { login: 'admin', password: PASSWORD });
     const db = (await admin('GET', '/api/db')).body;
-    const branch = createCompany(db, { name: 'Reminder branch', currency_id: db.records['res.company'][0].currency_id });
+    const branch = createCompanyWithDefaultInvoiceJournals(db, { name: 'Reminder branch', currency_id: db.records['res.company'][0].currency_id });
     const partner = db.records['res.partner'][0];
     const invoice = create(branch.db, 'account.move', { move_type: 'out_invoice', partner_id: partner.id, company_id: branch.id, invoice_date: '2020-01-01', invoice_date_due: '2020-01-02', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 123, tax: 0 }] });
     const posted = models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(invoice.db, read(invoice.db, 'account.move', invoice.id)).db;
@@ -238,7 +239,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const ret = create(db, 'account.return', { name: 'HTTP VAT', type_id: type.id, company_id: 1, date_from: '2020-03-01', date_to: '2020-03-31' });
     const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
     const reviewed = review.run(ret.db, read(ret.db, 'account.return', ret.id)).db;
-    const setup = updateSettings(reviewed, { lock_date: '2020-03-31' });
+    const setup = write(updateSettings(reviewed, { lock_date: '2020-03-31' }), 'res.company', 1, { lock_date: '2020-03-31' });
     const setupResponse = await admin('POST', '/api/diff', diffDb(db, setup));
     assert.equal(setupResponse.status, 200, JSON.stringify(setupResponse.body));
     db = setupResponse.body;
@@ -253,7 +254,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const blocked = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(blocked.status, 400);
     assert.match(blocked.body.error, /locked/i);
-    const unlocked = await admin('POST', '/api/diff', diffDb(db, updateSettings(db, { lock_date: null })));
+    const unlocked = await admin('POST', '/api/diff', diffDb(db, write(updateSettings(db, { lock_date: null }), 'res.company', 1, { lock_date: null })));
     assert.equal(unlocked.status, 200);
     const submitted = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
@@ -262,7 +263,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     assert.equal(result.state, 'submitted');
     assert.equal(read(saved, 'account.move', result.closing_move_ids[0]).state, 'posted');
     assert.equal(saved.settings.lock_date, null);
-    assert.equal(saved.settings.tax_lock_date, '2020-03-31');
+    assert.equal(saved.settings.tax_lock_dates?.[1], '2020-03-31');
   } finally {
     await stop();
   }

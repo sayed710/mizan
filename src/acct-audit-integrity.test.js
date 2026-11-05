@@ -1,8 +1,10 @@
 import './models/index.js';
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 import { accountId, isBalanced, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
@@ -10,7 +12,6 @@ import { unrealizedExchange } from './models/closing.js';
 import { cashFlow } from './models/reports.js';
 import { confirmLoan, earlyRepayment } from './models/loans.js';
 import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js';
-import { createCompany } from './models/company.js';
 
 // ---------------------------------------------------------------------------
 // 1. Cash rounding sign
@@ -155,6 +156,10 @@ test('cash flow statement classifies loan proceeds and repayment as financing, a
   // 1. Loan proceeds: receive loan of 10000 on 2026-01-05
   const loan = create(db, 'account.loan', {
     name: 'Bank Term Loan',
+    journal_id: db.records['account.journal'].find((j) => j.code === 'BNK1').id,
+    bank_account_id: db.records['account.account'].find((a) => a.code === '101401').id,
+    principal_account_id: db.records['account.account'].find((a) => a.code === '260000').id,
+    interest_account_id: db.records['account.account'].find((a) => a.code === '690400').id,
     amount: 10000,
     start_date: '2026-01-05',
     duration: 12,
@@ -201,12 +206,13 @@ test('cash flow statement classifies loan proceeds and repayment as financing, a
 test('assets post with company and validate journal and accounts across two companies', () => {
   let db = seed();
   // Create second company
-  const co2 = createCompany(db, { name: 'Subsidiary Corp' });
+  const co2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Subsidiary Corp', currency_id: db.settings.base_currency_id });
   db = co2.db;
   const co2Id = co2.id;
 
   // Assets in Company 1
   const asset1 = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Co1 Equipment',
     original_value: 12000,
     salvage_value: 0,
@@ -225,6 +231,7 @@ test('assets post with company and validate journal and accounts across two comp
 
   // Assets in Company 2
   const asset2 = create(db, 'account.asset', {
+    ...assetAccounts(db, co2Id),
     name: 'Co2 Van',
     original_value: 24000,
     salvage_value: 0,
@@ -241,13 +248,17 @@ test('assets post with company and validate journal and accounts across two comp
   const m2 = read(db, 'account.move', a2.depreciation_ids[0].move_id);
   assert.equal(m2.company_id, co2Id, 'Co2 depreciation entry must belong to company 2');
 
-  db = disposeAsset(db, read(db, 'account.asset', asset1.id), { date: '2027-12-31', saleValue: 1000 });
+  const sale1 = create(db, 'account.move', { move_type: 'out_invoice', company_id: 1, partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 1000, tax: 0 }] });
+  db = postMove(sale1.db, sale1.id);
+  db = disposeAsset(db, read(db, 'account.asset', asset1.id), { date: '2027-12-31', saleValue: 1000, invoiceId: sale1.id });
   const disp1 = search(db, 'account.move').find((m) => m.ref === 'Co1 Equipment disposal');
   assert.equal(disp1.company_id, 1, 'Co1 disposal move must belong to company 1');
   assert.ok(isBalanced(disp1.line_ids));
 
   // Dispose Co2 asset and check company_id
-  db = disposeAsset(db, read(db, 'account.asset', asset2.id), { date: '2027-12-31', saleValue: 5000 });
+  const sale2 = create(db, 'account.move', { move_type: 'out_invoice', company_id: co2Id, partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 5000, tax: 0 }] });
+  db = postMove(sale2.db, sale2.id);
+  db = disposeAsset(db, read(db, 'account.asset', asset2.id), { date: '2027-12-31', saleValue: 5000, invoiceId: sale2.id });
   const dispMove = search(db, 'account.move').find((m) => m.ref === 'Co2 Van disposal');
   assert.ok(dispMove, 'Disposal move must exist');
   assert.equal(dispMove.company_id, co2Id, 'Co2 disposal move must belong to company 2');

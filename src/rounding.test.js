@@ -4,6 +4,7 @@ import { create, read, search } from './orm.js';
 import { models } from './models/index.js';
 import { payMove } from './models/accounting.js';
 import { accountId, isBalanced, journalItems } from './models/ledger.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { seed } from './seed.js';
 
 const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.move', id)).db;
@@ -37,9 +38,9 @@ test('a foreign invoice paid in parts leaves nothing on the receivable', () => {
 
 test('cash-basis tax paid in three parts ends at zero on the transition account', () => {
   const base = seed();
-  const tax = create(base, 'account.tax', { name: 'VAT 14% on payment', amount: 14, amount_type: 'percent', type_tax_use: 'sale', tax_exigibility: 'on_payment' });
+  const tax = create(base, 'account.tax', { name: 'VAT 14% on payment', amount: 14, amount_type: 'percent', type_tax_use: 'sale', tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(base, '251100'), ...defaultTaxRepartitionLines(accountId(base, '251000')) });
   const p = newPartner(tax.db);
-  const made = create(p.db, 'account.move', { move_type: 'out_invoice', partner_id: p.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 14, tax_cash_basis: true }] });
+  const made = create(p.db, 'account.move', { move_type: 'out_invoice', partner_id: p.id, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = confirm(made.db, made.id);
   assert.equal(balance(db, '251100'), -14);
   for (const part of [38, 38, 38]) db = payMove(db, made.id, part);

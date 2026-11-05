@@ -103,11 +103,15 @@ export function calendarFor(db, employeeId, date) {
   if (!db) return standard40Calendar();
   if (employeeId) {
     const employee = (db.records['hr.employee'] ?? []).find((e) => e.id === employeeId);
+    const companyId = employee?.company_id ?? 1;
+    const eligibleCalendar = (id) => (db.records['resource.calendar'] ?? []).find(
+      (c) => c.id === id && (!employee || (c.company_id ?? 1) === companyId),
+    );
     const contract = (db.records['hr.contract'] ?? []).find(
       (r) => r.employee_id === employeeId && r.state === 'running' && (!date || ((!r.date_start || r.date_start <= date) && (!r.date_end || r.date_end >= date))),
     );
     if (contract?.resource_calendar_id) {
-      const cal = (db.records['resource.calendar'] ?? []).find((c) => c.id === contract.resource_calendar_id);
+      const cal = eligibleCalendar(contract.resource_calendar_id);
       if (cal) return cal;
     }
     if (contract?.work_days != null) {
@@ -133,17 +137,17 @@ export function calendarFor(db, employeeId, date) {
       };
     }
     if (employee?.resource_calendar_id) {
-      const cal = (db.records['resource.calendar'] ?? []).find((c) => c.id === employee.resource_calendar_id);
+      const cal = eligibleCalendar(employee.resource_calendar_id);
       if (cal) return cal;
     }
-    const companyId = employee?.company_id ?? 1;
     const company = (db.records['res.company'] ?? []).find((c) => c.id === companyId);
     if (company?.resource_calendar_id) {
-      const cal = (db.records['resource.calendar'] ?? []).find((c) => c.id === company.resource_calendar_id);
+      const cal = eligibleCalendar(company.resource_calendar_id);
       if (cal) return cal;
     }
     const companyCal = (db.records['resource.calendar'] ?? []).find((c) => c.active !== false && (c.company_id ?? 1) === companyId);
     if (companyCal) return companyCal;
+    if (employee) return { ...standard40Calendar(companyId), id: 0 };
   }
   const defaultCal = (db.records['resource.calendar'] ?? []).find((c) => c.active !== false);
   return defaultCal || standard40Calendar();

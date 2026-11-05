@@ -4,7 +4,7 @@
 import { models } from './registry.js';
 import { distributionError } from './analytic_distribution.js';
 
-export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD' } });
+export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD', currency_unit: 'Dollars', currency_unit_currency: 'USD' } });
 
 export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 
@@ -105,6 +105,8 @@ const message = (model, resId, body, kind, record, source) => ({
 });
 
 export function create(db, model, vals) {
+  const prepared = models[model].prepareCreate?.(db, vals);
+  if (prepared) ({ db, vals } = prepared);
   const id = nextId(db, model);
   const rec = {
     ...(models[model].defaults?.(id) ?? {}),
@@ -128,13 +130,13 @@ export function create(db, model, vals) {
   return model === 'res.partner' ? { ...res, db: models[model].onWrite?.(res.db, rec, null, vals) ?? res.db } : res;
 }
 
-function trackingMessages(db, model, before, vals) {
+function trackingMessages(db, model, before, after, vals) {
   const fields = models[model].fields;
-  const audited = models[model].audited?.(db);
+  const audited = models[model].audited?.(db, before) || models[model].audited?.(db, after);
   return Object.entries(vals)
     .filter(([k, v]) => fields[k] && (fields[k].tracking || audited) && JSON.stringify(before[k]) !== JSON.stringify(v))
     .map(([k, v]) => {
-      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking', before);
+      if (typeof v === 'object' && v !== null) return message(model, before.id, `${fields[k].label}: updated`, 'tracking', after);
       const label = (x) => {
         if (fields[k].options) return fields[k].options.find((o) => o[0] === x)?.[1] ?? x;
         if (fields[k].type === 'many2one' && fields[k].relation) {
@@ -143,7 +145,7 @@ function trackingMessages(db, model, before, vals) {
         }
         return x;
       };
-      return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking', before);
+      return message(model, before.id, `${fields[k].label}: ${label(before[k])} → ${label(v)}`, 'tracking', after);
     });
 }
 
@@ -171,7 +173,7 @@ export function write(db, model, id, vals) {
   const next = {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },
-    messages: [...db.messages, ...trackingMessages(db, model, before, clean)],
+    messages: [...db.messages, ...trackingMessages(db, model, before, after, clean)],
   };
   return models[model].onWrite?.(next, after, before, clean) ?? next;
 }
@@ -193,7 +195,7 @@ export function writeManyAtomic(db, model, updates) {
     if (error) throw new Error(error);
     checkDeclared(model, after);
   }
-  next = { ...next, messages: [...db.messages, ...[...changes.values()].flatMap(({ before, clean }) => trackingMessages(db, model, before, clean))] };
+  next = { ...next, messages: [...db.messages, ...[...changes.values()].flatMap(({ before, after, clean }) => trackingMessages(db, model, before, after, clean))] };
   for (const { before, after, vals } of changes.values()) {
     next = models[model].onWrite?.(next, after, before, vals) ?? next;
   }
@@ -216,7 +218,7 @@ export function writeMany(db, model, updates) {
     if (!before) throw new Error(`${model} #${id} not found`);
     const { after, clean } = prepareWrite(db, model, before, vals);
     written.set(id, after);
-    tracked.push(...trackingMessages(db, model, before, clean));
+    tracked.push(...trackingMessages(db, model, before, after, clean));
   }
   const next = {
     ...db,

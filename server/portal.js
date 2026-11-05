@@ -2,6 +2,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { postNote, read, search, write } from '../src/orm.js';
 import { subtotal, today } from '../src/models/common.js';
+import { documentCurrency, formatCurrency } from '../src/money.js';
 import * as quotePlus from '../src/models/quoteplus.js';
 import { demoPaymentsAllowed } from './api.js';
 
@@ -9,7 +10,7 @@ const ORDER = 'sale.order';
 const INVOICE = 'account.move';
 const paths = { __proto__: null, [ORDER]: 'orders', [INVOICE]: 'invoices' };
 export const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const money = (v) => escape((Number(v) || 0).toFixed(2));
+const money = (v, currency) => escape(formatCurrency(v, currency, ''));
 const tokenFor = (secret, model, r) => createHmac('sha256', secret).update(`${model}:${r.id}:${r.partner_id}`).digest('hex');
 const tokenMatches = (secret, model, r, given) => /^[a-f0-9]{64}$/.test(given ?? '') && timingSafeEqual(Buffer.from(given, 'hex'), Buffer.from(tokenFor(secret, model, r), 'hex'));
 const documentOf = (db, model, id) => {
@@ -28,8 +29,8 @@ const optionAdded = (r, o) => o.is_present || (r.order_line ?? []).some((l) => l
 const editable = (r) => ['draft', 'sent'].includes(r.state) && !r.is_expired && (!r.validity_date || r.validity_date >= today());
 const assertEditable = (r) => { if (!editable(r)) throw new Error('This quotation is closed or expired'); };
 /** Adapter contract: prepaymentAmount(order) -> number. */
-export function portalPrepaymentAmount(r) {
-  const amount = quotePlus.prepaymentAmount(r);
+export function portalPrepaymentAmount(r, db = null) {
+  const amount = quotePlus.prepaymentAmount(r, db);
   if (!Number.isFinite(amount) || amount <= 0 || amount > Number(r.amount_total)) throw new Error('Invalid quotation prepayment amount');
   return amount;
 }
@@ -49,7 +50,7 @@ export function portalPayQuote(db, r, env = process.env) {
   if (!r.require_payment) throw new Error('This quotation does not require online payment');
   if (r.require_signature && !r.signature) throw new Error('Sign the quotation before paying');
   if (r.payment_state === 'paid') throw new Error('This quotation is already paid');
-  const amount = portalPrepaymentAmount(r);
+  const amount = portalPrepaymentAmount(r, db);
   const booked = quotePlus.payQuote(db, r.id, amount, { journal: 'BNK1' });
   const next = write(booked, ORDER, r.id, { payment_state: 'paid', payment_provider: 'demo', amount_paid: amount });
   return postNote(next, ORDER, r.id, `Demo prepayment recorded: ${amount.toFixed(2)} (no real payment)`);
@@ -77,25 +78,25 @@ function documentPage(db, model, r, url, query, env) {
   const partner = read(db, 'res.partner', r.partner_id);
   const comp = read(db, 'res.company', r.company_id ?? 1);
   const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
-  const docCurrency = (r.currency_id && read(db, 'res.currency', r.currency_id)?.name)
-    ?? (comp?.currency_id && read(db, 'res.currency', comp.currency_id)?.name)
-    ?? db.settings?.currency ?? 'USD';
+  const currency = documentCurrency(db, r);
+  const docCurrency = currency?.name ?? db.settings?.currency ?? 'USD';
+  const documentMoney = (value) => money(value, currency);
   const token = new URL(url, 'http://x').searchParams.get('access_token');
   const lines = r[isOrder ? 'order_line' : 'invoice_line_ids'] ?? [];
   const printing = query.has('print') || query.has('download');
   let controls = '';
   if (isOrder && editable(r) && !printing) {
-    if (!r.signature && r.payment_state !== 'paid') controls += optionsOf(r).map((o, index) => optionAdded(r, o) ? '' : form(url, 'option', token, `<input type="hidden" name="option" value="${index}"><span>${escape(o.name || read(db, 'product', o.product_id)?.name)} — ${money(o.price_unit)}</span> <button type="submit">Add</button>`)).join('');
+    if (!r.signature && r.payment_state !== 'paid') controls += optionsOf(r).map((o, index) => optionAdded(r, o) ? '' : form(url, 'option', token, `<input type="hidden" name="option" value="${index}"><span>${escape(o.name || read(db, 'product', o.product_id)?.name)} — ${documentMoney(o.price_unit)}</span> <button type="submit">Add</button>`)).join('');
     if (!r.signature) controls += form(url, 'sign', token, '<h2>Sign quotation</h2><label>Your name <input name="name" autocomplete="name" required maxlength="120"></label><label>Typed signature <input name="signature" required maxlength="2000"></label><button type="submit">Sign and accept</button>');
     if (r.require_payment && r.payment_state !== 'paid') {
-      controls += `<h2>Payment required</h2><p>Prepayment: ${money(portalPrepaymentAmount(r))}</p>`;
+      controls += `<h2>Payment required</h2><p>Prepayment: ${documentMoney(portalPrepaymentAmount(r, db))}</p>`;
       controls += demoPaymentsAllowed(env) ? form(url, 'pay', token, '<p>Demo only: no real money is transferred.</p><button type="submit">Pay with demo provider</button>') : `<p>Pay by bank transfer. ${escape(search(db, 'payment.provider').find((p) => p.code === 'wire' && p.state === 'enabled')?.pending_msg || 'Contact us for bank details and use the document number as your payment reference.')}</p>`;
     }
   }
   return page(`${title} ${r.name}`, `<nav class="no-print" aria-label="Portal"><a href="/my">My documents</a></nav><h1>${escape(title)} ${escape(r.name)}</h1><p>${escape(compName)} · ${escape(docCurrency)}</p><p>${escape(partner?.name)}</p><p>Status: ${escape(r.state)}</p><p>${isOrder ? 'Valid until' : 'Due date'}: ${escape(isOrder ? r.validity_date : r.invoice_date_due)}</p>
     ${query.has('message') ? `<p role="status">${escape(query.get('message'))}</p>` : ''}
-    <div class="scroll"><table><caption>Document lines</caption><thead><tr><th scope="col">Description</th><th scope="col">Quantity</th><th scope="col">Unit price</th><th scope="col">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr><td>${escape(l.name || read(db, 'product', l.product_id)?.name)}</td><td>${escape(l.qty)}</td><td>${money(l.price_unit)}</td><td>${money(subtotal(l))}</td></tr>`).join('')}</tbody></table></div>
-    <dl><dt>Untaxed</dt><dd>${money(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${money(r.amount_tax)}</dd><dt>Total</dt><dd>${money(r.amount_total)}</dd>${!isOrder ? `<dt>Amount due</dt><dd>${money(r.amount_residual)}</dd>` : ''}</dl><p>${escape(r.note)}</p>
+    <div class="scroll"><table><caption>Document lines</caption><thead><tr><th scope="col">Description</th><th scope="col">Quantity</th><th scope="col">Unit price</th><th scope="col">Amount</th></tr></thead><tbody>${lines.map((l) => `<tr><td>${escape(l.name || read(db, 'product', l.product_id)?.name)}</td><td>${escape(l.qty)}</td><td>${documentMoney(l.price_unit)}</td><td>${documentMoney(subtotal(l))}</td></tr>`).join('')}</tbody></table></div>
+    <dl><dt>Untaxed</dt><dd>${documentMoney(r.amount_untaxed)}</dd><dt>Tax</dt><dd>${documentMoney(r.amount_tax)}</dd><dt>Total</dt><dd>${documentMoney(r.amount_total)}</dd>${!isOrder ? `<dt>Amount due</dt><dd>${documentMoney(r.amount_residual)}</dd>` : ''}</dl><p>${escape(r.note)}</p>
     ${r.signed_by ? `<p>Signed by ${escape(r.signed_by)}</p>` : ''}<div class="no-print"><a href="${escape(url + '&print=1')}">Printable document</a> · <a href="${escape(url + '&download=1')}">Download document (HTML)</a><p>Use your browser’s Print command to print or save as PDF.</p>${controls}</div>`);
 }
 
@@ -105,7 +106,7 @@ function homePage(db, user, urlFor) {
   const orders = partnerId ? search(db, ORDER).filter((r) => r.partner_id === partnerId) : [];
   const invoices = partnerId ? search(db, INVOICE).filter((r) => r.partner_id === partnerId && r.move_type === 'out_invoice') : [];
   const groups = [['Quotations', ORDER, orders.filter((r) => ['draft', 'sent'].includes(r.state))], ['Sales orders', ORDER, orders.filter((r) => r.state === 'sale')], ['Invoices', INVOICE, invoices]];
-  return page('My documents', `<h1>My documents</h1>${!partnerId ? '<p>Open the secure link provided by your salesperson to view a document. Portal login is not configured.</p>' : ''}${groups.map(([label, model, records]) => `<h2>${label} (${records.length})</h2><ul>${records.map((r) => `<li><a href="${escape(urlFor(model, r))}">${escape(r.name)}</a> — ${money(r.amount_total)}</li>`).join('')}</ul>`).join('')}`);
+  return page('My documents', `<h1>My documents</h1>${!partnerId ? '<p>Open the secure link provided by your salesperson to view a document. Portal login is not configured.</p>' : ''}${groups.map(([label, model, records]) => `<h2>${label} (${records.length})</h2><ul>${records.map((r) => `<li><a href="${escape(urlFor(model, r))}">${escape(r.name)}</a> — ${money(r.amount_total, documentCurrency(db, r))}</li>`).join('')}</ul>`).join('')}`);
 }
 
 /** Mountable portal handlers with a durable kv secret and the host server's authentication, headers and rate limiter. */

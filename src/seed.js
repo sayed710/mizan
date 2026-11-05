@@ -1,11 +1,12 @@
 import { ensureQuants } from './models/quant.js';
 import { create, emptyDb, postNote, read, search, write } from './orm.js';
 import { ensureUoms } from './models/uom.js';
+import { defaultPayrollRules } from './models/payroll.js';
 import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -13,6 +14,7 @@ import { migratePosMethods, SCHEMA_VERSION } from './migrations.js';
 import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'] },
@@ -88,27 +90,76 @@ export function seed() {
     return res.id;
   };
   const set = (model, id, vals) => { db = write(db, model, id, vals); };
-  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14 }));
-  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14 }));
+  const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
+  const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
   const cashFlowTags = {
     operating: add('account.account.tag', { name: 'Operating Activities', cash_flow_activity: 'operating' }),
     investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
     financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
   };
-  CHART.forEach(([code, name, account_type]) => add('account.account', {
-    code, name, account_type,
-    reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-    tag_ids: [cashFlowTags[defaultCashFlowActivity(code, account_type, name)]],
-  }));
-  JOURNALS.forEach(([code, name, type, account]) => add('account.journal', { code, name, type, default_account_id: account ? accountId(db, account) : null }));
-  const tax = (name, type_tax_use, amount, account, vals = {}) => add('account.tax', { name, type_tax_use, amount, amount_type: 'percent', account_id: account ? accountId(db, account) : null, tax_exigibility: 'on_invoice', price_include: false, active: true, tax_group: 'VAT', ...vals });
+  // The demo chart tags loans payable as financing explicitly; every other account follows its type.
+  const chartActivity = { '260000': 'financing' };
+  const installedAccountIds = {};
+  const installedByCode = {};
+  CHART.forEach(([code, name, account_type, key]) => {
+    const id = add('account.account', {
+      code, name, account_type,
+      reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
+      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
+    });
+    installedByCode[code] = id;
+    if (key) installedAccountIds[key] = id;
+  });
+  const companyJournals = {};
+  let demoBankJournal = null;
+  JOURNALS.forEach((journal) => {
+    const id = add('account.journal', {
+      code: journal.code, name: journal.name, type: journal.type,
+      default_account_id: journal.account ? installedByCode[journal.account] : null,
+      ...(['bank', 'cash'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
+      ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
+      default_for_payments: journal.default_for_payments === true,
+      ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
+      ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
+      ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),
+      ...(journal.refund_sequence_next_number != null ? { refund_sequence_next_number: journal.refund_sequence_next_number } : {}),
+    });
+    if (journal.company_default) companyJournals[journal.company_default] = id;
+    if (journal.default_for_payments === true) {
+      if (demoBankJournal) throw new Error('Demo setup needs exactly one default payment journal');
+      demoBankJournal = id;
+    }
+  });
+  if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
+  const tax = (name, type_tax_use, amount, account, vals = {}) => {
+    const accId = account ? accountId(db, account) : null;
+    return add('account.tax', {
+      name,
+      type_tax_use,
+      amount,
+      amount_type: 'percent',
+      tax_exigibility: 'on_invoice',
+      price_include: false,
+      active: true,
+      tax_group: 'VAT',
+      invoice_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      refund_repartition_line_ids: [
+        { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
+        { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
+      ],
+      ...vals,
+    });
+  };
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
   const zeroExport = tax('0% Exports', 'sale', 0, null);
   const zeroImport = tax('0% Imports', 'purchase', 0, null);
   tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
-  tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment' });
+  tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment', cash_basis_transition_account_id: installedByCode['251100'] });
   tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group: 'Stamp' });
   add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', tax_ids: [], account_ids: [] });
   add('account.fiscal.position', {
@@ -118,11 +169,35 @@ export function seed() {
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
-    lines: [{ account: '101401', debit: 150000 }, { account: '101501', debit: 5000 }, { account: '301000', credit: 155000 }],
+    lines: [{ account_id: installedAccountIds.liquidity_bank, debit: 150000 }, { account_id: installedAccountIds.liquidity_cash, debit: 5000 }, { account_id: installedByCode['301000'], credit: 155000 }],
   }).db;
   const wholesale = add('product.pricelist', { name: 'Wholesale', items: [{ product_id: null, min_qty: 10, fixed_price: 0, percent: 10 }, { product_id: 1, min_qty: 50, fixed_price: 180, percent: 0 }] });
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
-  db = ensureMainCompany(db);
+  db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
+  db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
+  const payrollJournal = search(db, 'account.journal').find((j) => j.code === 'SAL');
+  const payrollAccounts = { journal_id: payrollJournal.id, salary_expense_account_id: installedByCode['620000'], salary_payable_account_id: installedByCode['230000'] };
+  const egypt = add('hr.payroll.structure', { name: 'Egypt — Employees', ...payrollAccounts, rules: defaultPayrollRules({ insurance: installedByCode['240000'], tax: installedByCode['250100'] }) });
+  db = ensureMainCompany(db, { default_payroll_structure_id: egypt, opening_equity_account_id: installedByCode['301000'], account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], down_payment_account_id: installedByCode['212000'], gain_account_id: installedByCode['450300'], loss_account_id: installedByCode['690300'], income_currency_exchange_account_id: installedByCode['450100'], expense_currency_exchange_account_id: installedByCode['690100'], income_early_payment_discount_account_id: installedByCode['450200'], expense_early_payment_discount_account_id: installedByCode['690200'], rental_deposit_account_id: installedByCode['230100'], rental_withheld_deposit_account_id: installedByCode['450000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
+  const mainCompanyId = db.settings?.current_company_id ?? 1;
+  set('res.company', mainCompanyId, {
+    default_sale_journal_id: companyJournals.sales,
+    default_purchase_journal_id: companyJournals.purchases,
+    default_general_journal_id: companyJournals.general,
+  });
+  const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
+  db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
+  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
+  db = write(db, 'res.company', mainCompanyId, { account_sale_tax_id: vatSale, account_purchase_tax_id: vatPurchase });
+  const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
+  const mainTaxTypes = search(db, 'account.return.type').filter((type) =>
+    (type.company_id ?? 1) === mainCompanyId && type.category === 'account_return');
+  if (mainTaxTypes.length !== 1) throw new Error('Demo setup needs exactly one main-company tax return type');
+  db = write(db, 'account.return.type', mainTaxTypes[0].id, {
+    tax_payable_account_id: accountId(db, '251000', mainCompanyId),
+    tax_receivable_account_id: accountId(db, '131000', mainCompanyId),
+    payment_partner_id: taxAuthorityId,
+  });
 
   const crmStages = [
     { name: 'New', sequence: 1, is_won: false, fold: false, team_ids: [], rotting_threshold_days: 0 },
@@ -155,7 +230,10 @@ export function seed() {
     });
   });
   const weights = { 'FURN-001': 14, 'FURN-002': 32, 'FURN-003': 60, 'LIGHT-001': 1.2, 'COMP-001': 12, 'COMP-002': 18, 'COMP-003': 0.3 };
-  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...p }));
+  // Demo products sold to customers carry explicit tax records; components keep only their plain percentage.
+  const untaxedCodes = new Set(['COMP-001', 'COMP-002', 'COMP-003']);
+  const productTaxes = (code) => (untaxedCodes.has(code) ? {} : { tax_id: vatSale, supplier_tax_id: vatPurchase });
+  products.forEach((p) => add('product', { weight: weights[p.default_code] ?? 0, tracking: 'none', ...productTaxes(p.default_code), ...p }));
   add('delivery.carrier', { name: 'Standard Delivery', delivery_type: 'fixed', fixed_price: 25, free_over: 2000 });
   add('delivery.carrier', { name: 'Freight by weight', delivery_type: 'rules', rules: [{ max_weight: 50, price: 40 }, { max_weight: 300, price: 120 }, { max_weight: 2000, price: 450 }] });
   add('delivery.carrier', { name: 'Aramex Express', delivery_type: 'api', api_url: '', tracking_url: 'https://www.aramex.com/track/results?ShipmentNumber={ref}' });
@@ -168,12 +246,11 @@ export function seed() {
       join_date: addDays(today(), -900 + i * 120),
     }));
   [[1, 1], [2, 2], [3, 4], [4, 5]].forEach(([dep, mgr]) => set('hr.department', dep, { manager_id: mgr }));
-  const egypt = add('hr.payroll.structure', { name: 'Egypt — Employees' });
-  add('hr.payroll.structure', { name: 'Interns', rules: [
-    { sequence: 1, code: 'BASIC', name: 'Stipend', category: 'basic', amount_type: 'wage', base: '', value: 0, account: '' },
-    { sequence: 2, code: 'TRANS', name: 'Transport', category: 'allowance', amount_type: 'fixed', base: '', value: 300, account: '' },
-    { sequence: 3, code: 'GROSS', name: 'Gross', category: 'gross', amount_type: 'wage', base: '', value: 0, account: '' },
-    { sequence: 4, code: 'NET', name: 'Net', category: 'net', amount_type: 'wage', base: '', value: 0, account: '' },
+  add('hr.payroll.structure', { name: 'Interns', ...payrollAccounts, rules: [
+    { sequence: 1, code: 'BASIC', name: 'Stipend', category: 'basic', amount_type: 'wage', base: '', value: 0, account_debit_id: null, account_credit_id: null },
+    { sequence: 2, code: 'TRANS', name: 'Transport', category: 'allowance', amount_type: 'fixed', base: '', value: 300, account_debit_id: null, account_credit_id: null },
+    { sequence: 3, code: 'GROSS', name: 'Gross', category: 'gross', amount_type: 'wage', base: '', value: 0, account_debit_id: null, account_credit_id: null },
+    { sequence: 4, code: 'NET', name: 'Net', category: 'net', amount_type: 'wage', base: '', value: 0, account_debit_id: null, account_credit_id: null },
   ] });
   [[2, 6000], [4, 4500]].forEach(([employee_id, wage]) => add('hr.contract', { name: 'Contract ' + employee_id, employee_id, structure_id: egypt, wage, state: 'running', date_start: addDays(today(), -365) }));
 
@@ -208,7 +285,7 @@ export function seed() {
   add('account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: today(), invoice_date_due: addDays(today(), 30), invoice_line_ids: lines([[1, 4]]) });
 
   // Purchases: received PO + its posted bill, open RFQ.
-  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]) });
+  const po1 = add('purchase.order', { partner_id: 7, date_order: addDays(today(), -12), order_line: costLines([[1, 50], [3, 3]]).map((line) => ({ ...line, purchase_line_key: crypto.randomUUID() })) });
   const po1rec = read(db, 'purchase.order', po1);
   // Received through stock valuation at the PO price, so the bill clears the interim account.
   db = moveValued(db, po1rec.order_line.map((l) => ({ ...l, unit_cost: l.price_unit })), 1, { reference: po1rec.name, date: addDays(today(), -11) });
@@ -220,9 +297,9 @@ export function seed() {
   db = postMove(db, bill);
   add('purchase.order', { partner_id: 2, order_line: costLines([[4, 100]]) });
   const sara = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.partner_id === 3);
-  add('account.bank.statement.line', { date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
-  add('account.bank.statement.line', { date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart: '630000' });
-  add('account.bank.statement.line', { date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart: '690000' });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'TRF SARA HASSAN INV', partner_id: 3, amount: sara.amount_residual });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: today(), payment_ref: 'Office rent October', amount: -1800, counterpart_account_id: installedByCode['630000'] });
+  add('account.bank.statement.line', { journal_id: demoBankJournal, date: addDays(today(), -1), payment_ref: 'Bank charges', amount: -12.5, counterpart_account_id: installedByCode['690000'] });
   add('stock.picking', { picking_type: 'outgoing', partner_id: 6, origin: read(db, 'sale.order', so3).name, sale_id: so3, state: 'ready', move_ids: [{ product_id: 3, qty: 2 }] });
 
   const tagInterior = add('project.tags', { name: 'Interior', color: 1 });
@@ -293,7 +370,10 @@ export function seed() {
   add('knowledge.article', { name: 'Sales Playbook', parent_id: kb, category: 'workspace', body: 'Qualify leads within 48 hours. Send quotations from the Sales app.' });
   add('knowledge.article', { name: 'Support Escalation Process', parent_id: kb, category: 'shared', body: 'Urgent tickets (3 stars) go to the on-call engineer.' });
 
-  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1 });
+  const shopJournalId = companyJournals.pos;
+  if (!shopJournalId) throw new Error('Demo setup needs a configured point of sale journal');
+  const shopConfig = add('pos.config', { name: 'Shop', company_id: 1, journal_id: shopJournalId });
+  db = { ...db, settings: { ...db.settings, default_pos_config_id: shopConfig } };
   add('pos.order', { config_id: shopConfig, partner_id: 3, payment_method: 'card', lines: [{ product_id: 10, qty: 2, price_unit: 2.5, tax: 14 }, { product_id: 11, qty: 2, price_unit: 3, tax: 14 }] });
 
   const general = add('discuss.channel', { name: 'general', description: 'Company-wide announcements' });
@@ -421,12 +501,12 @@ export function seed() {
   add('marketplace.connector', { name: 'Amazon.eg store', platform: 'amazon' });
   const office = add('account.analytic.account', { name: 'Office Projects', code: 'PRJ-OFF', plan: 'project' });
   add('account.analytic.account', { name: 'Cairo Branch', code: 'REG-CAI', plan: 'region' });
-  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
+  add('account.budget', { name: `Budget ${today().slice(0, 4)}`, company_id: mainCompanyId, state: 'confirmed', lines: [{ analytic_account_id: office, planned: 50000 }] });
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
-  add('account.followup.level', { name: 'First reminder', delay: 15, message: 'Friendly reminder: please settle the amount below.' });
-  add('account.followup.level', { name: 'Second reminder', delay: 30, message: 'Your account is overdue; please pay within 7 days.' });
+  add('account.followup.level', { name: 'First reminder', delay: 15, channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
+  add('account.followup.level', { name: 'Second reminder', delay: 30, channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
   (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
@@ -438,8 +518,8 @@ export function seed() {
   add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
   add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', rate_ids: [{ date: addDays(today(), -60), rate: 0.92 }, { date: addDays(today(), -1), rate: 0.9 }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', rate_ids: [{ date: addDays(today(), -60), rate: 3.75 }] });
+  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
+  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

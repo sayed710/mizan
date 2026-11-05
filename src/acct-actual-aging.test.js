@@ -22,7 +22,8 @@ test('analytic actuals and budgets include posted distributions, refunds and man
   assert.deepEqual([analyticActuals(db).get(a.id), analyticActuals(db).get(b.id)], [0, 0]);
   post('out_refund', '2026-01-04', 50);
   assert.deepEqual([analyticActuals(db).get(a.id), analyticActuals(db).get(b.id)], [-30, -20]);
-  db = create(db, 'account.analytic.line', { name: 'Manual', date: '2026-01-05', account_id: a.id, amount: 10, general_account: '400000', company_id: 1 }).db;
+  const manualEntry = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-01-05', date: '2026-01-05', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 10, tax: 0 }] });
+  db = create(postMove(manualEntry.db, manualEntry.id), 'account.analytic.line', { move_id: manualEntry.id, name: 'Manual', date: '2026-01-05', account_id: a.id, amount: 10, general_account: '400000', company_id: 1 }).db;
   db = create(db, 'account.analytic.line', { name: 'Outside', date: '2026-02-01', account_id: a.id, amount: 999, company_id: 1 }).db;
   const period = { from: '2026-01-01', to: '2026-01-31', company_id: 1 };
   assert.deepEqual([analyticActuals(db, period).get(a.id), analyticActuals(db, period).get(b.id)], [-20, -20]);

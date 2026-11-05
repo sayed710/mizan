@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
 import { seed } from './seed.js';
+import { accountId } from './models/ledger.js';
 import { startSession } from './models/pos.js';
 import { read } from './orm.js';
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
@@ -63,14 +64,14 @@ test('server-backed receipt for a rounded checkout displays the authoritative ro
 
   let db = seed();
   const cfg1 = (db.records['pos.config'] ?? [])[0];
-  const rounding = { id: 99, name: 'Half Up 0.05', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line' };
+  const rounding = { id: 99, profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'), name: 'Half Up 0.05', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line' };
   db = {
     ...db,
     records: {
       ...db.records,
       'account.cash.rounding': [...(db.records['account.cash.rounding'] ?? []), rounding],
       'pos.config': db.records['pos.config'].map((c) => c.id === cfg1.id ? { ...c, cash_rounding: true, rounding_method_id: rounding.id, only_round_cash_method: false } : c),
-      product: db.records.product.map((p) => p.id === 1 ? { ...p, list_price: 10.02, sale_tax: 0 } : p),
+      product: db.records.product.map((p) => p.id === 1 ? { ...p, list_price: 10.02, sale_tax: 0, tax_id: null } : p),
     },
   };
   db = startSession(db, 0, cfg1.id).db;

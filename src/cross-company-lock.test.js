@@ -6,10 +6,15 @@ import { models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
 import { saveFormRecord } from './views/formSave.js';
+import { createCompany } from './models/company.js';
 
+let sharedBankId;
 function fixture(lockedCompany) {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = createCompany(db, { name: 'Second company', currency_id: db.settings.base_currency_id }); db = company.db;
+  const sharedBank = create(db, 'account.journal', { name: 'Shared Bank', code: 'SBNK', type: 'bank', company_id: null, default_account_id: db.records['account.account'].find((a) => a.code === '101401').id });
+  db = sharedBank.db;
+  sharedBankId = sharedBank.id;
   const partner = db.records['res.partner'][0].id;
   const entries = {};
   for (const companyId of [1, company.id]) {
@@ -23,7 +28,7 @@ function fixture(lockedCompany) {
 }
 
 const payment = (companyId, partner, move) => ({ name: 'PAY/2026/0099', company_id: companyId, date: '2026-01-15', state: 'posted', partner_id: partner, amount: 100, move_id: move, payment_type: 'inbound', partner_type: 'customer' });
-const bankLine = (companyId, partner, move) => ({ company_id: companyId, date: '2026-01-15', payment_ref: 'Bank item', amount: 100, state: 'reconciled', partner_id: partner, move_id: move });
+const bankLine = (companyId, partner, move) => ({ journal_id: sharedBankId, company_id: companyId, date: '2026-01-15', payment_ref: 'Bank item', amount: 100, state: 'reconciled', partner_id: partner, move_id: move });
 
 test('payment and bank transaction creation use only the existing record company lock in forms and server diffs', () => {
   for (const locked of [1, 2]) {

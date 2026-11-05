@@ -1,16 +1,17 @@
+import { createCompanyWithDefaultInvoiceJournals, withDefaultVat } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { discountAvailable, payWithDiscount, postMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { taxRepartitionLine, taxSnapshot } from './models/taxes.js';
 
 test('untaxed early discount settles to the configured account in each invoice company', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Discount branch', currency_id: base.records['res.company'][0].currency_id });
-  let db = branch.db;
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Discount branch', currency_id: base.records['res.company'][0].currency_id });
+  // Plain-rate VAT posts to the branch's configured default tax.
+  let db = withDefaultVat(branch.db, branch.id);
   for (const companyId of [1, branch.id]) {
     const account = create(db, 'account.account', { name: 'Early discount expense', code: `DISC${companyId}`, account_type: 'expense', company_id: companyId });
     db = write(account.db, 'res.company', companyId, { expense_early_payment_discount_account_id: account.id });
@@ -41,6 +42,6 @@ test('tax-inclusive early discount reduces both revenue and invoice-basis VAT', 
   const move = read(paid, 'account.move', invoice.id);
   assert.equal(move.amount_residual, 0);
   const entry = read(paid, 'account.move', move.payments.at(-1).move_id);
-  assert.equal(entry.line_ids.find((line) => line.account_id === tax.account_id)?.debit, 0.28);
+  assert.equal(entry.line_ids.find((line) => line.account_id === taxRepartitionLine(tax)?.account_id)?.debit, 0.28);
   assert.equal(entry.line_ids.find((line) => read(paid, 'account.account', line.account_id)?.code === '690200')?.debit, 2);
 });

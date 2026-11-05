@@ -15,6 +15,7 @@ function MenuGroup({ app, menu, active }) {
   const hasKey = (item) => (item.children ? item.children.some(hasKey) : item.key === active);
   const isActive = menu.children.some(hasKey);
   const renderItem = (c) => {
+    if (c.hidden) return null;
     if (c.children) {
       return (
         <div key={c.label} className="nav-submenu-group">

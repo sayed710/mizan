@@ -1,8 +1,13 @@
-import { balanceSheet, profitAndLoss } from '../models/ledger.js';
+import { balanceSheet, journalItems, profitAndLoss } from '../models/ledger.js';
+import { cashFlow } from '../models/reports.js';
 import { round } from '../money.js';
+import { groupBuckets } from '../models/configurableReports.js';
 
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const iso = (date) => date.toISOString().slice(0, 10);
+
+/** Horizontal groups are defined only for the balance sheet and profit and loss comparisons. */
+export const supportsHorizontalGroupComparison = (report) => ['pnl', 'balance'].includes(report);
 
 /** Full calendar periods, oldest first; modes are none, previous, lastYear and last3. */
 export function periodsFor(periodKey, mode, todayIso) {
@@ -23,7 +28,7 @@ export function periodsFor(periodKey, mode, todayIso) {
   });
 }
 
-function columns(periods, reports, sectionDefs, totalDefs) {
+function columns(periods, reports, sectionDefs, totalDefs, { showVariance = true } = {}) {
   const sections = sectionDefs.map(([title, value, detail]) => {
     const lists = reports.map((r) => detail ? detail(r) : []);
     const accounts = new Map(lists.flat().map((r) => [r.account.id, r.account]));
@@ -36,35 +41,72 @@ function columns(periods, reports, sectionDefs, totalDefs) {
   });
   const totals = totalDefs.map(([label, value, strong = false]) => ({ label, values: reports.map(value), strong }));
   // Variances follow sections, then totals, in their respective array order.
-  const variance = [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
+  const variance = showVariance ? [...sections.map((s) => s.totals), ...totals.map((r) => r.values)].map((values) => {
     const previous = values.at(-2);
     const amount = previous == null ? null : round(values.at(-1) - previous);
     return { amount, pct: amount == null || !previous ? null : round(amount / Math.abs(previous) * 100) };
-  });
+  }) : null;
   return { headers: periods.map((p) => p.label), sections, totals, variance };
 }
 
+const PNL_SECTIONS = [
+  ['Revenue', (p) => p.revenue, (p) => p.detail.revenue],
+  ['Cost of Revenue', (p) => p.cost, (p) => p.detail.cost],
+  ['Expenses', (p) => p.expense, (p) => p.detail.expense],
+  ['Other Income', (p) => p.otherIncome, (p) => p.detail.otherIncome],
+  ['Other Expenses', (p) => p.otherExpense, (p) => p.detail.otherExpense],
+];
+
+const PNL_TOTALS = [
+  ['Gross Profit', (p) => p.gross], ['Net Operating Income', (p) => p.operating], ['Net Income', (p) => p.net, true],
+];
+
+const BALANCE_SECTIONS = [
+  ['Assets', (b) => b.totalAssets, (b) => b.assets],
+  ['Liabilities', (b) => b.totalLiabilities, (b) => b.liabilities],
+  ['Equity', (b) => round(b.totalEquity - b.earnings), (b) => b.equity],
+  ['Current Year Earnings', (b) => b.earnings],
+];
+
+const BALANCE_TOTALS = [
+  ['Total Assets', (b) => b.totalAssets, true], ['Liabilities + Equity', (b) => round(b.totalLiabilities + b.totalEquity), true],
+];
+
 /** P&L sections and totals with account detail aligned across calendar periods. */
-export function pnlColumns(db, periods) {
-  return columns(periods, periods.map((p) => profitAndLoss(db, p)), [
-    ['Revenue', (p) => p.revenue, (p) => p.detail.revenue],
-    ['Cost of Revenue', (p) => p.cost, (p) => p.detail.cost],
-    ['Expenses', (p) => p.expense, (p) => p.detail.expense],
-    ['Other Income', (p) => p.otherIncome],
-    ['Other Expenses', (p) => p.otherExpense],
-  ], [
-    ['Gross Profit', (p) => p.gross], ['Net Operating Income', (p) => p.operating], ['Net Income', (p) => p.net, true],
-  ]);
+export function pnlColumns(db, periods, { analyticAccountIds } = {}) {
+  return columns(periods, periods.map((p) => profitAndLoss(db, p, { analyticAccountIds })), PNL_SECTIONS, PNL_TOTALS);
 }
 
 /** Cumulative balance sheets at each period end, retaining the displayed equity split. */
-export function balanceColumns(db, periods) {
-  return columns(periods, periods.map((p) => balanceSheet(db, p.to)), [
-    ['Assets', (b) => b.totalAssets, (b) => b.assets],
-    ['Liabilities', (b) => b.totalLiabilities, (b) => b.liabilities],
-    ['Equity', (b) => round(b.totalEquity - b.earnings), (b) => b.equity],
-    ['Current Year Earnings', (b) => b.earnings],
-  ], [
-    ['Total Assets', (b) => b.totalAssets, true], ['Liabilities + Equity', (b) => round(b.totalLiabilities + b.totalEquity), true],
-  ]);
+export function balanceColumns(db, periods, { analyticAccountIds } = {}) {
+  return columns(periods, periods.map((p) => balanceSheet(db, p.to, { analyticAccountIds })), BALANCE_SECTIONS, BALANCE_TOTALS);
+}
+
+/** Horizontal comparison columns partitioned by a horizontal group for Profit & Loss. */
+export function pnlAnalyticColumns(db, group, period, { analyticAccountIds } = {}) {
+  const filter = { ...period, company_id: group?.company_id ?? period?.company_id ?? 1 };
+  const buckets = groupBuckets(db, group, journalItems(db, filter), { analyticAccountIds });
+  return columns(buckets, buckets.map((b) => profitAndLoss(db, filter, { weight: b.weight, analyticAccountIds })), PNL_SECTIONS, PNL_TOTALS, { showVariance: false });
+}
+
+/** Horizontal comparison columns partitioned by a horizontal group for the Balance Sheet. */
+export function balanceAnalyticColumns(db, group, period, { analyticAccountIds } = {}) {
+  const filter = {
+    to: typeof period === 'object' && period !== null ? period.to : period,
+    company_id: group?.company_id ?? (typeof period === 'object' && period !== null ? period.company_id : null) ?? 1,
+  };
+  const buckets = groupBuckets(db, group, journalItems(db, filter), { analyticAccountIds });
+  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight, analyticAccountIds })), BALANCE_SECTIONS, BALANCE_TOTALS, { showVariance: false });
+}
+
+const cashLines = (section) => (c) => c.lines.filter((l) => l.section === section).map((l) => ({ account: l.account, balance: l.amount }));
+const CASHFLOW_SECTIONS = [['operating', 'Operating Activities'], ['investing', 'Investing Activities'], ['financing', 'Financing Activities'], ['unclassified', 'Unclassified']]
+  .map(([section, title]) => [title, (c) => c[section], cashLines(section)]);
+const CASHFLOW_TOTALS = [
+  ['Net Change in Cash', (c) => c.net], ['Cash at Beginning', (c) => c.opening], ['Cash at End', (c) => c.closing, true],
+];
+
+/** Cash flow statement per calendar period, activity lines aligned by account. */
+export function cashflowColumns(db, periods, { analyticAccountIds, company_id } = {}) {
+  return columns(periods, periods.map((p) => cashFlow(db, { ...p, company_id, analyticAccountIds })), CASHFLOW_SECTIONS, CASHFLOW_TOTALS);
 }

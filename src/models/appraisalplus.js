@@ -1,7 +1,7 @@
 // Templates, two-sided feedback, goals and calendar-based appraisal scheduling.
 import { create, postNote, read, search, write } from '../orm.js';
 import { apps2Models } from './apps2.js';
-import { today } from './common.js';
+import { shiftMonth, today, validDate } from './common.js';
 
 const MODEL = 'hr.appraisal';
 const INTERVAL_MONTHS = 12;
@@ -11,18 +11,7 @@ const employee = (label) => ({ type: 'many2one', relation: 'hr.employee', label 
 const status = (r) => r.stage_id ?? 'new';
 const open = (r) => ['new', 'pending'].includes(status(r));
 const validRating = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 5;
-const validDate = (date) => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(Date.parse(date)) && new Date(date).toISOString().slice(0, 10) === date;
-
-function monthsAfter(date, months) {
-  if (!validDate(date)) throw new Error('Enter a valid appraisal date');
-  const d = new Date(`${date}T00:00:00Z`);
-  const day = d.getUTCDate();
-  d.setUTCDate(1);
-  d.setUTCMonth(d.getUTCMonth() + months);
-  const end = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
-  d.setUTCDate(Math.min(day, end));
-  return d.toISOString().slice(0, 10);
-}
+const checkAppraisalDate = (date) => { if (!validDate(date)) throw new Error('Enter a valid appraisal date'); };
 
 function appraisal(db, id) {
   const r = read(db, MODEL, id);
@@ -40,7 +29,7 @@ export function createFromTemplate(db, { employeeId, templateId, date = today() 
   if (!person) throw new Error('Select an employee');
   if (!template || template.active === false) throw new Error('Select an active appraisal template');
   if (search(db, MODEL).some((r) => r.employee_id === employeeId && open(r))) throw new Error('This employee already has an open appraisal');
-  monthsAfter(date, 0);
+  checkAppraisalDate(date);
   return create(db, MODEL, {
     employee_id: employeeId, manager_id: person.parent_id ?? null, template_id: templateId, date, date_close: date,
     employee_feedback: feedbackLines(template.employee_questions), manager_feedback: feedbackLines(template.manager_questions),
@@ -84,20 +73,20 @@ export function completeAppraisal(db, id, { finalRating, date = today() }) {
   if (status(r) !== 'pending') throw new Error('Only a pending appraisal can be completed');
   if (!r.employee_feedback_published || !r.manager_feedback_published) throw new Error('Both sides must publish feedback before completion');
   if (!validRating(finalRating)) throw new Error('Final rating must be between 0 and 5');
-  monthsAfter(date, INTERVAL_MONTHS);
+  checkAppraisalDate(date);
   return write(db, MODEL, id, { stage_id: 'done', final_rating: finalRating, rating: finalRating, date_close: date });
 }
 
 /** Employees due for their first six-month review or a subsequent annual review. */
 export function dueAppraisals(db, date = today()) {
-  monthsAfter(date, 0);
+  checkAppraisalDate(date);
   const reviews = search(db, MODEL);
   return search(db, 'hr.employee').filter((e) => {
     const own = reviews.filter((r) => r.employee_id === e.id);
     if (own.some(open)) return false;
     const last = own.filter((r) => status(r) === 'done' && validDate(r.date_close)).sort((a, b) => b.date_close.localeCompare(a.date_close))[0];
     const start = e.join_date ?? e.start_date;
-    const due = last ? monthsAfter(last.date_close, INTERVAL_MONTHS) : validDate(start) ? monthsAfter(start, FIRST_MONTHS) : null;
+    const due = last ? shiftMonth(last.date_close, INTERVAL_MONTHS) : validDate(start) ? shiftMonth(start, FIRST_MONTHS) : null;
     return !!due && due <= date;
   });
 }
@@ -174,7 +163,7 @@ export const appraisalPlusModels = {
       manager_feedback_published: { type: 'boolean', label: 'Manager Feedback Published', readonly: true },
       goal_ids: { type: 'one2many', label: 'Employee Goals', fields: { goal_id: { type: 'many2one', relation: 'hr.appraisal.goal', label: 'Goal' } }, newLine: () => ({ goal_id: null }) },
       final_rating: { type: 'float', label: 'Final Rating', readonly: true },
-      next_appraisal_date: { type: 'date', label: 'Next Appraisal Date', compute: (r) => status(r) === 'done' && validDate(r.date_close) ? monthsAfter(r.date_close, INTERVAL_MONTHS) : null },
+      next_appraisal_date: { type: 'date', label: 'Next Appraisal Date', compute: (r) => status(r) === 'done' && validDate(r.date_close) ? shiftMonth(r.date_close, INTERVAL_MONTHS) : null },
       note: { type: 'text', label: 'Private Notes' },
     },
     defaults: () => ({ ...base.defaults(), date: today(), employee_feedback: [], manager_feedback: [], employee_feedback_published: false, manager_feedback_published: false, goal_ids: [], final_rating: null }),

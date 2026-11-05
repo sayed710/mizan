@@ -8,9 +8,120 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
+import { journalInvoiceSequence } from './models/accounting.js';
+import { checkMandatoryPlans } from './models/analyticplus.js';
+import { companyCurrencyRecord, roundCurrency } from './money.js';
+import { isRevaluationMovePair } from './models/closing.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
+
+function depreciationMoveMatches(seen, asset, boardLine, move) {
+  if (!move || move.move_type !== 'entry' || move.state !== 'posted'
+    || (move.company_id ?? 1) !== (asset.company_id ?? 1) || (move.date ?? move.invoice_date) !== boardLine.date) return false;
+  const moveLines = move.line_ids ?? [];
+  if (moveLines.length !== 2) return false;
+  const expenseLines = moveLines.filter((entry) => entry.account_id === asset.account_depreciation_expense_id);
+  const depreciationLines = moveLines.filter((entry) => entry.account_id === asset.account_depreciation_id);
+  if (expenseLines.length !== 1 || depreciationLines.length !== 1) return false;
+  const currency = companyCurrencyRecord(seen, asset.company_id ?? 1);
+  const amount = roundCurrency(Number(boardLine.amount), currency);
+  const expense = expenseLines[0];
+  const depreciation = depreciationLines[0];
+  if (roundCurrency(Number(expense.debit) || 0, currency) !== amount || Number(expense.credit) !== 0
+    || Number(depreciation.debit) !== 0 || roundCurrency(Number(depreciation.credit) || 0, currency) !== amount) return false;
+  const distribution = (value) => JSON.stringify(Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  return distribution(expense.analytic_distribution) === distribution(asset.analytic_distribution)
+    && !depreciation.analytic_distribution;
+}
+
+function linesByDate(lines) {
+  const indexed = new Map();
+  for (const line of lines) {
+    if (!line.date || indexed.has(line.date)) return null;
+    indexed.set(line.date, line);
+  }
+  return indexed;
+}
+
+function generatedAssetMove(seen, original, move, changed) {
+  const links = (seen.records['account.asset'] ?? []).flatMap((asset) => (asset.depreciation_ids ?? [])
+    .filter((line) => line.posted && line.move_id === move.id).map((line) => ({ asset, line })));
+  if (links.length !== 1) return false;
+  const { asset, line } = links[0];
+  if (!changed.some(([model, record]) => model === 'account.asset' && record.id === asset.id)) return false;
+  const before = (original.records['account.asset'] ?? []).find((record) => record.id === asset.id);
+  if (!before || before.state !== 'open') return false;
+
+  const unchangedFields = new Set(['id', 'state', 'depreciation_ids']);
+  const fields = new Set([...Object.keys(before), ...Object.keys(asset)]);
+  if ([...fields].some((field) => !unchangedFields.has(field) && same(before[field]) !== same(asset[field]))) return false;
+  const beforeLines = linesByDate(before.depreciation_ids ?? []);
+  const afterLines = linesByDate(asset.depreciation_ids ?? []);
+  if (!beforeLines || !afterLines || beforeLines.size !== afterLines.size) return false;
+
+  let linkedMoveCount = 0;
+  for (const [date, previous] of beforeLines) {
+    const current = afterLines.get(date);
+    if (!current) return false;
+    if (same(previous) === same(current)) continue;
+    if (previous.posted || previous.move_id || !current.posted || !current.move_id) return false;
+    const expected = { ...previous, posted: true, move_id: current.move_id };
+    if (same(expected) !== same(current)) return false;
+    const linkedMove = (seen.records['account.move'] ?? []).find((record) => record.id === current.move_id);
+    if (!changed.some(([model, record]) => model === 'account.move' && record.id === current.move_id)
+      || !depreciationMoveMatches(seen, asset, current, linkedMove)) return false;
+    if (current.move_id === move.id) linkedMoveCount++;
+  }
+  if (linkedMoveCount !== 1 || !depreciationMoveMatches(seen, asset, line, move)) return false;
+  const expectedState = (asset.depreciation_ids ?? []).every((candidate) => candidate.posted) ? 'close' : 'open';
+  return asset.state === expectedState;
+}
+
+/** Resolve both sides of a newly created revaluation pair through their explicit workflow links. */
+function generatedRevaluationMoves(seen, original, changed) {
+  const allMoves = byId(seen.records['account.move']);
+  const originalMoves = byId(original.records['account.move']);
+  const changedIds = new Set(changed.filter(([model]) => model === 'account.move').map(([, move]) => move.id));
+  const checked = new Set();
+  const generated = new Set();
+  for (const [model, move] of changed) {
+    if (model !== 'account.move' || originalMoves.has(move.id)) continue;
+    const adjustment = move.revaluation_date ? move : allMoves.get(move.reversed_entry_id);
+    const reversal = adjustment?.reversal_move_id ? allMoves.get(adjustment.reversal_move_id) : null;
+    if (!adjustment || !reversal) continue;
+    const key = `${adjustment.id}:${reversal.id}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
+    if (originalMoves.has(adjustment.id) || originalMoves.has(reversal.id)
+      || !changedIds.has(adjustment.id) || !changedIds.has(reversal.id)
+      || adjustment.reversal_move_id !== reversal.id || reversal.reversed_entry_id !== adjustment.id) continue;
+    const reversalLinks = (seen.records['account.move'] ?? []).filter((candidate) => (
+      candidate.move_type === 'entry' && candidate.state === 'posted' && candidate.reversed_entry_id === adjustment.id
+    ));
+    const adjustmentLinks = (seen.records['account.move'] ?? []).filter((candidate) => (
+      candidate.move_type === 'entry' && candidate.revaluation_date === adjustment.revaluation_date
+      && candidate.reversal_move_id === reversal.id
+    ));
+    if (reversalLinks.length !== 1 || reversalLinks[0].id !== reversal.id
+      || adjustmentLinks.length !== 1 || adjustmentLinks[0].id !== adjustment.id) continue;
+    // isRevaluationMovePair recomputes the pair from the staged snapshot without the submitted pair itself.
+    if (!isRevaluationMovePair(seen, adjustment, reversal)) continue;
+    generated.add(adjustment.id);
+    generated.add(reversal.id);
+  }
+  return generated;
+}
+
+/** Only a validated closing/reopening, revaluation pair, or posted asset board line may carry the internal marker. */
+function generatedMoveOrigin(seen, original, move, changed, revaluationMoves) {
+  if (move.move_type !== 'entry' || move.state !== 'posted') return false;
+  const fiscalOrigin = move.is_closing === true && (seen.records['account.fiscal.year'] ?? []).some((year) => (
+    changed.some(([model, record]) => model === 'account.fiscal.year' && record.id === year.id)
+    && (year.closing_move_id === move.id || year.opening_move_id === move.id)
+  ));
+  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed);
+}
 
 /** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
 const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(models[model]?.fields[k] && !models[model].fields[k].compute);
@@ -108,6 +219,63 @@ function danglingLink(records, upserts, stored) {
 export const isEmptyDiff = (d) =>
   !Object.keys(d.upserts).length && !Object.keys(d.deletes).length && !d.messages.length && !d.removedMessages.length && !d.settings;
 
+/** Rebase one concurrently posted invoice onto the current explicit journal sequence counter. */
+function rebaseConcurrentInvoiceSequence(db, diff) {
+  const existingMoves = byId(db.records['account.move']);
+  const posted = (diff.upserts?.['account.move'] ?? []).filter((move) => {
+    if (!['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move?.move_type) || move.state !== 'posted') return false;
+    return existingMoves.get(move.id)?.state !== 'posted';
+  });
+  if (!posted.length) return diff;
+
+  const nextDiff = {
+    ...diff,
+    upserts: { ...diff.upserts, 'account.move': [...(diff.upserts['account.move'] ?? [])] },
+    bases: { ...diff.bases, 'account.journal': { ...(diff.bases?.['account.journal'] ?? {}) } },
+    sequenceRenamed: [],
+  };
+  const journalUpserts = [...(diff.upserts?.['account.journal'] ?? [])];
+  if (journalUpserts.length) nextDiff.upserts['account.journal'] = journalUpserts;
+  const groups = new Map();
+  for (const move of posted) {
+    const journal = byId(db.records['account.journal']).get(move.journal_id);
+    if (!journal) continue;
+    const sequence = journalInvoiceSequence(journal, move);
+    const key = `${journal.id}:${sequence.numberField}`;
+    if (!groups.has(key)) groups.set(key, { journal, sequence, moves: [] });
+    groups.get(key).moves.push(move);
+  }
+
+  for (const { journal, sequence, moves } of groups.values()) {
+    const journalBase = nextDiff.bases['account.journal'][journal.id];
+    const journalUpdate = journalUpserts.find((record) => record.id === journal.id);
+    if (!journalBase || !journalUpdate || !(sequence.numberField in journalBase)) continue;
+    const baseValue = journalBase[sequence.numberField];
+    const currentValue = journal[sequence.numberField];
+    if (same(baseValue) === same(currentValue)) continue;
+    const sentValue = Number(journalUpdate[sequence.numberField]);
+    const expectedValue = Number(baseValue) + moves.length;
+    if (!Number.isSafeInteger(sentValue) || sentValue !== expectedValue) {
+      throw new ConflictError('Journal sequence changed while this document was being posted; reload and try again');
+    }
+    if (moves.length !== 1) {
+      throw new ConflictError('Post one invoice or refund per journal sequence update, then reload and continue');
+    }
+
+    const currentSequence = journalInvoiceSequence(journal, moves[0]);
+    const incoming = nextDiff.upserts['account.move'].find((record) => record.id === moves[0].id);
+    const previousName = incoming.name;
+    incoming.name = currentSequence.name;
+    if (Array.isArray(incoming.line_ids)) {
+      incoming.line_ids = incoming.line_ids.map((line) => line?.name === previousName ? { ...line, name: currentSequence.name } : line);
+    }
+    if (previousName !== currentSequence.name) nextDiff.sequenceRenamed.push(['account.move', incoming.id, previousName, currentSequence.name]);
+    journalUpdate[sequence.numberField] = currentSequence.nextNumber + 1;
+    journalBase[sequence.numberField] = currentValue;
+  }
+  return nextDiff;
+}
+
 /** A new id this far out is always refused on a fresh database (kept for callers and tests). */
 export const MAX_ID = 2 ** 40;
 /** How far past a model's counter a client may pick a new id (queued offline creates), so one record can't burn the id space. */
@@ -149,7 +317,14 @@ function highWater(numbering = {}, records) {
   const out = {};
   for (const model of SEQUENCED) {
     const marks = { ...numbering[model] };
-    for (const r of records[model] ?? []) {
+    const journalPrefixes = model === 'account.move'
+      ? (records['account.journal'] ?? []).flatMap((journal) => [journal.invoice_sequence_prefix, journal.refund_sequence_prefix].filter(Boolean))
+      : [];
+    if (journalPrefixes.length) {
+      for (const prefix of Object.keys(marks)) if (journalPrefixes.some((configured) => prefix.startsWith(configured))) delete marks[prefix];
+    }
+    const candidates = (records[model] ?? []).filter((record) => model !== 'account.move' || record.move_type === 'entry');
+    for (const r of candidates) {
       const m = sequencedName(model, r.name);
       if (m && Number.isSafeInteger(Number(m[2]))) marks[m[1]] = Math.max(marks[m[1]] ?? 0, Number(m[2]));
     }
@@ -166,10 +341,22 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
   let out = records;
   const renamed = [];
   for (const model of SEQUENCED.filter((m) => Array.isArray(upserts[m]))) {
-    const list = [...out[model] ?? []];
+    const all = [...out[model] ?? []];
+    const storedById = byId(stored[model]);
+    if (model === 'account.move') {
+      const newInvoices = upserts[model].filter((move) => move?.move_type !== 'entry' && move?.state === 'posted'
+        && storedById.get(move.id)?.state !== 'posted');
+      for (const move of newInvoices) {
+        if (all.some((other) => other.id !== move.id && other.move_type !== 'entry' && other.state === 'posted' && other.name === move.name)) {
+          throw new ConflictError('This invoice number is already assigned; reload and post again to use the journal sequence');
+        }
+      }
+    }
+    const list = model === 'account.move' ? all.filter((record) => record.move_type === 'entry') : all;
     const was = new Map((stored[model] ?? []).map((r) => [r.id, r.name]));
     // Only numbers this change set hands out can move; a record keeps the number it already had.
-    const incoming = new Set(upserts[model].map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
+    const genericUpserts = model === 'account.move' ? upserts[model].filter((record) => record.move_type === 'entry') : upserts[model];
+    const incoming = new Set(genericUpserts.map((r) => r?.id).filter((id) => was.get(id) !== list.find((x) => x.id === id)?.name));
     const owner = new Map();
     // Records keeping their number claim it first.
     for (const r of [...list.filter((r) => !incoming.has(r.id)), ...list.filter((r) => incoming.has(r.id))]) {
@@ -188,7 +375,8 @@ function uniqueNumbers(records, upserts = {}, stored = {}, marks = {}) {
       renamed.push([model, r.id, r.name, name]);
       owner.set(name, r.id);
     }
-    out = { ...out, [model]: list };
+    const numbered = new Map(list.map((record) => [record.id, record]));
+    out = { ...out, [model]: model === 'account.move' ? all.map((record) => numbered.get(record.id) ?? record) : list };
   }
   return { records: out, renamed };
 }
@@ -224,6 +412,24 @@ function remapDistribution(distribution, remapped) {
   return result;
 }
 
+function remapTaxSnapshot(snap, to) {
+  if (!snap || typeof snap !== 'object') return snap;
+  const remapRepartition = (rows) => (Array.isArray(rows)
+    ? rows.map((r) => (!r || typeof r !== 'object' ? r : {
+      ...r,
+      ...(Number.isInteger(r.account_id) ? { account_id: to('account.account', r.account_id) } : {}),
+      ...(Array.isArray(r.tag_ids) ? { tag_ids: r.tag_ids.map((id) => to('account.account.tag', id)) } : {}),
+    }))
+    : rows);
+  return {
+    ...snap,
+    ...(Number.isInteger(snap.tax_id) ? { tax_id: to('account.tax', snap.tax_id) } : {}),
+    ...(Array.isArray(snap.invoice_repartition_line_ids) ? { invoice_repartition_line_ids: remapRepartition(snap.invoice_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.refund_repartition_line_ids) ? { refund_repartition_line_ids: remapRepartition(snap.refund_repartition_line_ids) } : {}),
+    ...(Array.isArray(snap.tax_breakdown) ? { tax_breakdown: snap.tax_breakdown.map((c) => remapTaxSnapshot(c, to)) } : {}),
+  };
+}
+
 /** Point many2one, line and res_model/res_id references in a record at remapped ids. */
 function remapRefs(model, rec, remapped) {
   const to = (relation, v) => (Number.isInteger(v) && remapped[relation]?.[v]) || v;
@@ -243,10 +449,18 @@ function remapRefs(model, rec, remapped) {
         const analytic = distribution && typeof distribution === 'object' && !Array.isArray(distribution)
           ? { analytic_distribution: remapDistribution(distribution, remapped) }
           : null;
-        return subs.length || analytic ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...analytic } : line;
+        // JSON rows (e.g. tax repartition snapshots) declare which of their keys hold record ids.
+        const rows = Object.entries(f.fields ?? {}).filter(([k, s]) => s.type === 'json' && s.refs && Array.isArray(line[k]))
+          .map(([k, s]) => [k, line[k].map((row) => (row && typeof row === 'object' ? { ...row, ...Object.fromEntries(Object.entries(s.refs).filter(([rk]) => rk in row)
+            .map(([rk, rel]) => [rk, Array.isArray(row[rk]) ? row[rk].map((id) => to(rel, id)) : to(rel, row[rk])])) } : row))]);
+        const breakdown = Array.isArray(line.tax_breakdown)
+          ? { tax_breakdown: line.tax_breakdown.map((s) => remapTaxSnapshot(s, to)) }
+          : null;
+        return subs.length || analytic || rows.length || breakdown ? { ...line, ...Object.fromEntries(subs.map(([k, s]) => [k, s.type === 'many2many' && Array.isArray(line[k]) ? line[k].map((id) => to(target(s), id)) : to(target(s), line[k])])), ...Object.fromEntries(rows), ...analytic, ...breakdown } : line;
       });
     }
   }
+  if (Array.isArray(out.tax_breakdown)) out.tax_breakdown = out.tax_breakdown.map((s) => remapTaxSnapshot(s, to));
   if (typeof out.res_model === 'string') out.res_id = to(out.res_model, out.res_id);
   return out;
 }
@@ -345,6 +559,8 @@ const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the si
 export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
+  // Renumbering events are produced here by the server only; a client-sent list is discarded (Qodo 5).
+  d = rebaseConcurrentInvoiceSequence(db, { ...d, sequenceRenamed: [] });
   const companyError = (model, ...recs) => (recs.some((r) => r && !visibleTo(companies, model, r, db)) ? `No access to this company's ${model} records` : null);
   const storedRecord = (model, id) => (db.records[model] ?? []).find((r) => r.id === id);
   const check = (model) => {
@@ -359,6 +575,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let growth = 0;
   /** @type {[string, any][]} */
   const changed = [];
+  const requestedGeneratedMoves = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
   const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
   for (const [model, recs] of upserts) {
@@ -387,7 +604,15 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (model === 'account.move' && prior && (submitted.fx_payment_move_id !== prior.fx_payment_move_id || submitted.fx_invoice_id !== prior.fx_invoice_id)) {
         if (submitted.fx_payment_move_id != null || submitted.fx_invoice_id != null) throw new Error('Exchange provenance cannot be changed');
       }
-      const input = model === 'account.move' && !prior ? (({ fx_payment_move_id, fx_invoice_id, ...rest }) => rest)(submitted) : submitted;
+      if (model === 'account.move') {
+        if (prior && submitted.system_generated !== undefined && submitted.system_generated !== prior.system_generated) {
+          throw new Error('System-generated status cannot be changed');
+        }
+        if (!prior && submitted.system_generated === true) requestedGeneratedMoves.add(submitted.id);
+      }
+      const input = model === 'account.move' && !prior
+        ? (({ fx_payment_move_id, fx_invoice_id, system_generated, ...rest }) => rest)(submitted)
+        : submitted;
       const visiblePrior = companies && prior ? scopeNestedCompanyArrays(model, prior, companies) : prior;
       const rec = cleanRecord(model, merge(model, prior, input, d.bases?.[model]?.[raw.id], visiblePrior));
       if (companies) scopeNestedCompanyArrays(model, rec, companies, { prior, submitted, write: true });
@@ -413,19 +638,49 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       if (provenance.has(row.payment_fx_move_id)) throw new Error('Exchange entry is already used by another settlement');
       provenance.set(row.payment_fx_move_id, { fx_payment_move_id: row.move_id, fx_invoice_id: record.id });
     }
+    if (['out_refund', 'in_refund'].includes(record.move_type) && record.reversed_entry_id && record.state === 'posted') {
+      const submittedFx = (d.upserts?.['account.move'] ?? []).find((m) => m.fx_payment_move_id === record.id && m.fx_invoice_id === record.reversed_entry_id);
+      if (submittedFx && !oldMoves.has(submittedFx.id)) {
+        provenance.set(submittedFx.id, { fx_payment_move_id: record.id, fx_invoice_id: record.reversed_entry_id });
+      }
+    }
   }
   if (provenance.size) {
     records = { ...records, 'account.move': (records['account.move'] ?? []).map((m) => provenance.has(m.id) ? { ...m, ...provenance.get(m.id) } : m) };
     for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
-  const seen = { ...db, records };
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
+  const stagedSeq = { ...db.seq };
+  for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
+  const staged = { ...db, records, seq: stagedSeq };
+  const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
+  const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
+    model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed, revaluationMoves) ? [rec.id] : []
+  )));
+  for (const id of requestedGeneratedMoves) {
+    if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');
+  }
+  const seen = { ...db, records };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
       ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null });
     if (err) throw new Error(err);
+    if (model === 'account.move') {
+      const generated = generatedMoves.has(rec.id);
+      if (rec.state === 'posted' && before?.state !== 'posted') {
+        checkMandatoryPlans(seen, rec, { systemGenerated: generated });
+      }
+    }
+  }
+  if (generatedMoves.size) {
+    const generatedRecords = new Map((records['account.move'] ?? []).filter((move) => generatedMoves.has(move.id)).map((move) => [move.id, { ...move, system_generated: true }]));
+    for (const [id, marked] of generatedRecords) {
+      const before = (records['account.move'] ?? []).find((move) => move.id === id);
+      growth += json(marked) - json(before);
+    }
+    records = { ...records, 'account.move': (records['account.move'] ?? []).map((move) => generatedRecords.get(move.id) ?? move) };
   }
   const marks = highWater(db.numbering, db.records);
   const numbered = uniqueNumbers(records, d.upserts, db.records, marks);
@@ -452,7 +707,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     const kept = byId(records[model]);
     for (const raw of recs) {
       const rec = kept.get(raw.id);
-      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null);
+      const err = rec && models[model].invariant?.(final, rec, stored.get(rec.id) ?? null, db);
       if (err) throw new Error(err);
     }
   }
@@ -468,7 +723,14 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const seq = { ...db.seq };
   for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
-  const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db)).map((m) => m.id));
+  const auditRecords = new Map();
+  const kept = new Set(db.messages.filter((m) => {
+    if (!models[m.model]?.audited) return false;
+    if (!auditRecords.has(m.model)) auditRecords.set(m.model, byId(db.records[m.model]));
+    const record = auditRecords.get(m.model).get(m.res_id);
+    // Deleted moves retain their original company on each chatter message.
+    return models[m.model].audited(db, record ?? { company_id: m.company_id });
+  }).map((m) => m.id));
   // A limited user may only comment on a record that exists in the result and that they can see.
   const onVisibleRecord = (m) => {
     if (!companies) return true;
@@ -510,7 +772,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
       lock_date: lockValue(s.lock_date, db.settings.lock_date),
-      tax_lock_date: lockValue(s.tax_lock_date, db.settings.tax_lock_date),
       tax_lock_dates: s.tax_lock_dates && typeof s.tax_lock_dates === 'object' && !Array.isArray(s.tax_lock_dates)
         ? { ...db.settings.tax_lock_dates, ...Object.fromEntries(Object.entries(s.tax_lock_dates).filter(([id]) => /^[1-9]\d*$/.test(id))
           .map(([id, value]) => [id, lockValue(value, db.settings.tax_lock_dates?.[id])])) }
@@ -519,7 +780,6 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
       purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
       // The hard lock only ever moves forward.
       hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
-      audit_trail: db.settings.audit_trail === true || s.audit_trail === true,
       invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
       company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),
       company_iban: String(s.company_iban ?? db.settings.company_iban ?? '').slice(0, 40),
@@ -530,8 +790,9 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   installCustomFields(settings.customFields);
   let next = { ...db, records, seq, settings, numbering: highWater(marks, records), messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
   // The audit trail shows the number the server finally gave, not only the one the browser proposed.
-  for (const [model, id, from, to] of numbered.renamed) {
-    if (models[model].audited?.(next)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
+  for (const [model, id, from, to] of [...numbered.renamed, ...(d.sequenceRenamed ?? [])]) {
+    const record = (next.records[model] ?? []).find((r) => r.id === id);
+    if (models[model].audited?.(next, record)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
   }
   growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
   if (settings !== db.settings) growth += json(settings) - json(db.settings);

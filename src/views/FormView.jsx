@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { models } from '../models/index.js';
-import { aggregate, create, messagesOf, nextId, postNote, read, search, unlink, write } from '../orm.js';
+import { fieldReadonly } from '../field-metadata.js';
+import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
@@ -8,10 +9,12 @@ import { myEmployeeId } from '../access.js';
 import { t } from '../i18n.js';
 import { Avatar, display, FieldInput, isLabelable, money, SimulatedNote } from '../ui.jsx';
 import { currencyCode } from '../models/money.js';
+import { companyCurrencyRecord } from '../money.js';
 import { actionRecords, parseRel } from './ActionView.jsx';
 import { viewRecords } from '../companyView.js';
 import { duplicateValues } from '../duplicate.js';
 import { saveFormRecord } from './formSave.js';
+import { changeFormValue, newDefaults } from './formDefaults.js';
 import { RecordAnalysis } from './Analysis.jsx';
 
 /** Integrations whose buttons fall back to only recording a send when not configured. */
@@ -47,25 +50,16 @@ function withComputed(model, vals, db) {
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
-/** Defaults for a new record: model defaults < menu defaults < smart-button parent < `default_<field>` URL params. */
-function newDefaults(db, model, leaf, params) {
-  const def = models[model];
-  const fromUrl = Object.fromEntries(
-    [...params].filter(([k]) => k.startsWith('default_') && def.fields[k.slice(8)]).map(([k, v]) => [k.slice(8), v]),
-  );
-  const rel = parseRel(db, model, params.get('rel'));
-  return { ...(def.defaults?.(nextId(db, model)) ?? {}), ...(def.createDefaults?.(db, fromUrl) ?? {}), ...leaf.defaults, ...(rel ? { [rel.field]: rel.id } : {}), ...fromUrl };
-}
-
 function Field({ db, model, name, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
   const label = field.custom ? field.label : t(field.label);
   const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
+  const isReadonly = readonly || fieldReadonly(field, record, db);
   return (
     <div className="field">
-      {isLabelable(field, readonly) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={readonly} record={record} /></div>
+      {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
+      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
     </div>
   );
 }
@@ -85,6 +79,38 @@ function SmartButtons({ db, rec, smart }) {
         );
       })}
     </div>
+  );
+}
+
+/** Model-driven widget (def.form.outstandingCredits): lists the posted payments with unapplied credit and applies a chosen one in full. */
+function OutstandingCredits({ db, spec, current, onApply }) {
+  const rows = spec.list(db, current);
+  if (!rows?.length) return null;
+  return (
+    <section className="outstanding-credits" aria-label={t(spec.title)}>
+      <h3>{t(spec.title)}</h3>
+      <table className="list">
+        <thead><tr>
+          {spec.fields.map((f) => <th key={f.name}>{t(f.label)}</th>)}
+          <th><span className="sr-only">{t('Actions')}</span></th>
+        </tr></thead>
+        <tbody>
+          {rows.map((row) => {
+            const currency = spec.fields.some((f) => f.money) ? companyCurrencyRecord(db, row.company_id ?? 1) : null;
+            return (
+              <tr key={row.id}>
+                {spec.fields.map((f) => (
+                  <td key={f.name} className={f.money ? 'num' : ''}>
+                    {f.money ? money(row[f.name] ?? 0, currency?.name ?? null, currency) : String(row[f.name] ?? '')}
+                  </td>
+                ))}
+                <td><button type="button" className="btn sm" onClick={() => onApply(row)}>{t(spec.applyLabel)}</button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
@@ -228,7 +254,8 @@ export function FormView({ leaf, id, base, params }) {
   const [error, setError] = useState(() => restored?.error ?? null);
   const [wizard, setWizard] = useState(null);
   const [tab, setTab] = useState(0);
-  const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params) : null));
+  const [initial] = useState(() => (isNew ? newDefaults(db, model, leaf, params, parseRel(db, model, params.get('rel'))) : null));
+  const stageExplicit = useRef(!isNew || Object.hasOwn(restored?.values ?? {}, 'stage_id') || Object.hasOwn(leaf.defaults ?? {}, 'stage_id') || params.has('default_stage_id'));
   const revRef = useRef(0);
 
   const view = params.get('view') ?? '';
@@ -237,7 +264,7 @@ export function FormView({ leaf, id, base, params }) {
   const backHash = `${base}${query}`;
 
   // A record outside this menu's domain (e.g. a journal entry id under Invoices) is not shown under the wrong breadcrumb.
-  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec)))) {
+  if (!isNew && (!rec || (leaf.domain && !leaf.domain(rec, db)))) {
     return <main className="form-page"><p className="empty">{t('Record not found.')} <a href={backHash}>{t('Back to')} {t(leaf.label)}</a></p></main>;
   }
 
@@ -245,11 +272,8 @@ export function FormView({ leaf, id, base, params }) {
   const current = withComputed(model, def.form.prepare?.(values, db) ?? values, db);
   const dirty = Object.keys(changes).length > 0;
   const set = (k) => (v) => {
-    setChanges((c) => {
-      const next = { ...c, [k]: v };
-      const extra = def.onchange?.({ ...(isNew ? initial : rec), ...next }, k, getDb()) ?? {};
-      return { ...next, ...extra };
-    });
+    if (k === 'stage_id') stageExplicit.current = true;
+    setChanges((c) => changeFormValue(model, isNew ? initial : rec, c, k, v, getDb(), stageExplicit.current));
     setError(null);
   };
   const fail = (e) => setError(e instanceof Error ? t(e.message) : t('Could not save'));
@@ -394,15 +418,18 @@ export function FormView({ leaf, id, base, params }) {
   const idx = rec ? ids.indexOf(rec.id) : -1;
   const pageTo = (step) => leave(`${base}/${ids[(idx + step + ids.length) % ids.length]}${query}`);
 
-  const statusKey = def.form.statusbar;
+  const resolve = (v) => (typeof v === 'function' ? v(current, db, { leaf, isNew }) : v);
+  const statusKey = resolve(def.form.statusbarFor ?? def.form.statusbar);
   const statusField = statusKey && def.fields[statusKey];
   const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
-  const resolve = (v) => (typeof v === 'function' ? v(current) : v);
   const tabs = resolve(def.form.tabs);
+  const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
+  // A non-blocking warning shown above the form, such as an exceeded credit limit.
+  const warning = def.form.warning?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
-  const locked = !isNew && !!def.form.lockedWhen?.(current);
+  const locked = !isNew && !!def.form.lockedWhen?.(current, db);
 
   return (
     <main className="form-page">
@@ -476,6 +503,7 @@ export function FormView({ leaf, id, base, params }) {
           )}
 
           {error && <div className="alert" role="alert">{error}</div>}
+          {warning && <div className="alert alert-warning" role="status">{warning}</div>}
           <SimulatedNote text={def.simulated} />
           {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
@@ -490,12 +518,28 @@ export function FormView({ leaf, id, base, params }) {
                     value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
             <div className="groups">
-              {def.form.groups.map((g, i) => (
+              {groups.map((g, i) => (
                 <div key={i} className="group">
                   {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
                 </div>
               ))}
             </div>
+            {def.form.outstandingCredits && !isNew && (
+              <OutstandingCredits
+                db={db}
+                spec={def.form.outstandingCredits}
+                current={current}
+                onApply={(row) => {
+                  const savedId = current.id && !dirty ? current.id : save();
+                  if (savedId == null) return;
+                  try {
+                    const res = def.form.outstandingCredits.apply(getDb(), read(getDb(), model, savedId), row.id);
+                    commit(res.db);
+                    setError(null);
+                  } catch (e) { fail(e); }
+                }}
+              />
+            )}
             {tabs && (
               <>
                 <div className="tabs" role="tablist">
@@ -505,11 +549,21 @@ export function FormView({ leaf, id, base, params }) {
                 </div>
                 <div className="tab-panel" role="tabpanel">
                   {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
-                    <TaxReportTable db={db} period={{ from: current.date_from, to: current.date_to, company_id: current.company_id }} />
-                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text'].includes(def.fields[f].type)
+                    <TaxReportTable
+                      db={db}
+                      period={{
+                        from: current.date_from,
+                        to: current.date_to,
+                        company_id: current.company_id,
+                        tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
+                          ? current.tax_unit_id
+                          : null,
+                      }}
+                    />
+                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
                     ? (
                       <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && def.fields[f].type === 'one2many')} />
+                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
                     )
                     // Plain fields in a tab get a label, like fields in the header groups.
                     : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}

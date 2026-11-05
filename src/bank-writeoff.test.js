@@ -1,10 +1,10 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 import { journalItems } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
 
@@ -12,9 +12,9 @@ const LINE = 'account.bank.statement.line';
 const run = (db, id) => models[LINE].form.buttons.find((b) => b.label === 'Match').run(db, read(db, LINE, id)).db;
 function setup(type = 'out_invoice') {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch cash', account_type: 'asset_cash' });
-  const journal = create(bank.db, 'account.journal', { company_id: branch.id, code: 'B2', name: 'Branch bank', type: 'bank', default_account_id: bank.id });
+  const journal = create(bank.db, 'account.journal', { company_id: branch.id, code: 'B2', name: 'Branch bank', type: 'bank', default_account_id: bank.id, suspense_account_id: search(bank.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id });
   const account = create(journal.db, 'account.account', { company_id: branch.id, code: '690777', name: 'Write-off', account_type: 'expense' });
   const invoice = create(account.db, 'account.move', { company_id: branch.id, move_type: type, partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   const db = postMove(invoice.db, invoice.id);
@@ -58,7 +58,8 @@ test('foreign currency write-off uses the statement-date rate and clears the boo
   const inv = create(currency.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, currency_id: currency.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   db = postMove(inv.db, inv.id);
   const account = search(db, 'account.account').find((a) => a.code === '690000');
-  const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'Foreign', amount: 45, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Adjustment', writeoff_amount: 5 });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-02', payment_ref: 'Foreign', amount: 45, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Adjustment', writeoff_amount: 5 });
   db = run(line.db, line.id);
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   const entry = read(db, 'account.move', read(db, LINE, line.id).writeoff_move_id);

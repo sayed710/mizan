@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -6,7 +7,6 @@ import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
 import { agedBalance } from './models/finance.js';
 import { journalItems } from './models/ledger.js';
-import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -19,7 +19,8 @@ test('partial statement match settles the oldest installment and leaves the rema
   let db = seed();
   const term = create(db, 'account.payment.term', { name: 'Halves', line_ids: [{ value_type: 'percent', value: 50, nb_days: 0, delay_type: 'days_after' }, { value_type: 'percent', value: 50, nb_days: 30, delay_type: 'days_after' }] });
   const inv = invoice(term.db, 1, 100, term.id);
-  const line = create(inv.db, LINE, { date: '2026-01-20', payment_ref: 'partial', amount: 30, move_id: inv.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(inv.db, LINE, { journal_id: bankJournal.id, date: '2026-01-20', payment_ref: 'partial', amount: 30, move_id: inv.id });
   db = run(line.db, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 70);
   const aged = agedBalance(db, 'receivable', '2026-01-21').rows.find((r) => r.partner_id === 1);
@@ -29,8 +30,8 @@ test('partial statement match settles the oldest installment and leaves the rema
 });
 test('oversized company transaction can match another document without another bank item', () => {
   const base = seed();
-  const company = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
-  const journal = create(company.db, 'account.journal', { company_id: company.id, name: 'Branch bank', code: 'BRB', type: 'bank', default_account_id: search(company.db, 'account.account').find((a) => a.code === '101401').id });
+  const company = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const journal = create(company.db, 'account.journal', { company_id: company.id, name: 'Branch bank', code: 'BRB', type: 'bank', suspense_account_id: search(company.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id, default_account_id: search(company.db, 'account.account').find((a) => a.code === '101401').id });
   const first = invoice(journal.db, company.id, 100);
   const second = invoice(first.db, company.id, 50);
   const line = create(second.db, LINE, { company_id: company.id, journal_id: journal.id, date: '2026-01-20', payment_ref: 'two invoices', amount: 150, move_id: first.id });

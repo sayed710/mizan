@@ -1,4 +1,5 @@
 import './models/index.js';
+import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -7,6 +8,8 @@ import { accountId, isBalanced } from './models/ledger.js';
 import { analyticBalance } from './models/analyticplus.js';
 import { seed } from './seed.js';
 import { applyDiff, diffDb } from './sync.js';
+import { createCompany } from './models/company.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 const button = (model, label, db, id) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 
@@ -14,7 +17,7 @@ test('sale uses the posted invoice line account and reverses depreciation before
   let db = seed();
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Sale', qty: 1, price_unit: 50, tax: 0, account_id: accountId(db, '410000') }] });
   db = button('account.move', 'Confirm', invoice.db, invoice.id);
-  const asset = create(db, 'account.asset', { name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Machine', original_value: 100, acquisition_date: '2026-01-01', method: 'linear', method_number: 24, method_period: '1' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = button('account.asset', 'Post Depreciation', db, asset.id);
   const original = read(db, 'account.asset', asset.id).depreciation_ids[0].move_id;
@@ -36,7 +39,7 @@ test('reversing and reposting depreciation offsets analytic actuals through sync
   const first = create(db, 'account.analytic.account', { name: 'Project A', code: 'DEP-A' });
   const second = create(first.db, 'account.analytic.account', { name: 'Project B', code: 'DEP-B' });
   const distribution = { [first.id]: 60, [second.id]: 40 };
-  const asset = create(second.db, 'account.asset', { name: 'Allocated asset', original_value: 100,
+  const asset = create(second.db, 'account.asset', { ...assetAccounts(second.db), name: 'Allocated asset', original_value: 100,
     acquisition_date: '2020-01-01', method: 'linear', method_number: 1, method_period: '12', analytic_distribution: distribution });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = button('account.asset', 'Post Depreciation', db, asset.id);
@@ -128,14 +131,13 @@ test('resetting deferred invoices and bills offsets recognition analytic actuals
 
 test('manual company bill recognition respects hard lock without disturbing earlier periods', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Other company' });
+  const company = createCompany(db, { name: 'Other company', ...invoiceJournalDefaults(db), deferred_expense_account_id: accountId(db, '132000') });
   db = company.db;
   const deferred = create(db, 'account.account', { name: 'Prepaid', code: '132000', account_type: 'asset_current', company_id: company.id });
-  const expense = create(deferred.db, 'account.account', { name: 'Expense', code: '600000', account_type: 'expense', company_id: company.id });
-  const payable = create(expense.db, 'account.account', { name: 'Payable', code: '211000', account_type: 'liability_payable', company_id: company.id });
-  const billJournal = create(payable.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id });
+  const expense = { db: deferred.db, id: read(deferred.db, 'res.company', company.id).account_price_difference_id };
+  const billJournal = create(expense.db, 'account.journal', { name: 'Bills', code: 'BILL', type: 'purchase', company_id: company.id, invoice_sequence_prefix: 'DEF-BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'DEF-RBILL/', refund_sequence_next_number: 1 });
   const journal = create(billJournal.db, 'account.journal', { name: 'Misc', code: 'MISC', type: 'general', company_id: company.id });
-  db = write(journal.db, 'res.company', company.id, { deferred_expense_account_id: deferred.id, deferred_generation_method: 'manual' });
+  db = write(journal.db, 'res.company', company.id, { default_purchase_journal_id: billJournal.id, deferred_expense_account_id: deferred.id, deferred_generation_method: 'manual' });
   const bill = create(db, 'account.move', { company_id: company.id, move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Rent', qty: 1, price_unit: 90, tax: 0, account_id: expense.id, deferred_start_date: '2026-01-01', deferred_end_date: '2026-03-31' }] });
   db = button('account.move', 'Confirm', bill.db, bill.id);
   const source = read(db, 'account.move', bill.id);
@@ -177,12 +179,13 @@ test('deferred invoice and recognition provenance survive server synchronization
 
 test('second company disposal uses its own sale and gain accounts', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Branch' }); db = company.db;
+  const company = createCompany(db, { name: 'Branch', ...invoiceJournalDefaults(db) }); db = company.db;
   const saleAccount = create(db, 'account.account', { name: 'Sale proceeds', code: 'S2', account_type: 'income', company_id: company.id }); db = saleAccount.db;
   const gainAccount = create(db, 'account.account', { name: 'Disposal gains', code: 'G2', account_type: 'income_other', company_id: company.id }); db = gainAccount.db;
   const invoice = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Asset sale', qty: 1, price_unit: 150, tax: 0, account_id: saleAccount.id }] });
   db = button('account.move', 'Confirm', invoice.db, invoice.id);
-  const asset = create(db, 'account.asset', { company_id: company.id, name: 'Branch machine', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', account_gain_id: gainAccount.id });
+  db = write(db, 'res.company', company.id, { gain_account_id: gainAccount.id });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db, company.id), company_id: company.id, name: 'Branch machine', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   db = models['account.asset'].actions.dispose(db, read(db, 'account.asset', asset.id), { date: '2026-01-02', saleValue: 150, invoiceId: invoice.id, invoiceLine: 0 });
   const move = search(db, 'account.move').find((m) => m.ref === 'Branch machine disposal');
@@ -195,12 +198,12 @@ test('second company disposal uses its own sale and gain accounts', () => {
 
 test('disposal wizard selects posted company invoice lines and rejects another company', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Other' }); db = company.db;
+  const company = createCompany(db, { name: 'Other', ...invoiceJournalDefaults(db) }); db = company.db;
   const sale = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Machine proceeds', qty: 1, price_unit: 150, tax: 0, account_id: accountId(db, '410000') }] });
   db = button('account.move', 'Confirm', sale.db, sale.id);
   const other = create(db, 'account.move', { company_id: company.id, move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other sale', qty: 1, price_unit: 150, tax: 0 }] });
   db = button('account.move', 'Confirm', other.db, other.id);
-  const asset = create(db, 'account.asset', { name: 'Wizard asset', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Wizard asset', original_value: 100, acquisition_date: '2026-01-01', method_number: 3, method_period: '12' });
   db = button('account.asset', 'Confirm', asset.db, asset.id);
   const action = models['account.asset'].form.buttons.find((b) => b.label === 'Sell or Dispose');
   const record = read(db, 'account.asset', asset.id);

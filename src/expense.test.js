@@ -1,13 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { accountId, isBalanced } from './models/ledger.js';
 import { seed } from './seed.js';
 
 const run = (db, id, label) => models['hr.expense'].form.buttons.find((b) => b.label === label).run(db, read(db, 'hr.expense', id)).db;
 const flow = (vals) => {
-  const { db, id } = create(seed(), 'hr.expense', { name: 'Taxi', state: 'approved', category: 'travel', total_amount: 114, tax: 14, ...vals });
+  let base = seed();
+  const payable = accountId(base, '230100');
+  base = write(base, 'account.account', payable, { account_type: 'liability_payable', company_id: 1 });
+  base = write(base, 'res.company', 1, { account_default_payable_id: payable });
+  const product = create(base, 'product', { name: 'Taxi expense', type: 'service', property_account_expense_id: accountId(base, '610000') });
+  const tax = search(product.db, 'account.tax').find((tax) => tax.type_tax_use === 'purchase' && tax.amount === 14);
+  const { db, id } = create(product.db, 'hr.expense', { name: 'Taxi', state: 'approved', category: 'travel', product_id: product.id, tax_id: tax.id, total_amount: 114, tax: 14, ...vals });
   return { db: run(db, id, 'Post Journal Entries'), id };
 };
 

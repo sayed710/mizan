@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
-import { applyFilters, create, matches, read, search as searchRecords, unlink } from '../orm.js';
+import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
 import { display, SimulatedNote } from '../ui.jsx';
-import { fromCsv, toCsv } from '../csv.js';
+import { fromCsv, importCsvRows, toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
@@ -14,6 +14,7 @@ import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
 import { actionRecords } from '../companyView.js';
 import { pageWindow } from './paging.js';
+import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
 
 export { actionRecords } from '../companyView.js';
 
@@ -34,33 +35,6 @@ const download = (name, text) => {
   URL.revokeObjectURL(a.href);
 };
 
-/** Import rows whose headers match field labels (or technical names); many2one by record name. */
-function importRows(db, model, defaults, rows) {
-  const fields = models[model].fields;
-  const keyOf = (h) => Object.keys(fields).find((k) => k === h || fields[k].label.toLowerCase() === h.trim().toLowerCase());
-  const [header, ...body] = rows;
-  const keys = header.map(keyOf);
-  let next = db;
-  let count = 0;
-  for (const row of body.filter((r) => r.some((c) => c.trim()))) {
-    const vals = { ...defaults };
-    keys.forEach((k, i) => {
-      if (!k || fields[k].readonly || fields[k].compute) return;
-      const raw = (row[i] ?? '').trim();
-      const f = fields[k];
-      if (f.type === 'many2one') vals[k] = searchRecords(next, f.relation).find((r) => r.name?.toLowerCase() === raw.toLowerCase())?.id ?? null;
-      else if (['monetary', 'float', 'integer', 'priority'].includes(f.type)) vals[k] = raw === '' ? null : Number(raw);
-      else if (f.type === 'boolean') vals[k] = /^(1|true|yes|نعم)$/i.test(raw);
-      else if (f.type === 'tags') vals[k] = raw ? raw.split(/[;,]/).map((x) => x.trim()).filter(Boolean) : [];
-      else if (f.type === 'selection') vals[k] = f.options.find((o) => o[0] === raw || o[1].toLowerCase() === raw.toLowerCase())?.[0] ?? undefined;
-      else vals[k] = raw;
-    });
-    next = create(next, model, vals).db;
-    count += 1;
-  }
-  return { db: next, count };
-}
-
 export function ActionView({ leaf, base, params }) {
   const db = useDb();
   const model = leaf.model;
@@ -72,9 +46,11 @@ export function ActionView({ leaf, base, params }) {
   const urlFilters = params.getAll('filter').filter((id) => (models[model].filters ?? []).flat().some((f) => f.id === id));
   const [search, setSearch] = useState(() => {
     const initial = emptySearch(model, parseRel(db, model, relRaw));
-    return { ...initial, ...(urlFilters.length ? { filters: urlFilters } : {}), groupBy: leaf.groupBy ?? [] };
+    const defaultFilters = leaf.defaultFilters ?? models[model].defaultFilters ?? [];
+    return { ...initial, filters: urlFilters.length ? urlFilters : defaultFilters, groupBy: leaf.groupBy ?? [] };
   });
   const [selected, setSelected] = useState(() => new Set());
+  const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
 
@@ -89,6 +65,15 @@ export function ActionView({ leaf, base, params }) {
     .filter((r) => matches(db, model, r, search.terms));
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
+  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
+  const statementImport = model === 'account.bank.statement.line' && !!def.importFile;
+  const importJournals = statementImport && !defaults.journal_id
+    ? statementImportJournalChoices(db, defaults.company_id ?? null)
+    : [];
+  const selectedImportJournal = importJournals.find((journal) => String(journal.id) === selectedImportJournalId);
+  const importDefaults = statementImport && !defaults.journal_id
+    ? withSelectedStatementJournal(defaults, selectedImportJournal?.id)
+    : defaults;
 
   const deleteSelected = () => {
     if (!confirm(t('Delete {n} record(s)?', { n: selected.size }))) return;
@@ -97,12 +82,15 @@ export function ActionView({ leaf, base, params }) {
   };
   const exportCsv = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => display(db, def.fields[f], r[f])))]));
+    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => {
+      const field = def.fields[f];
+      return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
+    }))]));
   };
   const importCsv = async (file) => {
     try {
       const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importRows(getDb(), model, defaults, fromCsv(text));
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, importDefaults) : importCsvRows(getDb(), model, importDefaults, fromCsv(text));
       // Report the import only once the server has accepted it (a refusal shows its own message).
       if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
@@ -125,23 +113,28 @@ export function ActionView({ leaf, base, params }) {
       {(def.listActions ?? []).map((action) => <button key={action.label} type="button" className="btn sm" onClick={() => {
         try {
           const ids = selected.size ? records.filter((r) => selected.has(r.id)).map((r) => r.id) : records.map((r) => r.id);
-          if (!ids.length) return;
+          if (!ids.length && !action.noSelection) return;
           let options;
-          if (action.label === 'Request a count') {
+          if (action.ask) {
+            const promptDefault = typeof action.ask.default === 'function' ? action.ask.default() : (action.ask.default ?? '');
+            const val = prompt(t(action.ask.label), promptDefault);
+            if (val == null) return;
+            options = val;
+          } else if (action.label === 'Request a count') {
             const date = prompt(t('Scheduled Count Date'), new Date().toISOString().slice(0, 10));
             if (date == null) return;
             const name = prompt(t('Counter (name, optional)'), '');
             if (name == null) return;
-            const user = name ? searchRecords(getDb(), 'hr.employee').find((u) => u.name === name) : null;
-            if (name && !user) throw new Error(t('Select an existing counter'));
+            const users = name ? searchRecords(getDb(), 'hr.employee').filter((u) => u.name === name) : [];
+            if (name && users.length !== 1) throw new Error(t(users.length ? 'Enter a unique counter name' : 'Select an existing counter'));
+            const user = users[0] ?? null;
             options = { date, user_id: user?.id ?? null };
-          }
-          if (action.label === 'Snooze') {
+          } else if (action.label === 'Snooze') {
             const duration = prompt(t('Snooze for (1 day, 1 week, 1 month, or YYYY-MM-DD)'), '1 day');
             if (duration == null) return;
             options = duration;
           }
-          const res = action.run(getDb(), ids, options);
+          const res = action.run(getDb(), ids, options, { defaults: leaf?.defaults ?? {} });
           if (res?.go) {
             if (res.db) commit(res.db);
             location.hash = res.go;
@@ -151,13 +144,18 @@ export function ActionView({ leaf, base, params }) {
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
+      {statementImport && !defaults.journal_id && <label className="import-journal-picker">
+        <span>{t('Bank Journal')}</span>
+        <select aria-label={t('Bank Journal')} value={selectedImportJournalId} onChange={(e) => setSelectedImportJournalId(e.target.value)}>
+          <option value="">{t('Choose a bank or cash journal')}</option>
+          {importJournals.map((journal) => <option key={journal.id} value={journal.id}>{journal.name}</option>)}
+        </select>
+      </label>}
       <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       {pager}
     </>
   ) : pager;
-  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
-
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}

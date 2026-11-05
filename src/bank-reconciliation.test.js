@@ -1,3 +1,4 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
@@ -6,18 +7,21 @@ import { journalItems, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { applyRule } from './models/reconcile.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
 const run = (db, id, label) => models[LINE].form.buttons.find((b) => b.label === label).run(db, read(db, LINE, id)).db;
-const addLine = (db, vals) => create(db, LINE, { date: '2026-10-01', payment_ref: 'test', state: 'to_check', ...vals });
+const addLine = (db, vals) => {
+  const company = vals?.company_id ?? 1;
+  const journal_id = vals?.journal_id ?? search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === company)?.id;
+  return create(db, LINE, { date: '2026-10-01', payment_ref: 'test', state: 'to_check', journal_id, ...vals });
+};
 const openInvoice = (db) => search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted' && m.amount_residual > 0);
 const openBill = (db) => search(db, 'account.move').find((m) => m.move_type === 'in_invoice' && m.state === 'posted' && m.amount_residual > 0);
 
 test('bank reconciliation enforces company for entries, payment entries, journals and accounts locally and on sync', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
   const makeEntry = (db, company) => postEntry(db, { journal: 'BNK1', company, lines: [{ account: '101401', debit: 10 }, { account: '450000', credit: 10 }] });
   const own = makeEntry(branch.db, 1);
   const foreign = makeEntry(own.db, branch.id);
@@ -31,9 +35,10 @@ test('bank reconciliation enforces company for entries, payment entries, journal
   assert.equal(read(done, LINE, line.id).state, 'reconciled');
   assert.throws(() => write(done, LINE, line.id, { company_id: branch.id }), /cannot be changed/);
 
-  const journal = create(line.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id });
+  const liquidity = create(line.db, 'account.account', { name: 'Foreign Bank Liquidity', code: '999803', account_type: 'asset_cash', company_id: branch.id });
+  const journal = create(liquidity.db, 'account.journal', { name: 'Foreign Bank', code: 'FB', type: 'bank', company_id: branch.id, default_account_id: liquidity.id });
   assert.throws(() => addLine(journal.db, { company_id: 1, amount: 10, journal_id: journal.id }), /bank journal belongs to another company/);
-  const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id });
+  const branchLine = addLine(journal.db, { company_id: branch.id, amount: -10, journal_id: journal.id, counterpart_account_id: search(journal.db, 'account.account').find((a) => a.code === '600000' && !a.company_id).id });
   const booked = run(branchLine.db, branchLine.id, 'Book to Account');
   const bookedEntry = read(booked, 'account.move', read(booked, LINE, branchLine.id).move_id);
   assert.equal(bookedEntry.company_id, branch.id);
@@ -47,7 +52,7 @@ test('bank reconciliation enforces company for entries, payment entries, journal
 
 test('bank actions and reconciliation models never match another company invoice or book a foreign account', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
   const makeInvoice = (db, company) => {
     const draft = create(db, 'account.move', { company_id: company, move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-10-01', invoice_line_ids: [{ qty: 1, price_unit: 234.56, tax: 0 }] });
     return { db: postMove(draft.db, draft.id), id: draft.id };
@@ -68,7 +73,7 @@ test('bank actions and reconciliation models never match another company invoice
   assert.equal(applyRule(onlyForeign.db, rule, read(onlyForeign.db, LINE, onlyForeign.id)), onlyForeign.db);
   assert.throws(() => run(onlyForeign.db, onlyForeign.id, 'Reconcile'), /No open invoice/);
   const account = create(onlyForeign.db, 'account.account', { name: 'Branch only', code: '987655', account_type: 'expense', company_id: branch.id });
-  const writeoff = { name: 'Foreign account', rule_type: 'writeoff_button', line_ids: [{ account_code: '987655', amount_type: 'percentage', amount: 100 }] };
+  const writeoff = { name: 'Foreign account', rule_type: 'writeoff_button', line_ids: [{ account_id: account.id, amount_type: 'percentage', amount: 100 }] };
   assert.throws(() => applyRule(account.db, writeoff, read(account.db, LINE, onlyForeign.id)), /belongs to another company/);
 });
 

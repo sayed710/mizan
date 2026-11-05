@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { amounts } from './models/common.js';
+import { defaultTaxRepartitionLines, taxRepartitionLine } from './models/taxes.js';
 import { accountId, isBalanced, postEntry } from './models/ledger.js';
 import { payOrder, priceLines, refundOrder, startSession } from './models/pos.js';
 import { seed } from './seed.js';
@@ -20,7 +21,17 @@ const tenderSum = (orderId, db, code, key) => {
 const withIncludedTax = () => {
   const db0 = startSession(seed(), 0).db;
   const vat = search(db0, 'account.tax').find((t) => t.type_tax_use === 'sale' && Number(t.amount) === 14 && !t.price_include);
-  const incl = create(db0, 'account.tax', { name: 'VAT 14% incl.', type_tax_use: 'sale', amount: 14, amount_type: 'percent', price_include: true, account_id: vat.account_id, tax_exigibility: 'on_invoice', active: true });
+  const vatAcc = taxRepartitionLine(vat)?.account_id ?? accountId(db0, '251000');
+  const incl = create(db0, 'account.tax', {
+    name: 'VAT 14% incl.',
+    type_tax_use: 'sale',
+    amount: 14,
+    amount_type: 'percent',
+    price_include: true,
+    tax_exigibility: 'on_invoice',
+    active: true,
+    ...defaultTaxRepartitionLines(vatAcc, []),
+  });
   return { db: write(incl.db, 'product', 1, { list_price: 114, tax_id: incl.id }), tax: incl.id };
 };
 

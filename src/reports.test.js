@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { accountId, postEntry } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from './models/reports.js';
 
 // Wide enough to hold every posted entry (the seed's opening entry, invoices, payments and bill, plus the
@@ -28,7 +29,7 @@ function books() {
   }).db;
   const { db: withInvoice, id } = create(db, 'account.move', {
     move_type: 'out_invoice', partner_id: 5, invoice_date: addDays(today(), -3),
-    invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, tax: 14 }], // 1000 + 14% VAT = 1140
+    invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }], // 1000 + 14% VAT = 1140
   });
   db = postMove(withInvoice, id);
   db = payMove(db, id, 570, addDays(today(), -1));

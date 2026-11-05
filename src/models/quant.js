@@ -113,7 +113,8 @@ export function requestCount(db, ids, { date = today(), user_id = null } = {}) {
 /** Reuse count valuation (FIFO/average/standard and accounting guards), with the quant's location and lot. */
 export function applyInventory(db, ids, { date = today() } = {}) {
   if (!validDate(date)) throw new Error('Enter a valid count date');
-  if (date <= [lockDateFor(db.settings), closedYearLock(db)].sort().at(-1)) throw new Error('The accounting period is locked');
+  const comp = (db.records['res.company'] ?? []).find((c) => c.id === companyOf(db)) ?? {};
+  if (date <= [lockDateFor(comp), closedYearLock(db, companyOf(db))].sort().at(-1)) throw new Error('The accounting period is locked');
   const rows = selectedRows(db, ids).filter((q) => q.inventory_quantity_set);
   if (rows.some((q) => q.inventory_revision == null || q.inventory_revision !== (q.stock_revision ?? 0))) throw new Error('Stock changed since this count was recorded; count it again');
   const previousCompany = getActiveCompany();

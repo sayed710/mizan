@@ -1,10 +1,11 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { addDays, today } from './models/common.js';
-import { createCompany, ensureMainCompany } from './models/company.js';
+import {ensureMainCompany} from './models/company.js';
 import { accountId } from './models/ledger.js';
 import { payMove } from './models/accounting.js';
 import { rateAt } from './models/currency.js';
@@ -14,14 +15,18 @@ const confirm = (db, id) => models['account.move'].form.buttons.find((b) => b.la
 const currency = (db, name) => search(db, 'res.currency').find((c) => c.name === name)?.id;
 const setup = () => {
   const base = ensureMainCompany(seed());
-  const db = createCompany(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') }).db;
-  return { db, company: search(db, 'res.company').at(-1).id };
+  const made = createCompanyWithDefaultInvoiceJournals(base, { name: 'Euro GmbH', currency_id: currency(base, 'EUR') });
+  const db = write(made.db, 'res.company', made.id, { expense_currency_exchange_account_id: accountId(base, '690100') });
+  return { db, company: made.id };
 };
 const invoice = (db, company, currencyId, price) => {
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, company_id: company, currency_id: currencyId, invoice_date: addDays(today(), -30), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: price, tax: 0 }] });
   return { db: confirm(made.db, made.id), id: made.id };
 };
-const receivable = (db, id) => read(db, 'account.move', id).line_ids.find((l) => l.account_id === accountId(db, '121000'));
+const receivable = (db, id) => {
+  const move = read(db, 'account.move', id);
+  return move.line_ids.find((l) => l.account_id === read(db, 'res.company', move.company_id ?? 1).account_default_receivable_id);
+};
 
 test('a EUR company books a EUR invoice in EUR, not converted to the base currency', () => {
   const { db: base, company } = setup();

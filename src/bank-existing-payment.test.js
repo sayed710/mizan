@@ -1,10 +1,10 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 test('match a registered invoice payment through outstanding receipts without another payment', () => {
@@ -20,7 +20,8 @@ test('match a registered invoice payment through outstanding receipts without an
   const bank = search(db, 'account.account').find((a) => a.code === '101401').id;
   assert.ok(!entry.line_ids.some((l) => l.account_id === bank));
   assert.equal(entry.line_ids.find((l) => l.debit === 100).account_id, outstanding.id);
-  const line = create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'received', amount: 100, payment_id: p.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'received', amount: 100, payment_id: p.id });
   const count = search(line.db, 'account.payment').length;
   db = run(line.db, 'account.bank.statement.line', line.id, 'Match Payment');
   const matched = read(db, 'account.bank.statement.line', line.id);
@@ -30,14 +31,14 @@ test('match a registered invoice payment through outstanding receipts without an
   assert.equal(read(db, 'account.move', draft.id).amount_residual, 0);
   assert.ok(bankEntry.line_ids.some((l) => l.account_id === bank && l.debit === 100));
   assert.ok(bankEntry.line_ids.some((l) => l.account_id === outstanding.id && l.credit === 100));
-  const duplicate = create(db, 'account.bank.statement.line', { date: '2026-01-03', payment_ref: 'duplicate', amount: 100, payment_id: p.id });
+  const duplicate = create(db, 'account.bank.statement.line', { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'duplicate', amount: 100, payment_id: p.id });
   assert.throws(() => run(duplicate.db, 'account.bank.statement.line', duplicate.id, 'Match Payment'), /already matched/);
   assert.throws(() => run(db, 'account.payment', p.id, 'Reverse'), /reconciled bank transaction/);
 });
 
 test('outgoing payment uses company and journal outstanding defaults and unmatches in its own company', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch Bank', account_type: 'asset_cash' });
   const outstandingAccount = create(bank.db, 'account.account', { company_id: branch.id, code: '101403', name: 'Branch Outstanding', account_type: 'asset_current' });
   const journal = create(outstandingAccount.db, 'account.journal', { company_id: branch.id, name: 'Branch Bank', code: 'BRB', type: 'bank', default_account_id: bank.id, outstanding_payments_account_id: outstandingAccount.id });

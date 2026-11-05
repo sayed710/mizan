@@ -1,15 +1,15 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { postMove } from './models/accounting.js';
-import { createCompany } from './models/company.js';
 import { agedBalance, followUps, followUpCompanies } from './models/finance.js';
 
 test('posted installments drive aging and company follow-ups even after payment terms change', () => {
   const base = seed();
-  const company = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const company = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const partner = create(company.db, 'res.partner', { name: 'Installment customer' });
   const term = create(partner.db, 'account.payment.term', { name: '30 now, 70 later', line_ids: [
     { value_type: 'percent', value: 30, nb_days: 0, delay_type: 'days_after' },

@@ -23,9 +23,9 @@ export function cleanValue(field, value, where) {
   if (field.type === 'distribution' && value === '') fail(where);
   if (value === null || value === undefined || value === '') return value ?? null;
   switch (field.type) {
-    case 'char': case 'text':
+    case 'char': case 'text': case 'html':
       if (typeof value !== 'string') fail(where);
-      return value.slice(0, field.type === 'char' ? 1000 : MAX_TEXT);
+      return value.slice(0, field.type === 'char' ? 1000 : field.type === 'html' ? 100000 : MAX_TEXT);
     case 'selection':
       if (typeof value !== 'string' || !field.options.some((o) => o[0] === value)) fail(where);
       return value;
@@ -83,7 +83,7 @@ export function cleanValue(field, value, where) {
     case 'one2many':
       if (!Array.isArray(value) || value.length > MAX_ITEMS || !value.every(isPlain)) fail(where);
       return value.map((line, i) => Object.fromEntries(
-        Object.entries(field.fields).filter(([k]) => k in line).map(([k, sub]) => [k, cleanValue(sub, line[k], `${where}[${i}].${k}`)]),
+        Object.entries(line).filter(([k]) => field.fields[k]).map(([k, v]) => [k, cleanValue(field.fields[k], v, `${where}[${i}].${k}`)]),
       ));
     default:
       fail(where);

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import { DatabaseSync } from 'node:sqlite';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, write } from './orm.js';
 import { apps, leavesOf, models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
@@ -11,12 +13,13 @@ import { applyDiff, assignIds, diffDb } from './sync.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { saveFormRecord } from './views/formSave.js';
 import { openStorage } from '../server/storage.js';
+import { createCompany } from './models/company.js';
 
 const server = (old, next) => applyDiff(old, diffDb(old, next), { isAdmin: true });
 const entry = (db, company, date = '2026-01-01') => postEntry(db, { journal: 'SEC', date, company, lines: [{ account: '600000', debit: 100 }, { account: '211000', credit: 100 }] });
 const setup = () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Second company' }); db = company.db;
+  const company = createCompany(db, { name: 'Second company', ...invoiceJournalDefaults(db) }); db = company.db;
   const journal = create(db, 'account.journal', { name: 'Secure journal', code: 'SEC', restrict_mode_hash_table: true }); db = journal.db;
   return { db, company: company.id, journal: journal.id };
 };
@@ -233,7 +236,7 @@ test('depreciation model action posts allocated expense and analytic lines with 
   let db = seed();
   const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP' }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
-  const model = create(db, 'account.asset.model', { name: 'Annual equipment', method: 'linear', method_number: 2, method_period: '12', analytic_distribution: distribution }); db = model.db;
+  const model = create(db, 'account.asset.model', { ...assetAccounts(db), name: 'Annual equipment', method: 'linear', method_number: 2, method_period: '12', analytic_distribution: distribution }); db = model.db;
   const asset = create(db, 'account.asset', { name: 'Equipment', model_id: model.id, original_value: 1200, acquisition_date: '2020-01-01' }); db = asset.db;
   const buttons = models['account.asset'].form.buttons;
   db = buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.asset', asset.id)).db;
@@ -250,7 +253,7 @@ test('depreciation model action posts allocated expense and analytic lines with 
 test('asset disposal and deferred expense and revenue actions allocate profit and loss lines', () => {
   let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PROJ' }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
-  const asset = create(db, 'account.asset', { name: 'Disposal', original_value: 1200, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', analytic_distribution: distribution }); db = asset.db;
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Disposal', original_value: 1200, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', analytic_distribution: distribution }); db = asset.db;
   const buttons = models['account.asset'].form.buttons;
   db = buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.asset', asset.id)).db;
   const previousPrompt = globalThis.prompt; globalThis.prompt = () => '0';
@@ -260,7 +263,7 @@ test('asset disposal and deferred expense and revenue actions allocate profit an
   assert.deepEqual(loss.analytic_distribution, distribution);
   assert.equal(db.records['account.analytic.line'].find((l) => l.move_id === disposal.id).amount, -1200);
   for (const kind of ['expense', 'revenue']) {
-    const deferral = create(db, 'account.deferral', { name: kind, kind, amount: 300, months: 1, start_date: '2020-01-01', analytic_distribution: distribution }); db = deferral.db;
+    const deferral = create(db, 'account.deferral', { name: kind, kind, amount: 300, months: 1, start_date: '2020-01-01', analytic_distribution: distribution, recognition_account_id: db.records['account.account'].find((a) => a.code === (kind === 'expense' ? '600000' : '400000') && !a.company_id).id }); db = deferral.db;
     const actions = models['account.deferral'].form.buttons;
     db = actions.find((b) => b.label === 'Compute').run(db, read(db, 'account.deferral', deferral.id)).db;
     const next = actions.find((b) => b.label === 'Post Due Entries').run(db, read(db, 'account.deferral', deferral.id)).db;

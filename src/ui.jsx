@@ -5,23 +5,31 @@ import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
+import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money.js';
 import { parseAmount } from './models/common.js';
 import { parseDistributionInput } from './analytic_distribution.js';
+import { fieldReadonly } from './field-metadata.js';
+import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
+
+export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 const dateLocale = lang === 'ar' ? 'ar-EG-u-nu-latn' : 'en-US';
 export const CURRENCIES = ['USD', 'EGP', 'SAR', 'AED', 'KWD', 'QAR', 'MAD', 'EUR', 'GBP'];
 let moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+let activeCurrency = null;
 /** Switch the company currency used by every amount on screen. */
-export function setCurrency(code) {
-  const c = CURRENCIES.includes(code) ? code : 'USD';
-  if (moneyFmt.resolvedOptions().currency !== c) moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: c });
+export function setCurrency(code, currency = null) {
+  activeCurrency = currency;
+  try { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code }); } catch { moneyFmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }); }
 }
 const docFmts = new Map();
 // In Arabic, amounts are wrapped in a left-to-right isolate (LRI ... PDI) so a minus sign stays in front of the
 // number and the run does not reorder the surrounding right-to-left text.
 const ltr = (s) => (lang === 'ar' ? `⁦${s}⁩` : s);
 /** Format an amount in the company currency, or in `code` (a document's own currency) when given. */
-export const money = (n, code = null) => {
+export const money = (n, code = null, currency = null) => {
+  if (currency) return ltr(formatCurrency(n, currency, code || moneyFmt.resolvedOptions().currency));
+  if (!code && activeCurrency) return ltr(formatCurrency(n, activeCurrency));
   const fmt = code && code !== moneyFmt.resolvedOptions().currency
     ? docFmts.get(code) ?? docFmts.set(code, safeFormat(code)).get(code)
     : moneyFmt;
@@ -40,8 +48,12 @@ export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(fi
 export function display(db, field, value, rec = null) {
   if (value == null || value === '') return '';
   switch (field.type) {
-    case 'monetary': return money(value, currencyCode(db, rec));
-    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    case 'monetary': {
+      const context = { ...rec, company_id: rec?.company_id ?? db?.settings?.current_company_id ?? 1 };
+      const currency = field.currency === 'company' ? companyCurrencyRecord(db, context.company_id) : documentCurrency(db, context);
+      return money(value, currency?.name ?? currencyCode(db, rec), currency);
+    }
+    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: field.digits == null ? 2 : 0, maximumFractionDigits: field.digits ?? 2 }));
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
@@ -49,6 +61,7 @@ export function display(db, field, value, rec = null) {
     case 'tags': return value.join(', ');
     case 'distribution': return JSON.stringify(value);
     case 'binary': return value?.name ?? '';
+    case 'html': return String(value ?? '');
     case 'date': return formatDate(value);
     case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
@@ -193,11 +206,11 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
               {cols.map(([k, f]) => (
                 <td key={k} className={isNumeric(f) ? 'num' : ''}>
                   {readonly
-                    ? display(db, f, l[k], record)
-                    : <FieldInput db={db} field={f} value={l[k]} record={l} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                    ? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id })
+                    : <FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
                 </td>
               ))}
-              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record))}</td>}
+              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record), documentCurrency(db, record))}</td>}
               {!readonly && (
                 <td>
                   <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
@@ -208,7 +221,7 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
           {!readonly && (
             <tr>
               <td colSpan={cols.length + 2}>
-                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.() ?? {}])}>{t('Add a line')}</button>
+                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.(record, db) ?? {}])}>{t('Add a line')}</button>
               </td>
             </tr>
           )}
@@ -247,8 +260,10 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 }
 
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
-export const isLabelable = (field, readonly) =>
-  !(readonly || field.readonly || field.compute) && !['one2many', 'priority'].includes(field.type);
+export const isLabelable = (field, readonly, record, db) => {
+  const isReadonly = readonly || fieldReadonly(field, record, db);
+  return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type);
+};
 
 function DistributionInput({ value, onChange, ...props }) {
   const [draft, setDraft] = useState(() => typeof value === 'string' ? value : JSON.stringify(value ?? {}));
@@ -261,8 +276,9 @@ function DistributionInput({ value, onChange, ...props }) {
 }
 
 export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
-  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={readonly} record={record} />;
-  if (field.type === 'many2many' && field.openDirect && (readonly || field.readonly || field.compute)) {
+  const isReadonly = readonly || fieldReadonly(field, record, db);
+  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
+  if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
       const related = read(db, field.relation, valId);
       return <span key={valId}>{i > 0 && ', '}<a href={`#/open/${field.relation}/${valId}`}>{related?.display_name ?? related?.name ?? `#${valId}`}</a></span>;
@@ -270,7 +286,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   }
   if (field.type === 'many2many') {
     const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
-    const locked = readonly || field.readonly || field.compute;
+    const locked = isReadonly || field.compute;
     const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
     const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record)));
     return (
@@ -293,7 +309,10 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       </div>
     );
   }
-  if (readonly || field.readonly || field.compute) return <span className="readonly">{display(db, field, value, record)}</span>;
+  if (isReadonly || field.compute) {
+    if (field.type === 'html') return <SafeHtml html={value} />;
+    return <span className="readonly">{display(db, field, value, record)}</span>;
+  }
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
   const text = (type = 'text', extra = {}) => (
@@ -301,6 +320,13 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
   );
   switch (field.type) {
     case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
+    case 'html': {
+      const htmlLabel = label ?? (field ? (field.custom ? field.label : t(field.label)) : '');
+      if (sanitizeHtml('') === null) {
+        return <textarea {...a11y} aria-label={htmlLabel} value={value ?? ''} placeholder={placeholder ?? t('Report content…')} onChange={(e) => onChange(e.target.value)} />;
+      }
+      return <HtmlEditor id={id} label={htmlLabel} required={field.required} value={value} placeholder={placeholder} onChange={onChange} />;
+    }
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':
@@ -319,7 +345,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
-          {relationCandidates(db, field.relation, value).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
+          {relationCandidates(db, field.relation, value).filter((r) => !field.domain || r.id === Number(value) || field.domain(r, record)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;

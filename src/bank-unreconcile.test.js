@@ -1,10 +1,12 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, write } from './orm.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { seed } from './seed.js';
-import { createCompany } from './models/company.js';
+import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines, taxSnapshot } from './models/taxes.js';
 import { applyDiff, diffDb } from './sync.js';
 
 const LINE = 'account.bank.statement.line';
@@ -19,7 +21,8 @@ test('unmatching an existing payment retains its settlement and allows payment r
   const p = create(inv.db, 'account.payment', { invoice_id: inv.id, partner_id: 3, payment_type: 'inbound', partner_type: 'customer', amount: 100, date: '2026-01-02' });
   let db = button(p.db, 'account.payment', p.id, 'Confirm');
   const before = read(db, 'account.payment', p.id);
-  const line = create(db, LINE, { date: '2026-01-03', payment_ref: 'payment', amount: 100, payment_id: p.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'payment', amount: 100, payment_id: p.id });
   db = button(line.db, LINE, line.id, 'Match Payment');
   assert.throws(() => button(db, 'account.payment', p.id, 'Reverse'), /reconciled bank transaction/);
   const matched = db;
@@ -42,7 +45,8 @@ test('unmatching an existing payment retains its settlement and allows payment r
 test('a standalone matched payment cannot be reversed before unreconciliation', () => {
   const p = create(withOutstanding(seed()), 'account.payment', { partner_id: 1, payment_type: 'inbound', partner_type: 'customer', amount: 123, date: '2026-01-02' });
   let db = button(p.db, 'account.payment', p.id, 'Confirm');
-  const line = create(db, LINE, { date: '2026-01-03', payment_ref: 'standalone', amount: 123, payment_id: p.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'standalone', amount: 123, payment_id: p.id });
   db = button(line.db, LINE, line.id, 'Match Payment');
   assert.throws(() => button(db, 'account.payment', p.id, 'Reverse'), /unreconcile/i);
   db = button(db, LINE, line.id, 'Unreconcile');
@@ -54,7 +58,8 @@ test('a standalone matched payment cannot be reversed before unreconciliation', 
 test('unreconcile restores each invoice from a partly matched oversized statement', () => {
   const first = invoice(seed(), 1, 100);
   const second = invoice(first.db, 1, 40);
-  const line = create(second.db, LINE, { date: '2026-01-03', payment_ref: 'split', amount: 160, move_id: first.id });
+  const bankJournal = search(second.db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(second.db, LINE, { journal_id: bankJournal.id, date: '2026-01-03', payment_ref: 'split', amount: 160, move_id: first.id });
   let db = button(line.db, LINE, line.id, 'Match');
   db = write(db, LINE, line.id, { move_id: second.id });
   db = button(db, LINE, line.id, 'Match');
@@ -71,9 +76,13 @@ test('unreconcile restores each invoice from a partly matched oversized statemen
 });
 
 test('unreconciliation reverses linked cash-basis tax releases', () => {
-  const inv = create(seed(), 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 14, tax_cash_basis: true }] });
+  const base = seed();
+  // The cash-basis tax names its own transition and final tax accounts explicitly.
+  const tax = create(base, 'account.tax', { name: 'Cash VAT 14%', company_id: 1, type_tax_use: 'sale', amount: 14, tax_exigibility: 'on_payment', cash_basis_transition_account_id: accountId(base, '251100'), ...defaultTaxRepartitionLines(accountId(base, '251000')) });
+  const inv = create(tax.db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, ...taxSnapshot(read(tax.db, 'account.tax', tax.id)) }] });
   let db = postMove(inv.db, inv.id);
-  const line = create(db, LINE, { date: '2026-01-02', payment_ref: 'cash basis', amount: 114, move_id: inv.id });
+  const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const line = create(db, LINE, { journal_id: bankJournal.id, date: '2026-01-02', payment_ref: 'cash basis', amount: 114, move_id: inv.id });
   db = button(line.db, LINE, line.id, 'Match');
   const row = read(db, 'account.move', inv.id).payments.at(-1);
   assert.ok(row.cash_basis_move_id);
@@ -87,10 +96,12 @@ test('unreconciliation reverses linked cash-basis tax releases', () => {
 
 test('unreconcile restores a two-company invoice including an explicit write-off', () => {
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const inv = invoice(branch.db, branch.id);
   const account = create(inv.db, 'account.account', { company_id: branch.id, code: '699999', name: 'Adjustment', account_type: 'expense' });
-  const line = create(account.db, LINE, { company_id: branch.id, date: '2026-01-03', payment_ref: 'settlement', amount: 90, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Difference', writeoff_amount: 10 });
+  const bankAcc = create(account.db, 'account.account', { name: 'Branch Bank Liquidity', code: '101499', account_type: 'asset_cash', company_id: branch.id });
+  const bankBranch = create(bankAcc.db, 'account.journal', { name: 'Branch Bank', code: 'BRBNK', type: 'bank', company_id: branch.id, default_account_id: bankAcc.id, suspense_account_id: search(account.db, 'account.account').find((a) => a.code === '101404' && !a.company_id).id });
+  const line = create(bankBranch.db, LINE, { company_id: branch.id, journal_id: bankBranch.id, date: '2026-01-03', payment_ref: 'settlement', amount: 90, move_id: inv.id, writeoff_account_id: account.id, writeoff_label: 'Difference', writeoff_amount: 10 });
   let db = button(line.db, LINE, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   const matched = db;

@@ -79,9 +79,11 @@ test('the line onchange applies the fiscal position to the product tax and a pic
 
 test('the tax return lists base and tax per tax, refunds negative', () => {
   const base = seed();
+  const vat14 = taxNamed(base, 'VAT 14%');
+  const stampDuty = taxNamed(base, 'Stamp Duty');
   const { db } = invoice(base, [line(base, 'VAT 14%', { price_unit: 200 }), line(base, 'Stamp Duty', { qty: 2, price_unit: 10 })], { invoice_date: '2031-01-10' });
   const refund = create(db, 'account.move', { move_type: 'out_refund', partner_id: 1, invoice_date: '2031-01-12', invoice_line_ids: [line(db, 'VAT 14%', { price_unit: 50 })] });
   const rows = taxesByTax(postMove(refund.db, refund.id), { from: '2031-01-01', to: '2031-01-31' });
-  assert.deepEqual(rows.find((r) => r.name === 'VAT 14%'), { side: 'sale', name: 'VAT 14%', base: 150, tax: 21 });
-  assert.deepEqual(rows.find((r) => r.name === 'Stamp Duty'), { side: 'sale', name: 'Stamp Duty', base: 20, tax: 10 });
+  assert.deepEqual(rows.find((r) => r.name === 'VAT 14%'), { side: 'sale', tax_id: vat14.id, name: 'VAT 14%', base: 150, tax: 21 });
+  assert.deepEqual(rows.find((r) => r.name === 'Stamp Duty'), { side: 'sale', tax_id: stampDuty.id, name: 'Stamp Duty', base: 20, tax: 10 });
 });

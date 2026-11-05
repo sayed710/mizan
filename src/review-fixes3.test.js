@@ -12,8 +12,10 @@ import { applyRule } from './models/reconcile.js';
 import { taxSnapshot } from './models/taxes.js';
 import { invoiceQrPayload } from './models/qr.js';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 const cashTax = (db) => search(db, 'account.tax').find((t) => t.name === 'VAT 14% (Cash Basis)');
+const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
 const balanceOf = (db, code) => journalItems(db).filter((l) => l.account_id === accountId(db, code)).reduce((s, l) => s + l.credit - l.debit, 0);
 const post = (db, vals) => {
   const { db: next, id } = create(db, 'account.move', { partner_id: 1, invoice_date: '2026-03-01', invoice_date_due: '2026-03-31', ...vals });
@@ -51,7 +53,8 @@ test('a manual payment releases cash-basis tax of the invoices it settles', () =
 });
 
 test('a locked depreciation line does not stop the other scheduled jobs', () => {
-  const { db, id } = create(seed(), 'account.asset', { name: 'Old Van', original_value: 1000, acquisition_date: '2020-01-01', method_number: 2, method_period: '12' });
+  const base = seed();
+  const { db, id } = create(base, 'account.asset', { ...assetAccounts(base), name: 'Old Van', original_value: 1000, acquisition_date: '2020-01-01', method_number: 2, method_period: '12' });
   const running = confirmAsset(db, read(db, 'account.asset', id));
   const locked = { ...running, settings: { ...running.settings, lock_date: '2030-12-31' } };
   assert.doesNotThrow(() => runScheduledJobs(locked, '2031-01-01'));
@@ -60,18 +63,19 @@ test('a locked depreciation line does not stop the other scheduled jobs', () => 
 test('invoice matching never pays another partner or a different amount', () => {
   const inv = post(seed(), { move_type: 'out_invoice', partner_id: 1, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
   const rule = { name: 'Match', rule_type: 'invoice_matching', line_ids: [] };
-  const other = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 2, state: 'to_check' });
+  const other = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournalId(inv.db), date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 2, state: 'to_check' });
   assert.equal(applyRule(other.db, rule, read(other.db, 'account.bank.statement.line', other.id)), other.db);
-  const bigger = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 1000, partner_id: 1, state: 'to_check' });
+  const bigger = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournalId(inv.db), date: '2026-03-02', payment_ref: 'x', amount: 1000, partner_id: 1, state: 'to_check' });
   assert.equal(applyRule(bigger.db, rule, read(bigger.db, 'account.bank.statement.line', bigger.id)), bigger.db);
-  const exact = create(inv.db, 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 1, state: 'to_check' });
+  const exact = create(inv.db, 'account.bank.statement.line', { journal_id: bankJournalId(inv.db), date: '2026-03-02', payment_ref: 'x', amount: 100, partner_id: 1, state: 'to_check' });
   const done = applyRule(exact.db, rule, read(exact.db, 'account.bank.statement.line', exact.id));
   assert.equal(read(done, 'account.move', inv.id).payment_state, 'paid');
 });
 
 test('a write-off to an unknown account is refused', () => {
-  const { db, id } = create(seed(), 'account.bank.statement.line', { date: '2026-03-02', payment_ref: 'fee', amount: -5, state: 'to_check' });
-  const rule = { name: 'Typo', rule_type: 'writeoff_button', line_ids: [{ account_code: '690O00', amount_type: 'percentage', amount: 100 }] };
+  const base = seed();
+  const { db, id } = create(base, 'account.bank.statement.line', { journal_id: bankJournalId(base), date: '2026-03-02', payment_ref: 'fee', amount: -5, state: 'to_check' });
+  const rule = { name: 'Typo', rule_type: 'writeoff_button', line_ids: [{ account_id: 999999, amount_type: 'percentage', amount: 100 }] };
   assert.throws(() => applyRule(db, rule, read(db, 'account.bank.statement.line', id)), /Unknown account/);
 });
 

@@ -4,15 +4,18 @@ import { addShipping, applyLots, checkTrackedLine, shippingPrice } from './logis
 import { procure, routeAction } from './routes.js';
 import { createOrderTransfers } from './warehouse.js';
 import { moveQuantStock } from './quant.js';
-import { checkCreditLimit } from './finance.js';
+import { creditWarning } from './finance.js';
 import { reservePicking, returnableQty, returnPicking, validatePicking } from './picking.js';
 import { canValidatePicking, createChecks } from './qualityplus.js';
 import { applicablePrograms, applyCode, computeRewardLines, consumeOrderCodes, restoreOrderCodes } from './loyalty.js';
 import { dueDate } from './terms.js';
 import { convert, convertPrice, uomForLegacy } from './uom.js';
 import { rateAt } from './currency.js';
-import { fiscalPositionFor } from './taxes.js';
+import { fiscalPositionFor, isSectionOrNote, productTax, replaceTaxSnapshot, taxSnapshot } from './taxes.js';
 import { addDays, amounts, amountFields, monthFilters, pad, parseAmount, productLines, today } from './common.js';
+import { resolveDocumentJournal } from './ledger.js';
+import { productProperty } from './productconfig-helpers.js';
+import { documentCurrency, roundCurrency } from '../money.js';
 
 const stableValue = (value) => JSON.stringify(value ?? null, (key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 
@@ -136,9 +139,9 @@ export function cancelOrder(db, model, order) {
     throw new Error(model === 'sale.order' ? 'Return the delivered goods before cancelling the order' : 'Return the received goods before cancelling the order');
   }
   const type = model === 'sale.order' ? 'out_invoice' : 'in_invoice';
-  const moves = search(db, 'account.move').filter((m) => m.move_type === type && m.partner_id === order.partner_id
+  const moves = search(db, 'account.move').filter((m) => m.move_type === type
     && (m.company_id ?? 1) === (order.company_id ?? 1) && m.state !== 'cancel'
-    && (m[field] === order.id || (!m[field] && (m.origin || m.invoice_origin) === order.name)));
+    && (m[field] === order.id || (!m[field] && m.partner_id === order.partner_id && (m.origin || m.invoice_origin) === order.name)));
   const refunds = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === (type === 'out_invoice' ? 'out_refund' : 'in_refund'));
   const totalOf = (m) => amounts(m.invoice_line_ids ?? []).total;
   const uncredited = moves.filter((m) => m.state === 'posted').some((m) => {
@@ -160,14 +163,15 @@ export function syncInvoicedQty(db, move) {
   if (!order) return db;
   const moves = search(db, 'account.move').filter((m) => m[field] === order.id && m.state !== 'cancel');
   const lines = order.order_line.map((l) => ({ ...l, qty_invoiced: 0 }));
-  const byKey = new Map(lines.map((l, i) => [l.sale_line_key, i]).filter(([key]) => key));
+  const lineKey = model === 'sale.order' ? 'sale_line_key' : 'purchase_line_key';
+  const byKey = new Map(lines.map((l, i) => [l[lineKey], i]).filter(([key]) => key));
   const unlinked = [];
   for (const m of moves) for (const l of m.invoice_line_ids ?? []) {
     if (l.down_payment_key) continue;
     const qty = (['out_refund', 'in_refund'].includes(m.move_type) ? -1 : 1) * (Number(l.qty) || 0);
-    const ix = model === 'sale.order' && l.sale_line_key ? byKey.get(l.sale_line_key) : undefined;
+    const ix = l[lineKey] ? byKey.get(l[lineKey]) : undefined;
     if (ix !== undefined && lines[ix].product_id === l.product_id) lines[ix].qty_invoiced += fromStock(db, lines[ix], toStock(db, l, qty));
-    else if (!l.sale_line_key) unlinked.push({ ...l, qty });
+    else if (!l[lineKey]) unlinked.push({ ...l, qty });
   }
   const reset = write(db, model, order.id, { order_line: lines });
   return addLineQty(reset, model, read(reset, model, order.id), 'qty_invoiced', unlinked);
@@ -211,9 +215,8 @@ function downPaymentLines(db, order, method, input) {
   const ratio = method === 'percentage' ? amount / 100 : amount / total;
   const company = read(db, 'res.company', order.company_id ?? 1);
   const configured = company?.down_payment_account_id;
-  const accountRecord = configured ? read(db, 'account.account', configured) : (db.records['account.account'] ?? [])
-    .find((a) => a.code === '212000' && a.active !== false && (!a.company_id || a.company_id === (order.company_id ?? 1)));
-  if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error('Set up the deferred revenue account before creating a down payment');
+  const accountRecord = configured ? read(db, 'account.account', configured) : null;
+  if (!accountRecord || accountRecord.active === false || (accountRecord.company_id && accountRecord.company_id !== (order.company_id ?? 1))) throw new Error(`Configure the down payment account on company ${company?.name ?? order.company_id ?? 1}`);
   const account = accountRecord.id;
   const lines = order.order_line.filter((l) => Number(l.qty) > 0).map(({ qty_invoiced, qty_delivered, sale_line_key, purchase_method, product_id, uom_id, ...line }) => ({
     ...line, name: 'Down Payment', account_id: account, qty: Number(line.qty) * ratio, down_payment_key: crypto.randomUUID(),
@@ -248,8 +251,25 @@ export function refreshAdvanceDeductions(db, order, lines, exceptId = null) {
 
 const invoiceableQty = (db, line) => (read(db, 'product', line.product_id)?.invoice_policy === 'delivery' ? Number(line.qty_delivered) || 0 : Number(line.qty) || 0);
 
+/** The order amount not yet invoiced (draft or posted), as Odoo's amount to invoice. */
+function uninvoicedAmount(db, order) {
+  const orderCurr = documentCurrency(db, order);
+  const companyId = order.company_id ?? 1;
+  const billed = order.id == null ? 0 : search(db, 'account.move')
+    .filter((m) => m.sale_id === order.id && m.state !== 'cancel' && ['out_invoice', 'out_refund'].includes(m.move_type))
+    .reduce((sum, m) => {
+      const date = m.invoice_date ?? m.date ?? order.date_order ?? today();
+      const total = amounts(m.invoice_line_ids ?? [], documentCurrency(db, m)).total;
+      const inOrderCurr = total * rateAt(db, order.currency_id, date, companyId) / rateAt(db, m.currency_id, date, companyId);
+      return sum + (m.move_type === 'out_refund' ? -1 : 1) * inOrderCurr;
+    }, 0);
+  return Math.max(0, roundCurrency(amounts(order.order_line, orderCurr).total - billed, orderCurr));
+}
+
 /** Invoice/bill what is not invoiced yet (ordered quantities) and return where to go. */
 function invoiceFrom(db, order, moveType, originField, options = {}) {
+  const companyId = order.company_id ?? 1;
+  const journal = resolveDocumentJournal(db, { move_type: moveType, company_id: companyId }, { required: true }).id;
   const method = options.method ?? 'regular';
   if (!['regular', 'percentage', 'fixed'].includes(method)) throw new Error('Choose a valid invoicing method');
   if (moveType === 'out_invoice' && order.order_line.some((l) => !l.sale_line_key)) {
@@ -269,6 +289,8 @@ function invoiceFrom(db, order, moveType, originField, options = {}) {
   if (!lines.length) throw new Error('Nothing left to invoice: everything ordered or delivered is already invoiced');
   const term = read(db, 'account.payment.term', order.payment_term_id);
   const { db: next, id } = create(db, 'account.move', {
+    company_id: companyId,
+    journal_id: journal ?? null,
     move_type: moveType,
     partner_id: order.partner_invoice_id ?? order.partner_id,
     invoice_date: today(),
@@ -485,7 +507,9 @@ export const salesModels = {
                   }
                   const unit_cost = qty ? source.reduce((s, l) => s + Math.abs(l.value), 0) / qty
                     : po ? (value + left * (Number(read(d, 'product', m.product_id)?.cost) || 0)) / Number(m.qty) : undefined;
-                  return { ...m, unit_cost, valuation_options: original ? { counterpart: sign > 0 ? '500000' : '110200' } : {} };
+                  const prod = read(d, 'product', m.product_id);
+                  const hasOutput = Boolean(prod && productProperty(d, prod, 'property_stock_account_output_categ_id', p.company_id ?? 1));
+                  return { ...m, unit_cost, valuation_options: original ? { counterpart_role: sign > 0 ? (hasOutput ? 'output' : 'cogs') : 'input' } : {} };
                 });
                 return moveValued(applyLots(d, p, sign || 0), lines, sign, { reference: p.name, pickingId: p.id,
                   stockLine: { location_id: sign > 0 ? p.location_dest_id : p.location_id, company_id: p.company_id } });
@@ -637,9 +661,16 @@ export const salesModels = {
       ...amountFields('order_line'),
     },
     onchange: (r, key, db) => {
-      if (key !== 'partner_id' || !r.partner_id) return {};
-      const p = (db.records['res.partner'] ?? []).find((x) => x.id === r.partner_id);
-      return p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id, fiscal_position_id: fiscalPositionFor(db, p.id) } : {};
+      const p = ['partner_id', 'company_id'].includes(key) && r.partner_id ? read(db, 'res.partner', r.partner_id) : null;
+      if (key !== 'fiscal_position_id' && key !== 'company_id' && !p) return {};
+      const fiscal_position_id = key === 'company_id' || p ? fiscalPositionFor(db, r.partner_id, r.company_id ?? 1) : r.fiscal_position_id;
+      const order_line = (r.order_line ?? []).map((line) => {
+        if (!line.product_id || isSectionOrNote(line)) return line;
+        const product = read(db, 'product', line.product_id);
+        if (!product) throw new Error('Cannot update taxes: a line product no longer exists');
+        return { ...line, tax_source_id: null, ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id, r.company_id ?? 1) ?? taxSnapshot(null)), tax_ids: [] };
+      });
+      return { ...(key === 'partner_id' && p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {}), ...(p || key === 'company_id' ? { fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },
     defaults: (id) => ({ name: 'S' + pad(id), date_order: today(), validity_date: addDays(today(), 30), user: 'Admin', state: 'draft', order_line: [] }),
     filters: [
@@ -701,7 +732,6 @@ export const salesModels = {
           when: (r) => ['draft', 'sent'].includes(r.state),
           // Routes first (MTO buy/make, dropship), then a delivery for what ships from our stock.
           run: (db, r) => {
-            checkCreditLimit(db, r.partner_id, amounts(r.order_line).total);
             const lines = (r.order_line ?? []).map((l) => {
               const product = read(db, 'product', l.product_id);
               return product?.type === 'goods' ? { ...l, procurement_route: routeAction(db, product, l) } : l;
@@ -733,6 +763,8 @@ export const salesModels = {
         { label: 'Invoices', model: 'account.move', field: 'sale_id', target: 'accounting/invoices' },
       ],
       title: 'name',
+      // Evaluated for the record on screen only: it scans the partner's receivables.
+      warning: (r, db) => creditWarning(db, r.partner_invoice_id ?? r.partner_id, uninvoicedAmount(db, r), r),
       groups: [['partner_id', 'partner_invoice_id', 'partner_shipping_id', 'pricelist_id', 'carrier_id', 'incoterm_id', 'incoterm_location'], ['date_order', 'validity_date', 'payment_term_id', 'commitment_date', 'user']],
       tabs: [{ label: 'Order Lines', fields: ['order_line'] }, { label: 'Notes', fields: ['note'] }],
       footer: ['amount_untaxed', 'amount_tax', 'amount_total'],

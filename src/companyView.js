@@ -1,5 +1,6 @@
 import { SHARED_MODELS, read, search } from './orm.js';
 import { companyFilter, currentCompany, restrictRecords, scopeAuditChanges, visibleTo } from './models/company.js';
+import { resolveDocumentJournal } from './models/ledger.js';
 
 /** Search UI records in the allowed companies, keeping shared records. */
 export const viewRecords = (db, model, options) => companyFilter(db, search(db, model, options), model);
@@ -7,7 +8,16 @@ export const viewRecords = (db, model, options) => companyFilter(db, search(db, 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>
   viewRecords(db, leaf.model, { includeArchived: archived })
-    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r)) && (!rel || r[rel.field] === rel.id));
+    .filter((r) => {
+      if (archived && r.active !== false) return false;
+      if (leaf.domain && !leaf.domain(r, db)) return false;
+      if (!rel) return true;
+      if (rel.field === 'journal_id' && leaf.model === 'account.move') {
+        const jId = r.journal_id ?? (r.state === 'draft' && r.move_type !== 'entry' ? resolveDocumentJournal(db, r)?.id : null);
+        return jId === rel.id;
+      }
+      return r[rel.field] === rel.id;
+    });
 
 /** Allowed many2one choices plus the current value, even if foreign or archived. */
 export function relationCandidates(db, model, value) {
@@ -19,7 +29,12 @@ export function relationCandidates(db, model, value) {
 /** Read-only dashboard input for calculations that search several models. */
 export function companyViewDb(db) {
   const allowed = new Set(db.settings?.allowed_company_ids ?? [currentCompany(db)]);
-  const view = { ...db, records: restrictRecords(db, allowed).records };
+  const view = { ...db, records: { ...restrictRecords(db, allowed).records } };
+  // A visible invoice keeps the payment term it was issued with, even one stamped with another company (Qodo 27).
+  const terms = new Set((view.records['account.move'] ?? []).map((m) => m.invoice_payment_term_id).filter(Boolean));
+  const kept = new Set((view.records['account.payment.term'] ?? []).map((t) => t.id));
+  const referenced = (db.records['account.payment.term'] ?? []).filter((t) => terms.has(t.id) && !kept.has(t.id));
+  if (referenced.length) view.records['account.payment.term'] = [...(view.records['account.payment.term'] ?? []), ...referenced].sort((a, b) => a.id - b.id);
   // Legacy product quantities have no company field and belong to company 1; valuation uses them as a fallback.
   if (!allowed.has(1) && view.records.product) view.records.product = view.records.product.map((product) => ({ ...product, qty_available: 0 }));
   return { ...view, messages: scopeAuditRows(db, db.messages ?? []) };

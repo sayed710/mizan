@@ -24,7 +24,8 @@ function instalments(opening, months, rate, method) {
   let outstanding = opening;
   return Array.from({ length: months }, (_, i) => {
     const interest = Math.round(outstanding * rate);
-    const principal = i === months - 1 ? outstanding : method === 'linear' ? Math.round(opening / months) : annuity - interest;
+    const scheduled = method === 'linear' ? Math.floor(opening / months) + (i < opening % months ? 1 : 0) : annuity - interest;
+    const principal = i === months - 1 ? outstanding : Math.min(outstanding, Math.max(0, scheduled));
     outstanding -= principal;
     return { principal, interest, payment: principal + interest, outstanding };
   });
@@ -32,6 +33,20 @@ function instalments(opening, months, rate, method) {
 
 const rateOf = (loan) => (Number(loan.interest_rate) || 0) / 12 / 100;
 const board = (loan) => amortization(loan).map((l) => ({ ...l, posted: false, move_id: null }));
+
+function postingConfig(db, loan) {
+  const company = loan.company_id ?? 1;
+  for (const [field, model, label] of [
+    ['journal_id', 'account.journal', 'journal'],
+    ['bank_account_id', 'account.account', 'bank account'],
+    ['principal_account_id', 'account.account', 'principal liability account'],
+    ['interest_account_id', 'account.account', 'interest expense account'],
+  ]) {
+    const record = loan[field] && read(db, model, loan[field]);
+    if (!record) throw new Error(`Configure the loan ${label}`);
+    if (record.company_id && record.company_id !== company) throw new Error(`Loan ${label} belongs to another company`);
+  }
+}
 
 /** Monthly schedule: one line per month end, starting the month after the start date. */
 export function amortization(loan) {
@@ -54,11 +69,12 @@ function computeBoard(db, loan) {
 /** Check the terms, book the money received from the lender and start the schedule. */
 export function confirmLoan(db, loan) {
   check(loan);
+  postingConfig(db, loan);
   const { db: booked, id: receiptId } = postEntry(db, {
-    journal: 'BNK1', company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
+    journal: loan.journal_id, company: loan.company_id, date: loan.start_date, ref: `Loan received ${loan.name}`,
     lines: [
-      { account: '101401', debit: loan.amount, partner_id: loan.lender_id ?? undefined },
-      { account: '260000', credit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.bank_account_id, debit: loan.amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.principal_account_id, credit: loan.amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   return write(booked, 'account.loan', loan.id, { receipt_move_id: receiptId, line_ids: board(loan), state: 'running' });
@@ -66,14 +82,15 @@ export function confirmLoan(db, loan) {
 
 /** Post every unposted line dated on or before `upTo`; the loan closes once all lines are paid. */
 export function postDueLines(db, loan, upTo = today()) {
+  postingConfig(db, loan);
   const { db: next, line_ids } = (loan.line_ids ?? []).reduce((acc, l) => {
     if (l.posted || l.date > upTo) return { ...acc, line_ids: [...acc.line_ids, l] };
     const { db: booked, id } = postEntry(acc.db, {
-      journal: 'BNK1', company: loan.company_id, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
+      journal: loan.journal_id, company: loan.company_id, date: l.date, ref: `${loan.name} ${l.date.slice(0, 7)}`,
       lines: [
-        { account: '260000', debit: l.principal, partner_id: loan.lender_id ?? undefined },
-        { account: '690400', debit: l.interest, partner_id: loan.lender_id ?? undefined },
-        { account: '101401', credit: l.payment, partner_id: loan.lender_id ?? undefined },
+        { account: loan.principal_account_id, debit: l.principal, partner_id: loan.lender_id ?? undefined },
+        { account: loan.interest_account_id, debit: l.interest, partner_id: loan.lender_id ?? undefined },
+        { account: loan.bank_account_id, credit: l.payment, partner_id: loan.lender_id ?? undefined },
       ],
     });
     return { db: booked, line_ids: [...acc.line_ids, { ...l, posted: true, move_id: id }] };
@@ -88,11 +105,12 @@ export function earlyRepayment(db, loan, { date, amount }) {
   const pay = cents(amount);
   if (!(pay > 0)) throw new Error('The repayment amount must be positive');
   if (pay > outstanding) throw new Error('The repayment cannot exceed the outstanding balance');
+  postingConfig(db, loan);
   const { db: booked, id: repaymentId } = postEntry(db, {
-    journal: 'BNK1', company: loan.company_id, date, ref: `Early repayment ${loan.name}`,
+    journal: loan.journal_id, company: loan.company_id, date, ref: `Early repayment ${loan.name}`,
     lines: [
-      { account: '260000', debit: amount, partner_id: loan.lender_id ?? undefined },
-      { account: '101401', credit: amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.principal_account_id, debit: amount, partner_id: loan.lender_id ?? undefined },
+      { account: loan.bank_account_id, credit: amount, partner_id: loan.lender_id ?? undefined },
     ],
   });
   const posted = (loan.line_ids ?? []).filter((l) => l.posted);
@@ -118,6 +136,10 @@ export const loanModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       lender_id: { type: 'many2one', relation: 'res.partner', label: 'Lender' },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal', readonly: (r) => r?.state && r.state !== 'draft' },
+      bank_account_id: { type: 'many2one', relation: 'account.account', label: 'Bank Account', readonly: (r) => r?.state && r.state !== 'draft' },
+      principal_account_id: { type: 'many2one', relation: 'account.account', label: 'Principal Liability Account', readonly: (r) => r?.state && r.state !== 'draft' },
+      interest_account_id: { type: 'many2one', relation: 'account.account', label: 'Interest Expense Account', readonly: (r) => r?.state && r.state !== 'draft' },
       amount: { type: 'monetary', label: 'Amount Borrowed' },
       start_date: { type: 'date', label: 'Start Date' },
       duration: { type: 'integer', label: 'Duration (months)' },
@@ -152,6 +174,16 @@ export const loanModels = {
       },
     },
     defaults: () => ({ start_date: today(), duration: 12, interest_rate: 5, method: 'annuity', state: 'draft', line_ids: [], company_id: 1 }),
+    guard: (db, before, r) => {
+      if (before?.receipt_move_id) {
+        for (const f of ['journal_id', 'bank_account_id', 'principal_account_id', 'interest_account_id']) {
+          if (before[f] && r[f] !== before[f]) {
+            return 'Cannot change loan accounts or journal once money is booked';
+          }
+        }
+      }
+      return null;
+    },
     groupBys: ['state'],
     filters: [[{ id: 'running', label: 'Running', fn: (r) => r.state === 'running' }, { id: 'closed', label: 'Closed', fn: (r) => r.state === 'closed' }]],
     kanban: { title: 'name', lines: ['lender_id', 'amount', 'duration'], badge: 'state' },
@@ -173,7 +205,7 @@ export const loanModels = {
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['lender_id', 'amount'], ['start_date', 'duration', 'interest_rate', 'method'], ['outstanding_balance', 'total_interest']],
+      groups: [['lender_id', 'amount'], ['journal_id', 'bank_account_id', 'principal_account_id', 'interest_account_id', 'company_id'], ['start_date', 'duration', 'interest_rate', 'method'], ['outstanding_balance', 'total_interest']],
       tabs: [{ label: 'Amortization Schedule', fields: ['line_ids'] }],
       chatter: true,
     },

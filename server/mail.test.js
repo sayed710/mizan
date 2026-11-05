@@ -16,6 +16,8 @@ import { sendDocument, sendMailing } from './mail.js';
 function fakeSmtp() {
   const seen = [];
   const server = net.createServer((s) => {
+    // The server under test may be stopped mid-conversation (e.g. while it sends startup follow-ups).
+    s.on('error', () => {});
     s.write('220 fake\r\n');
     let inData = false;
     let buf = '';

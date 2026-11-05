@@ -21,14 +21,24 @@ export function epcPayload({ name, iban, bic = '', amount, reference }) {
 }
 
 /** QR payload for a posted customer invoice per the company setting, or null when off / not applicable. */
-export function invoiceQrPayload(settings, company, move) {
+export function invoiceQrPayload(settings, company, move, invoiceCurrency = move.currency_id ? null : company.currency) {
   if (move.move_type !== 'out_invoice' || move.state !== 'posted' || !settings?.invoice_qr) return null;
   if (settings.invoice_qr === 'zatca') {
     return zatcaPayload({ seller: company.name, vat: settings.company_vat ?? '', timestamp: `${move.invoice_date}T00:00:00Z`, total: move.amount_total, tax: move.amount_tax });
   }
   // EPC is euro-only and needs at least 0.01 to pay.
-  if (company.currency !== 'EUR' || move.currency_id || !(move.amount_residual >= 0.01)) return null;
+  if (invoiceCurrency !== 'EUR' || !(move.amount_residual >= 0.01)) return null;
   return epcPayload({ name: company.name, iban: settings.company_iban, amount: move.amount_residual, reference: move.payment_reference || move.name });
+}
+
+/** Resolve QR mode and issuer identity from the document company. */
+export function invoiceQrSettingsForCompany(db, company) {
+  const comp = company ?? {};
+  return {
+    invoice_qr: comp.invoice_qr ?? null,
+    company_vat: comp.vat ?? '',
+    company_iban: comp.company_iban ?? '',
+  };
 }
 
 /** QR modules as rows of booleans (error correction M, smallest version that fits). */

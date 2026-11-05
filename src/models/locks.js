@@ -5,15 +5,16 @@
 /** Fields a user can type into on the form: its title, groups and tabs, minus read-only, computed and hidden ones. */
 export function editableFields(model, record = {}, db) {
   const list = (v) => (Array.isArray(v) ? v : []);
+  const groups = typeof model.form?.groups === 'function' ? model.form.groups(record, db) : model.form?.groups;
   const tabs = typeof model.form?.tabs === 'function' ? model.form.tabs(record, db) : model.form?.tabs;
-  const listed = [model.form?.title, ...list(model.form?.groups).flat(), ...list(tabs).flatMap((t) => list(t?.fields))].filter((f) => typeof f === 'string');
+  const listed = [model.form?.title, ...list(groups).flat(), ...list(tabs).flatMap((t) => list(t?.fields))].filter((f) => typeof f === 'string');
   return [...new Set(listed)].filter((name) => {
     const f = model.fields?.[name];
-    return f && typed(f) && !['state', 'stage', 'stage_id'].includes(name) && name !== model.form.statusbar;
+    return f && typed(f, record, db) && !['state', 'stage', 'stage_id'].includes(name) && name !== model.form.statusbar;
   });
 }
 
-const typed = (f) => !f.readonly && !f.compute && !f.hidden;
+const typed = (f, record, db) => !(typeof f.readonly === 'function' ? f.readonly(record, db) : f.readonly) && !f.compute && !f.hidden;
 
 /** A field's user-entered content: for lines, only their editable columns (buttons maintain the others, e.g. qty_invoiced). */
 function content(field, value) {

@@ -11,7 +11,7 @@ import { accountId, journalId, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { runPosting } from '../server/posting.js';
 import { deliver, receive } from './models/valuation.js';
-import { setCompanies } from './models/company.js';
+import { createCompany, setCompanies } from './models/company.js';
 import { remapDiff } from './sync.js';
 
 test('migration creates company payment methods and preserves legacy payment values', () => {
@@ -53,7 +53,7 @@ test('string tenders post identically to their configured records for sales, rou
     receivable_account_id: accountId(db, '121000'), outstanding_account_id: accountId(db, '101501'),
   });
   const later = create(custom.db, 'pos.payment.method', { name: 'Customer Account', type: 'pay_later', company_id: 1, receivable_account_id: accountId(db, '121000') });
-  const rounding = create(later.db, 'account.cash.rounding', { name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
+  const rounding = create(later.db, 'account.cash.rounding', { profit_account_id: accountId(later.db, '450000'), loss_account_id: accountId(later.db, '690000'), name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const preset = create(rounding.db, 'pos.preset', { name: 'Return', is_return: true, identification: 'none', service_at: 'counter' });
   db = write(preset.db, 'pos.config', cfg.id, { payment_method_ids: [custom.id, later.id], available_preset_ids: [preset.id] });
 
@@ -410,7 +410,7 @@ test('product form exposes POS categories and category writes reject cycles', ()
 test('invoice form exposes rounding and draft totals reflect it', () => {
   let db = seed();
   assert.ok(models['account.move'].form.groups.flat().includes('invoice_cash_rounding_id'));
-  const rounding = create(db, 'account.cash.rounding', { name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
+  const rounding = create(db, 'account.cash.rounding', { profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'), name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const inv = create(rounding.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_cash_rounding_id: rounding.id, invoice_line_ids: [{ qty: 1, price_unit: 10.02, tax: 0 }] });
   assert.equal(read(inv.db, 'account.move', inv.id).amount_total, 10.05);
 });
@@ -535,15 +535,23 @@ test('foreign rounded invoices and credit notes retain currency amounts and can 
 
 test('POS posts and closes in the session company using that company journals and accounts', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Branch' }); db = company.db;
+  const company = createCompany(db, { name: 'Branch' }); db = company.db;
+  const accounts = {};
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
-    db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: company.id }).db;
+    const existing = search(db, 'account.account').find((account) => account.company_id === company.id && account.code === code);
+    const created = existing ? { db, id: existing.id } : create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: company.id });
+    db = created.db;
+    accounts[code] = created.id;
   }
-  const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
+  const journals = {};
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501']]) {
-    db = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id }).db;
+    const created = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc] });
+    db = created.db;
+    journals[code] = created.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id }); db = cfg.db;
+  db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
+  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true, profit_account_id: accounts['450000'], loss_account_id: accounts['690000'] });
+  const cfg = create(db, 'pos.config', { name: 'Branch POS', company_id: company.id, journal_id: journals.POSS }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'Branch cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   db = startSession(db, 0, cfg.id).db;
   const paid = payOrder(db, { lines: [{ product_id: 5, qty: 1, price_unit: 10, tax: 0 }], method: method.id });
@@ -763,16 +771,24 @@ test('return cancellation preserves differently valued stock and rejects consume
 
 test('automatically valued goods sold in a second company scope stock valuation to that company', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Company Two' });
+  const company = createCompany(db, { name: 'Company Two' });
   db = company.db;
+  const accounts = {};
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
-    db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
+    const existing = search(db, 'account.account').find((account) => account.company_id === company.id && account.code === code);
+    const created = existing ? { db, id: existing.id } : create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id });
+    db = created.db;
+    accounts[code] = created.id;
   }
-  const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === company.id);
+  const journals = {};
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    db = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: account(acc).id }).db;
+    const created = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc] });
+    db = created.db;
+    journals[code] = created.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id }); db = cfg.db;
+  db = write(db, 'res.company', company.id, { account_default_receivable_id: accounts['121000'] });
+  db = write(db, 'account.journal', journals.CSH1, { default_for_payments: true });
+  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id, journal_id: journals.POSS }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: search(db, 'account.journal').find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
 
   const prod = create(db, 'product', { name: 'Valued Widget', type: 'goods', valuation: 'automated', cost: 15, list_price: 30, company_id: company.id, available_in_pos: true, sale_ok: true, qty_available: 5 });
@@ -794,15 +810,18 @@ test('automatically valued goods sold in a second company scope stock valuation 
 
 test('shared product POS valuation opens and consumes only the session company stock', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Independent stock company' }); db = company.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['301000', 'equity']]) {
+  const company = createCompany(db, { name: 'Independent stock company' }); db = company.db;
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['301000', 'equity']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: company.id }).db;
   }
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
+  let c2PosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    db = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id }).db;
+    const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id });
+    db = journal.db;
+    if (code === 'POSS') c2PosJournalId = journal.id;
   }
-  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id }); db = cfg.db;
+  const cfg = create(db, 'pos.config', { name: 'C2 POS', company_id: company.id, journal_id: c2PosJournalId }); db = cfg.db;
   const method = create(db, 'pos.payment.method', { name: 'C2 Cash', type: 'cash', company_id: company.id, config_ids: [cfg.id], journal_id: (db.records['account.journal'] ?? []).find((j) => j.code === 'CSH1' && j.company_id === company.id).id }); db = method.db;
   const prod = create(db, 'product', { name: 'Shared FIFO', type: 'goods', company_id: null, valuation: 'real_time', cost_method: 'fifo', cost: 20, qty_available: 5, property_stock_valuation_account_id: accountId(db, '110100', 1), property_stock_journal: journalId(db, 'MISC', 1) }); db = prod.db;
   const loc1 = (db.records['stock.location'] ?? []).find((l) => l.usage === 'internal' && (l.company_id ?? 1) === 1);
@@ -1333,13 +1352,15 @@ test('refunds, return cancellations, and restaurant settlements validate company
   let db = seed();
   const c2 = create(db, 'res.company', { name: 'Branch Company' });
   db = c2.db;
-  for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
+  for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: c2.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
   const c2Journal = create(db, 'account.journal', { name: 'Branch Cash Journal', code: 'BCSH', type: 'cash', company_id: c2.id, default_account_id: account('101501').id });
   db = c2Journal.db;
-  const cfg2 = create(db, 'pos.config', { name: 'Branch POS', company_id: c2.id, module_restaurant: true });
+  const c2PosJournal = create(db, 'account.journal', { name: 'Branch POS Journal', code: 'BPOS', type: 'sale', company_id: c2.id, default_account_id: account('400000').id });
+  db = c2PosJournal.db;
+  const cfg2 = create(db, 'pos.config', { name: 'Branch POS', company_id: c2.id, journal_id: c2PosJournal.id, module_restaurant: true });
   db = cfg2.db;
   const c2Cash = create(db, 'pos.payment.method', { name: 'Branch Cash', type: 'cash', company_id: c2.id, config_ids: [cfg2.id], journal_id: c2Journal.id });
   db = c2Cash.db;
@@ -1462,7 +1483,7 @@ test('server checkout returns authoritative payable total with rounding differen
   let db = seed();
   const cfg1 = search(db, 'pos.config').find((c) => (c.company_id ?? 1) === 1);
   const rounding = create(db, 'account.cash.rounding', {
-    name: 'Half Up 0.05',
+    name: 'Half Up 0.05', profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'),
     rounding: 0.05,
     rounding_method: 'HALF-UP',
     strategy: 'add_invoice_line',
@@ -1514,5 +1535,3 @@ test('server checkout returns authoritative payable total with rounding differen
   });
   assert.equal(orderOut.total, 10.00, 'payOrder total must include rounding_difference');
 });
-
-

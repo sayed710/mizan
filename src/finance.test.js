@@ -1,27 +1,32 @@
+import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search, updateSettings, write } from './orm.js';
 import { models } from './models/index.js';
 import { agedBalance, analyticActuals, followUps, journalCards, lockDateFor, moveGuard, receivableOf, taxReport } from './models/finance.js';
 import { addDays, today } from './models/common.js';
+import { accountId } from './models/ledger.js';
+import { defaultTaxRepartitionLines } from './models/taxes.js';
 import { seed } from './seed.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
 const invoice = (db, vals) => {
-  const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14 }], ...vals });
+  const { db: next, id } = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }], ...vals });
   return { db: run(next, 'account.move', id, 'Confirm'), id };
 };
 
-test('confirming a quotation over the credit limit is refused', () => {
+test('confirming a quotation over the credit limit warns without blocking', () => {
   const db0 = write(seed(), 'res.partner', 3, { credit_limit: receivableOf(seed(), 3) + 500 });
   const { db, id } = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 1, qty: 1, price_unit: 1000, tax: 0 }] });
-  assert.throws(() => run(db, 'sale.order', id, 'Confirm'), /credit limit/);
+  assert.match(models['sale.order'].form.warning(read(db, 'sale.order', id), db), /credit limit/);
+  assert.equal(read(run(db, 'sale.order', id, 'Confirm'), 'sale.order', id).state, 'sale');
   const ok = create(db0, 'sale.order', { partner_id: 3, order_line: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  assert.ok(!models['sale.order'].form.warning(read(ok.db, 'sale.order', ok.id), ok.db));
   assert.equal(read(run(ok.db, 'sale.order', ok.id, 'Confirm'), 'sale.order', ok.id).state, 'sale');
 });
 
 test('posting into a locked period is refused', () => {
-  const db = updateSettings(seed(), { lock_date: today() });
+  const db = write(updateSettings(seed(), { lock_date: today() }), 'res.company', 1, { lock_date: today() });
   assert.throws(() => invoice(db, { invoice_date: addDays(today(), -1) }), /locked/);
   assert.equal(read(invoice(db, { invoice_date: addDays(today(), 1) }).db, 'account.move', invoice(db, { invoice_date: addDays(today(), 1) }).id).state, 'posted');
 });
@@ -46,7 +51,7 @@ test('aged receivable buckets by days overdue and follow-ups list overdue partne
 test('analytic actuals sum posted lines tagged with an analytic account', () => {
   const db0 = seed();
   const office = search(db0, 'account.analytic.account')[0].id;
-  const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, analytic_account_id: office }] });
+  const { db } = invoice(db0, { invoice_line_ids: [{ product_id: 1, qty: 2, price_unit: 500, discount: 10, tax: 14, ...defaultTaxRepartitionLines(accountId(db0, '251000')), analytic_account_id: office }] });
   assert.equal(analyticActuals(db).get(office), 900);
 });
 
@@ -54,7 +59,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
   const { applyDiff, diffDb } = await import('./sync.js');
   const { payMove } = await import('./models/accounting.js');
   const { db: posted, id } = invoice(seed(), { invoice_date: addDays(today(), -10) });
-  const locked = updateSettings(posted, { lock_date: addDays(today(), -1) });
+  const locked = write(updateSettings(posted, { lock_date: addDays(today(), -1) }), 'res.company', 1, { lock_date: addDays(today(), -1) });
   const edited = { ...locked, records: { ...locked.records, 'account.move': locked.records['account.move'].map((m) => (m.id === id ? { ...m, invoice_date: today() } : m)) } };
   assert.throws(() => applyDiff(locked, diffDb(locked, edited)), /locked/);
   assert.throws(() => applyDiff(locked, { upserts: {}, deletes: { 'account.move': [id] } }), /locked/);
@@ -64,7 +69,7 @@ test('the lock date also guards synced changes and deletes; payments on locked i
 test('the audit trail logs every change, keeps numbered entries and cannot be switched off', async () => {
   const { applyDiff } = await import('./sync.js');
   const { unlink } = await import('./orm.js');
-  const db0 = updateSettings(seed(), { audit_trail: true });
+  const db0 = write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true });
   const { db, id } = invoice(db0, {});
   const noted = write(db, 'account.move', id, { ref: 'PO-77' });
   assert.ok(noted.messages.some((m) => m.res_id === id && m.model === 'account.move' && /Reference/.test(m.body)));
@@ -79,23 +84,22 @@ test('automatic reminders log each reached level once per customer', async () =>
   const { messagesOf } = await import('./orm.js');
   const { applyDiff, diffDb } = await import('./sync.js');
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
-  const first = runFollowUps(db);
+  const first = runFollowUps(db, today(), () => {});
   assert.equal(partnerFollowUp(read(first, 'res.partner', 5), 1)?.followup_level_delay, 15);
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => m.body.includes('overdue \u2014 ')));
   const synced = applyDiff(db, diffDb(db, first));
   assert.ok(messagesOf(synced, 'res.partner', 5).some((m) => /First reminder: .* overdue — /.test(m.body)));
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
-  const later = runFollowUps(first, addDays(today(), 12));
+  const later = runFollowUps(first, addDays(today(), 12), () => {});
   assert.equal(partnerFollowUp(read(later, 'res.partner', 5), 1)?.followup_level_delay, 30);
 });
 
 test('successive scheduled runs track follow-up progress per company and never move backwards', async () => {
   const { runFollowUps, partnerFollowUp } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
-  const { createCompany } = await import('./models/company.js');
   const base = seed();
-  const branch = createCompany(base, { name: 'Branch Two', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch Two', currency_id: base.records['res.company'][0].currency_id });
   let curDb = branch.db;
 
   curDb = invoice(curDb, {
@@ -119,7 +123,7 @@ test('successive scheduled runs track follow-up progress per company and never m
     invoice_date_due: addDays(today(), -5),
   }).db;
 
-  const first = runFollowUps(curDb);
+  const first = runFollowUps(curDb, today(), () => {});
   const p1 = read(first, 'res.partner', 5);
   assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 15);
   assert.equal(partnerFollowUp(p1, branch.id)?.followup_level_delay, 30);
@@ -131,7 +135,7 @@ test('successive scheduled runs track follow-up progress per company and never m
   assert.equal(partnerFollowUp(pRepeat, 1)?.followup_level_delay, 15);
   assert.equal(partnerFollowUp(pRepeat, branch.id)?.followup_level_delay, 30);
 
-  const later = runFollowUps(first, addDays(today(), 15));
+  const later = runFollowUps(first, addDays(today(), 15), () => {});
   const pLater = read(later, 'res.partner', 5);
   assert.equal(partnerFollowUp(pLater, 1)?.followup_level_delay, 30);
   assert.equal(partnerFollowUp(pLater, branch.id)?.followup_level_delay, 30);
@@ -143,7 +147,7 @@ test('sales and purchase lock dates only lock their side; the hard lock locks ev
   assert.equal(lockDateFor({ sale_lock_date: '2026-03-31' }, { move_type: 'in_invoice' }), '');
   assert.equal(lockDateFor({ purchase_lock_date: '2026-02-28', lock_date: '2026-01-31' }, { move_type: 'in_refund' }), '2026-02-28');
   assert.equal(lockDateFor({ hard_lock_date: '2026-04-30', sale_lock_date: '2026-03-31' }, { move_type: 'entry' }), '2026-04-30');
-  const db = { settings: { sale_lock_date: '2026-03-31' }, records: { 'account.account': [{ id: 1 }, { id: 2 }] } };
+  const db = { settings: { sale_lock_date: '2026-03-31' }, records: { 'res.company': [{ id: 1, sale_lock_date: '2026-03-31' }], 'account.account': [{ id: 1 }, { id: 2 }] } };
   const entry = { name: 'BILL/2026/0001', line_ids: [{ account_id: 1, debit: 10, credit: 0 }, { account_id: 2, debit: 0, credit: 10 }] };
   assert.match(moveGuard(db, null, { ...entry, move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
   assert.equal(moveGuard(db, null, { ...entry, move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);
@@ -187,12 +191,11 @@ test('a manual reminder cannot regress the last recorded follow-up level', async
 });
 
 test('manual reminders work per company: two companies with 40-day and 5-day overdue invoices get their own levels and isolated email bodies', async () => {
-  const { createCompany } = await import('./models/company.js');
   const { followUpCompanies, followUpText, logManualFollowUp, partnerFollowUp } = await import('./models/finance.js');
   const { messagesOf } = await import('./orm.js');
 
   const base = seed();
-  const branch = createCompany(base, { name: 'Finance Branch', currency_id: base.records['res.company'][0].currency_id });
+  const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Finance Branch', currency_id: base.records['res.company'][0].currency_id });
 
   const inv1 = invoice(branch.db, {
     partner_id: 5,
@@ -256,7 +259,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
     invoice_date: addDays(today(), -65),
     invoice_date_due: addDays(today(), -35),
   });
-  const run1 = runFollowUps(inv1.db);
+  const run1 = runFollowUps(inv1.db, today(), () => {});
   const p1 = read(run1, 'res.partner', 5);
   assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 30);
   assert.ok(messagesOf(run1, 'res.partner', 5).some((m) => /Second reminder/.test(m.body)));
@@ -276,7 +279,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
     invoice_date: addDays(today(), -50),
     invoice_date_due: addDays(today(), -20),
   });
-  const run2 = runFollowUps(inv2.db);
+  const run2 = runFollowUps(inv2.db, today(), () => {});
   const p2 = read(run2, 'res.partner', 5);
   assert.equal(partnerFollowUp(p2, 1)?.followup_level_delay, 15, 'restarts at first level (delay 15)');
   assert.ok(messagesOf(run2, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));

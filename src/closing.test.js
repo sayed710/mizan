@@ -6,6 +6,8 @@ import { seed } from './seed.js';
 import { accountId, balances, balanceSheet, isBalanced, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { closeFiscalYear, closingModels, reopenFiscalYear, revalueForeignBalances, unrealizedExchange } from './models/closing.js';
+import { closedYearLock } from './models/finance.js';
+import { configureRevaluationLoss } from './test-support/revaluation-accounts.js';
 
 const period = { from: '2024-01-01', to: '2024-12-31' };
 const year = (db) => create(db, 'account.fiscal.year', { name: 'FY 2024', date_from: period.from, date_to: period.to });
@@ -49,7 +51,7 @@ test('closing clears all five P&L types into retained earnings, balances, and pr
   assert.equal(sheet.earnings, 0);
   assert.equal(sheet.totalAssets, sheet.totalLiabilities + sheet.totalEquity);
   assert.equal(sheet.equity.find((r) => r.account.code === '302000').balance, 750);
-  assert.equal(closed.settings.lock_date, period.to);
+  assert.equal(closedYearLock(closed, 1), period.to);
   assert.throws(() => entry(closed, '2024-03-01', [{ account: '101401', debit: 1 }, { account: '301000', credit: 1 }]), /locked/);
   assert.throws(() => write(closed, 'account.fiscal.year', id, { date_to: '2025-12-31' }), /Reopen/);
 });
@@ -73,7 +75,7 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   const reopened = run(closed, id, 'Reopen');
   const fy = read(reopened, 'account.fiscal.year', id);
   assert.equal(fy.state, 'open');
-  assert.equal(reopened.settings.lock_date, '');
+  assert.equal(closedYearLock(reopened, 1), '');
   assert.equal(profitAndLoss(reopened, period).net, 750);
   assert.equal(balanceSheet(reopened, period.to).totalEquity, 750);
   const reversal = read(reopened, 'account.move', fy.opening_move_id);
@@ -81,14 +83,16 @@ test('reopening reverses the close in the same year and permits a balanced reclo
   assert.ok(isBalanced(reversal.line_ids));
   assert.throws(() => reopenFiscalYear(reopened, id), /already open/);
   assert.equal(profitAndLoss(closeFiscalYear(reopened, id), period, { includeClosing: true }).net, 0);
-  assert.throws(() => reopenFiscalYear(updateSettings(closed, { lock_date: '2025-12-31' }), id), /locked/);
-  assert.throws(() => reopenFiscalYear(updateSettings(closed, { hard_lock_date: period.to }), id), /locked/);
-  const differentLock = reopenFiscalYear(updateSettings(closed, { lock_date: '2023-12-31' }), id);
+  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' }), id), /locked/);
+  assert.throws(() => reopenFiscalYear(write(updateSettings(closed, { hard_lock_date: period.to }), 'res.company', 1, { hard_lock_date: period.to }), id), /locked/);
+  const differentLock = reopenFiscalYear(write(updateSettings(closed, { lock_date: '2023-12-31' }), 'res.company', 1, { lock_date: '2023-12-31' }), id);
   assert.equal(differentLock.settings.lock_date, '2023-12-31');
 });
 
 test('loss years debit retained earnings; empty years close with a balanced zero entry', () => {
-  const loss = year(entry(seed(), '2024-02-01', [{ account: '600000', debit: 80 }, { account: '101401', credit: 80 }]));
+  const earnings = create(seed(), 'account.account', { code: '302100', name: 'Loss earnings', account_type: 'equity', company_id: 1 });
+  const configured = write(earnings.db, 'res.company', 1, { current_year_earnings_account_id: earnings.id });
+  const loss = year(entry(configured, '2024-02-01', [{ account: '600000', debit: 80 }, { account: '101401', credit: 80 }]));
   const closed = closeFiscalYear(loss.db, loss.id, { retainedEarningsCode: '302100' });
   assert.equal(balanceSheet(closed, period.to).equity.find((r) => r.account.code === '302100').balance, -80);
   assert.equal(balanceSheet(closed, period.to).earnings, 0);
@@ -98,6 +102,7 @@ test('loss years debit retained earnings; empty years close with a balanced zero
 });
 
 function foreign(moveType = 'out_invoice', amount = 100, db = seed()) {
+  db = configureRevaluationLoss(db);
   const currency = create(db, 'res.currency', { name: 'FX', rate_ids: [{ date: '2024-01-01', rate: 2 }, { date: '2024-02-01', rate: 1 }] });
   const invoice = create(currency.db, 'account.move', { move_type: moveType, partner_id: 1, currency_id: currency.id,
     invoice_date: '2024-01-15', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: amount, tax: 0 }] });

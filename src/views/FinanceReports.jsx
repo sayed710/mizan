@@ -1,22 +1,41 @@
 import { useState } from 'react';
 import { read, search } from '../orm.js';
-import { cashFlow, customerStatement, executiveSummary, partnerLedger, trialBalance } from '../models/reports.js';
+import { cashFlow, customerStatement, executiveSummary, fiscalReport, partnerLedger, trialBalance } from '../models/reports.js';
+import { currentCompany } from '../models/company.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
+import { formatCurrency } from '../money.js';
 
 const num = (v) => <td className="num">{money(v)}</td>;
 const pct = (v) => (v == null ? '—' : `${v}%`);
 
-export function TrialBalance({ db, period }) {
-  const { rows, totals } = trialBalance(db, period);
+export function TrialBalance({ db, period, analyticAccountIds }) {
+  const { rows, totals } = trialBalance(db, { ...period, analyticAccountIds });
   return (
     <tbody>
       {rows.map((r) => (
-        <tr key={r.account.id} className="rep-detail"><td>{r.account.code} {r.account.name}</td>{num(r.initial)}{num(r.debit)}{num(r.credit)}{num(r.end)}</tr>
+        <tr key={r.account.id} className="rep-detail"><td><a href={`#/open/account.account/${r.account.id}`}>{r.account.code} {r.account.name}</a></td>{num(r.initial)}{num(r.debit)}{num(r.credit)}{num(r.end)}</tr>
       ))}
       <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.initial)}{num(totals.debit)}{num(totals.credit)}{num(totals.end)}</tr>
     </tbody>
   );
+}
+
+function FiscalCategoryRows({ row }) {
+  const [open, setOpen] = useState(false);
+  const name = row.category ? row.category.name : t('Uncategorized');
+  return <>
+    <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} {name}</button></td>{num(row.debit)}{num(row.credit)}{num(row.balance)}</tr>
+    {open && row.accounts.map((line) => <tr key={line.account.id} className="rep-detail"><td><a href={`#/open/account.account/${line.account.id}`}>{line.account.code} {line.account.name}</a></td>{num(line.debit)}{num(line.credit)}{num(line.balance)}</tr>)}
+  </>;
+}
+
+export function FiscalReport({ db, period, analyticAccountIds }) {
+  const { rows, totals } = fiscalReport(db, { ...period, analyticAccountIds });
+  return <tbody>
+    {rows.map((row) => <FiscalCategoryRows key={row.category?.id ?? 'uncategorized'} row={row} />)}
+    <tr className="rep-total strong"><td>{t('Total')}</td>{num(totals.debit)}{num(totals.credit)}{num(totals.balance)}</tr>
+  </tbody>;
 }
 
 /** One partner: a clickable summary row that unfolds its entries with the running balance. */
@@ -26,30 +45,31 @@ function PartnerRows({ db, p }) {
     <>
       <tr className="rep-section" onClick={() => setOpen(!open)} aria-expanded={open}>
         <td><span className="caret">{p.lines.length ? (open ? '▾' : '▸') : ''}</span> {p.partner_id ? read(db, 'res.partner', p.partner_id)?.name : t('Unknown')}</td>
-        {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}
+        {num(p.initial)}{num(p.debit)}{num(p.credit)}{num(p.end)}<td />
       </tr>
       {open && p.lines.map((l, i) => (
-        <tr key={i} className="rep-detail"><td>{l.date} · {l.move_name}</td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}</tr>
+        <tr key={i} className="rep-detail"><td><a href={`#/open/account.move/${l.move_id}`}>{l.date} · {l.move_name}</a></td><td />{num(l.debit)}{num(l.credit)}{num(l.balance)}<td className="num">{l.currency_id ? formatCurrency(l.amount_currency, read(db, 'res.currency', l.currency_id)) : ''}</td></tr>
       ))}
     </>
   );
 }
 
-export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period }) {
-  const rows = partnerLedger(db, period, kind);
+export const PartnerLedger = (kind) => function PartnerLedgerBody({ db, period, analyticAccountIds }) {
+  const rows = partnerLedger(db, { ...period, analyticAccountIds }, kind);
   return (
     <tbody>
       {rows.map((p) => <PartnerRows key={p.partner_id ?? 'none'} db={db} p={p} />)}
-      <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}</tr>
+      <tr className="rep-total strong"><td>{t('Total')}</td>{['initial', 'debit', 'credit', 'end'].map((k) => <td key={k} className="num">{money(rows.reduce((s, r) => s + r[k], 0))}</td>)}<td /></tr>
     </tbody>
   );
 };
 
-export function CustomerStatement({ db, period }) {
+export function CustomerStatement({ db, period, companyId }) {
   const [partnerId, setPartnerId] = useState('');
   const partners = search(db, 'res.partner').sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
   const selected = partners.some((p) => p.id === Number(partnerId)) ? Number(partnerId) : null;
-  const statement = selected ? customerStatement(db, selected, period) : null;
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : (period?.company_id ?? currentCompany(db));
+  const statement = selected ? customerStatement(db, selected, { ...period, company_id: currentCo }) : null;
   return <tbody>
     <tr><td colSpan={4}><label>{t('Customer')} <select aria-label={t('Customer')} value={selected ?? ''} onChange={(e) => setPartnerId(e.target.value)}>
       <option value="">{t('Select a customer')}</option>
@@ -63,13 +83,14 @@ export function CustomerStatement({ db, period }) {
   </tbody>;
 }
 
-export function CashFlow({ db, period }) {
-  const r = cashFlow(db, period);
+export function CashFlow({ db, period, companyId, analyticAccountIds }) {
+  const currentCo = (companyId && companyId !== 'all') ? Number(companyId) : period?.company_id;
+  const r = cashFlow(db, currentCo ? { ...period, company_id: currentCo, analyticAccountIds } : { ...period, analyticAccountIds });
   const section = (key, title) => (
     <>
       <tr className="rep-section"><td>{t(title)}</td>{num(r[key])}</tr>
       {r.lines.filter((l) => l.section === key).map((l) => (
-        <tr key={`${key}-${l.account.id}`} className="rep-detail"><td>{l.account.code} {l.account.name}</td>{num(l.amount)}</tr>
+        <tr key={`${key}-${l.account.id}`} className="rep-detail"><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td>{num(l.amount)}</tr>
       ))}
     </>
   );
@@ -79,15 +100,15 @@ export function CashFlow({ db, period }) {
       {section('operating', 'Operating Activities')}
       {section('investing', 'Investing Activities')}
       {section('financing', 'Financing Activities')}
-      {section('unclassified', 'Unclassified')}
+      {(r.unclassified !== 0 || r.lines.some((l) => l.section === 'unclassified')) && section('unclassified', 'Unclassified')}
       <tr className="rep-total"><td>{t('Net Change in Cash')}</td>{num(r.net)}</tr>
       <tr className="rep-total strong"><td>{t('Cash at the end of the period')}</td>{num(r.closing)}</tr>
     </tbody>
   );
 }
 
-export function ExecutiveSummary({ db, period }) {
-  const s = executiveSummary(db, period);
+export function ExecutiveSummary({ db, period, analyticAccountIds }) {
+  const s = executiveSummary(db, { ...period, analyticAccountIds });
   const rows = [
     ['Revenue', money(s.revenue)], ['Gross Profit', money(s.grossProfit)], ['Net Profit', money(s.netProfit)],
     ['Cash', money(s.cash)], ['Receivables', money(s.receivables)], ['Payables', money(s.payables)],

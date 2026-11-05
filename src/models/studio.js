@@ -23,6 +23,7 @@ export function cleanCustomField(f) {
 }
 
 const installed = new Map(); // "model.field" → true, so re-installing is idempotent
+const dynamicGroups = new WeakMap();
 
 /**
  * Merge custom fields into the registry (fields + a "Custom" form group + optional list column).
@@ -36,10 +37,21 @@ export function installCustomFields(list = []) {
     def.fields[f.name] = { type: f.type, label: f.label, ...(f.options ? { options: f.options } : {}), custom: true };
     const key = `${f.model}.${f.name}`;
     if (installed.has(key)) continue;
+    if (typeof def.form.groups === 'function') {
+      let custom = dynamicGroups.get(def.form);
+      if (!custom) {
+        custom = Object.assign([], { custom: true });
+        const groups = def.form.groups;
+        def.form.groups = (...args) => [...groups(...args), custom];
+        dynamicGroups.set(def.form, custom);
+      }
+      custom.push(f.name);
+    } else {
+      const custom = def.form.groups.find((g) => g.custom);
+      if (custom) custom.push(f.name);
+      else def.form.groups = [...def.form.groups, Object.assign([f.name], { custom: true })];
+    }
     installed.set(key, true);
-    const custom = def.form.groups.find((g) => g.custom);
-    if (custom) custom.push(f.name);
-    else def.form.groups = [...def.form.groups, Object.assign([f.name], { custom: true })];
     if (f.inList && !def.list.includes(f.name)) def.list = [...def.list, f.name];
   }
 }

@@ -1,16 +1,21 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, read, search, unlink, write } from '../orm.js';
-import { today } from './common.js';
+import { dayOf, subtotal, today } from './common.js';
+import { toCompany } from './currency.js';
+import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { invoiceLines, invoiceLineAccount } from './ledger.js';
-import { round } from '../money.js';
+import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems, registerAnalyticPostingHooks } from './ledger.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { currentCompany } from './company.js';
+import { isSectionOrNote } from './taxes.js';
+import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
+export { isSectionOrNote } from './taxes.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];
 const inPeriod = (r, from, to) => (!from || r.date >= from) && (!to || r.date <= to);
-const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
 const allocatedShares = (db, distribution, base) => {
   const entries = Object.entries(normalizeDistribution(distribution, db)).filter(([, n]) => n > 0);
   const amounts = entries.map(([, percent]) => round(base * percent / 100));
@@ -30,60 +35,15 @@ const allocatedShares = (db, distribution, base) => {
 };
 export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
-
-/** Find the most specific matching analytic distribution model for line context. */
-export function findAnalyticDistribution(db, { partner_id, partner_category_id, product_id, product_categ_id, account_id, account_code, company_id } = {}, fallback = {}) {
-  const models = search(db, 'account.analytic.distribution.model');
-  if (!models?.length) return fallback;
-
-  const partner = partner_id ? read(db, 'res.partner', partner_id) : null;
-  const product = product_id ? read(db, 'product', product_id) : null;
-  const code = account_code || (account_id ? read(db, 'account.account', account_id)?.code : '') || '';
-
-  const partnerCat = partner_category_id ?? partner?.partner_category_id ?? partner?.category_id;
-  const productCat = product_categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
-
-  const targetCompany = company_id;
-  const matched = [];
-  for (const m of models) {
-    if (m.company_id && m.company_id !== targetCompany) continue;
-    if (m.partner_id && m.partner_id !== partner_id) continue;
-    if (m.product_id && m.product_id !== product_id) continue;
-    if (m.partner_category_id) {
-      const matchCat = partnerCat === m.partner_category_id || (partner?.tag_ids ?? []).includes(m.partner_category_id);
-      if (!matchCat) continue;
-    }
-    if (m.product_categ_id) {
-      const matchProdCat = productCat === m.product_categ_id;
-      if (!matchProdCat) continue;
-    }
-    if (m.account_prefix) {
-      if (!code || !code.startsWith(m.account_prefix)) continue;
-    }
-
-    let score = 0;
-    if (m.partner_id) score += 1000;
-    if (m.product_id) score += 1000;
-    if (m.partner_category_id) score += 100;
-    if (m.product_categ_id) score += 100;
-    if (m.account_prefix) score += 10 + (m.account_prefix.length ?? 0);
-    if (m.company_id) score += 1;
-
-    matched.push({ model: m, score, seq: Number(m.sequence) || 10 });
-  }
-
-  if (!matched.length) return fallback;
-  matched.sort((a, b) => b.score - a.score || a.seq - b.seq);
-  return matched[0].model.analytic_distribution ?? {};
-}
+export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 /** Resolve a fresh default using the same account that will be posted. */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
   return findAnalyticDistribution(db, {
-    partner_id: move?.partner_id,
+    partner_id: line?.partner_id ?? move?.partner_id,
     product_id: line.product_id,
-    account_id: invoiceLineAccount(db, move, line),
-    company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : 1,
+    account_id: move?.move_type === 'entry' ? (line.account_id ?? line.account) : invoiceLineAccount(db, move, line),
+    company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : (line?.company_id ?? 1),
   }, fallback);
 }
 
@@ -98,50 +58,116 @@ export function distributionOfLine(line, db, move) {
   return db ? defaultDistributionForLine(db, line, move) : {};
 }
 
+/** Determine the winning applicability for a plan on a given move line context. */
+export function planApplicability(db, plan, line, move = null) {
+  const targetCompany = (move && 'company_id' in move ? move.company_id : line?.company_id) ?? 1;
+  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type);
+  const domain = isInvoiceDoc
+    ? (['out_invoice', 'out_refund'].includes(move.move_type) ? 'invoice' : 'bill')
+    : move?.move_type === 'entry' ? 'general' : null;
+
+  const accountId = line?.account_id || (isInvoiceDoc ? invoiceLineAccount(db, move, line) : null);
+  const code = accountId ? read(db, 'account.account', accountId)?.code || '' : '';
+
+  const product = line?.product_id ? read(db, 'product', line.product_id) : null;
+  const categories = categoryHierarchy(db, product?.categ_id);
+
+  const matched = [];
+  for (const r of plan?.applicability_ids ?? []) {
+    let score = 0;
+    let prefixLen = 0;
+    if (r.company_id) {
+      if (r.company_id !== targetCompany) continue;
+      score += 1;
+    }
+    if (r.business_domain) {
+      if (r.business_domain !== domain) continue;
+      score += 1;
+    }
+    const prefixStr = String(r.account_prefix ?? '').trim();
+    if (prefixStr) {
+      const prefixes = prefixStr.split(',').map((p) => p.trim()).filter((p) => p && code.startsWith(p));
+      if (!prefixes.length) continue;
+      prefixLen = Math.max(...prefixes.map((p) => p.length));
+      score += 1;
+    }
+    if (r.product_categ_id) {
+      if (!categories.has(r.product_categ_id)) continue;
+      score += 1;
+    }
+    matched.push({ rule: r, score: score * 100 + prefixLen });
+  }
+
+  if (matched.length) {
+    matched.sort((a, b) => b.score - a.score);
+    return matched[0].rule.applicability || 'optional';
+  }
+  return plan?.default_applicability || 'optional';
+}
+
 /** Require a positive product-line allocation for every mandatory plan. */
-export function checkMandatoryPlans(db, move) {
-  if (!['out_invoice', 'in_invoice'].includes(move.move_type)) return;
+export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) {
+  const isInvoiceDoc = ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move?.move_type);
+  const isEntry = move?.move_type === 'entry';
+  if (!isInvoiceDoc && !isEntry) return;
+  if (isEntry && systemGenerated) return;
+
   const plans = search(db, 'account.analytic.plan');
-  for (const line of move.invoice_line_ids ?? []) {
+  if (!plans.length) return;
+
+  const lines = isInvoiceDoc ? (move.invoice_line_ids ?? []) : (move.line_ids ?? []);
+  for (const line of lines) {
+    if (isSectionOrNote(line)) continue;
     const distribution = normalizeDistribution(distributionOfLine(line, db, move), db);
-    const allocated = new Set(Object.entries(distribution).filter(([, n]) => n > 0).map(([id]) => read(db, 'account.analytic.account', Number(id))?.plan_id));
+    const allocated = new Map();
+    for (const [id, percent] of Object.entries(distribution)) {
+      const planId = read(db, 'account.analytic.account', Number(id))?.plan_id;
+      if (planId) allocated.set(planId, (allocated.get(planId) ?? 0) + percent);
+    }
     for (const plan of plans) {
-      if (line.product_id && plan.default_applicability === 'mandatory' && !allocated.has(plan.id)) throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
-      if (plan.default_applicability === 'unavailable' && allocated.has(plan.id)) throw new Error(`Analytic plan is unavailable: ${plan.name}`);
+      const applicability = planApplicability(db, plan, line, move);
+      if (applicability === 'mandatory' && (isInvoiceDoc || analyticEligibleAccount(read(db, 'account.account', line.account_id)) || allocated.has(plan.id)) && Math.abs((allocated.get(plan.id) ?? 0) - 100) > 0.00001) {
+        throw new Error(`Allocate product lines to the mandatory analytic plan: ${plan.name}`);
+      }
+      if (applicability === 'unavailable' && (allocated.get(plan.id) ?? 0) > 0) {
+        throw new Error(`Analytic plan is unavailable: ${plan.name}`);
+      }
     }
   }
 }
 
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
-export function analyticLinesForMove(db, move) {
+export function analyticLinesForMove(db, move, { historical = false } = {}) {
   if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
     const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
-    name: line.name || move.name || '/', date: move.invoice_date || today(), account_id: Number(id),
+    name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
     general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
     partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
     }));
   });
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
-  checkMandatoryPlans(db, move);
+  if (!historical) checkMandatoryPlans(db, move);
   const purchase = ['in_invoice', 'in_refund'].includes(move.move_type);
   const refund = ['out_refund', 'in_refund'].includes(move.move_type);
   const journalLines = move.line_ids?.length ? move.line_ids : invoiceLines(db, move);
   const allocations = new Map();
   for (const journalLine of journalLines) {
-    for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id });
+    for (const source of journalLine.invoice_sources ?? []) allocations.set(source.index, { amount: source.amount, account: journalLine.account_id, deferred: Boolean(source.original_account_id) });
   }
   return (move.invoice_line_ids ?? []).flatMap((line, index) => {
+    if (isSectionOrNote(line)) return [];
     const product = read(db, 'product', line.product_id);
     const allocation = allocations.get(index);
+    if (allocation?.deferred) return [];
     const account = move.line_ids?.length ? allocation?.account : invoiceLineAccount(db, move, line);
     const lineAmount = allocation?.amount ?? 0;
     return allocatedShares(db, distributionOfLine(line, db, move), lineAmount).map(([id, amount]) => {
       return {
-        name: line.name || product?.name || move.name || '/', date: move.invoice_date || today(),
+        name: line.name || product?.name || move.name || '/', date: move.date ?? move.invoice_date ?? today(),
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
-        general_account: read(db, 'account.account', account)?.code || (purchase ? '600000' : '400000'),
+        general_account: read(db, 'account.account', account)?.code || '',
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
         category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };
@@ -158,6 +184,8 @@ export function postAnalytic(db, moveId) {
   if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && r.category === category)) return db;
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }
+
+registerAnalyticPostingHooks({ checkMandatoryPlans, postAnalytic });
 
 /** Remove generated allocations on reset or cancellation, preserving timesheets. */
 export function removeAnalytic(db, moveId) {
@@ -179,10 +207,65 @@ const day = (date) => {
   return value / 86400000;
 };
 
+const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
+  const companyId = budget.company_id ?? selectedCompanyId;
+  return !companyId || !read(db, 'res.company', companyId) ? 'Select an existing company for the budget' : null;
+};
+
+/** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
+function postedPurchaseQuantities(db, order) {
+  const billed = new Map();
+  const keyedLines = (order.order_line ?? []).filter((line) => line.purchase_line_key);
+  const byKey = new Map(keyedLines.map((line) => [line.purchase_line_key, line]));
+  if (byKey.size !== keyedLines.length) throw new Error('Configure a unique purchase order line link for each line');
+  for (const move of search(db, 'account.move').filter((move) => move.purchase_id === order.id && move.state === 'posted' && ['in_invoice', 'in_refund'].includes(move.move_type))) {
+    if ((move.company_id ?? 1) !== (order.company_id ?? 1)) throw new Error('Purchase order and posted bill must belong to the same company');
+    for (const line of move.invoice_line_ids ?? []) {
+      if (isSectionOrNote(line)) continue;
+      if (!line.purchase_line_key) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
+      const source = byKey.get(line.purchase_line_key);
+      if (!source || source.product_id !== line.product_id) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
+      let qty = Number(line.qty) || 0;
+      if (line.uom_id !== source.uom_id) {
+        if (!line.uom_id || !source.uom_id) throw new Error('Configure units of measure on the purchase order and bill lines');
+        qty = convert(db, qty, line.uom_id, source.uom_id, { round: false });
+      }
+      billed.set(line.purchase_line_key, (billed.get(line.purchase_line_key) ?? 0) + qty * (move.move_type === 'in_refund' ? -1 : 1));
+    }
+  }
+  return billed;
+}
+
+/** Unbilled confirmed purchase allocations in company currency (costs negative), derived on every report. */
+function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
+  return search(db, 'purchase.order').filter((order) => ['purchase', 'done'].includes(order.state) && (order.company_id ?? 1) === company_id
+    && inPeriod({ date: dayOf(order.date_order) }, from, to)).flatMap((order) => {
+    const billed = postedPurchaseQuantities(db, order);
+    return (order.order_line ?? []).flatMap((line) => {
+      if (isSectionOrNote(line)) return [];
+      const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.purchase_line_key) ?? 0));
+      if (!qty) return [];
+      const distribution = distributionOfLine(line, db, { ...order, move_type: 'in_invoice' });
+      if (budgetLine.analytic_account_id && !normalizeDistribution(distribution, db)[budgetLine.analytic_account_id]) return [];
+      const accountId = budgetLine.account_id || budgetLine.general_account
+        ? invoiceLineAccount(db, { ...order, move_type: 'in_invoice' }, line) : null;
+      const code = accountId ? read(db, 'account.account', accountId)?.code : '';
+      if ((budgetLine.account_id && accountId !== budgetLine.account_id) || (budgetLine.general_account && !code?.startsWith(budgetLine.general_account))) return [];
+      const amount = -toCompany(db, documentCurrency(db, order).id, subtotal({ ...line, qty }), dayOf(order.date_order), company_id);
+      const allocated = budgetLine.analytic_account_id ? allocatedShares(db, distribution, amount).find(([id]) => Number(id) === budgetLine.analytic_account_id)?.[1] ?? 0 : amount;
+      return [{ purchase_id: order.id, purchase_line_key: line.purchase_line_key, date: dayOf(order.date_order), amount: allocated }];
+    });
+  });
+}
+
 /** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
-export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {}) {
+export function budgetReport(db, budgetId, atDate = today(), { period = {}, company_id: selectedCompanyId = null } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
+  const companyError = budgetCompanyError(db, budget, selectedCompanyId);
+  if (companyError) throw new Error(companyError);
+  const companyId = budget.company_id ?? selectedCompanyId;
+  const companyCurrency = companyCurrencyRecord(db, companyId);
   const start = day(budget.date_from);
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
@@ -194,11 +277,34 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
     const fraction = Math.min(1, Math.max(0, (day(atDate) - lineStart + 1) / (lineEnd - lineStart + 1)));
     const from = [budget.date_from, line.date_from, period.from].filter(Boolean).sort().at(-1);
     const to = [budget.date_to, line.date_to, period.to].filter(Boolean).sort()[0];
-    const companyId = budget.company_id ?? 1;
-    const analytic_lines = analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account });
-    const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
-    const theoretical = round(planned * fraction);
-    return { ...line, planned, practical, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines };
+    const targetAccount = line.account_id ? read(db, 'account.account', line.account_id) : null;
+    if (line.account_id && !targetAccount) throw new Error('Budget account not found');
+    const analytic_lines = line.analytic_account_id
+      ? analyticActualLines(db, { from, to, company_id: companyId, account_id: line.analytic_account_id, general_account: line.general_account, posted_only: true })
+          .filter((item) => !targetAccount || item.general_account === targetAccount.code)
+      : (line.account_id || line.general_account)
+        ? journalItems(db, { from, to, company_id: companyId })
+            .filter((item) => !item.is_closing
+              && (!line.account_id || item.account_id === line.account_id)
+              && (!line.general_account || (read(db, 'account.account', item.account_id)?.code ?? '').startsWith(line.general_account)))
+            .map((item, idx) => ({
+              id: `${item.move_id}-${idx}`,
+              name: item.name || item.move_name,
+              date: item.date,
+              move_id: item.move_id,
+              account_id: null,
+              general_account: read(db, 'account.account', item.account_id)?.code || '',
+              amount: roundCurrency((Number(item.credit) || 0) - (Number(item.debit) || 0), companyCurrency),
+              company_id: companyId,
+            }))
+            .filter((item) => item.amount !== 0)
+        : [];
+    const practical = roundCurrency(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0), companyCurrency);
+    const commitment_lines = line.analytic_account_id || line.account_id || line.general_account
+      ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
+    const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
+    const theoretical = roundCurrency(planned * fraction, companyCurrency);
+    return { ...line, planned, practical, committed, theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 
@@ -220,11 +326,28 @@ export const analyticPlusModels = {
       parent_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Parent Plan' },
       default_applicability: { type: 'selection', label: 'Default Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
       color: { type: 'integer', label: 'Color' },
+      applicability_ids: {
+        type: 'one2many',
+        label: 'Applicability',
+        fields: {
+          business_domain: { type: 'selection', label: 'Domain', options: [['general', 'General'], ['invoice', 'Invoice'], ['bill', 'Bill']] },
+          account_prefix: { type: 'char', label: 'Accounts Prefix' },
+          product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
+          applicability: { type: 'selection', label: 'Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+        },
+        newLine: () => ({ business_domain: null, account_prefix: '', product_categ_id: null, applicability: 'mandatory', company_id: null }),
+      },
     },
-    defaults: () => ({ default_applicability: 'optional', color: 0 }),
+    defaults: () => ({ default_applicability: 'optional', color: 0, applicability_ids: [] }),
     list: ['name', 'parent_id', 'default_applicability'],
     kanban: { title: 'name', lines: ['parent_id', 'default_applicability'] },
-    form: { title: 'name', groups: [['parent_id'], ['default_applicability', 'color']], chatter: true },
+    form: {
+      title: 'name',
+      groups: [['parent_id'], ['default_applicability', 'color']],
+      tabs: [{ label: 'Applicability', fields: ['applicability_ids'] }],
+      chatter: true,
+    },
   },
   'account.analytic.account': {
     ...accountModel,
@@ -261,9 +384,11 @@ export const analyticPlusModels = {
   },
   'account.budget': {
     ...budgetModel,
+    prepareCreate: (db, vals) => ({ db, vals: { company_id: currentCompany(db), ...vals } }),
+    guard: (db, before, budget) => budgetCompanyError(db, budget),
     fields: {
       ...budgetModel.fields,
-      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
+      lines: { ...budgetModel.fields.lines, fields: { ...budgetModel.fields.lines.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, date_from: { type: 'date', label: 'Start Date' }, date_to: { type: 'date', label: 'End Date' }, general_account: { type: 'char', label: 'General Account Prefix' } } },
       state: { ...budgetModel.fields.state, options: [['draft', 'Draft'], ['confirmed', 'Confirmed'], ['validated', 'Validated'], ['done', 'Done'], ['cancel', 'Cancelled']] },
     },
     form: {
@@ -283,11 +408,12 @@ export const analyticPlusModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_category_id: { type: 'char', label: 'Partner Category' },
       product_id: { type: 'many2one', relation: 'product', label: 'Product' },
-      product_categ_id: { type: 'char', label: 'Product Category' },
+      product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
       account_prefix: { type: 'char', label: 'Accounts Prefix' },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
     },
     defaults: () => ({ sequence: 10, analytic_distribution: {} }),
+    createDefaults: (db) => ({ company_id: currentCompany(db) }),
     list: ['sequence', 'partner_id', 'product_id', 'account_prefix', 'analytic_distribution'],
     kanban: { title: 'sequence', lines: ['partner_id', 'product_id', 'account_prefix'] },
     form: {

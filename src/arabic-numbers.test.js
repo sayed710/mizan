@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { read, search } from './orm.js';
 import { models } from './models/index.js';
-import { parseAmount, promptedAmount } from './models/common.js';
+import { parseAmount, promptedAmount, today } from './models/common.js';
 import { seed } from './seed.js';
 
 test('typed amounts accept Arabic-Indic digits and separators, and refuse ambiguous text', () => {
@@ -30,17 +30,13 @@ test('Register Payment takes an amount typed with Arabic digits instead of silen
   const db = seed();
   const inv = search(db, 'account.move').find((m) => m.move_type === 'out_invoice' && m.state === 'posted' && m.amount_residual >= 100);
   const button = models['account.move'].form.buttons.find((b) => b.label === 'Register Payment');
-  const saved = globalThis.prompt;
-  try {
-    globalThis.prompt = () => '١٠٠';
-    const paid = button.run(db, read(db, 'account.move', inv.id)).db;
-    assert.equal(Math.round((read(paid, 'account.move', inv.id).amount_residual - (inv.amount_residual - 100)) * 100), 0);
-    globalThis.prompt = () => '1,5';
-    assert.throws(() => button.run(db, read(db, 'account.move', inv.id)), /not a valid amount/);
-  } finally {
-    if (saved === undefined) delete globalThis.prompt;
-    else globalThis.prompt = saved;
-  }
+  const companyId = inv.company_id ?? 1;
+  const paymentJournals = search(db, 'account.journal').filter((journal) => journal.default_for_payments && (!journal.company_id || journal.company_id === companyId));
+  assert.equal(paymentJournals.length, 1);
+  const journal_id = paymentJournals[0].id;
+  const paid = button.run(db, read(db, 'account.move', inv.id), { amount: '١٠٠', date: today(), journal_id }).db;
+  assert.equal(Math.round((read(paid, 'account.move', inv.id).amount_residual - (inv.amount_residual - 100)) * 100), 0);
+  assert.throws(() => button.run(db, read(db, 'account.move', inv.id), { amount: '1,5', date: today(), journal_id }), /not a valid amount/);
 });
 
 test('CSV export removes directional isolation marks from cells', async () => {

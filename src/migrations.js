@@ -1,8 +1,9 @@
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
-import { create, search, write } from './orm.js';
+import { create, postNote, search, write } from './orm.js';
 import { migrateAppointments } from './models/appointments.js';
+import { analyticLinesForMove } from './models/analyticplus.js';
 import { migrateDocumentTags } from './models/signplus.js';
 import { migrateWorkorderTimes } from './models/workorder.js';
 import { ensureQuants } from './models/quant.js';
@@ -11,10 +12,11 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today } from './models/common.js';
-import { journalId } from './models/ledger.js';
+import { CHART, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { returnTaxLock } from './models/finance.js';
+import { defaultCashFlowActivity } from './models/reports.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -448,6 +450,26 @@ export function migratePartnerBankAccounts(db) {
   };
 }
 
+function migrateCashFlowActivities(db) {
+  let next = db;
+  const activities = ['operating', 'investing', 'financing'];
+  const tagFor = (activity) => {
+    const existing = (next.records['account.account.tag'] ?? []).find((tag) => tag.cash_flow_activity === activity);
+    if (existing) return existing.id;
+    const made = create(next, 'account.account.tag', { name: `Legacy ${activity} activities`, cash_flow_activity: activity });
+    next = made.db;
+    return made.id;
+  };
+  for (const account of db.records['account.account'] ?? []) {
+    const tags = account.tag_ids ?? [];
+    if (tags.some((tag) => activities.includes((typeof tag === 'object' ? tag : (next.records['account.account.tag'] ?? []).find((item) => item.id === tag))?.cash_flow_activity))) continue;
+    const activity = defaultCashFlowActivity(account.account_type);
+    const id = tagFor(activity);
+    next = write(next, 'account.account', account.id, { tag_ids: [...tags, id] });
+  }
+  return next;
+}
+
 export const MIGRATIONS = [
   { version: 1, name: 'Appointments: minutes, staff lines, start/end', up: migrateAppointments },
   { version: 2, name: 'Documents: tag names to documents.tag lines', up: (db) => documentTagLines(migrateDocumentTags(db)) },
@@ -473,15 +495,380 @@ export const MIGRATIONS = [
     return { ...db, settings: { ...db.settings, tax_lock_dates: locks } };
   } },
   { version: 17, name: 'Follow-ups: assign legacy untagged progress to company 1', up: migrateFollowUps },
+  { version: 18, name: 'Tax returns: unify per-company tax locks', up: (db) => {
+    const { tax_lock_date: legacy, ...settings } = db.settings ?? {};
+    const locks = { ...settings.tax_lock_dates };
+    if (legacy !== undefined) locks[1] = legacy;
+    return { ...db, settings: { ...settings, tax_lock_dates: locks } };
+  } },
+  { version: 19, name: 'Analytics and cash flow: restore historical reporting', up: (db) => {
+    const generated = new Set((db.records['account.analytic.line'] ?? [])
+      .filter((line) => ['invoice', 'vendor_bill', 'journal_entry'].includes(line.category))
+      .map((line) => line.move_id));
+    const analytic = (db.records['account.move'] ?? []).reduce((next, move) => {
+      if (move.state !== 'posted' || generated.has(move.id)
+        || !['entry', 'out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return next;
+      // Do not apply current distribution defaults to historically unassigned lines.
+      const historical = { ...move, invoice_line_ids: (move.invoice_line_ids ?? []).map((line) =>
+        line.analytic_distribution == null && !line.analytic_account_id ? { ...line, analytic_distribution: {} } : line) };
+      return analyticLinesForMove(next, historical, { historical: true })
+        .reduce((acc, values) => create(acc, 'account.analytic.line', values).db, next);
+    }, db);
+    return migrateCashFlowActivities(analytic);
+  } },
 ];
+MIGRATIONS.push({ version: 20, name: 'Fiscal years: assign legacy years to company 1', up: (db) => ({
+  ...db, records: { ...db.records, 'account.fiscal.year': (db.records['account.fiscal.year'] ?? []).map((year) => ({ ...year, company_id: year.company_id ?? 1 })) },
+}) });
+MIGRATIONS.push({ version: 21, name: 'Fiscal years: retain global closing lock', up: (db) => db });
+MIGRATIONS.push({ version: 22, name: 'Currency rounding defaults', up: (db) => ({
+  ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => currency.rounding == null ? { ...currency, rounding: 0.01 } : currency) },
+}) });
+MIGRATIONS.push({ version: 23, name: 'Explicit base currency and fiscal earnings accounts', up: (db) => {
+  db = MIGRATIONS.find((migration) => migration.version === 22).up(db);
+  const currencies = (db.records['res.currency'] ?? []).filter((currency) => currency.name === db.settings?.currency);
+  const companies = (db.records['res.company'] ?? []).map((company) => {
+    if (company.current_year_earnings_account_id != null) return company;
+    const accounts = (db.records['account.account'] ?? []).filter((account) => account.code === '302000'
+      && ['equity', 'equity_unaffected'].includes(account.account_type) && (!account.company_id || account.company_id === company.id));
+    return accounts.length === 1 ? { ...company, current_year_earnings_account_id: accounts[0].id } : company;
+  });
+  return { ...db, settings: { ...db.settings, ...(db.settings?.base_currency_id == null && currencies.length === 1 ? { base_currency_id: currencies[0].id } : {}) },
+    records: { ...db.records, 'res.company': companies } };
+} });
+
+MIGRATIONS.push({ version: 24, name: 'Currency rates: mark legacy rows as shared', up: (db) => ({
+  ...db, records: { ...db.records, 'res.currency': (db.records['res.currency'] ?? []).map((currency) => ({
+    ...currency, rate_ids: (currency.rate_ids ?? []).map((row) => ({ ...row, company_id: row.company_id ?? null })),
+  })) },
+}) });
+MIGRATIONS.push({ version: 25, name: 'Link legacy cash-basis releases', up: migrateCashBasisOrigins });
+MIGRATIONS.push({ version: 26, name: 'Lock dates and payment QR settings live on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const lockKeys = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date'];
+  const currentCompId = settings.current_company_id ?? 1;
+  const qrSetting = settings.invoice_qr;
+  const vatSetting = settings.company_vat ?? settings.vat;
+  const ibanSetting = settings.company_iban;
+
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    let updated = { ...c };
+    for (const k of lockKeys) {
+      if (settings[k] != null && settings[k] !== '' && (c[k] == null || c[k] === '')) {
+        updated[k] = settings[k];
+      }
+    }
+    if (c.id === currentCompId) {
+      if (qrSetting && (c.invoice_qr == null || c.invoice_qr === '')) {
+        updated.invoice_qr = qrSetting;
+      }
+      if (vatSetting && (c.vat == null || c.vat === '')) {
+        updated.vat = vatSetting;
+      }
+      if (ibanSetting && (c.company_iban == null || c.company_iban === '')) {
+        updated.company_iban = ibanSetting;
+      }
+    }
+    return updated;
+  });
+
+  const nextSettings = { ...settings };
+  for (const k of lockKeys) {
+    delete nextSettings[k];
+  }
+
+  return {
+    ...db,
+    settings: nextSettings,
+    records: { ...db.records, 'res.company': companies },
+  };
+} });
+
+MIGRATIONS.push({ version: 27, name: 'Accounting settings (three-way matching and audit trail) live on res.company', up: (db) => {
+  const settings = db.settings ?? {};
+  const threeWayMatching = settings.three_way_matching;
+  const auditTrail = settings.audit_trail;
+
+  const companies = (db.records?.['res.company'] ?? []).map((c) => {
+    const updated = { ...c };
+    if (threeWayMatching !== undefined && updated.three_way_matching == null) {
+      updated.three_way_matching = threeWayMatching;
+    }
+    if (auditTrail !== undefined && updated.audit_trail == null) {
+      updated.audit_trail = auditTrail;
+    }
+    return updated;
+  });
+
+  const nextSettings = { ...settings };
+  delete nextSettings.three_way_matching;
+  delete nextSettings.audit_trail;
+
+  return {
+    ...db,
+    settings: nextSettings,
+    records: { ...db.records, 'res.company': companies },
+  };
+} });
+
+function migrateCashBasisOrigins(db) {
+  // Each release is linked through the invoice payment that recorded it; unlinked releases are flagged for review.
+  const origins = new Map();
+  for (const invoice of db.records['account.move'] ?? []) {
+    for (const payment of invoice.payments ?? []) if (payment.cash_basis_move_id) origins.set(payment.cash_basis_move_id, invoice.id);
+  }
+  let next = { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).map((move) => (
+    move.cash_basis_origin_move_id == null && origins.has(move.id) ? { ...move, cash_basis_origin_move_id: origins.get(move.id) } : move
+  )) } };
+  for (const move of next.records['account.move']) {
+    if (move.move_type === 'entry' && move.cash_basis_origin_move_id == null && move.ref?.startsWith('Cash basis taxes ')) {
+      next = postNote(next, 'account.move', move.id, 'Cash-basis origin invoice could not be determined; review this entry.');
+    }
+  }
+  const { cash_basis_origins_migrated: ignored, ...settings } = next.settings ?? {};
+  void ignored;
+  return { ...next, settings };
+}
+
+MIGRATIONS.push({
+  version: 28,
+  name: 'Taxes: repartition lines for invoice and refund documents',
+  up: (db) => {
+    const taxMap = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, t]));
+    // Before repartition lines, a tax without an account posted to the chart's VAT account; keep that only when it is unambiguous.
+    const defaultTaxAccount = (companyId, use) => {
+      const code = use === 'purchase' ? '131000' : '251000';
+      const type = CHART.find((row) => row[0] === code)?.[2];
+      const typed = (db.records['account.account'] ?? []).filter((a) => a.code === code && a.account_type === type);
+      const owned = typed.filter((a) => a.company_id === (companyId ?? 1));
+      const pick = owned.length ? owned : typed.filter((a) => a.company_id == null);
+      return pick.length === 1 ? pick[0].id : null;
+    };
+    const convertLine = (l) => {
+      if (!l) return l;
+      const { tax_account_id, tax_tag_ids, tax_base_tag_ids, ...rest } = l;
+      let invLines = l.invoice_repartition_line_ids;
+      let refLines = l.refund_repartition_line_ids;
+      if (!invLines?.length && !refLines?.length && (tax_account_id !== undefined || tax_tag_ids !== undefined || l.tax_id)) {
+        const taxRec = l.tax_id ? taxMap.get(l.tax_id) : null;
+        const lineCompId = taxRec?.company_id ?? 1;
+        const defAcc = defaultTaxAccount(lineCompId, taxRec?.type_tax_use);
+        const acc = tax_account_id ?? taxRec?.account_id ?? defAcc;
+        const baseTags = [...(tax_base_tag_ids ?? taxRec?.base_tag_ids ?? [])];
+        const taxTags = [...(tax_tag_ids ?? taxRec?.tag_ids ?? [])];
+        invLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
+        ];
+        refLines = [
+          { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+          { repartition_type: 'tax', factor_percent: 100, account_id: acc, tag_ids: taxTags },
+        ];
+      }
+      let breakdown = rest.tax_breakdown;
+      if (Array.isArray(breakdown) && breakdown.length) {
+        breakdown = breakdown.map(convertLine);
+      }
+      return {
+        ...rest,
+        ...(invLines?.length ? { invoice_repartition_line_ids: invLines } : {}),
+        ...(refLines?.length ? { refund_repartition_line_ids: refLines } : {}),
+        ...(breakdown ? { tax_breakdown: breakdown } : {}),
+      };
+    };
+
+    const convertModelLines = (recs, fieldName) =>
+      (recs ?? []).map((r) => (r[fieldName] ? { ...r, [fieldName]: r[fieldName].map(convertLine) } : r));
+
+    const nextRecords = { ...db.records };
+    nextRecords['account.tax'] = (db.records['account.tax'] ?? []).map((t) => {
+      const baseTags = [...(t.base_tag_ids ?? [])];
+      const taxTags = [...(t.tag_ids ?? [])];
+      const defAcc = defaultTaxAccount(t.company_id, t.type_tax_use);
+      const accountId = t.account_id ?? defAcc;
+      const { account_id, tag_ids, base_tag_ids, ...restTax } = t;
+      return {
+        ...restTax,
+        invoice_repartition_line_ids: t.invoice_repartition_line_ids?.length
+          ? t.invoice_repartition_line_ids
+          : [
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
+        refund_repartition_line_ids: t.refund_repartition_line_ids?.length
+          ? t.refund_repartition_line_ids
+          : [
+            { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: baseTags },
+            { repartition_type: 'tax', factor_percent: 100, account_id: accountId, tag_ids: taxTags },
+          ],
+      };
+    });
+
+    nextRecords['account.move'] = convertModelLines(nextRecords['account.move'], 'invoice_line_ids');
+    nextRecords['sale.order'] = convertModelLines(nextRecords['sale.order'], 'order_line');
+    nextRecords['purchase.order'] = convertModelLines(nextRecords['purchase.order'], 'order_line');
+    nextRecords['pos.order'] = convertModelLines(nextRecords['pos.order'], 'lines');
+    nextRecords['sale.subscription'] = convertModelLines(nextRecords['sale.subscription'], 'order_line');
+
+    return { ...db, records: nextRecords };
+  },
+});
+
+MIGRATIONS.push({ version: 29, name: 'Explicit company stock accounts', up: (db) => ({
+  ...db, records: { ...db.records, 'res.company': (db.records['res.company'] ?? []).map((company) => {
+    const values = {};
+    for (const [field, [code, type]] of Object.entries(STOCK_CHART_ROLES)) {
+      if (company[field]) continue;
+      const matches = (db.records['account.account'] ?? []).filter((account) => account.company_id === company.id && account.code === code && account.account_type === type);
+      if (matches.length === 1) values[field] = matches[0].id;
+    }
+    return { ...company, ...values };
+  }) },
+}) });
+
+MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    const accounts = db.records['account.account'] ?? [];
+    const owned = accounts.filter((a) => a.company_id === company && a.code === code);
+    if (owned.length) {
+      const match = owned.filter((a) => a.account_type === type);
+      return match.length === 1 ? match[0].id : null;
+    }
+    const shared = accounts.filter((a) => a.company_id == null && a.code === code && a.account_type === type);
+    return shared.length === 1 ? shared[0].id : null;
+  };
+  const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company,
+    deferred_revenue_account_id: company.deferred_revenue_account_id ?? find(company.id, '212000'),
+    deferred_expense_account_id: company.deferred_expense_account_id ?? find(company.id, '132000'),
+  }));
+  const journals = (db.records['account.journal'] ?? []).map((journal) => {
+    if (!['bank', 'cash'].includes(journal.type)) return journal;
+    const company = journal.company_id ?? 1;
+    return { ...journal, suspense_account_id: journal.suspense_account_id ?? find(company, '101404'),
+      ...(journal.type === 'cash' ? { profit_account_id: journal.profit_account_id ?? find(company, '450000'), loss_account_id: journal.loss_account_id ?? find(company, '690000') } : {}) };
+  });
+  // Statement lines stored the chosen counterpart as a chart code; resolve it once to that company's account.
+  const accounts = db.records['account.account'] ?? [];
+  const lines = (db.records['account.bank.statement.line'] ?? []).map(({ counterpart, ...line }) => {
+    const company = line.company_id ?? 1;
+    let journalId = line.journal_id ?? null;
+    if (!journalId) {
+      // Only an unambiguous journal is assigned: the company's single default bank journal, else its single bank journal.
+      const banks = (db.records['account.journal'] ?? []).filter((j) => j.type === 'bank' && (j.company_id ?? 1) === company);
+      const defaults = banks.filter((j) => j.default_for_payments);
+      journalId = (defaults.length === 1 ? defaults[0] : banks.length === 1 ? banks[0] : null)?.id ?? null;
+    }
+    const withJournal = journalId ? { ...line, journal_id: journalId } : line;
+    if (counterpart == null || line.counterpart_account_id) return withJournal;
+    const matches = accounts.filter((a) => a.code === counterpart && a.company_id === company);
+    const candidates = matches.length ? matches : accounts.filter((a) => a.code === counterpart && a.company_id == null);
+    // An unresolved code stays on the line so the user's choice is not lost (Qodo 40).
+    return candidates.length === 1 ? { ...withJournal, counterpart_account_id: candidates[0].id } : { ...withJournal, counterpart };
+  });
+  return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
+} });
+
+MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental and reconciliation accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    if (!type) return null;
+    const accounts = db.records['account.account'] ?? [];
+    const owned = accounts.filter((account) => account.company_id === company && account.code === code);
+    if (owned.length) {
+      const match = owned.filter((a) => a.account_type === type);
+      return match.length === 1 ? match[0].id : null;
+    }
+    const shared = accounts.filter((account) => account.company_id == null && account.code === code && account.account_type === type);
+    return shared.length === 1 ? shared[0].id : null;
+  };
+  const resolveRuleAccount = (company, code) => {
+    if (!code) return null;
+    const accounts = db.records['account.account'] ?? [];
+    const owned = company == null ? [] : accounts.filter((a) => a.company_id === company && a.code === code);
+    if (owned.length) return owned.length === 1 ? owned[0].id : null;
+    const shared = accounts.filter((a) => a.company_id == null && a.code === code);
+    return shared.length === 1 ? shared[0].id : null;
+  };
+  const companyRoles = { gain_account_id: '450300', loss_account_id: '690300', income_currency_exchange_account_id: '450100', expense_currency_exchange_account_id: '690100', income_early_payment_discount_account_id: '450200', expense_early_payment_discount_account_id: '690200', rental_deposit_account_id: '230100', rental_withheld_deposit_account_id: '450000', down_payment_account_id: '212000' };
+  const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company, ...Object.fromEntries(Object.entries(companyRoles).filter(([field]) => !company[field]).map(([field, code]) => [field, find(company.id, code)])) }));
+  const assets = (records) => (records ?? []).map(({ account_expense_id, ...asset }) => ({ ...asset,
+    account_asset_id: asset.account_asset_id ?? find(asset.company_id ?? 1, '151000'),
+    account_depreciation_id: asset.account_depreciation_id ?? find(asset.company_id ?? 1, '152000'),
+    account_depreciation_expense_id: asset.account_depreciation_expense_id ?? account_expense_id ?? find(asset.company_id ?? 1, '680000'),
+  }));
+  const rules = (db.records['account.reconcile.model'] ?? []).map((rule) => ({ ...rule, line_ids: (rule.line_ids ?? []).map(({ account_code, ...line }) => {
+    const account_id = line.account_id ?? resolveRuleAccount(rule.company_id ?? null, account_code);
+    return { ...line, account_id, ...(!account_id && account_code ? { account_code } : {}) };
+  }) }));
+  return { ...db, records: { ...db.records, 'res.company': companies, 'account.asset': assets(db.records['account.asset']), 'account.asset.model': assets(db.records['account.asset.model']), 'account.reconcile.model': rules } };
+} });
+
+MIGRATIONS.push({ version: 32, name: 'Budget company', up: (db) => {
+  // Only a single-company database identifies the budget's company; otherwise the report asks the user to select one.
+  const companies = db.records['res.company'] ?? [];
+  if (companies.length !== 1) return db;
+  const budgets = (db.records['account.budget'] ?? []).map((budget) => budget.company_id ? budget : { ...budget, company_id: companies[0].id });
+  return { ...db, records: { ...db.records, 'account.budget': budgets } };
+} });
+
+MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    const matches = (db.records['account.account'] ?? []).filter((a) => a.company_id === company && a.code === code && a.account_type === type);
+    return matches.length === 1 ? matches[0].id : null;
+  };
+  const structures = (db.records['hr.payroll.structure'] ?? []).map((structure) => {
+    const company = structure.company_id ?? 1;
+    const journals = (db.records['account.journal'] ?? []).filter((j) => (j.company_id ?? 1) === company && j.code === 'SAL' && j.type === 'general');
+    return { ...structure, company_id: company, journal_id: structure.journal_id ?? (journals.length === 1 ? journals[0].id : null),
+      salary_expense_account_id: structure.salary_expense_account_id ?? find(company, '620000'),
+      salary_payable_account_id: structure.salary_payable_account_id ?? find(company, '230000'),
+      rules: (structure.rules ?? []).map(({ account, ...rule }) => ({ ...rule,
+        ...(account && !rule.account_credit_id ? { account_credit_id: find(company, account) } : {}),
+      })),
+    };
+  });
+  return { ...db, records: { ...db.records,
+    'hr.payroll.structure': structures,
+    'stock.valuation.layer': (db.records['stock.valuation.layer'] ?? []).map((layer) => typeof layer.counterpart === 'string' ? { ...layer, counterpart: find(layer.company_id ?? 1, layer.counterpart) } : layer),
+    'res.company': (db.records['res.company'] ?? []).map((company) => {
+      const candidates = structures.filter((s) => s.company_id === company.id);
+      return { ...company, opening_equity_account_id: company.opening_equity_account_id ?? find(company.id, '301000'),
+        default_payroll_structure_id: company.default_payroll_structure_id ?? (candidates.length === 1 ? candidates[0].id : null) };
+    }),
+    'account.tax': (db.records['account.tax'] ?? []).map((tax) => ({ ...tax, cash_basis_transition_account_id: tax.cash_basis_transition_account_id ?? (tax.tax_exigibility === 'on_payment' ? find(tax.company_id ?? 1, tax.type_tax_use === 'sale' ? '251100' : '131100') : null) })),
+    'account.cash.rounding': (db.records['account.cash.rounding'] ?? []).map((rounding) => ({ ...rounding,
+      profit_account_id: Number.isInteger(rounding.profit_account_id) ? rounding.profit_account_id : find(rounding.company_id ?? 1, rounding.profit_account_id || '450000'),
+      loss_account_id: Number.isInteger(rounding.loss_account_id) ? rounding.loss_account_id : find(rounding.company_id ?? 1, rounding.loss_account_id || '690000'),
+    })),
+  } };
+} });
+
+MIGRATIONS.push({ version: 34, name: 'Default general journal for companies with a single general journal', up: (db) => {
+  const journals = db.records?.['account.journal'] ?? [];
+  const unresolved = [];
+  const companies = (db.records?.['res.company'] ?? []).map((company) => {
+    if (company.default_general_journal_id) return company;
+    const candidates = journals.filter((j) => j.type === 'general' && (j.company_id ?? 1) === company.id);
+    if (candidates.length === 1) return { ...company, default_general_journal_id: candidates[0].id };
+    unresolved.push([company.id, candidates.length]);
+    return company;
+  });
+  // The note lives in the company's chatter, which is stored with the database and shown to administrators.
+  return unresolved.reduce((next, [id, count]) => postNote(next, 'res.company', id,
+    `Upgrade: this company has ${count} general journals, so no default general journal was chosen. Set the default general journal in the company settings before revaluing foreign balances.`),
+  { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
-export function migrate(db) {
+export function migrate(db, toVersion = SCHEMA_VERSION) {
   if (!db?.records) return db;
   const from = db.schema_version ?? 0;
-  if (from > SCHEMA_VERSION) throw new Error(`Database schema ${from} is newer than this version of Mizan (${SCHEMA_VERSION})`);
-  const pending = MIGRATIONS.filter((m) => m.version > from);
+  if (from > toVersion) throw new Error(`Database schema ${from} is newer than this version of Mizan (${toVersion})`);
+  const pending = MIGRATIONS.filter((m) => m.version > from && m.version <= toVersion);
   if (!pending.length) return db;
-  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: SCHEMA_VERSION };
+  return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: toVersion };
 }

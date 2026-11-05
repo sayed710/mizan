@@ -1,5 +1,5 @@
 import { addDays, today } from './common.js';
-import { cents } from '../money.js';
+import { currencyUnits, roundCurrency } from '../money.js';
 
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
@@ -12,16 +12,25 @@ function lineDate(line, invoiceDate) {
 }
 
 /** Split an invoice total into dated installments according to a payment term. */
-export function installments(term, total, invoiceDate) {
+export function installments(term, total, invoiceDate, currency = null) {
   const lines = term.line_ids ?? [];
   if (!lines.length) throw new Error('Add at least one due term');
 
-  const signedTotal = cents(total);
+  const step = Number(currency?.rounding ?? 0.01);
+  const signedTotal = currencyUnits(total, currency);
   const sign = Math.sign(signedTotal);
   const totalCents = Math.abs(signedTotal);
-  const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, cents(line.value)) : 0);
+  const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0);
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) throw new Error('Fixed amounts exceed the total');
+  const balanceIndex = lines.findIndex((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
+  if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) throw new Error('The balance due term must be the last one');
+  const hasFixed = lines.some((line) => line.value_type === 'fixed');
+  if (!hasFixed || balanceIndex >= 0) {
+    const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
+    // Without a balance line the terms must add up to the total; rounding may shift half a unit per line.
+    if (balanceIndex >= 0 ? requestedTotal > totalCents + lines.length / 2 : Math.abs(requestedTotal - totalCents) > lines.length / 2) throw new Error('Payment terms must allocate 100% of the total');
+  }
 
   let remaining = totalCents;
   const amounts = lines.map((line, index) => {
@@ -37,21 +46,27 @@ export function installments(term, total, invoiceDate) {
 
   return lines.map((line, index) => ({
     date: lineDate(line, invoiceDate),
-    amount: amounts[index] / 100,
+    amount: Number((amounts[index] * step).toPrecision(15)),
   }));
 }
 
 /** Due date of the final installment (dates do not depend on the amount). */
 export function dueDate(term, invoiceDate) {
-  const last = (term.line_ids ?? []).at(-1);
-  return last ? lineDate(last, invoiceDate) : invoiceDate;
+  const dates = (term.line_ids ?? []).map((line) => lineDate(line, invoiceDate));
+  return dates.length ? dates.reduce((latest, date) => date > latest ? date : latest) : invoiceDate;
 }
 
 /** Return the early-payment discount when payment falls within its configured window. */
-export function earlyDiscount(term, total, invoiceDate, paymentDate) {
+export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = null) {
   const discountDate = addDays(invoiceDate, Number(term.discount_days) || 0);
   if (!term.early_discount || !paymentDate || paymentDate > discountDate) return 0;
-  return Math.round(cents(total) * (Number(term.discount_percent) || 0) / 100) / 100;
+  return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
+}
+
+/** Share of the invoice's tax kept when the term reduces tax for its early-payment discount (1 when it does not). */
+export function mixedDiscountFactor(term) {
+  const percent = Number(term?.discount_percent) || 0;
+  return term?.early_discount && term.discount_tax_computation === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
@@ -64,13 +79,13 @@ export const termModels = {
       early_discount: { type: 'boolean', label: 'Early Discount' },
       discount_percent: { type: 'float', label: 'Discount %' },
       discount_days: { type: 'integer', label: 'Discount Days' },
-      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax']] },
+      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax'], ['mixed', 'Always (tax reduction on invoice)']] },
       line_ids: {
         type: 'one2many',
         label: 'Due Terms',
         fields: {
           value: { type: 'float', label: 'Value' },
-          value_type: { type: 'selection', label: 'Value Type', options: [['percent', 'Percent'], ['fixed', 'Fixed']] },
+          value_type: { type: 'selection', label: 'Value Type', options: [['percent', 'Percent'], ['fixed', 'Fixed'], ['balance', 'Balance']] },
           nb_days: { type: 'integer', label: 'Days' },
           delay_type: { type: 'selection', label: 'Delay Type', options: [['days_after', 'Days after invoice date'], ['days_end_of_month', 'Days after end of month']] },
         },
