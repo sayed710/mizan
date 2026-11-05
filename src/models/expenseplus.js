@@ -180,7 +180,10 @@ export const expensePlusModels = {
       accounting_date: { type: 'date', label: 'Accounting Date' },
       move_id: { ...expense.fields.move_id },
       journal: { type: 'char', label: 'Journal' },
-      expense_journal_id: { type: 'many2one', relation: 'account.journal', label: 'Expense Journal', readonly: (r) => ['post', 'done'].includes(r?.state) },
+      expense_journal_id: {
+        type: 'many2one', relation: 'account.journal', label: 'Expense Journal', readonly: (r) => ['post', 'done'].includes(r?.state),
+        domain: (journal, r) => (!journal.company_id || journal.company_id === (r?.company_id ?? 1)) && ['general', 'purchase'].includes(journal.type),
+      },
       amount_paid: { type: 'monetary', label: 'Reimbursed', readonly: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Reimbursement Contact', readonly: true },
     },

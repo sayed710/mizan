@@ -73,7 +73,7 @@ test('companies revalue only their own invoices using their own journal and acco
     accounts[code] = created.id;
   }
   const journal = create(db, 'account.journal', { code: 'MISC', name: 'Second miscellaneous', type: 'general', company_id: secondCompany.id });
-  db = write(journal.db, 'res.company', secondCompany.id, { account_default_receivable_id: accounts['121000'] });
+  db = write(journal.db, 'res.company', secondCompany.id, { account_default_receivable_id: accounts['121000'], default_general_journal_id: journal.id });
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, company_id: secondCompany.id, currency_id: read(db, 'account.move', first.id).currency_id, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Other', qty: 1, price_unit: 200, tax: 0 }] });
   db = postMove(invoice.db, invoice.id);
   const done = revalueForeignBalances(db, '2026-02-28');
