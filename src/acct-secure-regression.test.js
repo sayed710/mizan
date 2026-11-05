@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { invoiceJournalDefaults } from './test-support/accounting-company.js';
 import { DatabaseSync } from 'node:sqlite';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, write } from './orm.js';
 import { apps, leavesOf, models } from './models/index.js';
 import { postEntry } from './models/ledger.js';
@@ -235,7 +236,7 @@ test('depreciation model action posts allocated expense and analytic lines with 
   let db = seed();
   const analytic = create(db, 'account.analytic.account', { name: 'Equipment project', code: 'EQUIP' }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
-  const model = create(db, 'account.asset.model', { name: 'Annual equipment', method: 'linear', method_number: 2, method_period: '12', analytic_distribution: distribution }); db = model.db;
+  const model = create(db, 'account.asset.model', { ...assetAccounts(db), name: 'Annual equipment', method: 'linear', method_number: 2, method_period: '12', analytic_distribution: distribution }); db = model.db;
   const asset = create(db, 'account.asset', { name: 'Equipment', model_id: model.id, original_value: 1200, acquisition_date: '2020-01-01' }); db = asset.db;
   const buttons = models['account.asset'].form.buttons;
   db = buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.asset', asset.id)).db;
@@ -252,7 +253,7 @@ test('depreciation model action posts allocated expense and analytic lines with 
 test('asset disposal and deferred expense and revenue actions allocate profit and loss lines', () => {
   let db = seed(); const analytic = create(db, 'account.analytic.account', { name: 'Project', code: 'PROJ' }); db = analytic.db;
   const distribution = { [analytic.id]: 100 };
-  const asset = create(db, 'account.asset', { name: 'Disposal', original_value: 1200, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', analytic_distribution: distribution }); db = asset.db;
+  const asset = create(db, 'account.asset', { ...assetAccounts(db), name: 'Disposal', original_value: 1200, acquisition_date: '2026-01-01', method_number: 3, method_period: '12', analytic_distribution: distribution }); db = asset.db;
   const buttons = models['account.asset'].form.buttons;
   db = buttons.find((b) => b.label === 'Confirm').run(db, read(db, 'account.asset', asset.id)).db;
   const previousPrompt = globalThis.prompt; globalThis.prompt = () => '0';

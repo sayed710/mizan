@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 import { accountId, isBalanced, postEntry } from './models/ledger.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
@@ -211,6 +212,7 @@ test('assets post with company and validate journal and accounts across two comp
 
   // Assets in Company 1
   const asset1 = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Co1 Equipment',
     original_value: 12000,
     salvage_value: 0,
@@ -229,6 +231,7 @@ test('assets post with company and validate journal and accounts across two comp
 
   // Assets in Company 2
   const asset2 = create(db, 'account.asset', {
+    ...assetAccounts(db, co2Id),
     name: 'Co2 Van',
     original_value: 24000,
     salvage_value: 0,

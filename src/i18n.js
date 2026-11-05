@@ -961,6 +961,7 @@ const ar = {
   'Preceding Transfer': 'التحويل السابق',
   'Warehouse Route': 'مسار المستودع',
   'Order Line': 'بند الطلب', 'Invoicing Method': 'طريقة الفوترة', 'Regular Invoice': 'فاتورة عادية', 'Down Payment': 'دفعة مقدمة', 'Down Payment Account': 'حساب الدفعات المقدمة', 'Currency Exchange Gain Account': 'حساب أرباح صرف العملات', 'Currency Exchange Loss Account': 'حساب خسائر صرف العملات', 'Down Payment (Percentage)': 'دفعة مقدمة (نسبة مئوية)', 'Down Payment (Fixed Amount)': 'دفعة مقدمة (مبلغ ثابت)',
+  'Depreciation Expense Account': 'حساب مصروف الإهلاك', 'Legacy Expense Account': 'حساب المصروف القديم', 'Asset Disposal Gain Account': 'حساب أرباح استبعاد الأصول', 'Asset Disposal Loss Account': 'حساب خسائر استبعاد الأصول', 'Rental Deposit Liability Account': 'حساب التزامات تأمين الإيجار', 'Withheld Deposit Income Account': 'حساب إيراد التأمين المحتجز',
   'Analytic Distribution': 'التوزيع التحليلي',
   'Amount in Currency': 'المبلغ بالعملة',
   'Subscription Period': 'فترة الاشتراك',

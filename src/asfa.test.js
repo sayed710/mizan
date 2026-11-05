@@ -7,9 +7,11 @@ import { postMove } from './models/accounting.js';
 import { accountId } from './models/ledger.js';
 import { confirmAsset, depreciationReport, disposeAsset, modifyAsset, pauseAsset, postDepreciation, resumeAsset } from './models/assets.js';
 import { confirmLoan, postDueLines, earlyRepayment } from './models/loans.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 
 test('asset disposal rejects a sale invoice dated after disposal', () => {
-  const created = create(seed(), 'account.asset', { name: 'Asset', acquisition_date: '2026-01-01', original_value: 1000, salvage_value: 0, method_number: 5, method_period: '12' });
+  const base = seed();
+  const created = create(base, 'account.asset', { ...assetAccounts(base), name: 'Asset', acquisition_date: '2026-01-01', original_value: 1000, salvage_value: 0, method_number: 5, method_period: '12' });
   let db = confirmAsset(created.db, read(created.db, 'account.asset', created.id));
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2027-12-31', invoice_line_ids: [{ qty: 1, price_unit: 700, tax: 0, account_id: accountId(db, '101401') }] });
   db = postMove(invoice.db, invoice.id);
@@ -19,7 +21,7 @@ test('asset disposal rejects a sale invoice dated after disposal', () => {
 test('bill asset retains and clears the booked fixed asset account', () => {
   let db = seed();
   const bookedAccount = accountId(db, '151000');
-  const model = create(db, 'account.asset.model', { name: 'Other account', account_asset_id: accountId(db, '101401'), method_number: 5, method_period: '12' });
+  const model = create(db, 'account.asset.model', { ...assetAccounts(db), name: 'Other account', account_asset_id: accountId(db, '101401'), method_number: 5, method_period: '12' });
   db = write(model.db, 'account.account', bookedAccount, { asset_model_id: model.id });
   const bill = create(db, 'account.move', { move_type: 'in_invoice', partner_id: 2, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Machine', account_id: bookedAccount, qty: 1, price_unit: 500, tax: 0 }] });
   db = postMove(bill.db, bill.id);
@@ -66,7 +68,8 @@ test('loan posting uses explicit company accounts and rejects missing configurat
 });
 
 test('depreciation report excludes later asset value adjustments', () => {
-  const made = create(seed(), 'account.asset', { name: 'Revalued', acquisition_date: '2026-01-01', original_value: 1000, salvage_value: 0, method_number: 5, method_period: '12', account_asset_id: accountId(seed(), '151000') });
+  const base = seed();
+  const made = create(base, 'account.asset', { ...assetAccounts(base), name: 'Revalued', acquisition_date: '2026-01-01', original_value: 1000, salvage_value: 0, method_number: 5, method_period: '12', account_asset_id: accountId(base, '151000') });
   let db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
   db = modifyAsset(db, read(db, 'account.asset', made.id), { date: '2027-01-01', valueChange: 500, accountId: accountId(db, '301000') });
   const report = (to) => depreciationReport(db, { to }, '1').rows.find((row) => row.a.id === made.id);
@@ -76,7 +79,8 @@ test('depreciation report excludes later asset value adjustments', () => {
 });
 
 test('resume shifts unposted depreciation past the paused interval', () => {
-  const made = create(seed(), 'account.asset', { name: 'Paused', acquisition_date: '2026-01-01', original_value: 1200, salvage_value: 0, method_number: 3, method_period: '1' });
+  const base = seed();
+  const made = create(base, 'account.asset', { ...assetAccounts(base), name: 'Paused', acquisition_date: '2026-01-01', original_value: 1200, salvage_value: 0, method_number: 3, method_period: '1' });
   let db = confirmAsset(made.db, read(made.db, 'account.asset', made.id));
   db = pauseAsset(db, read(db, 'account.asset', made.id), '2026-01-15');
   db = resumeAsset(db, read(db, 'account.asset', made.id), '2026-03-15');

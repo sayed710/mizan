@@ -174,7 +174,7 @@ export function seed() {
   partners.forEach((p) => add('res.partner', { ...p, pricelist_id: (p.tag_ids ?? []).includes('Wholesale') ? wholesale : null }));
   db = write(db, 'account.account', installedAccountIds.receivable, { company_id: 1 });
   db = write(db, 'account.account', installedAccountIds.payable, { company_id: 1 });
-  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
+  db = ensureMainCompany(db, { account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], down_payment_account_id: installedByCode['212000'], gain_account_id: installedByCode['450300'], loss_account_id: installedByCode['690300'], income_currency_exchange_account_id: installedByCode['450100'], expense_currency_exchange_account_id: installedByCode['690100'], income_early_payment_discount_account_id: installedByCode['450200'], expense_early_payment_discount_account_id: installedByCode['690200'], rental_deposit_account_id: installedByCode['230100'], rental_withheld_deposit_account_id: installedByCode['450000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,

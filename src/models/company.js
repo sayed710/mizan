@@ -242,10 +242,10 @@ function companyGuard(db, before, r) {
     const account = record(db, 'account.account', r.down_payment_account_id);
     if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active down payment account for this company';
   }
-  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id']) {
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id', 'gain_account_id', 'loss_account_id', 'income_currency_exchange_account_id', 'expense_currency_exchange_account_id', 'income_early_payment_discount_account_id', 'expense_early_payment_discount_account_id', 'rental_deposit_account_id', 'rental_withheld_deposit_account_id']) {
     if (!r[field]) continue;
     const account = record(db, 'account.account', r[field]);
-    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return 'Select an active deferred account belonging to this company';
+    if (!account || account.active === false || (!shared(account.company_id) && account.company_id !== r.id)) return `Select an active ${companyModels['res.company'].fields[field]?.label ?? field} belonging to this company`;
   }
   if (r.current_year_earnings_account_id) {
     const account = record(db, 'account.account', r.current_year_earnings_account_id);
@@ -279,10 +279,27 @@ export function createCompany(db, vals) {
     accounts[field] = account.id;
   }
   const installed = new Map();
+  installed.set('212000:liability_current', accounts.deferred_revenue_account_id ?? values.deferred_revenue_account_id);
   for (const [field, [code, account_type, name]] of Object.entries(STOCK_CHART_ROLES)) {
     if (values[field]) continue;
     const key = `${code}:${account_type}`;
     if (!installed.has(key)) {
+      const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
+      next = account.db;
+      installed.set(key, account.id);
+    }
+    accounts[field] = installed.get(key);
+  }
+  for (const [field, code, name, account_type] of [
+    ['gain_account_id', '450300', 'Gain on Asset Disposal', 'income_other'], ['loss_account_id', '690300', 'Loss on Asset Disposal', 'expense_other'],
+    ['income_currency_exchange_account_id', '450100', 'Foreign Exchange Gain', 'income_other'], ['expense_currency_exchange_account_id', '690100', 'Foreign Exchange Loss', 'expense_other'],
+    ['income_early_payment_discount_account_id', '450200', 'Cash Discount Gain', 'income_other'], ['expense_early_payment_discount_account_id', '690200', 'Cash Discount Loss', 'expense_other'],
+    ['rental_deposit_account_id', '230100', 'Rental Deposits', 'liability_current'], ['rental_withheld_deposit_account_id', '450000', 'Other Income', 'income_other'],
+    ['down_payment_account_id', '212000', 'Deferred Revenue', 'liability_current'],
+  ]) {
+    if (values[field]) continue;
+    const key = `${code}:${account_type}`;
+    if (!installed.get(key)) {
       const account = create(next, 'account.account', { code, name, account_type, company_id: res.id });
       next = account.db;
       installed.set(key, account.id);
@@ -393,6 +410,10 @@ export const companyModels = {
       company_iban: { type: 'char', label: 'Company IBAN for Payment QR' },
       invoice_qr: { type: 'selection', label: 'Invoice Payment QR', options: [['zatca', 'ZATCA'], ['epc', 'EPC / SEPA']] },
       down_payment_account_id: { type: 'many2one', relation: 'account.account', label: 'Down Payment Account' },
+      gain_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Gain Account' },
+      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Asset Disposal Loss Account' },
+      rental_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Rental Deposit Liability Account' },
+      rental_withheld_deposit_account_id: { type: 'many2one', relation: 'account.account', label: 'Withheld Deposit Income Account' },
       deferred_revenue_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Revenue Account' },
       deferred_expense_account_id: { type: 'many2one', relation: 'account.account', label: 'Deferred Expense Account' },
       deferred_generation_method: { type: 'selection', label: 'Deferred Entry Generation', options: [['on_validation', 'On Validation'], ['manual', 'Manual'], ['manual_grouped', 'Manually & Grouped']] },

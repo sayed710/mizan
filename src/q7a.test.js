@@ -2,6 +2,7 @@ import './models/index.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
+import { assetAccounts } from './test-support/asset-accounts.js';
 import { create, read, search, write } from './orm.js';
 import { models } from './registry.js';
 import { reprintCheck } from './models/pay.js';
@@ -133,6 +134,7 @@ test('8. Extending an asset depreciation board does not skip the period after re
   let db = seed();
   let assetId;
   ({ db, id: assetId } = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Monthly Laptop',
     original_value: 300,
     salvage_value: 0,
@@ -156,6 +158,7 @@ test('8. Extending an asset depreciation board does not skip the period after re
 
   let prorataAssetId;
   ({ db, id: prorataAssetId } = create(db, 'account.asset', {
+    ...assetAccounts(db),
     name: 'Prorata Laptop',
     original_value: 300,
     salvage_value: 0,

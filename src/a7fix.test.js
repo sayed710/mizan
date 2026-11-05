@@ -14,7 +14,7 @@ test('reconciliation model posts tax and counterpart partner and maps a partner 
   const taxAccount = search(db, 'account.account').find((a) => a.code === '131000');
   const tax = create(db, 'account.tax', { name: 'Input tax', amount: 14, amount_type: 'percent', price_include: true, ...defaultTaxRepartitionLines(taxAccount.id, []) }); db = tax.db;
   const line = create(db, 'account.bank.statement.line', { date: '2025-01-01', amount: -114, payment_ref: 'fee' }); db = line.db;
-  db = applyRule(db, { name: 'fee', line_ids: [{ account_code: '600000', amount_type: 'percentage', amount: 100, tax_ids: [tax.id], partner_id: 3 }] }, read(db, 'account.bank.statement.line', line.id));
+  db = applyRule(db, { name: 'fee', line_ids: [{ account_id: search(db, 'account.account').find((a) => a.code === '600000').id, amount_type: 'percentage', amount: 100, tax_ids: [tax.id], partner_id: 3 }] }, read(db, 'account.bank.statement.line', line.id));
   const items = read(db, 'account.move', read(db, 'account.bank.statement.line', line.id).move_id).line_ids;
   assert.equal(items.find((l) => l.account_id === taxAccount.id).debit, 14);
   assert.equal(items.find((l) => read(db, 'account.account', l.account_id).code === '600000').debit, 100);
@@ -41,7 +41,7 @@ test('CAMT currency is validated and foreign journal reconciliation converts at 
   db = write(db, 'res.currency', eur.id, { rate_ids: [{ date: '2025-01-01', rate: 0.8 }] }); db = write(db, 'account.journal', journal.id, { currency_id: eur.id });
   db = importStatement(db, 'test.xml', xml, { journal_id: journal.id }).db;
   const line = search(db, 'account.bank.statement.line').find((l) => l.unique_import_id === 'fx-test'); assert.equal(line.amount, 100); assert.equal(line.currency_id, eur.id);
-  db = applyRule(db, { name: 'book', line_ids: [{ account_code: '600000', amount_type: 'percentage', amount: 100 }] }, line);
+  db = applyRule(db, { name: 'book', line_ids: [{ account_id: search(db, 'account.account').find((a) => a.code === '600000').id, amount_type: 'percentage', amount: 100 }] }, line);
   const items = read(db, 'account.move', read(db, 'account.bank.statement.line', line.id).move_id).line_ids;
   assert.deepEqual(items.map((l) => [l.debit, l.credit, l.currency_id, l.amount_currency]), [[125, 0, eur.id, 100], [0, 125, eur.id, -100]]);
 });

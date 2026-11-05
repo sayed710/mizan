@@ -739,6 +739,24 @@ MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral a
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
 } });
 
+MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental and reconciliation accounts', up: (db) => {
+  const find = (company, code) => {
+    const type = CHART.find((row) => row[0] === code)?.[2];
+    if (!type) return null;
+    const matches = (db.records['account.account'] ?? []).filter((account) => account.company_id === company && account.code === code && account.account_type === type);
+    return matches.length === 1 ? matches[0].id : null;
+  };
+  const companyRoles = { gain_account_id: '450300', loss_account_id: '690300', income_currency_exchange_account_id: '450100', expense_currency_exchange_account_id: '690100', income_early_payment_discount_account_id: '450200', expense_early_payment_discount_account_id: '690200', rental_deposit_account_id: '230100', rental_withheld_deposit_account_id: '450000', down_payment_account_id: '212000' };
+  const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company, ...Object.fromEntries(Object.entries(companyRoles).filter(([field]) => !company[field]).map(([field, code]) => [field, find(company.id, code)])) }));
+  const assets = (records) => (records ?? []).map(({ account_expense_id, ...asset }) => ({ ...asset,
+    account_asset_id: asset.account_asset_id ?? find(asset.company_id ?? 1, '151000'),
+    account_depreciation_id: asset.account_depreciation_id ?? find(asset.company_id ?? 1, '152000'),
+    account_depreciation_expense_id: asset.account_depreciation_expense_id ?? account_expense_id ?? find(asset.company_id ?? 1, '680000'),
+  }));
+  const rules = (db.records['account.reconcile.model'] ?? []).map((rule) => ({ ...rule, line_ids: (rule.line_ids ?? []).map(({ account_code, ...line }) => ({ ...line, account_id: line.account_id ?? (account_code ? find(rule.company_id ?? 1, account_code) : null) })) }));
+  return { ...db, records: { ...db.records, 'res.company': companies, 'account.asset': assets(db.records['account.asset']), 'account.asset.model': assets(db.records['account.asset.model']), 'account.reconcile.model': rules } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

@@ -17,7 +17,7 @@ for (const mode of ['Book to Account', 'rule']) test(`outbound oversized bill le
   db = run(line.db, line.id, 'Match');
   assert.equal(read(db, 'account.move', inv.id).amount_residual, 0);
   assert.equal(read(db, LINE, line.id).open_amount, 30);
-  if (mode === 'rule') db = applyRule(db, { name: 'Fees', line_ids: [{ account_code: '690000', amount_type: 'percentage', amount: 100 }] }, read(db, LINE, line.id));
+  if (mode === 'rule') db = applyRule(db, { name: 'Fees', line_ids: [{ account_id: search(db, 'account.account').find((a) => a.code === '690000').id, amount_type: 'percentage', amount: 100 }] }, read(db, LINE, line.id));
   else db = run(db, line.id, mode);
   assert.equal(read(db, LINE, line.id).state, 'reconciled');
   assert.equal(read(db, LINE, line.id).open_amount, 0);
