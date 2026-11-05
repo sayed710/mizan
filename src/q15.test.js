@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
+import { openStorage } from '../server/storage.js';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
@@ -32,12 +34,11 @@ test('Qodo 2: migration 34 sets default_general_journal_id for legacy companies 
   assert.equal(migrated.schema_version, 34);
   const updatedCompany = read(migrated, 'res.company', company.id);
   assert.equal(updatedCompany.default_general_journal_id, journal.id);
-  // Company with 1 general journal should not be reported in migration_reports
-  const reports = migrated.migration_reports ?? [];
-  assert.equal(reports.some((r) => r.company_id === company.id), false);
+  // A company with one general journal gets no upgrade note
+  assert.equal(upgradeNotes(migrated, company.id).length, 0);
 });
 
-test('Qodo 2: migration 34 leaves companies with zero or several general journals unset and reports them in db.migration_reports with names', () => {
+test('Qodo 2: migration 34 leaves companies with zero or several general journals unset and notes them in each company chatter', () => {
   let db = seed();
   // Company A has 0 general journals
   const compA = create(db, 'res.company', { name: 'Zero General Co', currency_id: 1 });
@@ -77,18 +78,16 @@ test('Qodo 2: migration 34 leaves companies with zero or several general journal
   assert.equal(read(migrated, 'res.company', compA.id).default_general_journal_id ?? null, null);
   assert.equal(read(migrated, 'res.company', compB.id).default_general_journal_id ?? null, null);
 
-  // Both should be reported in migration_reports with their names
-  const reports = migrated.migration_reports ?? [];
-  const repA = reports.find((r) => r.company_id === compA.id);
-  const repB = reports.find((r) => r.company_id === compB.id);
-
-  assert.ok(repA, 'Company with 0 general journals is reported in migration_reports');
-  assert.equal(repA.name, 'Zero General Co');
-  assert.equal(repA.journal_count, 0);
-
-  assert.ok(repB, 'Company with multiple general journals is reported in migration_reports');
-  assert.equal(repB.name, 'Multi General Co');
-  assert.equal(repB.journal_count, 2);
+  // Both get a persisted chatter note naming the count, and the note survives a save and reload
+  const sql = new DatabaseSync(':memory:');
+  const storage = openStorage(sql);
+  storage.save(null, migrated);
+  const reloaded = openStorage(sql).load();
+  for (const [id, count] of [[compA.id, 0], [compB.id, 2]]) {
+    const notes = upgradeNotes(reloaded, id);
+    assert.equal(notes.length, 1);
+    assert.match(notes[0].body, new RegExp(`has ${count} general journals`));
+  }
 });
 
 test('Qodo 2: revalueForeignBalances runtime error informs user to set default general journal in company settings', () => {
@@ -221,3 +220,7 @@ test('Qodo 3: forged revaluation pair submitted with source edits in one diff is
     /System-generated status can only come from a generated accounting workflow/,
   );
 });
+
+function upgradeNotes(db, companyId) {
+  return (db.messages ?? []).filter((m) => m.model === 'res.company' && m.res_id === companyId && m.body.startsWith('Upgrade:'));
+}
