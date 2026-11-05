@@ -6,7 +6,7 @@ import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
-import { returnTaxLock } from './finance.js';
+import { returnCompanies, returnTaxLock } from './finance.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -251,6 +251,17 @@ const CONTROL_FIELDS = [
 ];
 const LOCK_DATE_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date'];
 
+/**
+ * A tax-lock change the return workflow makes for a non-admin: raising the lock to the submitted-return floor,
+ * or lowering it to that floor from the period end of a return that has been reset.
+ */
+function returnLockChange(db, companyId, from, to) {
+  const floor = returnTaxLock(db, companyId) || null;
+  if (to !== floor) return false;
+  if (!from || (to && to > from)) return true;
+  return (db.records['account.return'] ?? []).some((ret) => ret.date_to === from && !['submitted', 'paid'].includes(ret.state) && returnCompanies(db, ret).includes(companyId));
+}
+
 function companyGuard(db, before, r, ctx) {
   for (const field of LOCK_DATE_FIELDS) {
     if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
@@ -259,7 +270,7 @@ function companyGuard(db, before, r, ctx) {
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
     JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null)
-    && !(field === 'tax_lock_date' && (r[field] ?? null) === (returnTaxLock(db, r.id) || null))
+    && !(field === 'tax_lock_date' && returnLockChange(db, r.id, before?.tax_lock_date || null, r.tax_lock_date || null))
   ))) {
     return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
   }

@@ -46,3 +46,21 @@ test('a synced ordinary taxable move cannot evade a submitted return lock with a
   const forged = { ...move, id: example.db.seq['account.move'] + 1, name: 'TEST/2026/99999', date: '2026-03-15', tax_return_id: created.id };
   assert.throws(() => applyDiff(example.db, { upserts: { 'account.move': [forged] } }, { isAdmin: false }), /period up to 2026-03-31 is locked/i);
 });
+
+test('return workflows never lower a stricter administrator tax lock, and non-admins cannot lower it to the return floor', () => {
+  const initial = seed();
+  const type = search(initial, 'account.return.type').find((item) => item.company_id === 1 && item.category === 'account_return');
+  const created = create(initial, 'account.return', {
+    name: 'Quarterly return', type_id: type.id, company_id: 1,
+    date_from: '2026-01-01', date_to: '2026-03-31',
+  });
+  const submitted = submitReturn(reviewReturn(created.db, created.id), created.id);
+  const adminLocked = applyDiff(submitted, diffDb(submitted, write(submitted, 'res.company', 1, { tax_lock_date: '2026-06-30' })), { isAdmin: true });
+  assert.equal(read(adminLocked, 'res.company', 1).tax_lock_date, '2026-06-30');
+
+  const company = read(adminLocked, 'res.company', 1);
+  assert.throws(() => applyDiff(adminLocked, { upserts: { 'res.company': [{ ...company, tax_lock_date: '2026-03-31' }] } }, { isAdmin: false }), /Only administrators/);
+
+  assert.throws(() => resetReturnToDraft(adminLocked, created.id), /period up to 2026-06-30 is locked/);
+  assert.equal(read(adminLocked, 'res.company', 1).tax_lock_date, '2026-06-30');
+});

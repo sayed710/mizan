@@ -6,12 +6,19 @@ import { postPayment } from './pay.js';
 import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 
-/** The tax lock follows the latest submitted or paid return. */
+/**
+ * Submitting a return raises the company tax lock to its period end; resetting it lowers the lock only when that return set it.
+ * A stricter lock set by an administrator is never lowered by the return workflow.
+ */
 const syncTaxLockDate = (db, ret, excludeId = null) => {
   let next = db;
   for (const companyId of returnCompanies(db, ret)) {
-    const lock = returnTaxLock(next, companyId, excludeId) || null;
-    next = write(next, 'res.company', companyId, { tax_lock_date: lock });
+    const current = read(next, 'res.company', companyId)?.tax_lock_date || null;
+    const floor = returnTaxLock(next, companyId, excludeId) || null;
+    const lock = excludeId != null
+      ? (current === ret.date_to ? floor : current)
+      : [current, floor].filter(Boolean).sort().at(-1) ?? null;
+    if (lock !== current) next = write(next, 'res.company', companyId, { tax_lock_date: lock });
   }
   return next;
 };
