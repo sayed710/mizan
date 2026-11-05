@@ -23,11 +23,11 @@ export function installments(term, total, invoiceDate, currency = null) {
   const fixed = lines.map((line) => line.value_type === 'fixed' ? Math.max(0, currencyUnits(line.value, currency)) : 0);
   let fixedRemaining = fixed.reduce((sum, amount) => sum + amount, 0);
   if (fixedRemaining > totalCents) throw new Error('Fixed amounts exceed the total');
-  const balanceIndex = lines.findIndex((line) => line.value === 'balance');
+  const balanceIndex = lines.findIndex((line) => line.value_type === 'balance' || (!line.value_type && line.value === 'balance'));
   if (balanceIndex >= 0 && balanceIndex !== lines.length - 1) throw new Error('The balance due term must be the last one');
   const hasFixed = lines.some((line) => line.value_type === 'fixed');
-  if (!hasFixed) {
-    const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : totalCents * (Number(line.value) || 0) / 100), 0);
+  if (!hasFixed || balanceIndex >= 0) {
+    const requestedTotal = lines.reduce((sum, line, index) => sum + (line.value_type === 'fixed' ? fixed[index] : line.value_type === 'percent' ? totalCents * (Number(line.value) || 0) / 100 : 0), 0);
     // Without a balance line the terms must add up to the total; rounding may shift half a unit per line.
     if (balanceIndex >= 0 ? requestedTotal > totalCents + lines.length / 2 : Math.abs(requestedTotal - totalCents) > lines.length / 2) throw new Error('Payment terms must allocate 100% of the total');
   }
@@ -85,7 +85,7 @@ export const termModels = {
         label: 'Due Terms',
         fields: {
           value: { type: 'float', label: 'Value' },
-          value_type: { type: 'selection', label: 'Value Type', options: [['percent', 'Percent'], ['fixed', 'Fixed']] },
+          value_type: { type: 'selection', label: 'Value Type', options: [['percent', 'Percent'], ['fixed', 'Fixed'], ['balance', 'Balance']] },
           nb_days: { type: 'integer', label: 'Days' },
           delay_type: { type: 'selection', label: 'Delay Type', options: [['days_after', 'Days after invoice date'], ['days_end_of_month', 'Days after end of month']] },
         },

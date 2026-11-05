@@ -11,9 +11,15 @@ import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
+import { normalizeDistribution } from '../analytic_distribution.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+let analyticPostingHooks = null;
+
+export function registerAnalyticPostingHooks(hooks) {
+  analyticPostingHooks = hooks;
+}
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
@@ -218,7 +224,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
         const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
         if (compIndex === 0) {
           group.amount += computed.untaxed;
-          group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+          group.lines.push({ index, line_id: l.line_id, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
         }
         group.base += t.base ?? computed.untaxed;
         byAccount.set(key, group);
@@ -233,7 +239,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
       group.base += computed.untaxed;
-      group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+      group.lines.push({ index, line_id: l.line_id, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
       byAccount.set(key, group);
     }
   }
@@ -260,7 +266,7 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   const direction = Math.sign(gap);
   const ranked = [...shares].sort((a, b) => direction * (b.remainder - a.remainder) || a.index - b.index);
   for (let i = 0; i < Math.abs(gap); i++) ranked[i % ranked.length].whole += direction;
-  return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
+  return sources.map((source, i) => ({ index: source.index, line_id: source.line_id, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
 /** A plain-rate tax (no tax record) posts to the tax account of the company's configured default sales or purchase tax. */
@@ -464,7 +470,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -473,6 +479,14 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   if (!j) throw new Error(`Journal not found: ${journal}`);
   if (j.company_id && company && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
 
+  const moveContext = {
+    move_type: 'entry',
+    company_id: company ?? 1,
+    journal_id: jId,
+    partner_id: lines.find((line) => line.partner_id)?.partner_id ?? null,
+    date,
+    ref,
+  };
   const line_ids = lines.map((l) => {
     let accId = null;
     if (l.account_id) accId = l.account_id;
@@ -495,17 +509,29 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
     if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
-    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    // Callers pass an explicit allocation; system entries (closing, revaluation, depreciation) get none from models.
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
+    const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
+  if (analyticPostingHooks?.checkMandatoryPlans) {
+    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids });
+  } else if (search(db, 'account.analytic.plan').length) {
+    throw new Error('Analytic posting support is not loaded');
+  }
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
-  return create(db, 'account.move', {
+  const made = create(db, 'account.move', {
     move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
+    ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
   });
+  if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
+  if (line_ids.some((line) => Object.keys(line.analytic_distribution ?? {}).length)) throw new Error('Analytic posting support is not loaded');
+  return made;
 }
 
 /** Resolve the unique payment default or an explicitly selected liquidity journal. */

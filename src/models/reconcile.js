@@ -128,6 +128,7 @@ function writeOff(db, rule, line) {
           account: row.account_id ?? l.account_id,
           partner_id: partner,
           name: taxRec.name,
+          tax_id: taxRec.id,
           tax_name: taxRec.name,
           tax_side: incoming ? 'sale' : 'purchase',
           tax_base: toCompany(db, journalCurrency, splitBases[i], line.date, company),

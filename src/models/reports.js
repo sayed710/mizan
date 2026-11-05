@@ -1,7 +1,6 @@
 // Pure accounting reports over the posted journal: trial balance, partner ledgers, cash flow, executive KPIs, customer statements.
 import { read, search } from '../orm.js';
 import { balances, balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from './ledger.js';
-import { exchangeAccount } from './exchange-account.js';
 import { round } from '../money.js';
 import { appliedValue } from './finance.js';
 import { toCompany } from './currency.js';
@@ -182,12 +181,6 @@ export function accountCashFlowActivity(db, account) {
  * non-cash counterpart lines (a credit on the counterpart is cash in); fixed-asset counterparts are investing,
  * equity and loans financing, everything else operating.
  */
-/** The accounts a company's realized exchange gains and losses are booked to (the same resolver payments post with). */
-const exchangeAccountIds = (db, companyId) => new Set([1, -1].map((difference) => {
-  const account = exchangeAccount(db, companyId, difference);
-  return account;
-}));
-
 export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) {
   const targetCompany = company_id;
   const cash = accountIds(db, 'asset_cash');
@@ -264,10 +257,13 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
     if (!denominator || !fullDenominator || !cashNet) continue;
     const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
     const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet) * share);
-    const fxAccounts = exchangeAccountIds(db, doc.company_id ?? 1);
-    const fxItems = items.filter((line) => fxAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
+    if (!delta) continue;
+    const counterpartAccounts = new Set((doc.line_ids ?? []).filter((line) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', line.account_id)?.account_type)).map((line) => line.account_id));
+    const fxItems = items.filter((line) => !cash.has(line.account_id) && !counterpartAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
+    // The exchange difference is the payment entry's single line that is neither cash nor the invoice counterpart; otherwise it stays unattributed.
+    if (fxItems.length !== 1 || !fxItems[0].account) continue;
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
-    if (!fxAmount || !delta) continue;
+    if (!fxAmount) continue;
     for (const x of fxItems) add(x.account, delta * netOf(x.line) / fxAmount, items[0]);
     for (const x of source) add(x.account, delta * netOf(x.line) / denominator, items[0]);
   }

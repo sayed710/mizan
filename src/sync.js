@@ -3,7 +3,7 @@
 // to different records don't overwrite each other.
 import { models } from './registry.js';
 import { analyticAccountKey } from './analytic_distribution.js';
-import { postTracking, read, referenceTo, validate, SHARED_MODELS } from './orm.js';
+import { postTracking, referenceTo, validate, SHARED_MODELS } from './orm.js';
 import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
@@ -580,7 +580,14 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const seq = { ...db.seq };
   for (const model of Object.keys(d.upserts ?? {})) seq[model] = Math.max(seq[model] ?? 0, maxId(records[model]));
   const known = new Set(db.messages.map((m) => m.id));
-  const kept = new Set(db.messages.filter((m) => models[m.model]?.audited?.(db, read(db, m.model, m.res_id))).map((m) => m.id));
+  const auditRecords = new Map();
+  const kept = new Set(db.messages.filter((m) => {
+    if (!models[m.model]?.audited) return false;
+    if (!auditRecords.has(m.model)) auditRecords.set(m.model, byId(db.records[m.model]));
+    const record = auditRecords.get(m.model).get(m.res_id);
+    // Deleted moves retain their original company on each chatter message.
+    return models[m.model].audited(db, record ?? { company_id: m.company_id });
+  }).map((m) => m.id));
   // A limited user may only comment on a record that exists in the result and that they can see.
   const onVisibleRecord = (m) => {
     if (!companies) return true;
@@ -641,7 +648,8 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   let next = { ...db, records, seq, settings, numbering: highWater(marks, records), messages: [...db.messages.filter((m) => !removed.has(m.id)), ...incoming] };
   // The audit trail shows the number the server finally gave, not only the one the browser proposed.
   for (const [model, id, from, to] of [...numbered.renamed, ...(d.sequenceRenamed ?? [])]) {
-    if (models[model].audited?.(next, read(next, model, id))) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
+    const record = (next.records[model] ?? []).find((r) => r.id === id);
+    if (models[model].audited?.(next, record)) next = postTracking(next, model, id, `Number: ${from} → ${to} (assigned by the server)`, author);
   }
   growth += next.messages.slice(db.messages.length - db.messages.filter((m) => removed.has(m.id)).length).reduce((n, m) => n + json(m) + 1, 0) - db.messages.filter((m) => removed.has(m.id)).reduce((n, m) => n + json(m) + 1, 0);
   if (settings !== db.settings) growth += json(settings) - json(db.settings);
