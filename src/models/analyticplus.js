@@ -5,31 +5,17 @@ import { toCompany } from './currency.js';
 import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
-import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
-import { documentCurrency, round } from '../money.js';
+import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems, registerAnalyticPostingHooks } from './ledger.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
+import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
 export { isSectionOrNote } from './taxes.js';
 
 const accountModel = financeModels['account.analytic.account'];
 const budgetModel = financeModels['account.budget'];
 const timesheetModel = moreModels['account.analytic.line'];
 const inPeriod = (r, from, to) => (!from || r.date >= from) && (!to || r.date <= to);
-const planOf = (account) => account?.plan_id ? `plan:${account.plan_id}` : `legacy:${account?.plan || 'project'}`;
-// A category reference is an id (legacy rules stored it as text); names are never matched.
-const toCategoryId = (val) => {
-  const n = Number(typeof val === 'object' && val !== null ? val.id : val);
-  return Number.isSafeInteger(n) && n > 0 ? n : null;
-};
-const categoryHierarchy = (db, initialCat) => {
-  const categories = new Set();
-  let catId = toCategoryId(initialCat);
-  while (catId && !categories.has(catId)) {
-    categories.add(catId);
-    catId = read(db, 'product.category', catId)?.parent_id;
-  }
-  return categories;
-};
 const allocatedShares = (db, distribution, base) => {
   const entries = Object.entries(normalizeDistribution(distribution, db)).filter(([, n]) => n > 0);
   const amounts = entries.map(([, percent]) => round(base * percent / 100));
@@ -49,68 +35,14 @@ const allocatedShares = (db, distribution, base) => {
 };
 export { normalizeDistribution } from '../analytic_distribution.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
-
-/** Find the most specific matching analytic distribution model for line context. */
-export function findAnalyticDistribution(db, { partner_id, partner_category_id, product_id, product_categ_id, account_id, account_code, company_id } = {}, fallback = {}) {
-  const models = search(db, 'account.analytic.distribution.model');
-  if (!models?.length) return fallback;
-
-  const partner = partner_id ? read(db, 'res.partner', partner_id) : null;
-  const product = product_id ? read(db, 'product', product_id) : null;
-  const code = account_code || (account_id ? read(db, 'account.account', account_id)?.code : '') || '';
-
-  const partnerCat = partner_category_id ?? partner?.partner_category_id ?? partner?.category_id;
-  const productCat = product_categ_id ?? product?.categ_id ?? product?.product_categ_id ?? product?.category_id ?? product?.categ;
-  const categories = categoryHierarchy(db, productCat);
-
-  const targetCompany = company_id;
-  const matched = [];
-  for (const m of models) {
-    if (m.company_id && m.company_id !== targetCompany) continue;
-    if (m.partner_id && m.partner_id !== partner_id) continue;
-    if (m.product_id && m.product_id !== product_id) continue;
-    if (m.partner_category_id) {
-      const matchCat = partnerCat === m.partner_category_id || (partner?.tag_ids ?? []).includes(m.partner_category_id);
-      if (!matchCat) continue;
-    }
-    if (m.product_categ_id != null && m.product_categ_id !== '') {
-      const modelCat = toCategoryId(m.product_categ_id);
-      if (!modelCat || !categories.has(modelCat)) continue;
-    }
-    if (m.account_prefix) {
-      if (!code || !code.startsWith(m.account_prefix)) continue;
-    }
-
-    const score = ['partner_id', 'product_id', 'partner_category_id', 'product_categ_id', 'account_prefix', 'company_id'].filter((field) => m[field]).length;
-    matched.push({ model: m, score, seq: Number(m.sequence ?? 10) });
-  }
-
-  if (!matched.length) return fallback;
-  matched.sort((a, b) => b.score - a.score || a.seq - b.seq || a.model.id - b.model.id);
-
-  if (matched[0].model.analytic_distribution && Object.keys(matched[0].model.analytic_distribution).length === 0) {
-    return {};
-  }
-
-  // Like Odoo: each matching model, best first, applies whole when none of its plans is covered yet.
-  const result = {};
-  const applied = new Set();
-  for (const { model } of matched) {
-    const distribution = model.analytic_distribution ?? {};
-    const plans = new Set(Object.keys(distribution).map((id) => planOf(read(db, 'account.analytic.account', Number(id)))));
-    if ([...plans].some((plan) => applied.has(plan))) continue;
-    Object.assign(result, distribution);
-    for (const plan of plans) applied.add(plan);
-  }
-  return result;
-}
+export { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 /** Resolve a fresh default using the same account that will be posted. */
 export function defaultDistributionForLine(db, line, move, fallback = {}) {
   return findAnalyticDistribution(db, {
     partner_id: move?.partner_id,
     product_id: line.product_id,
-    account_id: invoiceLineAccount(db, move, line),
+    account_id: move?.move_type === 'entry' ? line.account_id : invoiceLineAccount(db, move, line),
     company_id: move && Object.hasOwn(move, 'company_id') ? move.company_id : 1,
   }, fallback);
 }
@@ -252,6 +184,8 @@ export function postAnalytic(db, moveId) {
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }
 
+registerAnalyticPostingHooks({ checkMandatoryPlans, postAnalytic });
+
 /** Remove generated allocations on reset or cancellation, preserving timesheets. */
 export function removeAnalytic(db, moveId) {
   const ids = (db.records['account.analytic.line'] ?? []).filter((r) => r.move_id === moveId && ['invoice', 'vendor_bill', 'journal_entry'].includes(r.category)).map((r) => r.id);
@@ -272,8 +206,10 @@ const day = (date) => {
   return value / 86400000;
 };
 
-const budgetCompanyError = (db, budget) => !budget.company_id || !read(db, 'res.company', budget.company_id)
-  ? 'Select an existing company for the budget' : null;
+const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
+  const companyId = budget.company_id ?? selectedCompanyId;
+  return !companyId || !read(db, 'res.company', companyId) ? 'Select an existing company for the budget' : null;
+};
 
 /** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
 function postedPurchaseQuantities(db, order) {
@@ -285,6 +221,7 @@ function postedPurchaseQuantities(db, order) {
     if ((move.company_id ?? 1) !== (order.company_id ?? 1)) throw new Error('Purchase order and posted bill must belong to the same company');
     for (const line of move.invoice_line_ids ?? []) {
       if (isSectionOrNote(line)) continue;
+      if (!line.purchase_line_key) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
       const source = byKey.get(line.purchase_line_key);
       if (!source || source.product_id !== line.product_id) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
       let qty = Number(line.qty) || 0;
@@ -307,7 +244,7 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
       if (isSectionOrNote(line)) return [];
       const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.purchase_line_key) ?? 0));
       if (!qty) return [];
-      const distribution = distributionOfLine(line);
+      const distribution = distributionOfLine(line, db, { ...order, move_type: 'in_invoice' });
       if (budgetLine.analytic_account_id && !normalizeDistribution(distribution, db)[budgetLine.analytic_account_id]) return [];
       const accountId = budgetLine.account_id || budgetLine.general_account
         ? invoiceLineAccount(db, { ...order, move_type: 'in_invoice' }, line) : null;
@@ -321,12 +258,13 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
 }
 
 /** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
-export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {}) {
+export function budgetReport(db, budgetId, atDate = today(), { period = {}, company_id: selectedCompanyId = null } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
-  const companyError = budgetCompanyError(db, budget);
+  const companyError = budgetCompanyError(db, budget, selectedCompanyId);
   if (companyError) throw new Error(companyError);
-  const companyId = budget.company_id;
+  const companyId = budget.company_id ?? selectedCompanyId;
+  const companyCurrency = companyCurrencyRecord(db, companyId);
   const start = day(budget.date_from);
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
@@ -355,17 +293,17 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
               move_id: item.move_id,
               account_id: null,
               general_account: read(db, 'account.account', item.account_id)?.code || '',
-              amount: round((Number(item.credit) || 0) - (Number(item.debit) || 0)),
+              amount: roundCurrency((Number(item.credit) || 0) - (Number(item.debit) || 0), companyCurrency),
               company_id: companyId,
             }))
             .filter((item) => item.amount !== 0)
         : [];
-    const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+    const practical = roundCurrency(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0), companyCurrency);
     const commitment_lines = line.analytic_account_id || line.account_id || line.general_account
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
-    const committed = round(commitment_lines.reduce((sum, line) => sum + line.amount, 0));
-    const theoretical = round(planned * fraction);
-    return { ...line, planned, practical, committed, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
+    const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
+    const theoretical = roundCurrency(planned * fraction, companyCurrency);
+    return { ...line, planned, practical, committed, theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 

@@ -4,11 +4,12 @@ import { amounts, nextName, today } from './common.js';
 import { deliver, isPeriodicValuation, moveValued, reverseReceipt } from './valuation.js';
 import { roundingAccount } from './configured-account.js';
 import { stockAccount } from './stock-accounts.js';
-import { assertCompanyAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { assertCompanyAccount, invoiceLineAccount, invoiceLines, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { fiscalPositionFor, productTax } from './taxes.js';
 import { convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
 import { cashRound, companyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { priceFor } from './pricelist.js';
+import { findAnalyticDistribution } from './analytic-distribution-models.js';
 
 export const openSession = (db) => search(db, 'pos.session').find((s) => s.state === 'opened') ?? null;
 
@@ -41,7 +42,7 @@ export function startSession(db, openingCash = 0, configId = null) {
  * Lines of a cart priced from the products: sales price and the product's sales tax record
  * (price-included or not), mapped through the customer's fiscal position.
  */
-export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1 } = {}) => cart.map((l) => {
+export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fiscalPositionId = null, companyId = openSession(db)?.company_id ?? 1, journalId = openSession(db)?.journal_id ?? null } = {}) => cart.map((l) => {
   const p = read(db, 'product', l.product_id);
   const fp = fiscalPositionId || fiscalPositionFor(db, partnerId, companyId);
   const tax = productTax(db, p, 'sale', fp, companyId) ?? { tax: p?.sale_tax ?? 14 };
@@ -49,7 +50,14 @@ export const priceLines = (db, cart, partnerId = null, { pricelistId = null, fis
   const stock = p?.uom_id ?? uomForLegacy(db, p?.uom ?? 'unit')?.id;
   const rawPrice = pricelistId ? priceFor(db, pricelistId, l.product_id, Math.abs(l.qty), p?.list_price ?? 0) : (p?.list_price ?? 0);
   const price = uom_id && stock ? convertPrice(db, rawPrice, stock, uom_id) : rawPrice;
-  return { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: price, discount: Number(l.discount ?? 0), ...tax };
+  const line = { product_id: l.product_id, qty: l.qty, ...(uom_id ? { uom_id } : {}), price_unit: price, discount: Number(l.discount ?? 0), ...tax };
+  const analytic_distribution = l.analytic_distribution ?? findAnalyticDistribution(db, {
+    partner_id: partnerId,
+    product_id: l.product_id,
+    account_id: invoiceLineAccount(db, { move_type: 'out_invoice', journal_id: journalId, company_id: companyId, partner_id: partnerId, fiscal_position_id: fp }, line),
+    company_id: companyId,
+  });
+  return { ...line, ...(l.analytic_distribution != null || Object.keys(analytic_distribution).length ? { analytic_distribution } : {}) };
 });
 
 // Resolve both configured tenders and, when requested, historical ID-based tenders.
@@ -722,6 +730,7 @@ export function payCart(db, { cart = [], lines: inputLines = null, method, payme
     pricelistId: resolved.presetSnapshot.pricelist_id,
     fiscalPositionId: resolved.presetSnapshot.fiscal_position_id,
     companyId: resolved.config?.company_id ?? resolved.session?.company_id ?? 1,
+    journalId: resolved.config?.journal_id ?? resolved.session?.journal_id ?? null,
   });
   const out = payOrder(db, {
     lines,

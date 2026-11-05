@@ -761,9 +761,10 @@ MIGRATIONS.push({ version: 30, name: 'Configure installed journal and deferral a
     }
     const withJournal = journalId ? { ...line, journal_id: journalId } : line;
     if (counterpart == null || line.counterpart_account_id) return withJournal;
-    const matches = accounts.filter((a) => a.code === counterpart && (a.company_id ?? 1) === company);
+    const matches = accounts.filter((a) => a.code === counterpart && a.company_id === company);
+    const candidates = matches.length ? matches : accounts.filter((a) => a.code === counterpart && a.company_id == null);
     // An unresolved code stays on the line so the user's choice is not lost (Qodo 40).
-    return matches.length === 1 ? { ...withJournal, counterpart_account_id: matches[0].id } : { ...withJournal, counterpart };
+    return candidates.length === 1 ? { ...withJournal, counterpart_account_id: candidates[0].id } : { ...withJournal, counterpart };
   });
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.journal': journals, 'account.bank.statement.line': lines } };
 } });
@@ -784,11 +785,10 @@ MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental
   const resolveRuleAccount = (company, code) => {
     if (!code) return null;
     const accounts = db.records['account.account'] ?? [];
-    const owned = accounts.filter((a) => (a.company_id ?? 1) === company && a.code === code);
-    if (owned.length === 1) return owned[0].id;
+    const owned = company == null ? [] : accounts.filter((a) => a.company_id === company && a.code === code);
+    if (owned.length) return owned.length === 1 ? owned[0].id : null;
     const shared = accounts.filter((a) => a.company_id == null && a.code === code);
-    if (shared.length === 1) return shared[0].id;
-    return find(company, code);
+    return shared.length === 1 ? shared[0].id : null;
   };
   const companyRoles = { gain_account_id: '450300', loss_account_id: '690300', income_currency_exchange_account_id: '450100', expense_currency_exchange_account_id: '690100', income_early_payment_discount_account_id: '450200', expense_early_payment_discount_account_id: '690200', rental_deposit_account_id: '230100', rental_withheld_deposit_account_id: '450000', down_payment_account_id: '212000' };
   const companies = (db.records['res.company'] ?? []).map((company) => ({ ...company, ...Object.fromEntries(Object.entries(companyRoles).filter(([field]) => !company[field]).map(([field, code]) => [field, find(company.id, code)])) }));
@@ -797,7 +797,10 @@ MIGRATIONS.push({ version: 31, name: 'Explicit asset, exchange, discount, rental
     account_depreciation_id: asset.account_depreciation_id ?? find(asset.company_id ?? 1, '152000'),
     account_depreciation_expense_id: asset.account_depreciation_expense_id ?? account_expense_id ?? find(asset.company_id ?? 1, '680000'),
   }));
-  const rules = (db.records['account.reconcile.model'] ?? []).map((rule) => ({ ...rule, line_ids: (rule.line_ids ?? []).map(({ account_code, ...line }) => ({ ...line, account_id: line.account_id ?? (account_code ? resolveRuleAccount(rule.company_id ?? 1, account_code) : null) })) }));
+  const rules = (db.records['account.reconcile.model'] ?? []).map((rule) => ({ ...rule, line_ids: (rule.line_ids ?? []).map(({ account_code, ...line }) => {
+    const account_id = line.account_id ?? resolveRuleAccount(rule.company_id ?? null, account_code);
+    return { ...line, account_id, ...(!account_id && account_code ? { account_code } : {}) };
+  }) }));
   return { ...db, records: { ...db.records, 'res.company': companies, 'account.asset': assets(db.records['account.asset']), 'account.asset.model': assets(db.records['account.asset.model']), 'account.reconcile.model': rules } };
 } });
 

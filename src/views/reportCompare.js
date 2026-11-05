@@ -6,6 +6,9 @@ import { groupBuckets } from '../models/configurableReports.js';
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const iso = (date) => date.toISOString().slice(0, 10);
 
+/** Horizontal groups are defined only for the balance sheet and profit and loss comparisons. */
+export const supportsHorizontalGroupComparison = (report) => ['pnl', 'balance'].includes(report);
+
 /** Full calendar periods, oldest first; modes are none, previous, lastYear and last3. */
 export function periodsFor(periodKey, mode, todayIso) {
   if (periodKey === 'all') return [{ from: '', to: '9999-12-31', label: 'All Dates' }];
@@ -80,20 +83,20 @@ export function balanceColumns(db, periods, { analyticAccountIds } = {}) {
 }
 
 /** Horizontal comparison columns partitioned by a horizontal group for Profit & Loss. */
-export function pnlAnalyticColumns(db, group, period) {
+export function pnlAnalyticColumns(db, group, period, { analyticAccountIds } = {}) {
   const filter = { ...period, company_id: group?.company_id ?? period?.company_id ?? 1 };
-  const buckets = groupBuckets(db, group, journalItems(db, filter));
-  return columns(buckets, buckets.map((b) => profitAndLoss(db, filter, { weight: b.weight })), PNL_SECTIONS, PNL_TOTALS, { showVariance: false });
+  const buckets = groupBuckets(db, group, journalItems(db, filter), { analyticAccountIds });
+  return columns(buckets, buckets.map((b) => profitAndLoss(db, filter, { weight: b.weight, analyticAccountIds })), PNL_SECTIONS, PNL_TOTALS, { showVariance: false });
 }
 
 /** Horizontal comparison columns partitioned by a horizontal group for the Balance Sheet. */
-export function balanceAnalyticColumns(db, group, period) {
+export function balanceAnalyticColumns(db, group, period, { analyticAccountIds } = {}) {
   const filter = {
     to: typeof period === 'object' && period !== null ? period.to : period,
     company_id: group?.company_id ?? (typeof period === 'object' && period !== null ? period.company_id : null) ?? 1,
   };
-  const buckets = groupBuckets(db, group, journalItems(db, filter));
-  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight })), BALANCE_SECTIONS, BALANCE_TOTALS, { showVariance: false });
+  const buckets = groupBuckets(db, group, journalItems(db, filter), { analyticAccountIds });
+  return columns(buckets, buckets.map((b) => balanceSheet(db, filter, { weight: b.weight, analyticAccountIds })), BALANCE_SECTIONS, BALANCE_TOTALS, { showVariance: false });
 }
 
 const cashLines = (section) => (c) => c.lines.filter((l) => l.section === section).map((l) => ({ account: l.account, balance: l.amount }));

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { read, search } from '../orm.js';
+import { read, search, write } from '../orm.js';
 import { today } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from '../models/ledger.js';
@@ -17,7 +17,7 @@ import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLed
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
-import { balanceAnalyticColumns, balanceColumns, cashflowColumns, periodsFor, pnlAnalyticColumns, pnlColumns } from './reportCompare.js';
+import { balanceAnalyticColumns, balanceColumns, cashflowColumns, periodsFor, pnlAnalyticColumns, pnlColumns, supportsHorizontalGroupComparison } from './reportCompare.js';
 import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
 import { SalesReview } from './SalesReview.jsx';
@@ -311,18 +311,47 @@ export function FollowUps({ db, sourceDb, companyId = 'all' }) {
 }
 
 function Budget({ db, period }) {
+  const availableCompanies = companiesOf(db);
   const lineLabel = (l) => {
     const analytic = read(db, 'account.analytic.account', l.analytic_account_id)?.name;
     const acc = read(db, 'account.account', l.account_id);
     const general = acc ? `${acc.code} ${acc.name}` : l.general_account;
     return [analytic, general].filter(Boolean).join(' · ') || '—';
   };
+  const selectCompany = (budgetId, value) => {
+    const companyId = Number(value);
+    if (!companyId || !availableCompanies.some((company) => company.id === companyId)) return;
+    commit(write(getDb(), 'account.budget', budgetId, { company_id: companyId }));
+  };
   return (
     <tbody>
       {search(db, 'account.budget').filter((b) => !['draft', 'cancel'].includes(b.state) && (!period.from || !b.date_to || b.date_to >= period.from) && (!period.to || !b.date_from || b.date_from <= period.to)).flatMap((b) => {
+        const company = b.company_id ? read(db, 'res.company', b.company_id) : null;
+        const companyMissing = !company;
+        let reportLines = [];
+        let reportError = null;
+        if (!companyMissing && b.lines?.length) {
+          try {
+            reportLines = budgetReport(db, b.id, today(), { period, company_id: company.id });
+          } catch (error) {
+            reportError = error instanceof Error ? error.message : String(error);
+          }
+        }
         return [
-          <tr key={b.id} className="rep-section"><td colSpan={6}><a href={`#/open/account.budget/${b.id}`}>{b.name}</a></td></tr>,
-          ...(b.lines?.length ? budgetReport(db, b.id, today(), { period }) : []).map((l, i) => (
+          <tr key={b.id} className="rep-section"><td colSpan={6}>
+            <a href={`#/open/account.budget/${b.id}`}>{b.name}</a>
+            {companyMissing
+              ? <label className="inline-select">{t('Company')}
+                <select aria-label={`${t('Company')} for ${b.name}`} value="" onChange={(event) => selectCompany(b.id, event.target.value)}>
+                  <option value="">{t('Select a company')}</option>
+                  {availableCompanies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </label>
+              : <span className="muted"> · {company.name}</span>}
+          </td></tr>,
+          ...(companyMissing ? [<tr key={`${b.id}-company-required`}><td colSpan={6} className="muted">{t('Select a company to show this budget report.')}</td></tr>] : []),
+          ...(reportError ? [<tr key={`${b.id}-report-error`}><td colSpan={6} className="muted" role="alert">{reportError}</td></tr>] : []),
+          ...reportLines.map((l, i) => (
             <Fragment key={`${b.id}-${i}`}>
               <tr className="rep-detail">
                 <td>{lineLabel(l)}</td>
@@ -567,14 +596,16 @@ function ReportPage({ leaf }) {
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
-  const horizontalGroups = comparable ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
+  const horizontalGroups = comparable && supportsHorizontalGroupComparison(leaf.report) ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
     (g.company_id ?? 1) === (selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany))
   ) : [];
   const horizontalGroup = comparable ? horizontalGroups.find((g) => g.id === Number(horizontalGroupId)) : null;
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
   const data = horizontalGroup
-    ? (leaf.report === 'pnl' ? pnlAnalyticColumns(db, horizontalGroup, period) : balanceAnalyticColumns(db, horizontalGroup, period))
+    ? (leaf.report === 'pnl'
+      ? pnlAnalyticColumns(db, horizontalGroup, period, { analyticAccountIds })
+      : balanceAnalyticColumns(db, horizontalGroup, period, { analyticAccountIds }))
     : periods
       ? ({ pnl: pnlColumns, balance: balanceColumns, cashflow: cashflowColumns }[leaf.report])(db, periods, {
         analyticAccountIds, ...(leaf.report === 'cashflow' && selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),

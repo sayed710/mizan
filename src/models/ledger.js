@@ -11,9 +11,15 @@ import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
+import { normalizeDistribution } from '../analytic_distribution.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+let analyticPostingHooks = null;
+
+export function registerAnalyticPostingHooks(hooks) {
+  analyticPostingHooks = hooks;
+}
 
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
@@ -218,7 +224,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
         const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
         if (compIndex === 0) {
           group.amount += computed.untaxed;
-          group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+          group.lines.push({ index, line_id: l.line_id, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
         }
         group.base += t.base ?? computed.untaxed;
         byAccount.set(key, group);
@@ -233,7 +239,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
       group.base += computed.untaxed;
-      group.lines.push({ index, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
+      group.lines.push({ index, line_id: l.line_id, amount: computed.untaxed, ...(deferred ? { original_account_id: original } : {}) });
       byAccount.set(key, group);
     }
   }
@@ -260,7 +266,7 @@ export function allocateJournalSources(amount, sources, rate = 1, currency = nul
   const direction = Math.sign(gap);
   const ranked = [...shares].sort((a, b) => direction * (b.remainder - a.remainder) || a.index - b.index);
   for (let i = 0; i < Math.abs(gap); i++) ranked[i % ranked.length].whole += direction;
-  return sources.map((source, i) => ({ index: source.index, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
+  return sources.map((source, i) => ({ index: source.index, line_id: source.line_id, amount: Number((shares[i].whole * step).toPrecision(15)) || 0, ...(source.original_account_id ? { original_account_id: source.original_account_id } : {}) }));
 }
 
 /** A plain-rate tax (no tax record) posts to the tax account of the company's configured default sales or purchase tax. */
@@ -464,7 +470,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -473,6 +479,14 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   if (!j) throw new Error(`Journal not found: ${journal}`);
   if (j.company_id && company && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
 
+  const moveContext = {
+    move_type: 'entry',
+    company_id: company ?? 1,
+    journal_id: jId,
+    partner_id: lines.find((line) => line.partner_id)?.partner_id ?? null,
+    date,
+    ref,
+  };
   const line_ids = lines.map((l) => {
     let accId = null;
     if (l.account_id) accId = l.account_id;
@@ -495,17 +509,29 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     const net = roundCurrency((l.debit ?? 0) - (l.credit ?? 0), ownCurrency);
     const foreignCurrency = l.currency_id ? read(db, 'res.currency', l.currency_id) : null;
     if (l.currency_id && !foreignCurrency) throw new Error('Journal item currency does not exist');
-    return { account_id: accId, ...(l.analytic_distribution != null ? { analytic_distribution: l.analytic_distribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    // Callers pass an explicit allocation; system entries (closing, revaluation, depreciation) get none from models.
+    const distribution = l.analytic_distribution ?? (l.analytic_account_id != null ? { [l.analytic_account_id]: 100 } : null);
+    const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
+  if (analyticPostingHooks?.checkMandatoryPlans) {
+    analyticPostingHooks.checkMandatoryPlans(db, { ...moveContext, line_ids });
+  } else if (search(db, 'account.analytic.plan').length) {
+    throw new Error('Analytic posting support is not loaded');
+  }
   const journalCode = j?.code ?? journal;
   const prefix = `${journalCode}/${date.slice(0, 4)}/`;
-  return create(db, 'account.move', {
+  const made = create(db, 'account.move', {
     move_type: 'entry', state: 'posted', journal_id: jId, invoice_date: date, date, ref, ...(company ? { company_id: company } : {}),
     name: nextName(db, 'account.move', prefix), line_ids, partner_id: lines.find((l) => l.partner_id)?.partner_id ?? null,
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
+    ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
   });
+  if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
+  if (line_ids.some((line) => Object.keys(line.analytic_distribution ?? {}).length)) throw new Error('Analytic posting support is not loaded');
+  return made;
 }
 
 /** Resolve the unique payment default or an explicitly selected liquidity journal. */
@@ -569,19 +595,9 @@ export function bookedStatementAmount(db, line) {
 export function isPaymentMatched(db, payment, excludeLineId = null) {
   const pId = typeof payment === 'object' && payment ? payment.id : payment;
   const pMoveId = typeof payment === 'object' && payment ? payment.move_id : (pId ? read(db, 'account.payment', pId)?.move_id : null);
-  return search(db, 'account.bank.statement.line').some((l) => {
-    if (excludeLineId && l.id === excludeLineId) return false;
-    if (pMoveId && (l.allocations ?? []).some((a) => a.payment_move_id === pMoveId)) return true;
-    if (l.state !== 'reconciled') return false;
-    if (pMoveId && l.payment_move_id === pMoveId) return true;
-    if (l.payment_id === pId) return true;
-    if ((l.payment_ids ?? []).includes(pId)) return true;
-    if (l.batch_payment_id) {
-      const batch = read(db, 'account.batch.payment', l.batch_payment_id);
-      if ((batch?.lines ?? []).some((bl) => !bl.cancelled && bl.payment_id === pId)) return true;
-    }
-    return false;
-  });
+  const { paymentLinesById, paymentLinesByMove } = reconcileIndex(db);
+  const matches = [...(paymentLinesByMove.get(pMoveId) ?? []), ...(paymentLinesById.get(pId) ?? [])];
+  return matches.some((lineId) => !excludeLineId || lineId !== excludeLineId);
 }
 
 /** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
@@ -597,20 +613,52 @@ function reconcileIndex(db) {
       if (row.reversed && row.reversal_move_id) push(applications, row.reversal_move_id, { invoice, row });
     }
   }
-  const payments = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+  const paymentRecords = db.records['account.payment'] ?? [];
+  const payments = new Map(paymentRecords.filter((p) => p.move_id).map((p) => [p.move_id, p]));
+  const paymentsById = new Map(paymentRecords.map((p) => [p.id, p]));
+  const matchedPaymentMoves = new Set();
+  const paymentLinesById = new Map();
+  const paymentLinesByMove = new Map();
+  const batches = new Map((db.records['account.batch.payment'] ?? []).map((batch) => [batch.id, batch]));
+  const markPaymentMove = (moveId, statementId) => {
+    if (!moveId) return;
+    matchedPaymentMoves.add(moveId);
+    push(paymentLinesByMove, moveId, statementId);
+  };
+  const markPaymentId = (id, statementId) => {
+    if (!id) return;
+    push(paymentLinesById, id, statementId);
+    const payment = paymentsById.get(id);
+    if (payment?.move_id) markPaymentMove(payment.move_id, statementId);
+  };
   const settledSuspense = new Map();
-  for (const statement of (db.records['account.bank.statement.line'] ?? []).filter((l) => l.open_amount === 0)) {
-    const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
-    for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
+  for (const statement of db.records['account.bank.statement.line'] ?? []) {
+    for (const allocation of statement.allocations ?? []) {
+      markPaymentMove(allocation.payment_move_id, statement.id);
+    }
+    if (statement.state === 'reconciled') {
+      markPaymentMove(statement.payment_move_id, statement.id);
+      markPaymentId(statement.payment_id, statement.id);
+      for (const paymentId of statement.payment_ids ?? []) markPaymentId(paymentId, statement.id);
+      if (statement.batch_payment_id) {
+        for (const line of batches.get(statement.batch_payment_id)?.lines ?? []) {
+          if (!line.cancelled && line.payment_id) markPaymentId(line.payment_id, statement.id);
+        }
+      }
+    }
+    if (statement.open_amount === 0) {
+      const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
+      for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
+    }
   }
-  const index = { applications, payments, settledSuspense };
+  const index = { applications, payments, matchedPaymentMoves, paymentLinesById, paymentLinesByMove, settledSuspense };
   reconcileIndexes.set(db.records, index);
   return index;
 }
 
 /** Derive reconciliation from settlement links, never from labels or a second stored flag. */
 export function reconciledJournalItems(db, move) {
-  const { applications: byMove, payments, settledSuspense } = reconcileIndex(db);
+  const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = reconcileIndex(db);
   const applications = byMove.get(move.id) ?? [];
   const payment = payments.get(move.id);
   const posted = move.state === 'posted';
@@ -627,7 +675,7 @@ export function reconciledJournalItems(db, move) {
           && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
           && (row.reversed || !payment?.unapplied));
     }
-    if (payment?.outstanding_account_id === line.account_id) reconciled = isPaymentMatched(db, payment);
+    if (payment?.outstanding_account_id === line.account_id) reconciled = matchedPaymentMoves.has(move.id);
     if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
     return { ...line, reconciled };
   });
@@ -684,66 +732,59 @@ export function balances(db, items) {
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
 }
 
-/** Journal items whose analytic distribution (or legacy analytic account) touches one of the selected analytic accounts; no selection keeps every item. */
+/** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
+const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
+
+/** Journal items allocated to the selected analytic accounts; no selection keeps every item. */
 export function filterByAnalytic(items, analyticAccountIds) {
   if (!analyticAccountIds?.length) return items;
   const selected = new Set(analyticAccountIds.map(Number));
-  return items.filter((l) => l.analytic_distribution
-    ? Object.keys(l.analytic_distribution).some((key) => key.split(',').some((id) => selected.has(Number(id))))
-    : selected.has(Number(l.analytic_account_id)));
+  const shares = new Map();
+  const filtered = items.filter((line) => {
+    const share = line.analytic_distribution
+      ? Object.entries(line.analytic_distribution).reduce((total, [key, percent]) => (
+        key.split(',').some((id) => selected.has(Number(id))) ? total + (Number(percent) || 0) : total
+      ), 0) / 100
+      : (selected.has(Number(line.analytic_account_id)) ? 1 : 0);
+    if (share <= 0) return false;
+    shares.set(line, share);
+    return true;
+  });
+  return weighted(filtered, (line) => shares.get(line));
 }
 
-/** Journal items for balance sheet filtering: retains items touching selected analytic accounts, and scales untagged counterparts within the same move by the move's matching analytic share. */
-export function filterBalanceSheetByAnalytic(items, analyticAccountIds) {
+const lineNet = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
+const hasAnalyticAllocation = (line) => line.analytic_distribution != null
+  ? Object.keys(line.analytic_distribution).length > 0
+  : !!line.analytic_account_id;
+
+/** Keep selected analytic lines and restore each move's untagged counterparts by the move's selected share, so filtered reports still balance. */
+export function analyticMoveItems(items, analyticAccountIds) {
   if (!analyticAccountIds?.length) return items;
-  const selected = new Set(analyticAccountIds.map(Number));
-  const isTagged = (l) => Boolean(l.analytic_account_id || (l.analytic_distribution && Object.keys(l.analytic_distribution).length > 0));
-  const matches = (l) => (l.analytic_distribution
-    ? Object.keys(l.analytic_distribution).some((key) => key.split(',').some((id) => selected.has(Number(id))))
-    : selected.has(Number(l.analytic_account_id)));
+  const selected = filterByAnalytic(items, analyticAccountIds);
+  const originalsByMove = new Map();
+  const selectedByMove = new Map();
+  for (const line of items) originalsByMove.set(line.move_id, [...(originalsByMove.get(line.move_id) ?? []), line]);
+  for (const line of selected) selectedByMove.set(line.move_id, [...(selectedByMove.get(line.move_id) ?? []), line]);
 
-  const byMove = new Map();
-  for (const item of items) {
-    const key = item.move_id ?? `solo:${item.id ?? Math.random()}`;
-    let group = byMove.get(key);
-    if (!group) {
-      group = [];
-      byMove.set(key, group);
-    }
-    group.push(item);
-  }
-
-  const out = [];
-  for (const moveItems of byMove.values()) {
-    let matchingTaggedSum = 0;
-    let allTaggedSum = 0;
-    for (const l of moveItems) {
-      const amt = Math.max(Number(l.debit) || 0, Number(l.credit) || 0);
-      if (isTagged(l)) {
-        allTaggedSum += amt;
-        if (matches(l)) matchingTaggedSum += amt;
-      }
-    }
-    if (!matchingTaggedSum) continue;
-    const ratio = allTaggedSum > 0 ? Math.min(1, matchingTaggedSum / allTaggedSum) : 1;
-    for (const l of moveItems) {
-      if (isTagged(l)) {
-        if (matches(l)) out.push(l);
-      } else {
-        out.push({
-          ...l,
-          debit: round((Number(l.debit) || 0) * ratio),
-          credit: round((Number(l.credit) || 0) * ratio),
-          ...(l.amount_currency != null ? { amount_currency: round((Number(l.amount_currency) || 0) * ratio) } : {}),
-        });
-      }
+  const output = [];
+  for (const [moveId, matched] of selectedByMove) {
+    const originals = originalsByMove.get(moveId) ?? [];
+    const assigned = originals.filter(hasAnalyticAllocation);
+    const assignedAmount = assigned.reduce((sum, line) => sum + Math.abs(lineNet(line)), 0);
+    const matchedAmount = matched.filter(hasAnalyticAllocation).reduce((sum, line) => sum + Math.abs(lineNet(line)), 0);
+    const share = assignedAmount ? Math.min(1, matchedAmount / assignedAmount) : 0;
+    output.push(...matched);
+    if (share) {
+      output.push(...originals.filter((line) => !hasAnalyticAllocation(line)).map((line) => ({
+        ...line,
+        debit: (Number(line.debit) || 0) * share,
+        credit: (Number(line.credit) || 0) * share,
+      })));
     }
   }
-  return out;
+  return output;
 }
-
-/** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
-const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
 const sumTypes = (rows, types, sign = 1) => round(rows.filter((r) => types.includes(r.account.account_type)).reduce((s, r) => s + sign * r.balance, 0));
 
@@ -767,7 +808,7 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
 /** Balance sheet at a date; current-year earnings close into equity so assets = liabilities + equity. */
 export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = {}) {
   const filter = typeof at === 'object' && at !== null ? at : { to: at };
-  const items = filterBalanceSheetByAnalytic(journalItems(db, filter), analyticAccountIds);
+  const items = analyticMoveItems(journalItems(db, filter), analyticAccountIds);
   const rows = balances(db, weighted(items, weight));
   const pick = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   const assets = pick(['asset_receivable', 'asset_cash', 'asset_current', 'asset_non_current', 'asset_prepayments', 'asset_fixed'], 1);
@@ -776,7 +817,8 @@ export function balanceSheet(db, at = today(), { weight, analyticAccountIds } = 
   // Closed years already sit in retained earnings, so their closing entries count here.
   const earnings = profitAndLoss(db, filter, { includeClosing: true, weight, analyticAccountIds }).net;
   // Only a label here: an upgraded company without the setting still gets its balance sheet (Qodo 10).
-  const earningsAccount = configuredEarningsAccount(db, db.settings?.current_company_id ?? 1);
+  const reportCompanyId = filter.company_id ?? filter.company ?? db.settings?.current_company_id ?? 1;
+  const earningsAccount = configuredEarningsAccount(db, reportCompanyId);
   const total = (list) => round(list.reduce((s, r) => s + r.balance, 0));
   return {
     assets, liabilities, equity, earnings, earningsAccount,

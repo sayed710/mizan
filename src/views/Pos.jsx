@@ -70,7 +70,7 @@ export function Pos() {
 
   const shown = posProducts(db, { configId, selectedCatId, query });
 
-  const lines = priceLines(db, cart, Number(partner) || null, { pricelistId: preset?.pricelist_id ?? null, fiscalPositionId: preset?.fiscal_position_id ?? null });
+  const lines = priceLines(db, cart, Number(partner) || null, { pricelistId: preset?.pricelist_id ?? null, fiscalPositionId: preset?.fiscal_position_id ?? null, companyId: session?.company_id ?? config?.company_id ?? 1, journalId: session?.journal_id ?? config?.journal_id ?? null });
   const total = amounts(lines, currency);
 
   // Cash rounding
