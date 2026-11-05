@@ -124,3 +124,15 @@ test('Qodo 5: an invoice whose company currency is unresolved shows an unavailab
     assert.equal(models['account.move'].fields.payment_state.compute(move, unconfiguredDb), 'unavailable');
   }
 });
+
+test('a company-currency amount never shows the journal item currency when the company currency is unresolved', async () => {
+  const { display, setCurrency } = await import('./ui.jsx');
+  const base = seed();
+  const eur = search(base, 'res.currency').find((c) => c.name === 'EUR') ?? create(base, 'res.currency', { name: 'EUR', rate_ids: [] });
+  const db = write(base, 'res.company', 1, { currency_id: null });
+  setCurrency('USD');
+  const debit = models['account.move.line']?.fields?.debit ?? { type: 'monetary', currency: 'company' };
+  const shown = display(db, { ...debit, type: 'monetary', currency: 'company' }, 120, { company_id: 1, currency_id: eur.id });
+  assert.match(shown, /currency not configured/);
+  assert.doesNotMatch(shown, /€|EUR|\$/);
+});
