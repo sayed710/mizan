@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, unlink, updateSettings, write } from './orm.js';
+import { create, read, search, unlink, write } from './orm.js';
 import { models } from './models/index.js';
 import { applyDiff } from './sync.js';
 import { payWithDiscount } from './models/accounting.js';
@@ -16,11 +16,12 @@ const bill = (db, vals = {}) => {
 };
 
 test('the server stores a lock date sent by an admin', () => {
-  assert.equal(applyDiff(seed(), { upserts: {}, deletes: {}, settings: { lock_date: '2026-03-31' } }, { isAdmin: true }).settings.lock_date, '2026-03-31');
+  const comp = read(seed(), 'res.company', 1);
+  assert.equal(read(applyDiff(seed(), { upserts: { 'res.company': [{ ...comp, lock_date: '2026-03-31' }] }, deletes: {} }, { isAdmin: true }), 'res.company', 1).lock_date, '2026-03-31');
 });
 
 test('a diff cannot renumber a posted entry and delete it under the audit trail', () => {
-  const { db, id } = bill(write(updateSettings(seed(), { audit_trail: true }), 'res.company', 1, { audit_trail: true }));
+  const { db, id } = bill(write(seed(), 'res.company', 1, { audit_trail: true }));
   const move = read(db, 'account.move', id);
   assert.throws(() => applyDiff(db, { upserts: { 'account.move': [{ ...move, name: '/' }] }, deletes: { 'account.move': [id] } }), /audit trail/);
 });
@@ -55,7 +56,7 @@ test('cancelling or deleting an order invoice makes its quantities invoiceable a
 
 test('payments dated after the lock date still settle a locked invoice', () => {
   const { db, id } = bill(seed(), { invoice_date: addDays(today(), -20) });
-  const locked = write(updateSettings(db, { lock_date: addDays(today(), -5) }), 'res.company', 1, { lock_date: addDays(today(), -5) });
+  const locked = write(db, 'res.company', 1, { lock_date: addDays(today(), -5) });
   assert.equal(read(payWithDiscount(locked, id, 100), 'account.move', id).amount_residual, 0);
   assert.throws(() => payWithDiscount(locked, id, 100, addDays(today(), -10)), /locked/);
 });

@@ -97,7 +97,7 @@ test('invoice sequences are selected and advanced independently by journal', () 
   const defaultPosted = postMove(defaulted.db, defaulted.id);
   assert.equal(read(defaultPosted, 'account.move', defaulted.id).journal_id, invoiceJournal.id);
 
-  const noDefaultCompany = create(db, 'res.company', { name: 'Company without an invoice journal' });
+  const noDefaultCompany = create(db, 'res.company', { name: 'Company without an invoice journal', currency_id: read(db, 'res.company', 1).currency_id });
   const unassigned = create(noDefaultCompany.db, 'account.move', {
     move_type: 'out_invoice', company_id: noDefaultCompany.id, partner_id: 3, invoice_date: today(),
     invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 10, tax: 0 }],

@@ -63,7 +63,7 @@ test('agenda orders published talks by date and time, groups rooms, and exposes 
 });
 
 test('booths reserve and invoice once, and sponsors receive one draft invoice', () => {
-  const { db: d0, id: eventId } = event(emptyDb());
+  const { db: d0, id: eventId } = event(seed());
   const contact = create(d0, 'res.partner', { name: 'Cairo Design Co.' });
   const booth = create(contact.db, 'event.booth', { event_id: eventId, name: 'B-12', price: 500 });
   const reserved = reserveBooth(booth.db, booth.id, contact.id);
@@ -85,7 +85,7 @@ test('booths reserve and invoice once, and sponsors receive one draft invoice', 
 });
 
 test('registration invoicing bills only active attendees with a priced ticket, once each', () => {
-  const { db: d0, id: eventId } = event(emptyDb(), {
+  const { db: d0, id: eventId } = event(seed(), {
     ticket_ids: [{ name: 'Standard', price: 80, seats_max: 0 }, { name: 'Free', price: 0, seats_max: 0 }],
   });
   const contact = create(d0, 'res.partner', { name: 'Nadia' });

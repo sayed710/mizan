@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
-import { create, read, search, updateSettings, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { today, addDays } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
@@ -109,7 +109,7 @@ test('sync rejects forged return transitions and accepts linked review, submit, 
   assert.throws(() => applyDiff(db, forged(db, { closing_move_ids: [] }), { isAdmin: true }), /closing links/i);
   run('Reset to Draft');
   assert.equal(read(db, 'account.move', closing).state, 'cancel');
-  assert.equal(db.settings.tax_lock_dates?.[1], null);
+  assert.equal(read(db, 'res.company', 1).tax_lock_date, null);
   run('Review');
   run('Submit');
   run('Pay');
@@ -131,14 +131,14 @@ test('submission revalidates drafts created after review through form actions', 
 });
 
 test('a forged tax closing reference cannot bypass a period lock', () => {
-  const db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
+  const db = write(seed(), 'res.company', 1, { lock_date: '2025-03-31' });
   assert.throws(() => postEntry(db, { journal: 'MISC', date: '2025-03-15', ref: 'Tax Closing: forged', lines: [
     { account: '101401', debit: 100 }, { account: '211000', credit: 100 },
   ] }), /locked/i);
 });
 
 test('a return closing cannot post into a globally locked period', () => {
-  let db = write(updateSettings(seed(), { lock_date: '2025-03-31' }), 'res.company', 1, { lock_date: '2025-03-31' });
+  let db = write(seed(), 'res.company', 1, { lock_date: '2025-03-31' });
   const manualJournal = create(db, 'account.journal', { name: 'Lock test journal', code: 'LOCKTEST', type: 'general', company_id: 1 });
   db = manualJournal.db;
   const bank = search(db, 'account.account').find((a) => a.code === '101401');
@@ -156,11 +156,11 @@ test('a return closing cannot post into a globally locked period', () => {
   db = actions.find((a) => a.label === 'Review').run(ret.db, read(ret.db, 'account.return', ret.id)).db;
   assert.throws(() => actions.find((a) => a.label === 'Submit').run(db, read(db, 'account.return', ret.id)), /locked/i);
   assert.equal(read(db, 'account.return', ret.id).state, 'reviewed');
-  assert.equal(db.settings.lock_date, '2025-03-31');
+  assert.equal(read(db, 'res.company', 1).lock_date, '2025-03-31');
 });
 
 test('sync round trips preserve manual locks and reset returns in lock order', () => {
-  let db = updateSettings(seed(), { lock_date: '2024-12-31' });
+  let db = write(seed(), 'res.company', 1, { lock_date: '2024-12-31' });
   const type = search(db, 'account.return.type')[0];
   const actions = models['account.return'].form.buttons;
   const run = (label, id) => { const next = actions.find((action) => action.label === label).run(db, read(db, 'account.return', id)).db; db = applyDiff(db, diffDb(db, next), { isAdmin: true }); };
@@ -172,13 +172,13 @@ test('sync round trips preserve manual locks and reset returns in lock order', (
   db = second.db;
   run('Review', second.id);
   run('Submit', second.id);
-  assert.equal(db.settings.lock_date, '2024-12-31');
-  assert.equal(db.settings.tax_lock_dates?.[1], '2025-02-28');
+  assert.equal(read(db, 'res.company', 1).lock_date, '2024-12-31');
+  assert.equal(read(db, 'res.company', 1).tax_lock_date, '2025-02-28');
   const closingId = read(db, 'account.return', first.id).closing_move_ids[0];
   assert.equal(read(db, 'account.move', closingId).tax_return_id, first.id);
   assert.throws(() => actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)), /locked/i);
   run('Reset to Draft', second.id);
-  assert.equal(db.settings.tax_lock_dates?.[1], '2025-01-31');
+  assert.equal(read(db, 'res.company', 1).tax_lock_date, '2025-01-31');
   const reset = actions.find((action) => action.label === 'Reset to Draft').run(db, read(db, 'account.return', first.id)).db;
   const forged = diffDb(db, reset);
   const closing = forged.upserts['account.move'].find((move) => move.id === closingId);
@@ -186,8 +186,8 @@ test('sync round trips preserve manual locks and reset returns in lock order', (
   closing.ref = 'Altered during reset';
   assert.throws(() => applyDiff(db, forged, { isAdmin: true }), /locked|draft/i);
   run('Reset to Draft', first.id);
-  assert.equal(db.settings.tax_lock_dates?.[1], null);
-  assert.equal(db.settings.lock_date, '2024-12-31');
+  assert.equal(read(db, 'res.company', 1).tax_lock_date, null);
+  assert.equal(read(db, 'res.company', 1).lock_date, '2024-12-31');
 });
 
 test('tax return locks and resets are isolated by company through synced actions', () => {
@@ -281,7 +281,7 @@ test('invoice confirmation only uses journals and accounts available to its comp
 
 test('journal posting resolves duplicate account codes in the entry company', () => {
   let db = seed();
-  db = create(db, 'res.company', { name: 'Other company' }).db;
+  db = create(db, 'res.company', { name: 'Other company', currency_id: read(db, 'res.company', 1).currency_id }).db;
   const account = create(db, 'account.account', { code: '251000', name: 'Other company tax', company_id: 2 });
   db = account.db;
   const cash = create(db, 'account.account', { code: '101401', name: 'Other company cash', company_id: 2 });
@@ -294,8 +294,9 @@ test('journal posting resolves duplicate account codes in the entry company', ()
 
 test('journal entries sync with exact, shared and other-company account fallbacks', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Entry company' });
-  const otherCompany = create(company.db, 'res.company', { name: 'Other company' });
+  const currency_id = read(db, 'res.company', 1).currency_id;
+  const company = create(db, 'res.company', { name: 'Entry company', currency_id });
+  const otherCompany = create(company.db, 'res.company', { name: 'Other company', currency_id });
   db = otherCompany.db;
   const account = (code, name, companyId) => {
     const made = create(db, 'account.account', { code, name, company_id: companyId });
@@ -816,7 +817,7 @@ test('manual locks are preserved and prevent closing cancellation inside their p
   const vatType = search(db, 'account.return.type').find((t) => t.name === 'VAT Return');
 
   // 1. Pre-existing manual lock date preserved on reset
-  db = write(updateSettings(db, { lock_date: '2025-12-31' }), 'res.company', 1, { lock_date: '2025-12-31' });
+  db = write(db, 'res.company', 1, { lock_date: '2025-12-31' });
   const r1 = create(db, 'account.return', {
     name: 'VAT Jan 2026',
     type_id: vatType.id,
@@ -826,11 +827,11 @@ test('manual locks are preserved and prevent closing cancellation inside their p
     state: 'reviewed',
   });
   const sub1 = submitReturn(r1.db, r1.id);
-  assert.equal(sub1.settings?.lock_date, '2025-12-31');
+  assert.equal(read(sub1, 'res.company', 1).lock_date, '2025-12-31');
 
   // Resetting r1 must NOT erase the manual lock date
   const reset1 = resetReturnToDraft(sub1, r1.id);
-  assert.equal(reset1.settings?.lock_date, '2025-12-31', 'Manual lock date preserved on reset');
+  assert.equal(read(reset1, 'res.company', 1).lock_date, '2025-12-31', 'Manual lock date preserved on reset');
 
   // 2. Cancellation under later lock
   const r2 = create(reset1, 'account.return', {
@@ -842,17 +843,17 @@ test('manual locks are preserved and prevent closing cancellation inside their p
     state: 'reviewed',
   });
   const sub2 = submitReturn(r2.db, r2.id);
-  assert.equal(sub2.settings?.lock_date, '2025-12-31');
-  assert.equal(sub2.settings?.tax_lock_dates?.[1], '2026-02-28');
+  assert.equal(read(sub2, 'res.company', 1).lock_date, '2025-12-31');
+  assert.equal(read(sub2, 'res.company', 1).tax_lock_date, '2026-02-28');
   const closingId = read(sub2, 'account.return', r2.id).closing_move_ids[0];
 
   // A later lock date (e.g. from year-end closing or manual lock 2026-12-31) is configured
-  const laterLocked = write(updateSettings(sub2, { lock_date: '2026-12-31' }), 'res.company', 1, { lock_date: '2026-12-31' });
+  const laterLocked = write(sub2, 'res.company', 1, { lock_date: '2026-12-31' });
 
   // A later global lock also protects the closing from cancellation.
   assert.throws(() => resetReturnToDraft(laterLocked, r2.id), /locked/i);
   assert.equal(read(laterLocked, 'account.move', closingId).state, 'posted');
-  assert.equal(laterLocked.settings?.lock_date, '2026-12-31', 'Later lock remains active');
+  assert.equal(read(laterLocked, 'res.company', 1).lock_date, '2026-12-31', 'Later lock remains active');
 });
 
 test('states workflow transitions and immutability of submitted/paid returns', () => {
@@ -1693,10 +1694,10 @@ test('submit applies a tax-only lock to taxed invoices and tax account entries',
   const submittedDb = submitReturn(db, retRes.id);
   const ret = read(submittedDb, 'account.return', retRes.id);
   assert.equal(ret.date_lock, pastEnd);
-  assert.equal(submittedDb.settings?.tax_lock_dates?.[1], pastEnd);
-  assert.ok(!submittedDb.settings?.lock_date);
+  assert.equal(read(submittedDb, 'res.company', 1).tax_lock_date, pastEnd);
+  assert.ok(!read(submittedDb, 'res.company', 1).lock_date);
   const synced = applyDiff(db, diffDb(db, submittedDb), { isAdmin: true });
-  assert.equal(synced.settings.tax_lock_dates?.[1], pastEnd);
+  assert.equal(read(synced, 'res.company', 1).tax_lock_date, pastEnd);
 
   const entry = postEntry(synced, { journal: 'MISC', date: '2026-01-15', lines: [
     { account: '101401', debit: 50 }, { account: '400000', credit: 50 },

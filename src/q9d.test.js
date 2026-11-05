@@ -198,7 +198,7 @@ test('Qodo 32: intercompany bill rejects purchase tax group containing another c
   });
   db = groupTax.db;
 
-  const product = create(db, 'product', { name: 'Group Tax Goods', type: 'goods', supplier_tax_id: groupTax.id });
+  const product = create(db, 'product', { name: 'Group Tax Goods', type: 'goods', supplier_tax_id: groupTax.id, property_account_expense_id: buyerExpense.id });
   db = product.db;
 
   const invoice = create(db, 'account.move', {

@@ -8,7 +8,7 @@ import { cleanCustomField, installCustomFields } from './models/studio.js';
 import { cleanFavorites, cleanMessage, cleanRecord } from './validate.js';
 import { scopeNestedCompanyArrays, setCompanies, visibleTo } from './models/company.js';
 import { authorityDeleteRules, authorityRules } from './models/authority.js';
-import { journalInvoiceSequence } from './models/accounting.js';
+import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './models/accounting.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
@@ -130,9 +130,6 @@ const persisted = (model, k) => k === 'active' || k === 'company_id' || Boolean(
 export class ConflictError extends Error {
   conflict = true;
 }
-/** A submitted lock date if it is a date or null (cleared), else the current one. */
-const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v ?? '') && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
-const lockValue = (value, current) => (value === null || isRealDate(value) ? value ?? null : current ?? null);
 
 /**
  * `bases` holds, for each edited record, the values its changed fields had before the edit, so the server can
@@ -577,7 +574,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const changed = [];
   const requestedGeneratedMoves = new Set();
   // Models that point at other records (guardLast) are validated after those records of the same change set.
-  const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
+  const upserts = Object.entries(d.upserts ?? {}).sort(([a], [b]) => (models[b]?.guardFirst ? 1 : 0) - (models[a]?.guardFirst ? 1 : 0) || (models[a]?.guardLast ? 1 : 0) - (models[b]?.guardLast ? 1 : 0));
   for (const [model, recs] of upserts) {
     check(model);
     if (!Array.isArray(recs)) throw new Error(`Invalid ${model} records`);
@@ -654,6 +651,50 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
   const staged = { ...db, records, seq: stagedSeq };
   const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
+  for (const [model, counterpart] of changed) {
+    if (model !== 'account.move' || stored(model, counterpart.id) || !['in_invoice', 'in_refund'].includes(counterpart.move_type) || !counterpart.intercompany_move_id) continue;
+    const source = (records['account.move'] ?? []).find((move) => move.id === counterpart.intercompany_move_id);
+    if (!source || source.state !== 'posted' || source.intercompany_move_id !== counterpart.id || !changed.some(([kind, move]) => kind === 'account.move' && move.id === source.id)) {
+      throw new Error('Invalid inter-company counterpart: source link does not match');
+    }
+    const values = intercompanyBill(staged, { ...source, intercompany_move_id: null });
+    if (!values) throw new Error('Invalid inter-company counterpart: rule is not configured');
+    if (!['draft', 'posted'].includes(counterpart.state)) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+    const isPosted = counterpart.state === 'posted';
+    if (isPosted && (!counterpart.name || counterpart.name === '/')) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+    const linesWithIds = (values.invoice_line_ids ?? []).map((line, i) => ({
+      ...line,
+      ...(counterpart.invoice_line_ids?.[i]?.line_id ? { line_id: counterpart.invoice_line_ids[i].line_id } : {}),
+    }));
+    const { line_ids: expectedLineIds, resolvedLines } = isPosted
+      ? postedInvoiceLines(staged, { ...values, id: counterpart.id, invoice_line_ids: linesWithIds }, counterpart.name)
+      : { line_ids: [], resolvedLines: values.invoice_line_ids };
+    const expected = cleanRecord('account.move', {
+      ...(models['account.move'].defaults?.(counterpart.id) ?? {}),
+      ...values,
+      id: counterpart.id,
+      ...(isPosted ? {
+        state: 'posted',
+        name: counterpart.name,
+        line_ids: expectedLineIds,
+        invoice_line_ids: resolvedLines,
+      } : {}),
+    });
+    const actual = cleanRecord('account.move', counterpart);
+    const stripVolatiles = (val) => {
+      if (val == null || typeof val !== 'object') return val;
+      if (Array.isArray(val)) return val.map(stripVolatiles);
+      const { line_id: _ignoredLineId, payments: _ignoredPayments, amount_paid: _ignoredAmountPaid, payment_date: _ignoredPaymentDate, ...rest } = val;
+      return Object.fromEntries(Object.keys(rest).filter((k) => rest[k] !== undefined).sort().map((k) => [k, stripVolatiles(rest[k])]));
+    };
+    if (JSON.stringify(stripVolatiles(expected)) !== JSON.stringify(stripVolatiles(actual))) {
+      throw new Error('Invalid inter-company counterpart: contents do not match the source');
+    }
+  }
   const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
     model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed, revaluationMoves) ? [rec.id] : []
   )));
@@ -766,23 +807,17 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     favorites: s.favorites === undefined ? db.settings.favorites : cleanFavorites(s.favorites, db.settings.favorites),
     ...(isAdmin ? {
       company: String(s.company ?? db.settings.company).slice(0, 200),
-      currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : db.settings.currency,
+      currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : (() => {
+        try {
+          return companyCurrencyRecord(db, null).name;
+        } catch {
+          return db.settings.currency;
+        }
+      })(),
       companies: Array.isArray(s.companies)
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))
         : db.settings.companies,
-      lock_date: lockValue(s.lock_date, db.settings.lock_date),
-      tax_lock_dates: s.tax_lock_dates && typeof s.tax_lock_dates === 'object' && !Array.isArray(s.tax_lock_dates)
-        ? { ...db.settings.tax_lock_dates, ...Object.fromEntries(Object.entries(s.tax_lock_dates).filter(([id]) => /^[1-9]\d*$/.test(id))
-          .map(([id, value]) => [id, lockValue(value, db.settings.tax_lock_dates?.[id])])) }
-        : db.settings.tax_lock_dates,
-      sale_lock_date: lockValue(s.sale_lock_date, db.settings.sale_lock_date),
-      purchase_lock_date: lockValue(s.purchase_lock_date, db.settings.purchase_lock_date),
-      // The hard lock only ever moves forward.
-      hard_lock_date: [lockValue(s.hard_lock_date, db.settings.hard_lock_date), db.settings.hard_lock_date].filter(Boolean).sort().at(-1) ?? null,
-      invoice_qr: [null, 'zatca', 'epc'].includes(s.invoice_qr ?? null) ? s.invoice_qr ?? null : db.settings.invoice_qr,
-      company_vat: String(s.company_vat ?? db.settings.company_vat ?? '').slice(0, 40),
-      company_iban: String(s.company_iban ?? db.settings.company_iban ?? '').slice(0, 40),
       uninstalled: Array.isArray(s.uninstalled) ? s.uninstalled.filter((x) => typeof x === 'string').slice(0, 200) : db.settings.uninstalled,
       customFields: Array.isArray(s.customFields) ? s.customFields.map(cleanCustomField).filter(Boolean).slice(0, 500) : db.settings.customFields,
     } : {}),

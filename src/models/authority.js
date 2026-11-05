@@ -64,6 +64,16 @@ const SHEET_STEPS = {
 };
 const SHEET_MANAGER_STEPS = new Set(['submit>approve', 'approve>draft']);
 
+// Compare individual journal items, not account nets: opposite repartition rows and their grid effects are distinct.
+function expenseLineKey(line) {
+  return JSON.stringify([
+    line.account ?? line.account_id ?? null, Number(line.debit) || 0, Number(line.credit) || 0,
+    line.tax_id ?? null, line.tax_name || null, line.tax_side || null, Number(line.tax_base) || 0,
+    Boolean(line.tax_base_signed), Boolean(line.tax_zero), Boolean(line.tax_grid_base), Boolean(line.tax_grid_release),
+    line.type_tax_use || null, [...(line.tax_tag_ids ?? [])].sort((a, b) => a - b),
+  ]);
+}
+
 /** Posting/completion must carry the accounting and expense-line effects, not just a status label. */
 function sheetBookingError(db, r, before = null) {
   if (!['post', 'done'].includes(r.state)) return null;
@@ -75,32 +85,35 @@ function sheetBookingError(db, r, before = null) {
     || expenses.some((e) => e.move_id !== entry.id || e.employee_id !== r.employee_id || e.state !== (r.state === 'done' ? 'paid' : 'posted'))) return 'A posted expense report needs its accounting entry and posted expenses';
   const credit = (m, accountId) => (m.line_ids ?? []).filter((l) => l.account_id === accountId).reduce((s, l) => s + Number(l.credit || 0) - Number(l.debit || 0), 0);
   const companyId = r.company_id ?? 1;
-  const debitLines = (entry.line_ids ?? []).filter((line) => Number(line.debit) > 0);
+  let settlementAccount;
+  if (r.payment_mode === 'company_account') {
+    try { settlementAccount = paymentJournal(db, entry.journal_id, companyId).accountId; }
+    catch (error) { return error.message; }
+  } else if (r.payment_mode === 'own_account') {
+    try { settlementAccount = partnerAccount(db, r.partner_id, companyId, 'payable'); }
+    catch (error) { return error.message; }
+  } else {
+    return 'Employee expenses need their posted payable accounting entry';
+  }
+  const nonSettlementLines = (entry.line_ids ?? []).filter((line) => line.account_id !== settlementAccount);
   if (['post', 'done'].includes(before?.state)) {
     // Once posted, the entry's lines are the record of the accounts used; later configuration changes must not rewrite it.
-    const debitTotal = debitLines.reduce((sum, line) => sum + Number(line.debit), 0);
-    if (debitLines.some((line) => !line.account_id) || !close(debitTotal, total)) return 'Expense report entry must contain the posted expense debits';
+    if (r.move_id !== before.move_id) return 'The posted expense report accounting entry cannot be changed';
+    const netTotal = nonSettlementLines.reduce((sum, line) => sum + (Number(line.debit) || 0) - (Number(line.credit) || 0), 0);
+    if (!nonSettlementLines.length || nonSettlementLines.some((line) => !line.account_id) || !close(netTotal, total)) return 'Expense report entry must contain the posted expense debits';
   } else {
     // Being posted now: the client-built entry must use exactly the configured expense and tax accounts.
     let expected;
     try { expected = expenseDebits(db, r, expenses, r.payment_mode === 'own_account' ? expenseReportJournal(db, r) : null); }
     catch (error) { return error.message; }
-    const expectedByAccount = new Map();
-    for (const line of expected) expectedByAccount.set(line.account, (expectedByAccount.get(line.account) ?? 0) + line.debit);
-    const actualByAccount = new Map();
-    for (const line of debitLines) actualByAccount.set(line.account_id, (actualByAccount.get(line.account_id) ?? 0) + Number(line.debit));
-    if (actualByAccount.size !== expectedByAccount.size || [...expectedByAccount].some(([id, amount]) => !close(actualByAccount.get(id) ?? 0, amount))) return 'Expense report entry must use the configured expense and tax accounts';
+    const expectedLines = [...expected, { account_id: settlementAccount, credit: total }].map(expenseLineKey).sort();
+    const actualLines = (entry.line_ids ?? []).map(expenseLineKey).sort();
+    if (JSON.stringify(actualLines) !== JSON.stringify(expectedLines)) return 'Expense report entry must use the configured expense and tax accounts and reporting lines';
   }
   if (r.payment_mode === 'company_account') {
-    let liquidity;
-    try { liquidity = paymentJournal(db, entry.journal_id, companyId).accountId; }
-    catch (error) { return error.message; }
-    return r.state === 'done' && close(credit(entry, liquidity), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
+    return r.state === 'done' && close(credit(entry, settlementAccount), total) && close(Number(r.amount_paid), total) ? null : 'Company-paid expenses need their posted bank accounting entry';
   }
-  let payable;
-  try { payable = partnerAccount(db, r.partner_id, companyId, 'payable'); }
-  catch (error) { return error.message; }
-  if (r.payment_mode !== 'own_account' || !close(credit(entry, payable), total)) return 'Employee expenses need their posted payable accounting entry';
+  if (!close(credit(entry, settlementAccount), total)) return 'Employee expenses need their posted payable accounting entry';
   if (r.state === 'done') {
     const reimbursements = (db.records['account.move'] ?? []).filter((m) => m.state === 'posted' && m.ref === `Reimbursement: ${r.name}` && (m.company_id ?? 1) === companyId);
     let reimbursed = 0;
@@ -108,7 +121,7 @@ function sheetBookingError(db, r, before = null) {
       let liquidity;
       try { liquidity = paymentJournal(db, move.journal_id, companyId).accountId; }
       catch (error) { return error.message; }
-      reimbursed += Math.min(-credit(move, payable), credit(move, liquidity));
+      reimbursed += Math.min(-credit(move, settlementAccount), credit(move, liquidity));
     }
     if (!close(Number(r.amount_paid), total) || !close(reimbursed, total)) return 'Paid employee expenses need their posted reimbursement entries';
   }

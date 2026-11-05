@@ -218,7 +218,7 @@ test('invoices and bills enforce existing, company-matched journal of appropriat
 
 test('finding 15: taxes with foreign configured account reject posting when company equivalent is missing', () => {
   let db = seed();
-  const c2 = create(db, 'res.company', { name: 'Branch 2' });
+  const c2 = create(db, 'res.company', { name: 'Branch 2', currency_id: read(db, 'res.company', 1).currency_id });
   db = c2.db;
   const company2Id = c2.id;
 
@@ -275,7 +275,7 @@ test('finding 15: taxes with foreign configured account reject posting when comp
 
 test('finding 16: fiscal account rules apply to original selected account before company resolution', () => {
   let db = seed();
-  const c2 = create(db, 'res.company', { name: 'Branch 2' });
+  const c2 = create(db, 'res.company', { name: 'Branch 2', currency_id: read(db, 'res.company', 1).currency_id });
   db = c2.db;
   const company2Id = c2.id;
 
@@ -352,7 +352,7 @@ test('finding 16: fiscal account rules apply to original selected account before
 
 test('finding 17: product with foreign configured account rejects posting when company equivalent is missing', () => {
   let db = seed();
-  const c2 = create(db, 'res.company', { name: 'Branch 2' });
+  const c2 = create(db, 'res.company', { name: 'Branch 2', currency_id: read(db, 'res.company', 1).currency_id });
   db = c2.db;
   const company2Id = c2.id;
 

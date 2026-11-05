@@ -1,11 +1,12 @@
 import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
-import { companyRoundingMethod, today } from './common.js';
-import { documentCurrency } from '../money.js';
+import { companyRoundingMethod, today, validDate } from './common.js';
+import { companyCurrencyRecord, documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
+import { returnCompanies, returnTaxLock } from './finance.js';
 
 // Integration: initialize with ensureMainCompany(seed()) so existing partner/currency IDs stay stable.
 // After Confirm returns its new database, call interCompanyRules(next, saleId).
@@ -243,14 +244,35 @@ export function withCompany(models) {
   }));
 }
 
-// Period locks and the audit trail are accounting controls: over sync only administrators may change them.
-const CONTROL_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date', 'tax_lock_dates', 'audit_trail'];
+// Accounting settings shown in General Settings are company controls and can only be changed by administrators over sync.
+const CONTROL_FIELDS = [
+  'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
+  'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date',
+];
+const LOCK_DATE_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date'];
+
+/**
+ * A tax-lock change the return workflow makes for a non-admin: raising the lock to the submitted-return floor,
+ * or lowering it to that floor from the period end of a return that has been reset.
+ */
+function returnLockChange(db, companyId, from, to) {
+  const floor = returnTaxLock(db, companyId) || null;
+  if (to !== floor) return false;
+  if (!from || (to && to > from)) return true;
+  return (db.records['account.return'] ?? []).some((ret) => ret.date_to === from && !['submitted', 'paid'].includes(ret.state) && returnCompanies(db, ret).includes(companyId));
+}
 
 function companyGuard(db, before, r, ctx) {
+  for (const field of LOCK_DATE_FIELDS) {
+    if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
+  }
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
-  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null))) {
-    return 'Only administrators can change lock dates or the audit trail';
+  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
+    JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null)
+    && !(field === 'tax_lock_date' && returnLockChange(db, r.id, before?.tax_lock_date || null, r.tax_lock_date || null))
+  ))) {
+    return 'Only administrators can change lock dates or the audit trail or other company accounting settings';
   }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
@@ -304,9 +326,18 @@ function companyGuard(db, before, r, ctx) {
 /** Create a company and its shared contact, inheriting the parent's currency. */
 export function createCompany(db, vals) {
   if (!vals.name?.trim()) throw new Error('Company name is required');
-  const parent = vals.parent_id && record(db, 'res.company', vals.parent_id);
-  const values = { ...vals, ...(parent ? { currency_id: parent.currency_id } : {}) };
   let next = db;
+  const parent = vals.parent_id && record(next, 'res.company', vals.parent_id);
+  let currencyId = parent ? parent.currency_id : (vals.currency_id ?? null);
+  if (!currencyId) {
+    try {
+      currencyId = companyCurrencyRecord(next, null)?.id;
+    } catch {
+      throw new Error('Configure the company currency before creating a company');
+    }
+  }
+  if (!currencyId) throw new Error('Configure the company currency before creating a company');
+  const values = { ...vals, currency_id: currencyId };
   if (!values.partner_id) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
       ...Object.fromEntries(['email', 'phone', 'vat', 'street', 'city', 'country'].filter((k) => k in values).map((k) => [k, values[k]])) });
@@ -374,15 +405,11 @@ export function createForCompany(db, model, vals) {
 export function ensureMainCompany(db, accounts = {}) {
   if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
-  const code = db.settings?.currency ?? 'USD';
-  const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const unitName = db.settings?.currency_unit_currency === code ? String(db.settings?.currency_unit ?? '').trim() : '';
-  if (!currency && !unitName) throw new Error('Configure the whole currency unit name before initializing the company');
-  const base = currency
-    ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
-    : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
-  const configured = updateSettings(base.db, { base_currency_id: base.id });
-  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: base.id, ...accounts }).db;
+  const currencyId = accounts.currency_id ?? db.settings?.base_currency_id;
+  const currency = currencyId ? (db.records['res.currency'] ?? []).find((c) => c.id === currencyId) : null;
+  if (!currency) throw new Error('Configure the base currency before initializing the company');
+  const configured = updateSettings(db, { base_currency_id: currency.id });
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: currency.id, ...accounts }).db;
   return ensureReturnTypes(created);
 }
 
@@ -395,10 +422,16 @@ export function renameCompany(db, companyId, name) {
   return companyId === 1 ? { ...next, settings: { ...next.settings, company: name } } : next;
 }
 
+/** Ensure a currency record exists by code, creating it when missing. */
+export function ensureCurrencyRecord(db, code) {
+  if (!code) return { db, id: null };
+  const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);
+  return found ? { db, id: found.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
+}
+
 /** Set a company's currency by code, creating the currency record when missing. */
 export function setCompanyCurrency(db, companyId, code) {
-  const found = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const currency = found ? { db, id: found.id } : create(db, 'res.currency', { name: code, rate_ids: [] });
+  const currency = ensureCurrencyRecord(db, code);
   return write(currency.db, 'res.company', companyId, { currency_id: currency.id });
 }
 
@@ -486,6 +519,7 @@ export const companyModels = {
       lock_date: { type: 'date', label: 'Lock Date' },
       sale_lock_date: { type: 'date', label: 'Sales Lock Date' },
       purchase_lock_date: { type: 'date', label: 'Purchase Lock Date' },
+      tax_lock_date: { type: 'date', label: 'Tax Return Lock Date' },
       hard_lock_date: { type: 'date', label: 'Hard Lock Date', readonly: true },
       vat: { type: 'char', label: 'Tax ID' }, street: { type: 'char', label: 'Street' },
       city: { type: 'char', label: 'City' }, country: { type: 'char', label: 'Country' },

@@ -51,12 +51,12 @@ test('tax unit return reviews and closes each company once', () => {
     const move = moves.find((m) => m.company_id === companyId);
     assert.equal(move.state, 'posted');
     assert.equal(move.line_ids.reduce((sum, line) => sum + line.debit, 0), amount);
-    assert.equal(db.settings.tax_lock_dates[companyId], '2040-01-31');
+    assert.equal(read(db, 'res.company', companyId).tax_lock_date, '2040-01-31');
   }
   assert.throws(() => write(db, 'account.tax.unit', unit.id, { company_ids: [1, 999] }), /Cannot change companies/);
   db = action('Reset to Draft');
-  assert.equal(db.settings.tax_lock_dates[1], null);
-  assert.equal(db.settings.tax_lock_dates[company.id], null);
+  assert.equal(read(db, 'res.company', 1).tax_lock_date, null);
+  assert.equal(read(db, 'res.company', company.id).tax_lock_date, null);
   assert.ok(moves.every((move) => read(db, 'account.move', move.id).state === 'cancel'));
 });
 

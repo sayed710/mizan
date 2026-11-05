@@ -93,8 +93,8 @@ function settlesAfterLock(db, before, after, lock) {
  * lock date may still settle them); with the audit trail on, a posted entry keeps its number.
  */
 /**
- * The latest lock date that applies to a move: the global and hard locks always, the sales or purchase lock
- * by journal type. Empty when nothing is locked.
+ * The latest lock date configured on the move's company: general and hard locks always apply, then
+ * the sales or purchase lock by journal type. Empty when nothing is locked.
  */
 export function lockDateFor(company = {}, move = {}, journal = null) {
   const sales = String(move.move_type ?? '').startsWith('out_') || journal?.type === 'sale';
@@ -109,7 +109,10 @@ const companyLockDate = (db, move) => {
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === move.journal_id);
   return lockDateFor(comp, move, journal);
 };
-const companyTaxLock = (settings, companyId) => settings?.tax_lock_dates?.[companyId];
+export const companyTaxLock = (db, companyId) => {
+  const comp = (db.records?.['res.company'] ?? []).find((c) => c.id === companyId);
+  return comp?.tax_lock_date ?? null;
+};
 export function returnCompanies(db, ret) {
   if (!ret.tax_unit_id) return [ret.company_id ?? 1];
   const unit = read(db, 'account.tax.unit', ret.tax_unit_id);
@@ -119,13 +122,18 @@ export function returnCompanies(db, ret) {
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
   .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state) && returnCompanies(db, r).includes(companyId))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
+const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
-function taxLockFor(db, move, settings = db.settings) {
-  const lock = companyTaxLock(settings, move?.company_id ?? 1);
-  if (!move || !lock) return '';
-  const accounts = taxAccounts(db, move.company_id);
+export function taxLockFor(db, move) {
+  if (!move) return '';
+  const compId = move?.company_id ?? 1;
+  // A submitted or paid return keeps its period locked even if the company setting is lowered below it.
+  // A return's own closing entry is unlocked by resetting that return, so it is not held by the floor.
+  const lock = [companyTaxLock(db, compId), returnTaxLock(db, compId, isReturnEntry(db, move) ? move.tax_return_id : null)].filter(Boolean).sort().at(-1);
+  if (!lock) return '';
+  const accounts = taxAccounts(db, compId);
   const ids = new Set([...accounts.sale, ...accounts.purchase,
-    ...cashBasisTransitionAccounts(db, move.company_id)]);
+    ...cashBasisTransitionAccounts(db, compId)]);
   const taxable = (move.line_ids ?? []).some((line) => line.tax_name || line.tax_id || ids.has(line.account_id))
     || (move.invoice_line_ids ?? []).some((line) => line.tax_id || line.tax_name || Number(line.tax));
   return taxable ? lock : '';
@@ -482,7 +490,6 @@ export function paymentInvariant(db, after) {
 
 /** Whether a fiscal year names this entry as its closing or reopening entry. */
 const isYearEntry = (db, id) => (db.records?.['account.fiscal.year'] ?? []).some((y) => y.closing_move_id === id || y.opening_move_id === id);
-const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 
 /** A closed fiscal year locks its period whoever closed it. */
 export function closedYearLock(db, companyId = 1) {
@@ -496,8 +503,8 @@ function securedMoveRule(before, after) {
   return null;
 }
 
-export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+export function moveGuard(db, before, after, _ctx) {
+  return securedMoveRule(before, after) ?? lockRule(db, before, after) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
 }
 
 /** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
@@ -506,7 +513,7 @@ function pendingReversalRule(db, before, after) {
   return read(db, 'account.move', after.reversed_entry_id)?.state === 'posted' ? null : 'The entry this reverses is no longer posted';
 }
 
-function lockRule(db, before, after, ctx) {
+function lockRule(db, before, after) {
   if ((before?.closing_fiscal_year_id ?? null) !== (after.closing_fiscal_year_id ?? null)) {
     if (before || !after.closing_fiscal_year_id || read(db, 'account.fiscal.year', after.closing_fiscal_year_id)?.closing_move_id !== after.id) return 'Closing provenance is set only by closing the fiscal year';
   }
@@ -521,15 +528,9 @@ function lockRule(db, before, after, ctx) {
   if (!before && after.system_generated && after.move_type !== 'entry') return 'Invoices cannot be system generated';
   // A year's own closing or reopening entry is booked into it once, as it is created.
   const yearLock = !before && isYearEntry(db, after.id) ? '' : closedYearLock(db, companyId);
-  const proposed = companyTaxLock(ctx?.settings, companyId);
-  const current = companyTaxLock(db.settings, companyId);
-  const remaining = returnTaxLock(db, companyId);
-  const validDate = typeof proposed === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(proposed) && !Number.isNaN(Date.parse(proposed)) && new Date(proposed).toISOString().slice(0, 10) === proposed;
-  const lowered = current && (proposed === null || validDate) && (proposed ?? '') < current;
-  const adjusted = [proposed, remaining].filter(Boolean).sort().at(-1) ?? null;
-  const taxSettings = !lowered ? db.settings : { ...db.settings, tax_lock_dates: { ...db.settings?.tax_lock_dates, [companyId]: adjusted } };
-  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before, taxSettings), yearLock].sort().at(-1) : '';
-  const afterLock = [companyLockDate(db, after), taxLockFor(db, after, taxSettings), yearLock].sort().at(-1);
+  const taxLock = !before && isReturnEntry(db, after) ? returnTaxLock(db, companyId, after.tax_return_id) : taxLockFor(db, after);
+  const beforeLock = before ? [companyLockDate(db, before), taxLockFor(db, before), yearLock].sort().at(-1) : '';
+  const afterLock = [companyLockDate(db, after), taxLock, yearLock].sort().at(-1);
   const beforeLocked = before && beforeLock && moveDate(before) <= beforeLock;
   const afterLocked = after.state === 'posted' && afterLock && moveDate(after) <= afterLock;
   if (!beforeLocked && !afterLocked) return null;

@@ -62,7 +62,8 @@ test('same-currency conversions work without a base but cross-currency conversio
 });
 
 test('main company onboarding configures the base currency for same-currency invoices', () => {
-  const db = ensureMainCompany(emptyDb());
+  const base = create(emptyDb(), 'res.currency', { name: 'USD', rounding: 0.01, rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
+  const db = ensureMainCompany(base.db, { currency_id: base.id });
   const company = read(db, 'res.company', 1);
   assert.equal(db.settings.base_currency_id, company.currency_id);
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', company_id: company.id, currency_id: company.currency_id,

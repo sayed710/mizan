@@ -8,6 +8,7 @@ import { setActor } from './models/authority.js';
 import { installCustomFields } from './models/studio.js';
 import { setCurrency } from './ui.jsx';
 import { t } from './i18n.js';
+import { companyCurrencyRecord } from './money.js';
 
 // Two modes: "server" (shared db behind /api, login required) or "local" (browser-only demo).
 const KEY = 'mizan-db-v32';
@@ -28,8 +29,18 @@ const savedCompany = () => { try { return Number(localStorage.getItem(COMPANY_KE
 /** Companies defined in settings (the first one mirrors the company name/currency fields). */
 export const companiesOf = (d) => {
   const records = (d?.records?.['res.company'] ?? []).filter((c) => c.active !== false);
-  if (records.length) return records.map((c) => ({ id: c.id, name: c.name, currency: d.records['res.currency']?.find((x) => x.id === c.currency_id)?.name ?? d.settings?.currency ?? 'USD' }));
-  return d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: d?.settings?.currency ?? 'USD' }];
+  if (records.length) {
+    return records.map((c) => {
+      let curr;
+      try {
+        curr = companyCurrencyRecord(d, c.id)?.name ?? null;
+      } catch {
+        curr = null;
+      }
+      return { id: c.id, name: c.name, currency: curr };
+    });
+  }
+  return d?.settings?.companies?.length ? d.settings.companies : [{ id: 1, name: d?.settings?.company ?? 'My Company', currency: null }];
 };
 export const currentCompany = (d = db) => companiesOf(d).find((c) => c.id === (d?.settings?.current_company_id ?? savedCompany())) ?? companiesOf(d)[0];
 export function switchCompany(id) {
@@ -44,9 +55,13 @@ const applyContext = () => {
   const company = currentCompany();
   if (db.settings?.current_company_id == null) db = updateSettings(db, { current_company_id: company.id, allowed_company_ids: db.settings?.allowed_company_ids ?? [company.id] });
   setActiveCompany(null);
-  const currency = (db.records?.['res.currency'] ?? []).find((c) => c.id === db.records?.['res.company']?.find((c) => c.id === company.id)?.currency_id)
-    ?? (db.records?.['res.currency'] ?? []).find((c) => c.name === company.currency);
-  setCurrency(company.currency ?? db?.settings?.currency, currency);
+  let currency;
+  try {
+    currency = companyCurrencyRecord(db, company?.id);
+  } catch {
+    currency = null;
+  }
+  setCurrency(currency?.name ?? null, currency);
 };
 
 const notify = () => {

@@ -203,7 +203,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
     const docCurrency = documentCurrency(db, move);
-    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
+    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod, side: ['out_refund', 'in_refund'].includes(move.move_type) ? 'refund' : 'invoice' });
     const cashBasis = computed.taxes.length ? computed.taxes.some((t) => t.tax_cash_basis) : !!l.tax_cash_basis;
     const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
     const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
@@ -213,7 +213,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       return baseRow?.tag_ids ?? [];
     };
 
-    if (!computed.tax && !cashBasis) {
+    if (!computed.taxes.some((tax) => tax.amount) && !cashBasis) {
       const zeroTaxes = computed.taxes.length
         ? computed.taxes
         : [{ tax_id: l.tax_id ?? null, tax_name: l.tax_name || taxLabel(l), invoice_repartition_line_ids: l.invoice_repartition_line_ids, refund_repartition_line_ids: l.refund_repartition_line_ids }];
@@ -294,7 +294,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
 
   for (const l of move.invoice_line_ids ?? []) {
     if (isSectionOrNote(l)) continue;
-    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod });
+    const computed = computeLineTaxes(l, { currency: docCurrency, roundingMethod, side });
     for (const t of computed.taxes) {
       if (t.amount === 0 && !t.tax_cash_basis) continue;
       const { explicit, splits } = taxRepartitionSplits(t, l, side, docCurrency);
@@ -365,15 +365,13 @@ export function invoiceLines(db, move) {
     companyRound(docRound(base ?? amount) / rate),
   ]);
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
-  const discountFactor = mixedDiscountFactor(term);
-  const mixedDiscount = discountFactor !== 1;
   const rounding = move.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', move.invoice_cash_rounding_id) : null;
   // Tax lines are kept apart per tax so the tax return can read tax and base straight from the ledger.
   const taxes = invoiceTaxGroups(db, move, roundingMethod);
 
-  const rawTotalDoc = mixedDiscount
-    ? docRound(amounts(move.invoice_line_ids, docCurrency, { roundingMethod }).untaxed + taxes.reduce((s, g) => s + g.document_amount, 0))
-    : amounts(move.invoice_line_ids, docCurrency, { roundingMethod }).total;
+  const rawTotalDoc = mixedDiscountFactor(term) !== 1
+    ? docRound(amounts(move.invoice_line_ids, docCurrency, { roundingMethod, side: refund ? 'refund' : 'invoice' }).untaxed + taxes.reduce((s, group) => s + group.document_amount, 0))
+    : amounts(move.invoice_line_ids, docCurrency, { roundingMethod, side: refund ? 'refund' : 'invoice' }).total;
   const totalDoc = rounding ? docRound(cashRound(rawTotalDoc, rounding.rounding, rounding.rounding_method)) : rawTotalDoc;
   const diffDoc = docRound(totalDoc - rawTotalDoc);
   const total = companyRound(totalDoc / rate);
@@ -400,7 +398,7 @@ export function invoiceLines(db, move) {
   }
 
   // A document is foreign when its currency is not the company's (an equal rate on the day does not change that).
-  const own = companyCurrency(db, move.company_id) ?? (db.records['res.currency'] ?? []).find((c) => c.name === db.settings?.currency)?.id ?? null;
+  const own = companyCurrency(db, move.company_id);
   const foreign = !!move.currency_id && move.currency_id !== own;
   const side = (amount, debit, doc) => {
     const sign = (debit !== refund) !== ((amount || doc) < 0) ? 1 : -1;

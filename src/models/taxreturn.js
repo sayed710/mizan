@@ -1,16 +1,26 @@
 // Tax Returns and Return Types (Odoo 20 parity).
-import { create, getActiveCompany, read, search, updateSettings, write } from '../orm.js';
+import { create, getActiveCompany, read, search, write } from '../orm.js';
 import { round } from '../money.js';
 import { addDays, today } from './common.js';
 import { postPayment } from './pay.js';
 import { moveDate, postTaxReturnClosing, returnCompanies, returnTaxLock, taxClosingMatchesReturn, taxClosingSpec, taxReport, taxUnitMemberTypeValidation, validateTaxReturnPeriod } from './finance.js';
 import { checkInalterability } from './hash_chain.js';
 
-/** The tax lock follows the latest submitted or paid return. */
+/**
+ * Submitting a return raises the company tax lock to its period end; resetting it lowers the lock only when that return set it.
+ * A stricter lock set by an administrator is never lowered by the return workflow.
+ */
 const syncTaxLockDate = (db, ret, excludeId = null) => {
-  const dates = { ...db.settings?.tax_lock_dates };
-  for (const companyId of returnCompanies(db, ret)) dates[companyId] = returnTaxLock(db, companyId, excludeId) || null;
-  return updateSettings(db, { tax_lock_dates: dates });
+  let next = db;
+  for (const companyId of returnCompanies(db, ret)) {
+    const current = read(next, 'res.company', companyId)?.tax_lock_date || null;
+    const floor = returnTaxLock(next, companyId, excludeId) || null;
+    const lock = excludeId != null
+      ? (current === ret.date_to ? floor : current)
+      : [current, floor].filter(Boolean).sort().at(-1) ?? null;
+    if (lock !== current) next = write(next, 'res.company', companyId, { tax_lock_date: lock });
+  }
+  return next;
 };
 
 /** Determine if a return is an audit working file rather than a standard tax return. */
@@ -82,7 +92,7 @@ export function ensureReturnTypes(db) {
   const companies = next.records?.['res.company'] ?? [];
 
   for (const company of companies) {
-    const rawPer = company.tax_periodicity || company.account_tax_periodicity || next.settings?.tax_periodicity;
+    const rawPer = company.tax_periodicity || company.account_tax_periodicity;
     const periodicity = ['quarterly', 'trimester'].includes(rawPer) ? 'trimester' : ['semester', 'year'].includes(rawPer) ? rawPer : 'monthly';
     const startDate = company.tax_start_date || company.fiscalyear_start_date || null;
 
@@ -553,6 +563,7 @@ export const taxReturnModels = {
 
   'account.return': {
     label: 'Tax Returns',
+    guardFirst: true,
     guard: returnGuard,
     prepareCreate: (db, vals) => {
       const companyId = returnCompany(db, vals);

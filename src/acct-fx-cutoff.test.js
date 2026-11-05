@@ -2,7 +2,7 @@ import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounti
 import './models/index.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, updateSettings, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { payMove, postMove } from './models/accounting.js';
 import { reversePayment } from './models/pay.js';
@@ -46,7 +46,7 @@ test('revaluation reverses next day, is idempotent, and later cutoff uses revers
 
 test('locked revaluation rejects without changing the database', () => {
   const { db } = fixture();
-  const locked = write(updateSettings(db, { lock_date: '2026-02-28' }), 'res.company', 1, { lock_date: '2026-02-28' });
+  const locked = write(db, 'res.company', 1, { lock_date: '2026-02-28' });
   const before = JSON.stringify(locked);
   assert.throws(() => revalueForeignBalances(locked, '2026-02-28'), /locked/i);
   assert.equal(JSON.stringify(locked), before);

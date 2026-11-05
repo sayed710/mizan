@@ -108,11 +108,12 @@ test('Finding 5: migration preserves global lock date matching closed fiscal yea
   const closed = closeFiscalYear(year.db, year.id);
 
   // An admin independently set a global lock date equal to 2032-12-31 on schema version 20
-  const legacy = write({ ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } }, 'res.company', company.id, { lock_date: dates.date_to });
-  const migrated = migrate(legacy, 21);
+  const legacy = { ...closed, schema_version: 20, settings: { ...closed.settings, lock_date: dates.date_to } };
+  const migrated = migrate(legacy);
 
-  // Global lock must be preserved, not wiped to null
-  assert.equal(migrated.settings.lock_date, dates.date_to, 'Global lock date must be retained');
+  // Global lock must be preserved on all companies
+  assert.ok(migrated.records['res.company'].every((c) => c.lock_date === dates.date_to), 'Lock date must be retained for every company');
+  assert.equal('lock_date' in migrated.settings, false);
 
   // Attempting to post in company 2 within the locked period must throw /locked/
   assert.throws(

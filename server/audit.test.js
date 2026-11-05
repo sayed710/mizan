@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { diffDb } from '../src/sync.js';
-import { create, postTracking, read, search, unlink, updateSettings, write } from '../src/orm.js';
+import { create, postTracking, read, search, unlink, write } from '../src/orm.js';
 import { models } from '../src/models/index.js';
 import { createCompany } from '../src/models/company.js';
 import { createCompanyWithDefaultInvoiceJournals } from '../src/test-support/accounting-company.js';
@@ -239,7 +239,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const ret = create(db, 'account.return', { name: 'HTTP VAT', type_id: type.id, company_id: 1, date_from: '2020-03-01', date_to: '2020-03-31' });
     const review = models['account.return'].form.buttons.find((b) => b.label === 'Review');
     const reviewed = review.run(ret.db, read(ret.db, 'account.return', ret.id)).db;
-    const setup = write(updateSettings(reviewed, { lock_date: '2020-03-31' }), 'res.company', 1, { lock_date: '2020-03-31' });
+    const setup = write(reviewed, 'res.company', 1, { lock_date: '2020-03-31' });
     const setupResponse = await admin('POST', '/api/diff', diffDb(db, setup));
     assert.equal(setupResponse.status, 200, JSON.stringify(setupResponse.body));
     db = setupResponse.body;
@@ -254,7 +254,7 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const blocked = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(blocked.status, 400);
     assert.match(blocked.body.error, /locked/i);
-    const unlocked = await admin('POST', '/api/diff', diffDb(db, write(updateSettings(db, { lock_date: null }), 'res.company', 1, { lock_date: null })));
+    const unlocked = await admin('POST', '/api/diff', diffDb(db, write(db, 'res.company', 1, { lock_date: null })));
     assert.equal(unlocked.status, 200);
     const submitted = await admin('POST', '/api/button', { model: 'account.return', id: ret.id, label: 'Submit' });
     assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
@@ -262,8 +262,8 @@ test('global locks block forged entries and tax submission until unlocked', asyn
     const result = read(saved, 'account.return', ret.id);
     assert.equal(result.state, 'submitted');
     assert.equal(read(saved, 'account.move', result.closing_move_ids[0]).state, 'posted');
-    assert.equal(saved.settings.lock_date, null);
-    assert.equal(saved.settings.tax_lock_dates?.[1], '2020-03-31');
+    assert.equal(read(saved, 'res.company', 1).lock_date, null);
+    assert.equal(read(saved, 'res.company', 1).tax_lock_date, '2020-03-31');
   } finally {
     await stop();
   }
@@ -295,7 +295,7 @@ test('account administration, settings edits and notes are logged without secret
     const key = (await admin('POST', '/api/keys', { name: 'ci' })).body.key;
     const { body: db } = await admin('GET', '/api/db');
     const partner = db.records['res.partner'][0];
-    const edited = { ...db, settings: { ...db.settings, lock_date: '2026-01-31' }, messages: [...db.messages, { id: 'm-audit', model: 'res.partner', res_id: partner.id, body: 'call back', kind: 'note' }] };
+    const edited = { ...db, settings: { ...db.settings, company: 'Renamed Co' }, messages: [...db.messages, { id: 'm-audit', model: 'res.partner', res_id: partner.id, body: 'call back', kind: 'note' }] };
     assert.equal((await admin('POST', '/api/diff', diffDb(db, edited))).status, 200);
     await admin('DELETE', `/api/keys?created=${(await admin('GET', '/api/keys')).body[0].created}`);
 

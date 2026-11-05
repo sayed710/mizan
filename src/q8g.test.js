@@ -12,7 +12,7 @@ import { models } from './models/index.js';
 
 test('Qodo 20: branch operation costs capitalize stock in the order company', () => {
   let db = seed();
-  const company2 = create(db, 'res.company', { name: 'Branch 2' });
+  const company2 = create(db, 'res.company', { name: 'Branch 2', currency_id: read(db, 'res.company', 1).currency_id });
   db = company2.db;
   const c2Id = company2.id;
 

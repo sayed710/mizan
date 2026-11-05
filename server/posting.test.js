@@ -399,7 +399,7 @@ test('server posting automated-valuation return committed through real diff/appl
 
 test('public server-path regression: zero-total stockable sale refunded in a session of another company is rejected and nothing moves', () => {
   let db = seed();
-  const c2 = create(db, 'res.company', { name: 'Company Two' });
+  const c2 = create(db, 'res.company', { name: 'Company Two', currency_id: read(db, 'res.company', 1).currency_id });
   db = c2.db;
   for (const [code, type] of [['121000', 'asset_receivable'], ['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: `C2 ${code}`, account_type: type, company_id: c2.id }).db;

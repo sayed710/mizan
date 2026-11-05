@@ -3,7 +3,7 @@ import { updateSettings, write } from '../orm.js';
 import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser, isServer, listKeys, listUsers, logout, resetDemo, restoreBackup, revokeKey, changePassword, revokeOtherSessions, revokeUser, useDb } from '../store.js';
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
-import { createCompany, renameCompany, setCompanyCurrency } from '../models/company.js';
+import { createCompany, ensureCurrencyRecord, renameCompany, setCompanyCurrency } from '../models/company.js';
 import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
@@ -71,13 +71,30 @@ function Users() {
 
 function Companies({ db }) {
   const list = companiesOf(db);
-  const add = () => {
-    const name = prompt(t('Company Name'));
-    if (!name?.trim()) return;
+  const mainCurrency = list.find((c) => c.id === 1)?.currency ?? list[0]?.currency ?? CURRENCIES[0];
+  const [newCurrency, setNewCurrency] = useState(mainCurrency);
+  const [newName, setNewName] = useState('');
+  useEffect(() => {
+    if (mainCurrency) setNewCurrency(mainCurrency);
+  }, [mainCurrency]);
+  const add = (e) => {
+    e?.preventDefault?.();
+    const name = newName.trim() || prompt(t('Company Name'))?.trim();
+    if (!name) return;
     const current = getDb();
-    if (current.records['res.company']?.length) return commit(setCompanyCurrency(createCompany(current, { name: name.trim() }).db, (current.seq['res.company'] ?? 0) + 1, current.settings?.currency ?? 'USD'));
-    const next = [...list, { id: Math.max(...list.map((c) => c.id)) + 1, name: name.trim(), currency: db.settings?.currency ?? 'USD' }];
+    const currency = newCurrency || mainCurrency;
+    if (current.records['res.company']?.length) {
+      const curRec = currency ? ensureCurrencyRecord(current, currency) : null;
+      const dbWithCurr = curRec ? curRec.db : current;
+      const currencyId = curRec?.id ?? null;
+      const created = createCompany(dbWithCurr, { name, ...(currencyId ? { currency_id: currencyId } : {}) });
+      commit(created.db);
+      setNewName('');
+      return;
+    }
+    const next = [...list, { id: Math.max(...list.map((c) => c.id), 0) + 1, name, currency }];
     commit(updateSettings(current, { companies: next }));
+    setNewName('');
   };
   const setCurrencyOf = (id, currency) => commit(getDb().records['res.company']?.length ? setCompanyCurrency(getDb(), id, currency)
     : updateSettings(getDb(), { companies: list.map((c) => (c.id === id ? { ...c, currency } : c)) }));
@@ -98,7 +115,13 @@ function Companies({ db }) {
           ))}
         </tbody>
       </table>
-      <button type="button" className="btn" onClick={add}>{t('Add Company')}</button>
+      <form className="row user-form" onSubmit={add}>
+        <input aria-label={t('Company Name')} placeholder={t('Company Name')} value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <select aria-label={t('Currency')} value={newCurrency} onChange={(e) => setNewCurrency(e.target.value)}>
+          {CURRENCIES.map((x) => <option key={x} value={x}>{x}</option>)}
+        </select>
+        <button type="submit" className="btn">{t('Add Company')}</button>
+      </form>
     </>
   );
 }
@@ -230,7 +253,7 @@ export function Settings() {
                 </>
               )
               : (
-                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? 'USD'} onChange={(e) => {
+                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
                   const currency = e.target.value;
                   const curId = db.settings?.current_company_id ?? 1;
                   const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
@@ -266,7 +289,7 @@ export function Settings() {
             <input id="lock_date" type="date" disabled={readOnly || !company} value={company?.lock_date ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { lock_date: e.target.value || null }))} />
           </div>
         </div>
-        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date']].map(([key, label]) => (
+        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date'], ['tax_lock_date', 'Tax Return Lock Date']].map(([key, label]) => (
           <div className="field" key={key}>
             <label htmlFor={key}>{t(label)}</label>
             <div className="field-value">

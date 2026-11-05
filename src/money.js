@@ -51,16 +51,39 @@ export function formatCurrency(amount, currency, code = currency?.name) {
 }
 
 /** Resolve currencies without requiring callers to materialize computed ORM fields. */
-export function companyCurrencyRecord(db, companyId) {
-  const company = (db?.records?.['res.company'] ?? []).find((c) => c.id === (companyId ?? 1));
+export function companyCurrencyRecord(db, companyId = null) {
+  if (typeof companyId === 'object' && companyId !== null) {
+    throw new TypeError('companyCurrencyRecord expects a company ID or null, got an object');
+  }
+  const isMain = companyId == null;
+  const targetId = isMain ? 1 : companyId;
+  const company1 = (db?.records?.['res.company'] ?? []).find((c) => c.id === 1);
+  const company = targetId === 1 ? company1 : (db?.records?.['res.company'] ?? []).find((c) => c.id === targetId);
+
+  let currencyId;
+  if (company) {
+    currencyId = company.currency_id;
+  } else if (targetId === 1) {
+    // settings.base_currency_id may only be read when company 1 does not exist yet (initialisation)
+    currencyId = db?.settings?.base_currency_id;
+  } else {
+    currencyId = null;
+  }
+
   const currencies = db?.records?.['res.currency'] ?? [];
-  return currencies.find((c) => c.id === company?.currency_id)
-    ?? currencies.find((c) => c.name === db?.settings?.currency) ?? null;
+  const currency = currencyId ? currencies.find((c) => c.id === currencyId) : null;
+  if (!currency) {
+    if (isMain) throw new Error('Configure the base currency before converting currencies');
+    throw new Error('Configure the company currency before converting currencies');
+  }
+  return currency;
 }
 
 export function documentCurrency(db, record) {
-  return (db?.records?.['res.currency'] ?? []).find((c) => c.id === record?.currency_id)
-    ?? companyCurrencyRecord(db, record?.company_id);
+  if (!db) return null;
+  const direct = (db?.records?.['res.currency'] ?? []).find((c) => c.id === record?.currency_id);
+  if (direct) return direct;
+  return companyCurrencyRecord(db, record?.company_id ?? null);
 }
 
 /** Integer count of the currency's rounding units. */

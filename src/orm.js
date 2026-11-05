@@ -276,7 +276,17 @@ export const postNote = (db, model, id, body, source) => ({ ...db, messages: [..
 export const messagesOf = (db, model, id) =>
   db.messages.filter((m) => m.model === model && m.res_id === id).sort((a, b) => b.date.localeCompare(a.date));
 
-export const updateSettings = (db, vals) => ({ ...db, settings: { ...db.settings, ...vals } });
+export const updateSettings = (db, vals) => {
+  const companyAccountingSettings = [
+    'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'tax_lock_dates', 'hard_lock_date',
+    'audit_trail', 'three_way_matching', 'invoice_qr', 'company_vat', 'vat', 'company_iban',
+    'tax_periodicity', 'tax_start_date',
+  ];
+  if (companyAccountingSettings.some((key) => Object.hasOwn(vals, key))) {
+    throw new Error('Accounting lock dates must be set on the company; other accounting settings must also be set on the company');
+  }
+  return { ...db, settings: { ...db.settings, ...vals } };
+};
 
 const groupKey = (field, v) => {
   if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;

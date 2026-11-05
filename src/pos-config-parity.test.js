@@ -1350,7 +1350,7 @@ test('public settlement regression with two distinct configurations', () => {
 
 test('refunds, return cancellations, and restaurant settlements validate company consistency first before any write', () => {
   let db = seed();
-  const c2 = create(db, 'res.company', { name: 'Branch Company' });
+  const c2 = create(db, 'res.company', { name: 'Branch Company', currency_id: read(db, 'res.company', 1).currency_id });
   db = c2.db;
   for (const [code, type] of [['400000', 'income'], ['101501', 'asset_cash'], ['110100', 'asset_current'], ['500000', 'expense_direct'], ['450000', 'income_other'], ['690000', 'expense_other']]) {
     db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: c2.id }).db;

@@ -79,7 +79,8 @@ function documentPage(db, model, r, url, query, env) {
   const comp = read(db, 'res.company', r.company_id ?? 1);
   const compName = comp?.name ?? (typeof db.settings?.company === 'object' ? db.settings?.company?.name : db.settings?.company) ?? 'My Company';
   const currency = documentCurrency(db, r);
-  const docCurrency = currency?.name ?? db.settings?.currency ?? 'USD';
+  if (!currency) throw new Error('Configure the document or company currency before viewing portal.');
+  const docCurrency = currency.name;
   const documentMoney = (value) => money(value, currency);
   const token = new URL(url, 'http://x').searchParams.get('access_token');
   const lines = r[isOrder ? 'order_line' : 'invoice_line_ids'] ?? [];
