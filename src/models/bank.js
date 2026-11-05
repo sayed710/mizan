@@ -331,11 +331,11 @@ function unreconcileError(db, before, after) {
 }
 
 /** Release a match by posting linked reversals; existing payments are not reversed. */
-export function unreconcile(db, line) {
+export function unreconcile(db, line, reversalDate = null) {
   const bankId = line.bank_move_id ?? (line.payment_id ? line.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = line.allocations ?? [];
-  const date = [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
+  const date = reversalDate ?? [today(), line.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
   // Stage an unlinked line while reversals are generated; the original and complete result are validated below.
   const original = db.records['account.bank.statement.line'].find((l) => l.id === line.id);
   const cleared = { ...original, state: 'to_check', move_id: null, payment_id: null, payment_ids: [], batch_payment_id: null, payment_move_id: null, writeoff_move_id: null, bank_move_id: null, open_amount: null, allocations: [] };

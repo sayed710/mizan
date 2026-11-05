@@ -2,7 +2,7 @@ import { create, postNote, read, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
-import { applyPaymentCredit, reverseEntry } from './pay.js';
+import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
@@ -638,7 +638,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
   const release = releaseCashBasis(withPayment, r, value / total(r, db), date, { final });
-  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, cash_basis_move_id: release.id }];
+  const payments = [...(r.payments ?? []), { date, amount: value, move_id: paymentMove, company_amount: open, payment_company_amount: bank, cash_basis_move_id: release.id }];
   const next = write(release.db, 'account.move', id, { amount_paid: docRound((Number(r.amount_paid) || 0) + value), payment_date: date, payments });
   const noted = postNote(next, 'account.move', id, `Payment of ${money(value)} registered`);
   return excess > 0 ? postNote(noted, 'account.move', id, `${money(excess)} paid above the amount due kept as an outstanding credit`) : noted;
@@ -755,6 +755,9 @@ export function creditNote(db, r, options = {}) {
   const date = opts.date ?? opts.invoice_date ?? today();
   if (!validDate(date)) {
     throw new Error('Enter a valid credit note date');
+  }
+  if (date < (r.invoice_date ?? '')) {
+    throw new Error('Credit note date cannot be before the invoice date');
   }
   const journalIdVal = opts.journal_id ?? null;
   if (journalIdVal) {
@@ -964,11 +967,17 @@ export { isOutstandingCreditFor, outstandingPaymentCredits };
 
 /** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
 function isOutstandingCreditFor(db, r, p) {
-  return p.state === 'posted'
+  return p?.state === 'posted'
     && Number(p.unapplied) > 0
+    && !p.destination_account_id
+    && !p.destination_account_code
+    && !p.is_tax_payment
+    && !p.return_id
     && (p.company_id ?? 1) === (r.company_id ?? 1)
     && sameCommercialPartner(db, p.partner_id, r.partner_id)
-    && (p.payment_type === (isInbound(r) ? 'inbound' : 'outbound'));
+    && Boolean(SETTLES[p.partner_type]?.[p.payment_type]?.includes(r.move_type))
+    && (!p.partner_bank_id || !r.partner_bank_id || p.partner_bank_id === r.partner_bank_id)
+    && shouldBePaid(db, r) !== 'exception';
 }
 
 /** Outstanding (unapplied) payment credits for a posted open invoice or vendor bill, in record order. */

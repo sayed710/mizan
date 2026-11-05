@@ -4,7 +4,7 @@ import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
 import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
-import { lineTaxOf, taxRepartitionLine, taxSnapshot } from './taxes.js';
+import { computeLineTaxes, expandTaxIds, taxRepartitionLines } from './taxes.js';
 
 const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
 
@@ -73,39 +73,82 @@ function writeOff(db, rule, line) {
   const via = paymentJournal(db, line.journal_id, company);
   const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrencyRecord(db, company)), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
   const items = counterparts.flatMap((l) => {
-    const taxes = (l.tax_ids ?? []).map((id) => {
-      const tax = read(db, 'account.tax', id);
-      const taxRow = taxRepartitionLine(tax, 'invoice', 'tax');
-      if (!tax || !taxRow?.account_id) throw new Error('Tax and its account must exist');
-      return { tax, taxRow, baseRow: taxRepartitionLine(tax, 'invoice', 'base') };
-    });
-    const taxAt = (tax, base) => lineTaxOf({ ...taxSnapshot(tax), qty: 1, price_unit: tax.price_include && tax.amount_type !== 'fixed' ? base * (1 + Number(tax.amount) / 100) : base });
-    const fixed = taxes.reduce((sum, { tax }) => sum + taxAt(tax, 0), 0);
-    const factor = 1 + taxes.reduce((sum, { tax }) => sum + taxAt(tax, 1) - taxAt(tax, 0), 0);
-    const base = roundCurrency((l.value - fixed) / factor, currency);
-    const amounts = taxes.map(({ tax }) => roundCurrency(taxAt(tax, base), currency));
-    const net = roundCurrency(l.value - amounts.reduce((a, b) => a + b, 0), currency);
+    const taxRecs = expandTaxIds(db, l.tax_ids ?? []);
+    for (const tax of taxRecs) {
+      const repart = taxRepartitionLines(tax, 'invoice');
+      for (const row of repart.filter((r) => r.repartition_type === 'tax')) {
+        if (row.account_id) {
+          const account = read(db, 'account.account', row.account_id);
+          if (!account || account.active === false) throw new Error('Tax account does not exist or is inactive');
+          if (account.company_id && account.company_id !== company) throw new Error('Tax account belongs to another company');
+        }
+      }
+    }
+    const taxSpecs = taxRecs.map((tax) => ({
+      tax_id: tax.id,
+      tax: Number(tax.amount) || 0,
+      tax_type: tax.amount_type || 'percent',
+      tax_include: true,
+      tax_cash_basis: tax.tax_exigibility === 'on_payment',
+      tax_name: tax.name,
+      tax_include_base_amount: !!tax.include_base_amount,
+      tax_is_base_affected: tax.is_base_affected !== false,
+      tax_sequence: Number(tax.sequence ?? 1),
+      invoice_repartition_line_ids: tax.invoice_repartition_line_ids ?? [],
+      refund_repartition_line_ids: tax.refund_repartition_line_ids ?? [],
+    }));
+
+    const computed = computeLineTaxes({
+      qty: 1,
+      price_unit: l.value,
+      tax_breakdown: taxSpecs,
+    }, { currency, roundingMethod: 'round_per_line' });
+
     const partner = l.partner_id ?? partner_id;
+    const allBaseTags = [...new Set(taxRecs.flatMap((t) => taxRepartitionLines(t, 'invoice').find((r) => r.repartition_type === 'base')?.tag_ids ?? []))];
+
+    const taxLines = [];
+    for (const t of computed.taxes) {
+      const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
+      if (!taxRec) continue;
+      const repartLines = taxRepartitionLines(taxRec, 'invoice');
+      const taxRows = repartLines.filter((r) => r.repartition_type === 'tax');
+      if (!taxRows.length) continue;
+      const weights = taxRows.map((r) => Number(r.factor_percent) || 0);
+      const splitAmounts = taxRows.length === 1
+        ? [t.amount]
+        : allocateCents(t.amount, weights, currency, { tieBreak: 'last' });
+      const splitBases = taxRows.length === 1
+        ? [t.base]
+        : allocateCents(t.base, weights, currency, { tieBreak: 'last' });
+
+      for (let i = 0; i < taxRows.length; i++) {
+        const row = taxRows[i];
+        taxLines.push(side(splitAmounts[i], !incoming, {
+          account: row.account_id ?? l.account_id,
+          partner_id: partner,
+          name: taxRec.name,
+          tax_name: taxRec.name,
+          tax_side: incoming ? 'sale' : 'purchase',
+          tax_base: toCompany(db, journalCurrency, splitBases[i], line.date, company),
+          tax_tag_ids: row.tag_ids ?? [],
+        }));
+      }
+    }
+
+    const net = computed.untaxed;
     return [
       side(net, !incoming, {
         account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
-        ...(taxes.length ? {
+        ...(taxRecs.length ? {
           tax_side: incoming ? 'sale' : 'purchase',
           tax_grid_base: true,
-          tax_tag_ids: [...new Set(taxes.flatMap(({ baseRow }) => baseRow?.tag_ids ?? []))],
+          tax_tag_ids: allBaseTags,
         } : {}),
       }),
-      ...taxes.map(({ tax, taxRow }, i) => side(amounts[i], !incoming, {
-        account: taxRow.account_id,
-        partner_id: partner,
-        name: tax.name,
-        tax_name: tax.name,
-        tax_side: incoming ? 'sale' : 'purchase',
-        tax_base: toCompany(db, journalCurrency, net, line.date, company),
-        tax_tag_ids: taxRow.tag_ids ?? [],
-      })),
+      ...taxLines,
     ];
   });
   const gap = roundCurrency(companyValue - items.reduce((sum, item) => sum + (item.debit || item.credit || 0), 0), companyCurrencyRecord(db, company));

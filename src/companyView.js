@@ -1,5 +1,6 @@
 import { SHARED_MODELS, read, search } from './orm.js';
 import { companyFilter, currentCompany, restrictRecords, scopeAuditChanges, visibleTo } from './models/company.js';
+import { resolveDocumentJournal } from './models/ledger.js';
 
 /** Search UI records in the allowed companies, keeping shared records. */
 export const viewRecords = (db, model, options) => companyFilter(db, search(db, model, options), model);
@@ -7,7 +8,16 @@ export const viewRecords = (db, model, options) => companyFilter(db, search(db, 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>
   viewRecords(db, leaf.model, { includeArchived: archived })
-    .filter((r) => (!archived || r.active === false) && (!leaf.domain || leaf.domain(r, db)) && (!rel || r[rel.field] === rel.id));
+    .filter((r) => {
+      if (archived && r.active !== false) return false;
+      if (leaf.domain && !leaf.domain(r, db)) return false;
+      if (!rel) return true;
+      if (rel.field === 'journal_id' && leaf.model === 'account.move') {
+        const jId = r.journal_id ?? (r.state === 'draft' && r.move_type !== 'entry' ? resolveDocumentJournal(db, r)?.id : null);
+        return jId === rel.id;
+      }
+      return r[rel.field] === rel.id;
+    });
 
 /** Allowed many2one choices plus the current value, even if foreign or archived. */
 export function relationCandidates(db, model, value) {
