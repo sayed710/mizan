@@ -20,6 +20,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
+import { recipientBankCompanyError } from './company.js';
 
 export { invoiceTaxAmount, total, applyPaymentCredit };
 
@@ -450,6 +451,8 @@ export function postedInvoiceLines(db, move, name = move.name) {
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   let r = read(db, 'account.move', id);
+  const bankError = recipientBankCompanyError(db, r);
+  if (bankError) throw new Error(bankError);
   const order = r.move_type === 'out_invoice' && r.sale_id && !r.correction_of_id && read(db, 'sale.order', r.sale_id);
   if (order && (r.invoice_line_ids ?? []).some((l) => !l.down_payment_key)
     && !(r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0)) {
@@ -687,13 +690,17 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
+  const moveBankError = recipientBankCompanyError(db, r);
+  if (moveBankError) throw new Error(moveBankError);
+  const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
+  const payBankError = recipientBankCompanyError(db, payRec);
+  if (payBankError) throw new Error(payBankError);
   if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const value = Math.min(amount, residual(r, db));
   if (!(value > 0)) return db;
-  const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
   if (paymentId && (!payRec || payRec.partner_id !== r.partner_id || payRec.payment_type !== (isInbound(r) ? 'inbound' : 'outbound') || payRec.partner_type !== (isPurchase(r) ? 'supplier' : 'customer'))) {
     throw new Error('Payment must match the invoice partner and direction');
   }

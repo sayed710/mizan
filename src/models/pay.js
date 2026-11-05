@@ -12,6 +12,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
 import { shouldBePaid } from './billcontrol.js';
+import { recipientBankCompanyError } from './company.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -128,6 +129,8 @@ export function postPayment(db, p) {
   if (p.state !== 'draft') throw new Error('Only draft payments can be confirmed');
   if (!p.partner_id) throw new Error('Set the partner');
   if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) throw new Error('The amount must be a finite positive number');
+  const bankError = recipientBankCompanyError(db, p);
+  if (bankError) throw new Error(bankError);
   let currentPayment = p;
   if (!p.invoice_id && p.payment_type === 'outbound' && p.partner_type === 'supplier') {
     const resolvedBankId = resolveAndValidateRecipientBank(db, p.partner_id, p.partner_bank_id, { companyId: p.company_id ?? 1 });

@@ -83,7 +83,7 @@ const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'produc
   'account.incoterm', 'account.account.tag', 'account.asset.model']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
-  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
+  'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', 'res.partner.bank', ...CONFIG_MODELS]);
 /** Group-wide reports hold every company's figures, so only users without a company limit may use them. */
 const GROUP_WIDE = new Set(['consolidation.chart', 'consolidation.period']);
 
@@ -213,6 +213,15 @@ export function companyFilter(db, records, model = null) {
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }
 
+const RECIPIENT_BANK_FIELDS = {
+  partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
+};
+
+export function recipientBankCompanyError(db, record, company = record?.company_id ?? 1) {
+  if (!record?.partner_bank_id) return null;
+  return checkCompany(db, RECIPIENT_BANK_FIELDS, record, company);
+}
+
 function checkCompany(db, fields, r, company) {
   if (shared(company)) return null;
   for (const [key, field] of Object.entries(fields)) {
@@ -222,7 +231,7 @@ function checkCompany(db, fields, r, company) {
         if (error) return error;
       }
     }
-    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal'].includes(field.relation)) continue;
+    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal', 'res.partner.bank'].includes(field.relation)) continue;
     const linked = record(db, field.relation, r[key]);
     if (linked && !shared(linked.company_id) && linked.company_id !== company) return `${field.label}: select a record shared with or belonging to this company`;
   }
