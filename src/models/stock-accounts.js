@@ -30,6 +30,6 @@ export function stockAccount(db, p, role, companyId = 1) {
   if (!id) throw new Error(message);
   const account = read(db, 'account.account', id);
   if (!account || account.active === false) throw new Error(`${message}: configured account is missing or archived`);
-  if ((account.company_id ?? 1) !== companyId) throw new Error(`${message}: account belongs to another company`);
+  if (account.company_id && account.company_id !== companyId) throw new Error(`${message}: account belongs to another company`);
   return account.id;
 }
