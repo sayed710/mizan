@@ -281,8 +281,20 @@ function spawnRecurringMove(db, move) {
   }).db;
 }
 
+function attemptAutoPostMove(db, moveId, onError = null) {
+  try {
+    return postMove(db, moveId);
+  } catch (e) {
+    onError?.(`auto-post move ${moveId}`, e);
+    const body = `Auto-post failed: ${e.message}`;
+    return (db.messages ?? []).some((message) => message.model === 'account.move' && message.res_id === moveId && message.body === body)
+      ? db
+      : postNote(db, 'account.move', moveId, body);
+  }
+}
+
 /** Auto-post draft entries scheduled on or before `at`, generating each next recurring entry once up to its end date. */
-export function postAutoPostMoves(db, at = today()) {
+export function postAutoPostMoves(db, at = today(), { onError = null } = {}) {
   if (!validDate(at)) throw new Error('Enter a valid date');
   let next = db;
   const attempted = new Set();
@@ -295,15 +307,7 @@ export function postAutoPostMoves(db, at = today()) {
     if (!due.length) break;
     for (const { move } of due) {
       attempted.add(move.id);
-      const before = next;
-      try {
-        next = postMove(next, move.id);
-      } catch (e) {
-        const body = `Auto-post failed: ${e.message}`;
-        next = (before.messages ?? []).some((m) => m.model === 'account.move' && m.res_id === move.id && m.body === body)
-          ? before
-          : postNote(before, 'account.move', move.id, body);
-      }
+      next = attemptAutoPostMove(next, move.id, onError);
     }
   }
   return next;
@@ -1249,7 +1253,7 @@ export const accountingModels = {
       }
       if (before.state === 'posted' && after.state !== 'posted') {
         db = reverseInvoiceDeferrals(db, before);
-        db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry);
+        db = revertInvoiceDeferralCreditAdjustment(db, before, reverseEntry, attemptAutoPostMove);
       }
       if (!['invoice_line_ids', 'state', 'sale_id', 'purchase_id'].some((key) => key in vals)) return db;
       return syncInvoicedQty(syncInvoicedQty(db, before), after);

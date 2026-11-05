@@ -11,6 +11,7 @@ import { authorityDeleteRules, authorityRules } from './models/authority.js';
 import { journalInvoiceSequence } from './models/accounting.js';
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
+import { isRevaluationMovePair } from './models/closing.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -77,14 +78,49 @@ function generatedAssetMove(seen, original, move, changed) {
   return asset.state === expectedState;
 }
 
-/** Only a validated closing/reopening or a posted asset board line may carry the internal marker. */
-function generatedMoveOrigin(seen, original, move, changed) {
+/** Resolve both sides of a newly created revaluation pair through their explicit workflow links. */
+function generatedRevaluationMoves(seen, original, changed) {
+  const allMoves = byId(seen.records['account.move']);
+  const originalMoves = byId(original.records['account.move']);
+  const changedIds = new Set(changed.filter(([model]) => model === 'account.move').map(([, move]) => move.id));
+  const checked = new Set();
+  const generated = new Set();
+  for (const [model, move] of changed) {
+    if (model !== 'account.move' || originalMoves.has(move.id)) continue;
+    const adjustment = move.revaluation_date ? move : allMoves.get(move.reversed_entry_id);
+    const reversal = adjustment?.reversal_move_id ? allMoves.get(adjustment.reversal_move_id) : null;
+    if (!adjustment || !reversal) continue;
+    const key = `${adjustment.id}:${reversal.id}`;
+    if (checked.has(key)) continue;
+    checked.add(key);
+    if (originalMoves.has(adjustment.id) || originalMoves.has(reversal.id)
+      || !changedIds.has(adjustment.id) || !changedIds.has(reversal.id)
+      || adjustment.reversal_move_id !== reversal.id || reversal.reversed_entry_id !== adjustment.id) continue;
+    const reversalLinks = (seen.records['account.move'] ?? []).filter((candidate) => (
+      candidate.move_type === 'entry' && candidate.state === 'posted' && candidate.reversed_entry_id === adjustment.id
+    ));
+    const adjustmentLinks = (seen.records['account.move'] ?? []).filter((candidate) => (
+      candidate.move_type === 'entry' && candidate.revaluation_date === adjustment.revaluation_date
+      && candidate.reversal_move_id === reversal.id
+    ));
+    if (reversalLinks.length !== 1 || reversalLinks[0].id !== reversal.id
+      || adjustmentLinks.length !== 1 || adjustmentLinks[0].id !== adjustment.id) continue;
+    // isRevaluationMovePair recomputes the pair from the staged snapshot without the submitted pair itself.
+    if (!isRevaluationMovePair(seen, adjustment, reversal)) continue;
+    generated.add(adjustment.id);
+    generated.add(reversal.id);
+  }
+  return generated;
+}
+
+/** Only a validated closing/reopening, revaluation pair, or posted asset board line may carry the internal marker. */
+function generatedMoveOrigin(seen, original, move, changed, revaluationMoves) {
   if (move.move_type !== 'entry' || move.state !== 'posted') return false;
   const fiscalOrigin = move.is_closing === true && (seen.records['account.fiscal.year'] ?? []).some((year) => (
     changed.some(([model, record]) => model === 'account.fiscal.year' && record.id === year.id)
     && (year.closing_move_id === move.id || year.opening_move_id === move.id)
   ));
-  return fiscalOrigin || generatedAssetMove(seen, original, move, changed);
+  return fiscalOrigin || revaluationMoves.has(move.id) || generatedAssetMove(seen, original, move, changed);
 }
 
 /** Fields the server keeps (computed and undeclared ones are dropped, so they never conflict). */
@@ -614,9 +650,12 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     for (let i = 0; i < changed.length; i++) if (changed[i][0] === 'account.move' && provenance.has(changed[i][1].id)) changed[i] = ['account.move', records['account.move'].find((m) => m.id === changed[i][1].id)];
   }
   const stored = (model, id) => (db.records[model] ?? []).find((r) => r.id === id) ?? null;
-  const staged = { ...db, records };
+  const stagedSeq = { ...db.seq };
+  for (const model of Object.keys(d.upserts ?? {})) stagedSeq[model] = Math.max(stagedSeq[model] ?? 0, maxId(records[model]));
+  const staged = { ...db, records, seq: stagedSeq };
+  const revaluationMoves = generatedRevaluationMoves(staged, db, changed);
   const generatedMoves = new Set(changed.flatMap(([model, rec]) => (
-    model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed) ? [rec.id] : []
+    model === 'account.move' && !stored(model, rec.id) && generatedMoveOrigin(staged, db, rec, changed, revaluationMoves) ? [rec.id] : []
   )));
   for (const id of requestedGeneratedMoves) {
     if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');

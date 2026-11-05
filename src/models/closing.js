@@ -254,6 +254,17 @@ function revaluationTotals(lines, companyRound, totals = new Map()) {
   return totals;
 }
 
+function revaluationJournalId(db, company) {
+  const settings = read(db, 'res.company', company);
+  const journal = settings?.default_general_journal_id
+    ? read(db, 'account.journal', settings.default_general_journal_id)
+    : null;
+  if (!journal || journal.type !== 'general' || (journal.company_id && journal.company_id !== company)) {
+    throw new Error(`Configure a default general journal for company ${company} in the company settings before revaluing foreign balances`);
+  }
+  return journal.id;
+}
+
 /**
  * Post the exchange adjustment for a date, with its next-day reversal. Adjustments already posted for that
  * company and date count towards the target, so a rerun posts only the change (nothing when unchanged), and a
@@ -291,21 +302,66 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       const amount = companyRound((wanted.get(key)?.amount ?? 0) - (booked.get(key)?.amount ?? 0));
       return { account_id: row.account_id, partner_id: row.partner_id, debit: Math.max(0, amount), credit: Math.max(0, -amount) };
     }).filter((line) => line.debit || line.credit);
-    if (delta.length) plans.push({ company, expected: delta });
+    if (delta.length) plans.push({ company, journalId: revaluationJournalId(db, company), expected: delta });
   }
 
   let next = db;
   for (const plan of plans) {
-    const { company, expected } = plan;
-    const entry = postEntry(next, { journal: 'MISC', date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company, system_generated: true });
+    const { company, journalId, expected } = plan;
+    const entry = postEntry(next, { journal: journalId, journal_id: journalId, date, ref: `Foreign currency revaluation: ${date}`, lines: expected, company, system_generated: true });
     const reversal = postEntry(entry.db, {
-      journal: 'MISC', date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
+      journal: journalId, journal_id: journalId, date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
       lines: expected.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
       system_generated: true,
     });
     next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
   return next;
+}
+
+const revaluationIgnoredFields = new Set(['id', 'name', 'ref', 'system_generated', 'reversal_move_id', 'reversed_entry_id']);
+function revaluationMoveContents(move) {
+  const lineContents = (move.line_ids ?? []).map((line) => JSON.stringify(Object.fromEntries(
+    Object.entries(line).filter(([field]) => field !== 'name').sort(([a], [b]) => a.localeCompare(b)),
+  ))).sort();
+  return JSON.stringify(Object.fromEntries(Object.entries(move)
+    .filter(([field]) => !revaluationIgnoredFields.has(field))
+    .map(([field, value]) => [field, field === 'line_ids' ? lineContents : value])
+    .sort(([a], [b]) => a.localeCompare(b))));
+}
+
+/** A revaluation pair is valid only when it matches the pair the configured workflow produces from this snapshot. */
+export function isRevaluationMovePair(db, adjustment, reversal) {
+  const date = adjustment?.revaluation_date;
+  const company = adjustment?.company_id ?? 1;
+  if (!validDate(date) || adjustment.move_type !== 'entry' || adjustment.state !== 'posted'
+    || adjustment.date !== date || adjustment.invoice_date !== date
+    || reversal?.move_type !== 'entry' || reversal.state !== 'posted'
+    || reversal.date !== addDays(date, 1) || reversal.invoice_date !== addDays(date, 1)
+    || adjustment.reversal_move_id !== reversal.id || reversal.reversed_entry_id !== adjustment.id
+    || (reversal.company_id ?? 1) !== company) return false;
+
+  const moves = (db.records['account.move'] ?? []).filter((m) => m.id !== adjustment.id && m.id !== reversal.id);
+  const maxMoveId = Math.max(0, db.seq?.['account.move'] ?? 0, ...moves.map((m) => m.id ?? 0));
+  const snapshot = {
+    ...db,
+    records: { ...db.records, 'account.move': moves },
+    seq: { ...db.seq, 'account.move': maxMoveId },
+  };
+  const expected = revalueForeignBalances(snapshot, date, { companyId: company });
+  const existingIds = new Set((snapshot.records['account.move'] ?? []).map((move) => move.id));
+  const newAdjustments = (expected.records['account.move'] ?? []).filter((move) => (
+    !existingIds.has(move.id) && move.revaluation_date === date
+    && (move.company_id ?? 1) === company && move.reversal_move_id
+  ));
+  if (newAdjustments.length !== 1) return false;
+  const expectedAdjustment = newAdjustments[0];
+  const expectedReversals = (expected.records['account.move'] ?? []).filter((move) => move.id === expectedAdjustment.reversal_move_id);
+  if (expectedReversals.length !== 1) return false;
+  const expectedReversal = expectedReversals[0];
+  return Boolean(expectedReversal
+    && revaluationMoveContents(adjustment) === revaluationMoveContents(expectedAdjustment)
+    && revaluationMoveContents(reversal) === revaluationMoveContents(expectedReversal));
 }
 
 export const closingModels = {

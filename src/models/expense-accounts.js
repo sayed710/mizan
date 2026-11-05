@@ -6,7 +6,9 @@ import { taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from '.
 export function expenseReportJournal(db, report) {
   const company = report.company_id ?? 1;
   const journal = read(db, 'account.journal', report.expense_journal_id ?? read(db, 'res.company', company)?.default_general_journal_id);
-  if (!journal || (journal.company_id && journal.company_id !== company)) throw new Error('Select an expense journal or configure a default general journal for this company');
+  if (!journal || (journal.company_id && journal.company_id !== company) || !['general', 'purchase'].includes(journal.type)) {
+    throw new Error('Select a general or purchase expense journal, or configure a default general journal for this company');
+  }
   return journal;
 }
 

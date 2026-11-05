@@ -254,6 +254,50 @@ function postRecognitionCorrection(db, schedule, sourceMove, amount, date, note,
   return { db: postAnalytic(posted.db, posted.id), id: posted.id };
 }
 
+function cancelScheduledReversals(db, sourceMove) {
+  const scheduledReversalsBefore = [];
+  let next = db;
+  const pending = (next.records['account.move'] ?? []).filter((move) =>
+    move.state === 'draft' && move.auto_post === 'at_date' && move.reversed_entry_id === sourceMove.id
+  );
+  for (const move of pending) {
+    scheduledReversalsBefore.push({ move_id: move.id, state: move.state, auto_post: move.auto_post });
+    next = write(next, 'account.move', move.id, { state: 'cancel', auto_post: 'no' });
+  }
+  return { db: next, scheduled_reversals_before: scheduledReversalsBefore };
+}
+
+function restoreScheduledReversals(db, scheduledReversalsBefore, autoPostMoveFn) {
+  const restorations = (scheduledReversalsBefore ?? []).map((prior) => {
+    const reversal = read(db, 'account.move', prior.move_id);
+    if (!reversal) throw new Error('A scheduled deferral reversal is missing and cannot be restored');
+    if (reversal.state !== 'cancel' && reversal.state !== prior.state) {
+      throw new Error('A scheduled deferral reversal changed before it could be restored');
+    }
+    const sourceMove = read(db, 'account.move', reversal.reversed_entry_id);
+    if (!sourceMove) throw new Error('A scheduled deferral reversal has no source entry and cannot be restored');
+    const date = reversal.date ?? reversal.invoice_date;
+    if (!date) throw new Error('A scheduled deferral reversal has no posting date and cannot be restored');
+    return { prior, reversal, sourceMove, date };
+  });
+  const currentDate = today();
+  if (restorations.some(({ prior, date }) => prior.state === 'draft' && prior.auto_post === 'at_date' && date <= currentDate)
+    && typeof autoPostMoveFn !== 'function') {
+    throw new Error('A posting service is required to restore a due scheduled deferral reversal');
+  }
+
+  let next = db;
+  for (const { prior, reversal, sourceMove, date } of restorations) {
+    next = write(next, 'account.move', reversal.id, { state: prior.state, auto_post: prior.auto_post });
+    // A secured (hashed) source keeps its fields; the reversal still points at it through reversed_entry_id.
+    if (!sourceMove.inalterable_hash) next = write(next, 'account.move', sourceMove.id, { reversal_move_id: reversal.id });
+    if (prior.state === 'draft' && prior.auto_post === 'at_date' && date <= currentDate) {
+      next = autoPostMoveFn(next, reversal.id);
+    }
+  }
+  return next;
+}
+
 /** Apply only the deferral share explicitly referenced by a posted credit note. */
 export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
   const plan = validateInvoiceDeferralCredit(db, note);
@@ -320,6 +364,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
     const reversed = effectivelyReversedEntryIds(next.records['account.move'] ?? []);
     const reversalByDate = new Map();
     const eligiblePosted = [];
+    const scheduledReversalsBefore = [];
 
     for (let index = 0; index < board.length; index++) {
       const line = board[index];
@@ -340,13 +385,9 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
       for (const { line, recognitionMove, outstanding } of eligiblePosted) {
         const moveDate = recognitionMove.invoice_date ?? recognitionMove.date ?? note.invoice_date;
         const date = note.invoice_date < moveDate ? moveDate : note.invoice_date;
-        const pendingScheduledReversals = (next.records['account.move'] ?? []).filter((move) =>
-          move.state === 'draft' && move.auto_post === 'at_date' && move.reversed_entry_id === recognitionMove.id
-        );
-        for (const pending of pendingScheduledReversals) {
-          // A full credit supplies the offset now; disarm any future auto-post of the same reversal.
-          next = write(next, 'account.move', pending.id, { state: 'cancel', auto_post: 'no' });
-        }
+        const cancelledReversals = cancelScheduledReversals(next, recognitionMove);
+        next = cancelledReversals.db;
+        scheduledReversalsBefore.push(...cancelledReversals.scheduled_reversals_before);
         const hasExistingReversal = (next.records['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === recognitionMove.id);
         const { db: stepDb, id: reversalId } = !hasExistingReversal
           ? reverseEntryFn(next, recognitionMove, { date, reason: `Credit note ${note.name}` })
@@ -445,6 +486,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
         board_before,
         state_before,
         move_ids: adjustmentMoveIds,
+        scheduled_reversals_before: scheduledReversalsBefore,
         grouped_contributions_before: groupedContributionsBefore,
       },
     ];
@@ -454,7 +496,7 @@ export function adjustInvoiceDeferralsForCreditNote(db, note, reverseEntryFn) {
 }
 
 /** Revert deferral schedule and move adjustments when a linked credit note leaves posted. */
-export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn) {
+export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn, autoPostMoveFn) {
   if (!isRefund(note)) return db;
   const schedules = (db.records['account.deferral'] ?? []).filter((s) =>
     (s.credit_adjustments ?? []).some((adj) => adj.note_id === note.id)
@@ -494,6 +536,7 @@ export function revertInvoiceDeferralCreditAdjustment(db, note, reverseEntryFn) 
         next = write(next, 'account.move', m.id, { deferred_contributions: entry.deferred_contributions });
       }
     }
+    next = restoreScheduledReversals(next, adjustment.scheduled_reversals_before, autoPostMoveFn);
     const remainingAdjustments = (schedule.credit_adjustments ?? []).filter((adj) => adj.note_id !== note.id);
     next = write(next, 'account.deferral', schedule.id, {
       board: adjustment.board_before,
