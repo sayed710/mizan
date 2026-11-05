@@ -1,4 +1,4 @@
-import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { createCompanyWithDefaultInvoiceJournals, withDefaultVat } from './test-support/accounting-company.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './models/index.js';
@@ -43,7 +43,8 @@ function setupPrecision(rounding, foreign) {
   if (foreign) db = write(db, 'account.journal', journalId(db, 'BNK1'), { currency_id: made.id });
   if (!foreign) {
     const created = createCompanyWithDefaultInvoiceJournals(db, { name: `Precision ${rounding}`, currency_id: made.id });
-    db = created.db;
+    // Plain-rate VAT posts to the new company's configured default tax.
+    db = withDefaultVat(created.db, created.id);
     company = created.id;
   }
   const invoice = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, company_id: company, currency_id: made.id,
