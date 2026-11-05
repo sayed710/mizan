@@ -14,6 +14,7 @@ import { CalendarView } from './CalendarView.jsx';
 import { Gantt } from './Gantt.jsx';
 import { actionRecords } from '../companyView.js';
 import { pageWindow } from './paging.js';
+import { statementImportJournalChoices, withSelectedStatementJournal } from '../models/statements.js';
 
 export { actionRecords } from '../companyView.js';
 
@@ -49,6 +50,7 @@ export function ActionView({ leaf, base, params }) {
     return { ...initial, filters: urlFilters.length ? urlFilters : defaultFilters, groupBy: leaf.groupBy ?? [] };
   });
   const [selected, setSelected] = useState(() => new Set());
+  const [selectedImportJournalId, setSelectedImportJournalId] = useState('');
   const companyScope = db.settings?.allowed_company_ids?.join(',') ?? db.settings?.current_company_id ?? 1;
   useEffect(() => setSelected(new Set()), [companyScope]);
 
@@ -63,6 +65,15 @@ export function ActionView({ leaf, base, params }) {
     .filter((r) => matches(db, model, r, search.terms));
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
+  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
+  const statementImport = model === 'account.bank.statement.line' && !!def.importFile;
+  const importJournals = statementImport && !defaults.journal_id
+    ? statementImportJournalChoices(db, defaults.company_id ?? null)
+    : [];
+  const selectedImportJournal = importJournals.find((journal) => String(journal.id) === selectedImportJournalId);
+  const importDefaults = statementImport && !defaults.journal_id
+    ? withSelectedStatementJournal(defaults, selectedImportJournal?.id)
+    : defaults;
 
   const deleteSelected = () => {
     if (!confirm(t('Delete {n} record(s)?', { n: selected.size }))) return;
@@ -79,7 +90,7 @@ export function ActionView({ leaf, base, params }) {
   const importCsv = async (file) => {
     try {
       const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, defaults) : importCsvRows(getDb(), model, defaults, fromCsv(text));
+      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, importDefaults) : importCsvRows(getDb(), model, importDefaults, fromCsv(text));
       // Report the import only once the server has accepted it (a refusal shows its own message).
       if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
     } catch (e) {
@@ -133,13 +144,18 @@ export function ActionView({ leaf, base, params }) {
         } catch (e) { alert(t(e.message)); }
       }}>{t(action.label)}</button>)}
       <button type="button" className="btn sm" onClick={exportCsv}>⬇ {t('Export')}</button>
+      {statementImport && !defaults.journal_id && <label className="import-journal-picker">
+        <span>{t('Bank Journal')}</span>
+        <select aria-label={t('Bank Journal')} value={selectedImportJournalId} onChange={(e) => setSelectedImportJournalId(e.target.value)}>
+          <option value="">{t('Choose a bank or cash journal')}</option>
+          {importJournals.map((journal) => <option key={journal.id} value={journal.id}>{journal.name}</option>)}
+        </select>
+      </label>}
       <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       {pager}
     </>
   ) : pager;
-  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
-
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}

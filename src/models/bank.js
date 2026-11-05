@@ -439,8 +439,11 @@ function lineGuard(db, before, after) {
   return null;
 }
 
+/** An unreconciled legacy statement line that still needs a user to choose its journal. */
+export const isStatementLineWithoutJournal = (line) => line.state === 'to_check' && !line.journal_id;
+
 /** Unreconciled statement lines saved before a journal was required; they count on no bank card until assigned one. */
-export const statementLinesWithoutJournal = (db) => (db.records['account.bank.statement.line'] ?? []).filter((l) => l.state === 'to_check' && !l.journal_id);
+export const statementLinesWithoutJournal = (db) => (db.records['account.bank.statement.line'] ?? []).filter(isStatementLineWithoutJournal);
 
 export const bankModels = {
   'account.bank.statement.line': {
@@ -483,7 +486,8 @@ export const bankModels = {
     createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
     defaultFilters: ['open'],
     filters: [[{ id: 'open', label: 'To Reconcile', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Reconciled', fn: (r) => r.state === 'reconciled' }],
-      [{ id: 'in', label: 'Incoming', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Outgoing', fn: (r) => r.amount < 0 }]],
+      [{ id: 'in', label: 'Incoming', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Outgoing', fn: (r) => r.amount < 0 }],
+      [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }]],
     groupBys: ['state', 'partner_id', 'date'],
     kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
     list: ['date', 'payment_ref', 'partner_id', 'amount', 'open_amount', 'move_id', 'state'],
