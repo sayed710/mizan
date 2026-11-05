@@ -483,6 +483,7 @@ export const posPlusModels = {
       preset_snapshot: { type: 'json', label: 'Preset Snapshot', readonly: true, hidden: true },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       rounding_difference: { type: 'monetary', label: 'Rounding Difference', readonly: true, hidden: true },
+      rounding_account_id: { type: 'many2one', relation: 'account.account', label: 'Rounding Account', readonly: true, hidden: true },
       return_layers: {
         type: 'one2many', label: 'Return Layers', readonly: true, hidden: true,
         fields: {

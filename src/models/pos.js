@@ -420,7 +420,27 @@ function validateReturnValuation(db, { original, lines, session }) {
   }
 }
 
-function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id }) {
+/**
+ * Resolve and validate the cash rounding account for a POS order or refund.
+ * - On a refund of an order that recorded its rounding account, reverses that exact account.
+ * - On a historical order without the recorded field, or on a sale, resolves from current configuration.
+ * - Validates the account is active and belongs to the company before anything is written.
+ */
+function orderRoundingAccount(db, { original = null, config = null, roundingDiff = 0, companyId = 1 } = {}) {
+  if (Number(roundingDiff || 0) === 0) return null;
+  if (original?.rounding_account_id) {
+    const acc = read(db, 'account.account', original.rounding_account_id);
+    if (!acc || acc.active === false || (acc.company_id && acc.company_id !== (companyId ?? 1))) {
+      throw new Error('Original POS rounding account belongs to another company or is inactive');
+    }
+    return acc.id;
+  }
+  const isProfit = Number(roundingDiff) > 0;
+  const rounding = config?.cash_rounding && config?.rounding_method_id ? read(db, 'account.cash.rounding', config.rounding_method_id) : null;
+  return roundingAccount(db, rounding, isProfit, companyId);
+}
+
+function validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id, config, roundingDiff }) {
   if (original) {
     if (roundCurrency(total.total, currency) !== 0) {
       const valuationMoveIds = new Set(
@@ -453,6 +473,10 @@ function validateCheckoutAccounting(db, { original, total, expectedTotal, sessio
       }
     }
   }
+  const shouldValidateRounding = original ? roundCurrency(total.total, currency) !== 0 : roundCurrency(expectedTotal, currency) !== 0;
+  return shouldValidateRounding
+    ? orderRoundingAccount(db, { original, config, roundingDiff, companyId: session.company_id })
+    : null;
 }
 
 function validateRefundTaxRepartition(db, lines, currency, companyId) {
@@ -533,7 +557,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     : resolveNewOrderTenders(db, { payments, method, expectedTotal, enabledMethods, session, effectivePartnerId, isReturn, currency });
 
   validateReturnValuation(db, { original, lines, session });
-  validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId });
+  const roundingAccountId = validateCheckoutAccounting(db, { original, total, expectedTotal, session, resolvedPayments, currency, partner_id: effectivePartnerId, config, roundingDiff });
 
   return {
     session,
@@ -549,6 +573,7 @@ export function resolvePosOrderCheckout(db, { lines, method, payments = null, pa
     resolvedPayments,
     original,
     effectivePartnerId,
+    roundingAccountId,
   };
 }
 
@@ -585,7 +610,7 @@ function moveOrderStock(db, { next, id, name, lines, refund_of, original, sessio
   return stocked;
 }
 
-function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, id, expectedTotal }) {
+function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, presetSnapshot, name, resolvedPayments, roundingDiff, id, expectedTotal, roundingAccountId = null }) {
   const posJournal = resolveDocumentJournal(stocked, {
     move_type: refund_of ? 'out_refund' : 'out_invoice',
     company_id: session.company_id,
@@ -619,9 +644,12 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
       };
     }),
   ];
+  let postedRoundingAccountId = null;
   if (roundingDiff !== 0) {
     const isProfit = Number(roundingDiff) > 0;
-    const acc = roundingAccount(db, rounding, isProfit, session.company_id);
+    const acc = roundingAccountId;
+    if (!acc) throw new Error('Cash rounding account is not configured');
+    postedRoundingAccountId = acc;
     const amt = Math.abs(roundingDiff);
     // A refund reverses the same rounding account, so the debit side flips with the document direction.
     const debit = refund_of ? isProfit : !isProfit;
@@ -657,7 +685,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
     booked = tenderEntry.db;
     moveIds.push(tenderEntry.id);
   }
-  return { db: write(booked, 'pos.order', id, { lines: postedLines, accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
+  const postedRounding = (!refund_of && postedRoundingAccountId) ? { rounding_account_id: postedRoundingAccountId } : {};
+  return { db: write(booked, 'pos.order', id, { lines: postedLines, ...postedRounding, accounting_entries: moveIds.map((move_id) => ({ move_id })) }), id, name, total: expectedTotal };
 }
 
 /**
@@ -666,11 +695,8 @@ function postOrderEntries(db, { stocked, lines, refund_of, session, partner_id, 
  */
 export function payOrder(db, { lines, method, payments = null, partner_id = null, refund_of = null, config_id = null, preset_id = null }) {
   const checkout = resolvePosOrderCheckout(db, { lines, method, payments, partner_id, refund_of, config_id, preset_id });
-  const { session, config, resolvedConfigId, presetSnapshot, effectivePresetId, total, expectedTotal, roundingDiff, resolvedPayments, original, effectivePartnerId } = checkout;
+  const { session, resolvedConfigId, presetSnapshot, effectivePresetId, total, expectedTotal, roundingDiff, resolvedPayments, original, effectivePartnerId, roundingAccountId } = checkout;
 
-  // A refund must reverse the rounding account the sale used, even if cash rounding was disabled since.
-  const roundingMethodId = config?.rounding_method_id && (refund_of || config?.cash_rounding) ? config.rounding_method_id : null;
-  const rounding = roundingMethodId ? read(db, 'account.cash.rounding', roundingMethodId) : null;
   const primaryMethod = read(db, 'pos.payment.method', resolvedPayments[0].payment_method_id);
   const orderPaymentMethod = primaryMethod ? (primaryMethod.type === 'cash' ? 'cash' : (primaryMethod.type === 'bank' ? 'card' : primaryMethod.type)) : resolvedPayments[0].method;
   const primaryMethodId = primaryMethod?.id ?? resolvedPayments[0].payment_method_id ?? null;
@@ -701,7 +727,7 @@ export function payOrder(db, { lines, method, payments = null, partner_id = null
     return { db: stocked, id, name, total: expectedTotal };
   }
 
-  const posted = postOrderEntries(db, { stocked, lines: orderLines, refund_of, session, partner_id, presetSnapshot, name, rounding, resolvedPayments, roundingDiff, id, expectedTotal });
+  const posted = postOrderEntries(db, { stocked, lines: orderLines, refund_of, session, partner_id: effectivePartnerId, presetSnapshot, name, resolvedPayments, roundingDiff, id, expectedTotal, roundingAccountId });
   return original ? { ...posted, db: write(posted.db, 'pos.order', original.id, { state: 'refunded' }) } : posted;
 }
 
