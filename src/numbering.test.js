@@ -103,7 +103,7 @@ test('server renumbering uses the request author and newly enabled audit setting
   const server = applyDiff(base, diffDb(base, alice), { author: 'First' });
   const diff = diffDb(base, bob);
   diff.settings = { ...base.settings, audit_trail: true };
-  diff.upserts = { ...diff.upserts, 'res.company': [{ id: 1, name: read(base, 'res.company', 1).name, audit_trail: true }] };
+  diff.upserts = { ...diff.upserts, 'res.company': [{ ...read(base, 'res.company', 1), audit_trail: true }] };
   const saved = applyDiff(server, diff, { author: 'Second', isAdmin: true });
   const msg = saved.messages.find((m) => m.res_id === b.id && m.model === 'account.move' && m.body.includes('assigned by the server'));
   assert.ok(msg, 'audit enablement takes effect in this diff');

@@ -33,7 +33,8 @@ test('purchase matching accepts a vendor contact but rejects unrelated vendor or
   const other = create(bill.db, 'res.partner', { name: 'Unrelated vendor' });
   const wrongVendor = makeBill(other.db, { partner_id: other.id, purchase_id: po.id });
   assert.throws(() => matchBill(wrongVendor.db, wrongVendor.id), /vendor and company/);
-  const wrongCompany = makeBill(po.db, { company_id: 2, purchase_id: po.id });
+  const co2 = create(po.db, 'res.company', { id: 2, name: 'Company 2', currency_id: read(po.db, 'res.company', 1).currency_id });
+  const wrongCompany = makeBill(co2.db, { company_id: 2, purchase_id: po.id });
   assert.throws(() => matchBill(wrongCompany.db, wrongCompany.id), /vendor and company/);
 });
 

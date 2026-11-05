@@ -2,7 +2,7 @@ import { create, read, updateSettings, write } from '../orm.js';
 import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today, validDate } from './common.js';
-import { documentCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
@@ -327,7 +327,16 @@ function companyGuard(db, before, r, ctx) {
 export function createCompany(db, vals) {
   if (!vals.name?.trim()) throw new Error('Company name is required');
   const parent = vals.parent_id && record(db, 'res.company', vals.parent_id);
-  const values = { ...vals, ...(parent ? { currency_id: parent.currency_id } : {}) };
+  let currencyId = parent ? parent.currency_id : vals.currency_id;
+  if (!currencyId) {
+    try {
+      currencyId = companyCurrencyRecord(db, null)?.id;
+    } catch {
+      throw new Error('Configure the company currency before creating a company');
+    }
+  }
+  if (!currencyId) throw new Error('Configure the company currency before creating a company');
+  const values = { ...vals, currency_id: currencyId };
   let next = db;
   if (!values.partner_id) {
     const partner = create(next, 'res.partner', { name: values.name, is_company: true,
@@ -396,15 +405,11 @@ export function createForCompany(db, model, vals) {
 export function ensureMainCompany(db, accounts = {}) {
   if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
-  const code = db.settings?.currency ?? 'USD';
-  const currency = (db.records['res.currency'] ?? []).find((c) => c.name === code);
-  const unitName = db.settings?.currency_unit_currency === code ? String(db.settings?.currency_unit ?? '').trim() : '';
-  if (!currency && !unitName) throw new Error('Configure the whole currency unit name before initializing the company');
-  const base = currency
-    ? { db: currency.unit_name || !unitName ? db : write(db, 'res.currency', currency.id, { unit_name: unitName }), id: currency.id }
-    : create(db, 'res.currency', { name: code, unit_name: unitName, rate_ids: [] });
-  const configured = updateSettings(base.db, { base_currency_id: base.id });
-  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: base.id, ...accounts }).db;
+  const currencyId = accounts.currency_id ?? db.settings?.base_currency_id;
+  const currency = currencyId ? (db.records['res.currency'] ?? []).find((c) => c.id === currencyId) : null;
+  if (!currency) throw new Error('Configure the base currency before initializing the company');
+  const configured = updateSettings(db, { base_currency_id: currency.id });
+  const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: currency.id, ...accounts }).db;
   return ensureReturnTypes(created);
 }
 

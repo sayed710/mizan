@@ -281,7 +281,7 @@ test('invoice confirmation only uses journals and accounts available to its comp
 
 test('journal posting resolves duplicate account codes in the entry company', () => {
   let db = seed();
-  db = create(db, 'res.company', { name: 'Other company' }).db;
+  db = create(db, 'res.company', { name: 'Other company', currency_id: read(db, 'res.company', 1).currency_id }).db;
   const account = create(db, 'account.account', { code: '251000', name: 'Other company tax', company_id: 2 });
   db = account.db;
   const cash = create(db, 'account.account', { code: '101401', name: 'Other company cash', company_id: 2 });
@@ -294,8 +294,9 @@ test('journal posting resolves duplicate account codes in the entry company', ()
 
 test('journal entries sync with exact, shared and other-company account fallbacks', () => {
   let db = seed();
-  const company = create(db, 'res.company', { name: 'Entry company' });
-  const otherCompany = create(company.db, 'res.company', { name: 'Other company' });
+  const currency_id = read(db, 'res.company', 1).currency_id;
+  const company = create(db, 'res.company', { name: 'Entry company', currency_id });
+  const otherCompany = create(company.db, 'res.company', { name: 'Other company', currency_id });
   db = otherCompany.db;
   const account = (code, name, companyId) => {
     const made = create(db, 'account.account', { code, name, company_id: companyId });

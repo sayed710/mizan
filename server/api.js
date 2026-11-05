@@ -13,6 +13,7 @@ import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
 import { restrictRecords, visibleTo } from '../src/models/company.js';
 import { referFromLink } from '../src/models/skillsplus.js';
+import { companyCurrencyRecord } from '../src/money.js';
 
 const MAX_LIMIT = 500;
 
@@ -38,10 +39,10 @@ export const websiteCompany = (db) => read(db, 'res.company', 1) ?? search(db, '
 /** Public website content: only published pages and sellable products (no internal fields). */
 export const publicSite = (db, canAccess = () => false) => {
   const company = websiteCompany(db);
-  const currency = company?.currency_id ? (read(db, 'res.currency', company.currency_id)?.name ?? db.settings?.currency ?? 'USD') : (db.settings?.currency ?? 'USD');
+  const currency = companyCurrencyRecord(db, company?.id);
   return {
     company: company?.name ?? db.settings?.company,
-    currency,
+    currency: currency.name,
     pages: search(db, 'website.page').filter((p) => {
     const access = resolveUrl(db, p.slug);
     return access?.page || ((access?.needsPassword || access?.needsLogin) && canAccess(p));

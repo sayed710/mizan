@@ -88,7 +88,8 @@ test('bank reconciliation refuses a selected journal with no liquidity account',
 });
 
 test('company creation without an installed source chart gives a readable configuration error', () => {
-  const company = create(emptyDb(), 'res.company', { name: 'Unconfigured company' });
+  const base = create(emptyDb(), 'res.currency', { name: 'USD', rounding: 0.01, rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
+  const company = create(base.db, 'res.company', { name: 'Unconfigured company', currency_id: base.id });
   assert.throws(() => invoiceLines(company.db, { company_id: company.id, move_type: 'out_invoice', invoice_line_ids: [] }), /default receivable/i);
   assert.throws(() => paymentJournal(company.db, null, company.id), /default.*journal/i);
 });

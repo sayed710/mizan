@@ -126,7 +126,13 @@ export function amounts(lines = [], currency = null, { roundingMethod = null, si
 
 /** Tax amount of an invoice/bill, applying mixed early-payment discount factor and cash rounding tax adjustment when present. */
 export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(db, r?.company_id)) {
-  const docCurr = documentCurrency(db, r);
+  let docCurr;
+  try {
+    docCurr = documentCurrency(db, r);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
   const side = ['out_refund', 'in_refund'].includes(r.move_type) ? 'refund' : 'invoice';
   const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
   const baseTax = mixedDiscountFactor(term) !== 1
@@ -147,9 +153,15 @@ export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(d
 /** Total of an account.move (invoice, bill, refund, or manual entry). */
 export function total(r, db) {
   if (r.move_type === 'entry') return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
+  let docCurr;
+  try {
+    docCurr = documentCurrency(db, r);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
   const term = db && r.invoice_payment_term_id && read(db, 'account.payment.term', r.invoice_payment_term_id);
   const mixed = mixedDiscountFactor(term) !== 1;
-  const docCurr = documentCurrency(db, r);
   const roundingMethod = companyRoundingMethod(db, r?.company_id);
   const side = ['out_refund', 'in_refund'].includes(r.move_type) ? 'refund' : 'invoice';
   const base = !db && r.amount_total != null
@@ -228,11 +240,23 @@ export const productLines = (label, priceField) => ({
   },
 });
 
-export const amountFields = (lineField) => ({
-  amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed },
-  amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).tax },
-  amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => amounts(r[lineField], documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).total },
-});
+export const amountFields = (lineField) => {
+  const computeAmount = (r, db, part) => {
+    let curr;
+    try {
+      curr = documentCurrency(db, r);
+    } catch (err) {
+      if (/configure.*currency/i.test(err?.message)) return null;
+      throw err;
+    }
+    return amounts(r[lineField], curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) })[part];
+  };
+  return {
+    amount_untaxed: { type: 'monetary', label: 'Untaxed Amount', compute: (r, db) => computeAmount(r, db, 'untaxed') },
+    amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => computeAmount(r, db, 'tax') },
+    amount_total: { type: 'monetary', label: 'Total', compute: (r, db) => computeAmount(r, db, 'total') },
+  };
+};
 
 /**
  * Next "PREFIX00001"-style number among records matching `filter`: one past the highest. The server keeps a

@@ -113,7 +113,17 @@ const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
-export const residual = (r, db) => (isInvoice(r) ? Math.max(0, db ? roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), documentCurrency(db, r)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)))) : 0);
+export const residual = (r, db) => {
+  if (!isInvoice(r)) return 0;
+  let curr;
+  try {
+    curr = documentCurrency(db, r);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
+  return db ? Math.max(0, roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), curr)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)));
+};
 const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
   if (residual(r, db) === 0) return 'paid';
@@ -1339,7 +1349,20 @@ export const accountingModels = {
         newLine: () => ({ date: today(), amount: 0, move_id: null }),
       },
       line_ids: lineItem,
-      amount_untaxed: { type: 'monetary', label: 'Tax Excluded', compute: (r, db) => amounts(r.invoice_line_ids, documentCurrency(db, r), { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed },
+      amount_untaxed: {
+        type: 'monetary',
+        label: 'Tax Excluded',
+        compute: (r, db) => {
+          let curr;
+          try {
+            curr = documentCurrency(db, r);
+          } catch (err) {
+            if (/configure.*currency/i.test(err?.message)) return null;
+            throw err;
+          }
+          return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed;
+        },
+      },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },

@@ -90,6 +90,14 @@ export function seed() {
     return res.id;
   };
   const set = (model, id, vals) => { db = write(db, model, id, vals); };
+  const mainCurrency = add('res.currency', {
+    name: 'USD',
+    symbol: '$',
+    unit_name: 'Dollars',
+    rounding: 0.01,
+    rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }],
+  });
+  db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrency } };
   const lines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).list_price, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '251000')) }));
   const costLines = (pairs) => pairs.map(([product_id, qty]) => ({ product_id, qty, price_unit: read(db, 'product', product_id).cost, tax: 14, ...defaultTaxRepartitionLines(accountId(db, '131000')) }));
 
@@ -178,16 +186,13 @@ export function seed() {
   const payrollJournal = search(db, 'account.journal').find((j) => j.code === 'SAL');
   const payrollAccounts = { journal_id: payrollJournal.id, salary_expense_account_id: installedByCode['620000'], salary_payable_account_id: installedByCode['230000'] };
   const egypt = add('hr.payroll.structure', { name: 'Egypt — Employees', ...payrollAccounts, rules: defaultPayrollRules({ insurance: installedByCode['240000'], tax: installedByCode['250100'] }) });
-  db = ensureMainCompany(db, { default_payroll_structure_id: egypt, opening_equity_account_id: installedByCode['301000'], account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], down_payment_account_id: installedByCode['212000'], gain_account_id: installedByCode['450300'], loss_account_id: installedByCode['690300'], income_currency_exchange_account_id: installedByCode['450100'], expense_currency_exchange_account_id: installedByCode['690100'], income_early_payment_discount_account_id: installedByCode['450200'], expense_early_payment_discount_account_id: installedByCode['690200'], rental_deposit_account_id: installedByCode['230100'], rental_withheld_deposit_account_id: installedByCode['450000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
+  db = ensureMainCompany(db, { currency_id: mainCurrency, default_payroll_structure_id: egypt, opening_equity_account_id: installedByCode['301000'], account_default_receivable_id: installedAccountIds.receivable, account_default_payable_id: installedAccountIds.payable, deferred_revenue_account_id: installedByCode['212000'], deferred_expense_account_id: installedByCode['132000'], down_payment_account_id: installedByCode['212000'], gain_account_id: installedByCode['450300'], loss_account_id: installedByCode['690300'], income_currency_exchange_account_id: installedByCode['450100'], expense_currency_exchange_account_id: installedByCode['690100'], income_early_payment_discount_account_id: installedByCode['450200'], expense_early_payment_discount_account_id: installedByCode['690200'], rental_deposit_account_id: installedByCode['230100'], rental_withheld_deposit_account_id: installedByCode['450000'], ...Object.fromEntries(Object.entries(STOCK_CHART_ROLES).map(([field, [code]]) => [field, installedByCode[code]])) });
   const mainCompanyId = db.settings?.current_company_id ?? 1;
   set('res.company', mainCompanyId, {
     default_sale_journal_id: companyJournals.sales,
     default_purchase_journal_id: companyJournals.purchases,
     default_general_journal_id: companyJournals.general,
   });
-  const mainCurrencyId = read(db, 'res.company', mainCompanyId).currency_id;
-  db = { ...db, settings: { ...db.settings, base_currency_id: mainCurrencyId } };
-  db = write(db, 'res.currency', mainCurrencyId, { rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }] });
   db = write(db, 'res.company', mainCompanyId, { account_sale_tax_id: vatSale, account_purchase_tax_id: vatPurchase });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
   const mainTaxTypes = search(db, 'account.return.type').filter((type) =>

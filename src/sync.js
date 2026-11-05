@@ -783,7 +783,13 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     favorites: s.favorites === undefined ? db.settings.favorites : cleanFavorites(s.favorites, db.settings.favorites),
     ...(isAdmin ? {
       company: String(s.company ?? db.settings.company).slice(0, 200),
-      currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : db.settings.currency,
+      currency: /^[A-Z]{3}$/.test(s.currency ?? '') ? s.currency : (() => {
+        try {
+          return companyCurrencyRecord(db, null).name;
+        } catch {
+          return db.settings.currency;
+        }
+      })(),
       companies: Array.isArray(s.companies)
         ? s.companies.filter((c) => c && Number.isInteger(c.id) && c.id > 0 && typeof c.name === 'string').slice(0, 20)
           .map((c) => ({ id: c.id, name: c.name.slice(0, 200), currency: /^[A-Z]{3}$/.test(c.currency ?? '') ? c.currency : 'USD' }))

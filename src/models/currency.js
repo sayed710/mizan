@@ -36,17 +36,16 @@ function baseRate(db, currencyId, date, baseId, companyId = null) {
   return rate ? Number(rate.rate) : null;
 }
 
-/** The currency a company keeps its books in (null: the base currency). */
-export const companyCurrency = (db, companyId) => (companyId ? read(db, 'res.company', companyId)?.currency_id ?? null : null);
+/** The currency a company keeps its books in. */
+export const companyCurrency = (db, companyId = null) => companyCurrencyRecord(db, companyId).id;
 
 /**
  * Units of `currencyId` per 1 unit of the company's currency on `date` (1 for the company currency itself).
- * Without a company the base currency (settings.currency) is the reference.
+ * Without a company the main company's currency is the reference.
  */
 export function rateAt(db, currencyId, date = today(), companyId = null) {
   if (!currencyId) return 1;
-  const own = companyId == null ? baseCurrency(db).id : companyCurrency(db, companyId);
-  if (!own) throw new Error('Configure the company currency before converting currencies');
+  const own = companyCurrency(db, companyId);
   const rate = conversionRate(db, own, currencyId, date, companyId);
   if (rate == null) {
     const base = baseCurrency(db);
@@ -60,7 +59,7 @@ export function rateAt(db, currencyId, date = today(), companyId = null) {
 /** Amount in `currencyId` expressed in the company's currency at `date`. */
 export const toCompany = (db, currencyId, amount, date, companyId = null) => roundCurrency(
   (Number(amount) || 0) / rateAt(db, currencyId, date, companyId),
-  companyId == null ? baseCurrency(db) : companyCurrencyRecord(db, companyId),
+  companyCurrencyRecord(db, companyId),
 );
 
 export const currencyModels = {
@@ -87,13 +86,18 @@ export const currencyModels = {
         type: 'one2many',
         label: 'Rates',
         fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' }, company_id: { type: 'many2one', relation: 'res.company', label: 'Company' } },
-        newLine: () => ({ date: today(), rate: 1, company_id: null }),
+        newLine: (record, db) => ({ date: today(), rate: 1, company_id: db?.settings?.current_company_id ?? null }),
       },
       current_rate: {
         type: 'float',
         label: 'Current Rate',
         compute: (r, db) => {
-          if (companyCurrencyRecord(db, db.settings?.current_company_id ?? 1)?.id === r.id) return 1;
+          try {
+            if (companyCurrencyRecord(db, db.settings?.current_company_id ?? 1)?.id === r.id) return 1;
+          } catch (err) {
+            if (/configure.*currency/i.test(err?.message)) return null;
+            throw err;
+          }
           const rate = applicableRate(r, today(), db.settings?.current_company_id ?? null);
           return rate ? Number(rate.rate) : null;
         },

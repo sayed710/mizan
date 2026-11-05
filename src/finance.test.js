@@ -149,7 +149,7 @@ test('sales and purchase lock dates only lock their side; the hard lock locks ev
   assert.equal(lockDateFor({ sale_lock_date: '2026-03-31' }, { move_type: 'in_invoice' }), '');
   assert.equal(lockDateFor({ purchase_lock_date: '2026-02-28', lock_date: '2026-01-31' }, { move_type: 'in_refund' }), '2026-02-28');
   assert.equal(lockDateFor({ hard_lock_date: '2026-04-30', sale_lock_date: '2026-03-31' }, { move_type: 'entry' }), '2026-04-30');
-  const db = { settings: { sale_lock_date: '2026-03-31' }, records: { 'res.company': [{ id: 1, sale_lock_date: '2026-03-31' }], 'account.account': [{ id: 1 }, { id: 2 }] } };
+  const db = { settings: { sale_lock_date: '2026-03-31' }, records: { 'res.company': [{ id: 1, sale_lock_date: '2026-03-31', currency_id: 1 }], 'res.currency': [{ id: 1, name: 'USD', rounding: 0.01 }], 'account.account': [{ id: 1 }, { id: 2 }] } };
   const entry = { name: 'BILL/2026/0001', line_ids: [{ account_id: 1, debit: 10, credit: 0 }, { account_id: 2, debit: 0, credit: 10 }] };
   assert.match(moveGuard(db, null, { ...entry, move_type: 'out_invoice', state: 'posted', invoice_date: '2026-03-10' }), /locked/);
   assert.equal(moveGuard(db, null, { ...entry, move_type: 'in_invoice', state: 'posted', invoice_date: '2026-03-10' }), null);

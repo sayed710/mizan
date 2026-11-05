@@ -7,7 +7,9 @@ import { applyDiff, diffDb } from './sync.js';
 
 const LOCK = '2026-12-31';
 const locked = () => {
-  const db = seed();
+  let db = seed();
+  const usd = db.records['res.currency'].find((c) => c.name === 'USD');
+  db = create(db, 'res.company', { id: 2, name: 'Second Co', currency_id: usd.id }).db;
   return write({ ...db, settings: { ...db.settings, lock_date: LOCK, hard_lock_date: LOCK } }, 'res.company', 1, { lock_date: LOCK, hard_lock_date: LOCK });
 };
 const invoiceIn = (db) => db.records['account.move'].map((m) => read(db, 'account.move', m.id))

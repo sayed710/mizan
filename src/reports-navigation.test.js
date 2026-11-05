@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
@@ -18,6 +18,7 @@ test('follow-up reminder logs only the selected company invoices and level for a
     { id: 9002, name: 'FOREIGN-INV', company_id: 2, invoice_date_due: due(90), amount_residual: 999 },
   ].map((move) => ({ ...move, partner_id: partner.id, state: 'posted', move_type: 'out_invoice', invoice_line_ids: [{ qty: 1, price_unit: move.amount_residual }] }));
   const db = { ...base, settings: { ...base.settings, current_company_id: 1, allowed_company_ids: [1] }, records: { ...base.records,
+    'res.company': [...base.records['res.company'], { id: 2, name: 'Company 2', currency_id: base.records['res.company'][0].currency_id }],
     'res.partner': base.records['res.partner'].map((p) => p.id === partner.id ? partner : p),
     'account.move': invoices, 'account.followup.level': [{ id: 1, name: 'Gentle', delay: 0 }, { id: 2, name: 'Final', delay: 30 }] } };
   await React.act(async () => commit(db));
@@ -268,7 +269,7 @@ test('follow-up report with several companies selected shows separate sections w
     settings: { ...base.settings, current_company_id: 1, allowed_company_ids: [1, 2] },
     records: {
       ...base.records,
-      'res.company': [{ id: 1, name: 'Alpha Corp' }, { id: 2, name: 'Beta Branch' }],
+      'res.company': [{ id: 1, name: 'Alpha Corp', currency_id: base.records['res.company'][0].currency_id }, { id: 2, name: 'Beta Branch', currency_id: base.records['res.company'][0].currency_id }],
       'res.partner': base.records['res.partner'].map((p) => (p.id === partner.id ? partner : p)),
       'account.move': invoices,
       'account.followup.level': [

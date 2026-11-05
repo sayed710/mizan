@@ -71,13 +71,28 @@ function Users() {
 
 function Companies({ db }) {
   const list = companiesOf(db);
-  const add = () => {
-    const name = prompt(t('Company Name'));
-    if (!name?.trim()) return;
+  const mainCurrency = list.find((c) => c.id === 1)?.currency ?? list[0]?.currency ?? CURRENCIES[0];
+  const [newCurrency, setNewCurrency] = useState(mainCurrency);
+  const [newName, setNewName] = useState('');
+  useEffect(() => {
+    if (mainCurrency) setNewCurrency(mainCurrency);
+  }, [mainCurrency]);
+  const add = (e) => {
+    e?.preventDefault?.();
+    const name = newName.trim() || prompt(t('Company Name'))?.trim();
+    if (!name) return;
     const current = getDb();
-    if (current.records['res.company']?.length) return commit(setCompanyCurrency(createCompany(current, { name: name.trim() }).db, (current.seq['res.company'] ?? 0) + 1, current.settings?.currency ?? 'USD'));
-    const next = [...list, { id: Math.max(...list.map((c) => c.id)) + 1, name: name.trim(), currency: db.settings?.currency ?? 'USD' }];
+    const currency = newCurrency || mainCurrency;
+    if (current.records['res.company']?.length) {
+      const created = createCompany(current, { name });
+      const newCompanyId = (created.db.seq['res.company'] ?? 0);
+      commit(setCompanyCurrency(created.db, newCompanyId, currency));
+      setNewName('');
+      return;
+    }
+    const next = [...list, { id: Math.max(...list.map((c) => c.id), 0) + 1, name, currency }];
     commit(updateSettings(current, { companies: next }));
+    setNewName('');
   };
   const setCurrencyOf = (id, currency) => commit(getDb().records['res.company']?.length ? setCompanyCurrency(getDb(), id, currency)
     : updateSettings(getDb(), { companies: list.map((c) => (c.id === id ? { ...c, currency } : c)) }));
@@ -98,7 +113,13 @@ function Companies({ db }) {
           ))}
         </tbody>
       </table>
-      <button type="button" className="btn" onClick={add}>{t('Add Company')}</button>
+      <form className="row user-form" onSubmit={add}>
+        <input aria-label={t('Company Name')} placeholder={t('Company Name')} value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <select aria-label={t('Currency')} value={newCurrency} onChange={(e) => setNewCurrency(e.target.value)}>
+          {CURRENCIES.map((x) => <option key={x} value={x}>{x}</option>)}
+        </select>
+        <button type="submit" className="btn">{t('Add Company')}</button>
+      </form>
     </>
   );
 }
@@ -230,7 +251,7 @@ export function Settings() {
                 </>
               )
               : (
-                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? 'USD'} onChange={(e) => {
+                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
                   const currency = e.target.value;
                   const curId = db.settings?.current_company_id ?? 1;
                   const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));

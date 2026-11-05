@@ -398,7 +398,7 @@ export function invoiceLines(db, move) {
   }
 
   // A document is foreign when its currency is not the company's (an equal rate on the day does not change that).
-  const own = companyCurrency(db, move.company_id) ?? (db.records['res.currency'] ?? []).find((c) => c.name === db.settings?.currency)?.id ?? null;
+  const own = companyCurrency(db, move.company_id);
   const foreign = !!move.currency_id && move.currency_id !== own;
   const side = (amount, debit, doc) => {
     const sign = (debit !== refund) !== ((amount || doc) < 0) ? 1 : -1;

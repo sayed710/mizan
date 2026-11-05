@@ -2,20 +2,13 @@
 import { read } from '../orm.js';
 import { today } from './common.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
-import { conversionRate } from './currency.js';
+import { companyCurrency, conversionRate } from './currency.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 export const currencyCode = (db, rec) => (rec?.currency_id ? read(db, 'res.currency', rec.currency_id)?.name ?? null : null);
 
-function ownCurrencyId(db, rec) {
-  const company = read(db, 'res.company', rec.company_id ?? 1);
-  if (!company?.currency_id || !read(db, 'res.currency', company.currency_id)) throw new Error(`Company ${company?.name ?? rec.company_id ?? 1} requires a configured currency`);
-  return company.currency_id;
-}
-
-const reportingCurrency = (db) => ownCurrencyId(db, { company_id: db.settings?.current_company_id ?? 1 });
-
-function reportingValue(db, rec, amount, at) {
-  const own = ownCurrencyId(db, rec), target = reportingCurrency(db);
+export function reportingValue(db, rec, amount, at = today()) {
+  const own = companyCurrency(db, rec?.company_id);
+  const target = companyCurrency(db, db.settings?.current_company_id);
   let booked = amount;
   if (rec.currency_id && rec.currency_id !== own) {
     const rate = conversionRate(db, rec.currency_id, own, docDate(rec), rec.company_id ?? 1);
@@ -36,8 +29,8 @@ export function reportingBookedAmount(db, rec, amount) {
   const reportingId = db.settings?.current_company_id ?? 1;
   // A company's own books are already in the reporting currency; no second currency needs to be configured.
   if (companyId === reportingId) return Number(amount) || 0;
-  const own = read(db, 'res.currency', ownCurrencyId(db, { company_id: companyId }));
-  const target = read(db, 'res.currency', ownCurrencyId(db, { company_id: reportingId }));
+  const own = companyCurrencyRecord(db, companyId);
+  const target = companyCurrencyRecord(db, reportingId);
   if (own.id === target.id) return Number(amount) || 0;
   const rate = conversionRate(db, own.id, target.id, date, reportingId);
   if (rate == null) throw new Error(`Configure an exchange rate for ${own.name} and ${target.name} on or before ${date}`);

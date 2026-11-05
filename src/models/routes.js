@@ -4,7 +4,7 @@ import { today } from './common.js';
 import { invoiceCounterpartAccount, partnerAccount, postEntry, postedBillLine } from './ledger.js';
 import { costMethod, stockAccount } from './valuation.js';
 import { productProperty } from './productconfig-helpers.js';
-import { allocateCents, round } from '../money.js';
+import { allocateCents, companyCurrencyRecord, round } from '../money.js';
 import { getForecast, orderOrderpoints } from './orderpoint.js';
 import { rateAt } from './currency.js';
 import { convert, convertPrice, lineToStockQty, uomForLegacy } from './uom.js';
@@ -93,9 +93,10 @@ export function vendorPrice(db, productId, { partnerId, qty = 1, date = today(),
     && (!s.date_start || s.date_start <= date) && (!s.date_end || s.date_end >= date))
     .sort((a, b) => Number(a.sequence ?? 10) - Number(b.sequence ?? 10) || Number(a.price) - Number(b.price) || a.id - b.id)[0];
   if (!info) return null;
+  const targetCurrency = companyCurrencyRecord(db, companyId);
   const legacyCurrency = info.currency && search(db, 'res.currency').find((c) => c.name === info.currency);
   const sourceCurrency = info.currency_id ?? legacyCurrency?.id ?? null;
-  if (info.currency && !sourceCurrency && info.currency !== (db.settings?.currency ?? 'USD')) throw new Error(`Currency ${info.currency} not found`);
+  if (info.currency && !sourceCurrency && info.currency !== targetCurrency.name) throw new Error(`Currency ${info.currency} not found`);
   const unitPrice = info.uom_id && orderUnit ? convertPrice(db, info.price, info.uom_id, orderUnit) : Number(info.price);
   const price = unitPrice / rateAt(db, sourceCurrency, date, companyId) * rateAt(db, currencyId, date, companyId);
   return { price, delay: Number(info.delay ?? 0), partner_id: info.partner_id };

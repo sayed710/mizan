@@ -172,7 +172,7 @@ test('the order hook reads its linked warehouse and only shipment updates sale d
 test('non-default company MTO orders receive and deliver through their own warehouse', () => {
   let db = seed();
   let company, wh, product, sale;
-  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company', currency_id: read(db, 'res.company', 1).currency_id }));
   db = write(db, 'res.company', company, Object.fromEntries(['account_stock_valuation_id', 'account_stock_input_id', 'account_stock_output_id', 'account_cogs_id', 'account_price_difference_id', 'account_production_id'].map((field) => [field, read(db, 'res.company', 1)[field]])));
   ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Other Warehouse', code: 'OTHER', company_id: company, reception_steps: 'two_steps', delivery_steps: 'pick_ship' }));
   ({ db, id: product } = create(db, 'product', { name: 'Company MTO', type: 'goods', route: 'mto_buy', vendor_id: 2, qty_available: 0, cost: 20 }));
@@ -203,7 +203,7 @@ test('non-default company MTO orders receive and deliver through their own wareh
 test('MTO purchase receipt follows the warehouse explicitly selected on the sale', () => {
   let db = seed();
   let company, wh, product, sale;
-  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company', currency_id: read(db, 'res.company', 1).currency_id }));
   db = write(db, 'res.company', company, Object.fromEntries(['account_stock_valuation_id', 'account_stock_input_id', 'account_stock_output_id', 'account_cogs_id', 'account_price_difference_id', 'account_production_id'].map((field) => [field, read(db, 'res.company', 1)[field]])));
   ({ db } = create(db, 'stock.warehouse', { name: 'First Warehouse', code: 'FIRST', company_id: company }));
   ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Selected Warehouse', code: 'SECOND', company_id: company }));
@@ -224,7 +224,7 @@ test('MTO purchase receipt follows the warehouse explicitly selected on the sale
 test('order confirmation rejects a warehouse or warehouse location from another company', () => {
   let db = seed();
   let company, wh, sale;
-  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company' }));
+  ({ db, id: company } = create(db, 'res.company', { name: 'Other Company', currency_id: read(db, 'res.company', 1).currency_id }));
   ({ db, id: wh } = create(db, 'stock.warehouse', { name: 'Other Warehouse', code: 'OTHER', company_id: company }));
   ({ db, id: sale } = create(db, 'sale.order', { company_id: company, partner_id: 1, warehouse_id: whId(db), order_line: [{ product_id: 7, qty: 1, price_unit: 10, tax: 0 }] }));
   const confirm = (state) => models['sale.order'].form.buttons.find((b) => b.label === 'Confirm').run(state, read(state, 'sale.order', sale)).db;

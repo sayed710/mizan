@@ -9,9 +9,12 @@ import { subtotal } from '../src/models/common.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
-const docCurrency = (db, rec) => (rec.currency_id && read(db, 'res.currency', rec.currency_id)?.name)
-  ?? (read(db, 'res.company', rec.company_id ?? 1)?.currency_id && read(db, 'res.currency', read(db, 'res.company', rec.company_id ?? 1).currency_id)?.name)
-  ?? db.settings?.currency ?? 'USD';
+const docCurrency = (db, rec) => {
+  const company = read(db, 'res.company', rec.company_id ?? 1);
+  const currency = read(db, 'res.currency', rec.currency_id ?? company?.currency_id);
+  if (!currency) throw new Error('Configure the document or company currency before emailing.');
+  return currency.name;
+};
 
 const money = (db, rec, n) => {
   const curr = docCurrency(db, rec);

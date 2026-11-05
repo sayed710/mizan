@@ -971,6 +971,26 @@ MIGRATIONS.push({ version: 35, name: 'Per-company lock dates and accounting sett
   return nextDb;
 } });
 
+MIGRATIONS.push({ version: 36, name: 'Explicit company currency from legacy settings', up: (db) => {
+  // Legacy databases stored a company's currency only as its code in settings; resolve it to the one currency record with that code.
+  const legacySetting = db.settings?.currency;
+  const legacyCompanies = db.settings?.companies ?? [];
+  const currencies = db.records['res.currency'] ?? [];
+  const unresolved = [];
+  const companies = (db.records['res.company'] ?? []).map((company) => {
+    if (company.currency_id != null) return company;
+    const code = legacyCompanies.find((c) => c.id === company.id)?.currency ?? legacySetting;
+    if (!code) return company;
+    const matches = currencies.filter((currency) => currency.name === code);
+    if (matches.length === 1) return { ...company, currency_id: matches[0].id };
+    unresolved.push([company.id, code]);
+    return company;
+  });
+  return unresolved.reduce((next, [id, code]) => postNote(next, 'res.company', id,
+    `Upgrade: no single currency with code ${code} was found, so this company has no currency. Set the company currency in the company settings.`),
+  { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
