@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total } from './common.js';
-import { accountId, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { accountId, bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { TRANSITION, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -871,9 +871,10 @@ export function journalCards(db, at = today()) {
   return search(db, 'account.journal').map((j) => {
     const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.id));
     if (['sale', 'purchase'].includes(j.type)) {
-      const unpaid = own.filter((m) => m.state === 'posted' && m.amount_residual > 0);
+      const documents = own.filter((m) => m.move_type === (j.type === 'sale' ? 'out_invoice' : 'in_invoice'));
+      const unpaid = documents.filter((m) => m.state === 'posted' && m.amount_residual > 0);
       return {
-        journal: j, kind: j.type, draft: own.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
+        journal: j, kind: j.type, draft: documents.filter((m) => m.state === 'draft').length, unpaid: unpaid.length,
         unpaidAmount: companySum(db, unpaid, 'amount_residual', at), unratedCount: unratedCount(db, unpaid, at), late: unpaid.filter((m) => m.invoice_date_due < at).length,
       };
     }
@@ -881,7 +882,8 @@ export function journalCards(db, at = today()) {
       const balances = items.filter((l) => l.account_id === j.default_account_id).map((l) => ({ company_id: companyByMove.get(l.move_id), balance: (Number(l.debit) || 0) - (Number(l.credit) || 0) }));
       const balance = companySum(db, balances, 'balance', at);
       const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && l.journal_id === j.id) : [];
-      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...toCheck], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, toCheck, 'amount', at) };
+      const open = toCheck.map((line) => ({ company_id: line.company_id, balance: (line.amount < 0 ? -1 : 1) * (line.open_amount ?? bookedStatementAmount(db, line)) }));
+      return { journal: j, kind: j.type, balance, unratedCount: unratedCount(db, [...balances, ...open], at), toReconcile: toCheck.length, toReconcileAmount: companySum(db, open, 'balance', at) };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
   });

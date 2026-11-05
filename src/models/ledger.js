@@ -1,7 +1,7 @@
 // Double-entry core: chart of accounts, journals, and helpers that turn business documents into balanced entries.
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, today, addDays } from './common.js';
-import { companyCurrency, rateAt } from './currency.js';
+import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { TRANSITION, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines } from './taxes.js';
 import { allocateCents, cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
@@ -9,6 +9,7 @@ import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { currentYearEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
+import { models } from '../registry.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
@@ -550,6 +551,91 @@ export function outstandingAccount(db, journal, company, inbound) {
   return id;
 }
 
+/** Statement amounts use the journal currency; open allocations use company currency. */
+export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.amount))) {
+  const company = line.company_id ?? 1;
+  const currency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
+  return toCompany(db, currency, amount, line.date ?? today(), company);
+}
+
+/** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
+export function bookedStatementAmount(db, line) {
+  if (!line.bank_move_id) return statementCompanyAmount(db, line);
+  const company = line.company_id ?? 1;
+  const entry = read(db, 'account.move', line.bank_move_id);
+  const account = paymentJournal(db, line.journal_id, company).accountId;
+  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
+  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
+}
+
+/** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
+export function isPaymentMatched(db, payment, excludeLineId = null) {
+  const pId = typeof payment === 'object' && payment ? payment.id : payment;
+  const pMoveId = typeof payment === 'object' && payment ? payment.move_id : (pId ? read(db, 'account.payment', pId)?.move_id : null);
+  return search(db, 'account.bank.statement.line').some((l) => {
+    if (excludeLineId && l.id === excludeLineId) return false;
+    if (pMoveId && (l.allocations ?? []).some((a) => a.payment_move_id === pMoveId)) return true;
+    if (l.state !== 'reconciled') return false;
+    if (pMoveId && l.payment_move_id === pMoveId) return true;
+    if (l.payment_id === pId) return true;
+    if ((l.payment_ids ?? []).includes(pId)) return true;
+    if (l.batch_payment_id) {
+      const batch = read(db, 'account.batch.payment', l.batch_payment_id);
+      if ((batch?.lines ?? []).some((bl) => !bl.cancelled && bl.payment_id === pId)) return true;
+    }
+    return false;
+  });
+}
+
+/** Settlement links per move, built once per immutable records object (journalItems runs on every report). */
+const reconcileIndexes = new WeakMap();
+function reconcileIndex(db) {
+  const cached = reconcileIndexes.get(db.records);
+  if (cached) return cached;
+  const push = (map, key, value) => map.set(key, [...(map.get(key) ?? []), value]);
+  const applications = new Map();
+  for (const invoice of db.records['account.move'] ?? []) {
+    for (const row of invoice.payments ?? []) {
+      push(applications, row.move_id, { invoice, row });
+      if (row.reversed && row.reversal_move_id) push(applications, row.reversal_move_id, { invoice, row });
+    }
+  }
+  const payments = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+  const settledSuspense = new Map();
+  for (const statement of (db.records['account.bank.statement.line'] ?? []).filter((l) => l.open_amount === 0)) {
+    const suspense = read(db, 'account.journal', statement.journal_id)?.suspense_account_id;
+    for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
+  }
+  const index = { applications, payments, settledSuspense };
+  reconcileIndexes.set(db.records, index);
+  return index;
+}
+
+/** Derive reconciliation from settlement links, never from labels or a second stored flag. */
+export function reconciledJournalItems(db, move) {
+  const { applications: byMove, payments, settledSuspense } = reconcileIndex(db);
+  const applications = byMove.get(move.id) ?? [];
+  const payment = payments.get(move.id);
+  const posted = move.state === 'posted';
+  const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type);
+  return (move.line_ids ?? []).map((line) => {
+    if (!posted) return { ...line, reconciled: false };
+    const account = read(db, 'account.account', line.account_id);
+    let reconciled = false;
+    if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
+      reconciled = document
+        ? models['account.move'].fields.amount_residual.compute(move, db) === 0
+        : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
+          && (invoice.company_id ?? 1) === (move.company_id ?? 1)
+          && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
+          && (row.reversed || !payment?.unapplied));
+    }
+    if (payment?.outstanding_account_id === line.account_id) reconciled = isPaymentMatched(db, payment);
+    if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
+    return { ...line, reconciled };
+  });
+}
+
 /** Journal items with their move date, optionally limited by review status, date and company. */
 export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
@@ -567,7 +653,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
-      return (m.line_ids ?? []).map((l) => ({
+      return reconciledJournalItems(db, m).map((l) => ({
         ...l,
         move_id: m.id,
         move_name: m.name,

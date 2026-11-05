@@ -8,12 +8,11 @@ import { journalCards } from '../models/finance.js';
 import { companyViewDb } from '../companyView.js';
 import { invoiceKpis } from '../dashboardKpis.js';
 import { RateNote } from './RateNote.jsx';
-
-const LINKS = { sale: 'invoices', purchase: 'bills', bank: 'bank', cash: 'entries', general: 'entries' };
+import { journalCardListUrl } from './journalDashboard.js';
 
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
 function JournalCard({ card }) {
-  const list = `#/accounting/${LINKS[card.kind]}${card.kind === 'bank' ? `?view=list&rel=journal_id:${card.journal.id}` : ''}`;
+  const list = journalCardListUrl(card);
   const figures = {
     sale: [['To Validate', card.draft], ['Unpaid', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
     purchase: [['To Validate', card.draft], ['To Pay', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
