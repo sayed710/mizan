@@ -1226,7 +1226,10 @@ export function analyticActualLines(db, period = {}) {
 }
 
 /** An analytic line's amount in the reporting company's currency, translated at the line's accounting date. */
-export const analyticReportAmount = (db, line) => reportingBookedAmount(db, line, Number(line.amount) || 0);
+export const analyticReportAmount = (db, line) => {
+  const amount = Number(line.amount) || 0;
+  return amount === 0 ? 0 : reportingBookedAmount(db, line, amount);
+};
 
 /** Actual amount per analytic account from posted invoice/bill lines (income positive, costs negative). */
 export function analyticActuals(db, period = {}) {

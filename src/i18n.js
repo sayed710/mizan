@@ -631,6 +631,7 @@ const ar = {
   'Credit Limit': 'حد الائتمان', 'Lock Date': 'تاريخ الإقفال', 'Tax Return': 'الإقرار الضريبي', 'Aged Receivable': 'أعمار الذمم المدينة',
   'Aged Payable': 'أعمار الذمم الدائنة', 'Follow-up Reports': 'تقارير المتابعة', 'Budget vs Actual': 'الموازنة مقابل الفعلي', 'Analytic Report': 'التقرير التحليلي',
   'Analytic Accounts': 'الحسابات التحليلية', Budgets: 'الموازنات', Analytic: 'تحليلي', 'Output Tax': 'ضريبة المخرجات', 'Input Tax': 'ضريبة المدخلات',
+  'Select a company': 'اختر شركة', 'Select a company to show this budget report.': 'اختر شركة لعرض تقرير هذه الموازنة.',
   'Tax Payable': 'الضريبة المستحقة', 'Not due': 'غير مستحق', Older: 'أقدم', Actual: 'الفعلي', Achievement: 'نسبة التحقيق',
   'Send Reminder': 'إرسال تذكير', 'Open Reminder in Mail App': 'فتح التذكير في تطبيق البريد', 'Confirm Sent': 'تأكيد الإرسال', 'Oldest Due': 'أقدم استحقاق',
   Currencies: 'العملات', Symbol: 'الرمز', Rates: 'الأسعار', 'Current Rate': 'السعر الحالي', 'Unit per Company Currency': 'الوحدة لكل عملة الشركة',

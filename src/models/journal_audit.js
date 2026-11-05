@@ -19,10 +19,11 @@ export function journalAudit(db, { from = '', to = '', companyId = null } = {}) 
         const side = line.tax_side || (String(move.move_type).startsWith('in_') ? 'purchase' : 'sale');
         const amount = line.tax_zero ? 0 : side === 'purchase' ? debit - credit : credit - debit;
         const taxId = line.tax_id ?? null;
-        const tax = group.taxes.get(taxId) ?? { tax_id: taxId, name: line.tax_name, base: 0, tax: 0 };
+        const taxKey = taxId == null ? JSON.stringify([null, line.tax_name]) : JSON.stringify([taxId]);
+        const tax = group.taxes.get(taxKey) ?? { tax_id: taxId, name: line.tax_name, base: 0, tax: 0 };
         tax.base = round(tax.base + (amount < 0 ? -1 : 1) * (Number(line.tax_base) || 0));
         tax.tax = round(tax.tax + amount);
-        group.taxes.set(taxId, tax);
+        group.taxes.set(taxKey, tax);
       }
     }
   }

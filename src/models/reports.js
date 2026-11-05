@@ -11,6 +11,48 @@ import { reportingBookedAmount } from './money.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 const accountIds = (db, type) => new Set(search(db, 'account.account', { includeArchived: true }).filter((a) => a.account_type === type).map((a) => a.id));
+const hasAnalyticAllocation = (line) => line.analytic_distribution != null
+  ? Object.keys(line.analytic_distribution).length > 0
+  : !!line.analytic_account_id;
+
+/** Keep selected analytic lines and proportionally restore untagged counterparts on the same move. */
+function analyticMoveItems(items, analyticAccountIds) {
+  if (!analyticAccountIds?.length) return items;
+  const selected = filterByAnalytic(items, analyticAccountIds);
+  const originalsByMove = new Map();
+  const selectedByMove = new Map();
+  for (const line of items) originalsByMove.set(line.move_id, [...(originalsByMove.get(line.move_id) ?? []), line]);
+  for (const line of selected) selectedByMove.set(line.move_id, [...(selectedByMove.get(line.move_id) ?? []), line]);
+
+  const output = [];
+  for (const [moveId, matched] of selectedByMove) {
+    const originals = originalsByMove.get(moveId) ?? [];
+    const assigned = originals.filter(hasAnalyticAllocation);
+    const assignedAmount = assigned.reduce((sum, line) => sum + Math.abs(netOf(line)), 0);
+    const matchedAmount = matched.filter(hasAnalyticAllocation).reduce((sum, line) => sum + Math.abs(netOf(line)), 0);
+    const share = assignedAmount ? Math.min(1, matchedAmount / assignedAmount) : 0;
+    output.push(...matched);
+    if (share) {
+      output.push(...originals.filter((line) => !hasAnalyticAllocation(line)).map((line) => ({
+        ...line,
+        debit: (Number(line.debit) || 0) * share,
+        credit: (Number(line.credit) || 0) * share,
+      })));
+    }
+  }
+  return output;
+}
+
+/** Invoice counterpart lines used to classify cash flows, retaining their analytic allocation shares. */
+function cashFlowDocumentSources(db, document) {
+  return (document.line_ids ?? []).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
+    .filter((source) => source.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(source.account.account_type));
+}
+
+const cashFlowSourceTotal = (sources) => sources.reduce((sum, source) => sum + netOf(source.line), 0);
+const cashFlowSelectedSources = (sources, analyticAccountIds) => !analyticAccountIds?.length
+  ? sources?.all ?? []
+  : sources?.selected ?? [];
 
 /** Journal items dated strictly before `from` (none without a `from`): the opening column of every report. */
 const itemsBefore = (db, from, company_id, analyticAccountIds) => (from ? filterByAnalytic(journalItems(db, { company_id }), analyticAccountIds).filter((l) => l.date < from) : []);
@@ -150,16 +192,25 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
   const targetCompany = company_id;
   const cash = accountIds(db, 'asset_cash');
   const sum = (items) => round(balances(db, items.filter((l) => cash.has(l.account_id))).reduce((s, b) => s + b.balance, 0));
-  const all = filterByAnalytic(journalItems(db, { company_id: targetCompany }), analyticAccountIds);
-  const opening = sum(itemsBefore(db, from, targetCompany, analyticAccountIds));
+  const all = analyticMoveItems(journalItems(db, { company_id: targetCompany }), analyticAccountIds);
+  const opening = sum(all.filter((l) => from && l.date < from));
   const closing = sum(all.filter((l) => !to || l.date <= to));
   const totals = { operating: 0, investing: 0, financing: 0, unclassified: 0 };
   const attributed = new Map();
   const byMove = new Map();
-  for (const l of filterByAnalytic(journalItems(db, { from, to, company_id: targetCompany }), analyticAccountIds)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
+  for (const l of analyticMoveItems(journalItems(db, { from, to, company_id: targetCompany }), analyticAccountIds)) byMove.set(l.move_id, [...(byMove.get(l.move_id) ?? []), l]);
   const documents = search(db, 'account.move').filter((m) => m.state === 'posted'
     && (!targetCompany || (m.company_id ?? 1) === targetCompany)
     && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(m.move_type));
+  const documentSources = new Map(documents.map((document) => {
+    const allSources = cashFlowDocumentSources(db, document);
+    const selectedLines = analyticAccountIds?.length
+      ? analyticMoveItems(document.line_ids ?? [], analyticAccountIds)
+      : (document.line_ids ?? []);
+    const selectedSources = selectedLines.map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
+      .filter((source) => source.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(source.account.account_type));
+    return [document.id, { all: allSources, selected: selectedSources }];
+  }));
   const add = (account, amount, source) => {
     amount = reportingBookedAmount(db, source, amount);
     const section = accountCashFlowActivity(db, account);
@@ -181,9 +232,9 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
             const effDate = applicationEffectiveDate(p, doc);
             return (p.move_id === l.move_id && effDate <= moveDate) || (p.reversed && p.reversal_move_id === l.move_id && effDate <= moveDate);
           });
-          const source = (doc.line_ids ?? []).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
-            .filter((x) => x.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(x.account.account_type));
-          const denominator = source.reduce((sum, x) => sum + netOf(x.line), 0);
+          const sourceData = documentSources.get(doc.id);
+          const source = cashFlowSelectedSources(sourceData, analyticAccountIds);
+          const denominator = cashFlowSourceTotal(source);
           if (!denominator) continue;
           for (const settlement of settlements) {
             const available = Math.max(0, Math.abs(appliedValue(db, doc, settlement)) - (consumed.get(settlement) ?? 0));
@@ -206,12 +257,13 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
     const doc = read(db, 'account.move', payment.invoice_id);
     const settlement = (doc?.payments ?? []).find((p) => p.move_id === payment.move_id);
     if (!settlement) continue;
-    const source = (doc.line_ids ?? []).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
-      .filter((x) => x.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(x.account.account_type));
-    const denominator = source.reduce((sum, x) => sum + netOf(x.line), 0);
+    const source = cashFlowSelectedSources(documentSources.get(doc.id), analyticAccountIds);
+    const denominator = cashFlowSourceTotal(source);
+    const fullDenominator = cashFlowSourceTotal(documentSources.get(doc.id)?.all ?? []);
     const cashNet = items.filter((l) => cash.has(l.account_id)).reduce((sum, l) => sum + netOf(l), 0);
-    if (!denominator || !cashNet) continue;
-    const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet));
+    if (!denominator || !fullDenominator || !cashNet) continue;
+    const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
+    const delta = round((toCompany(db, doc.currency_id, settlement.amount, settlement.date, doc.company_id) - appliedValue(db, doc, settlement)) * Math.sign(cashNet) * share);
     const fxAccounts = exchangeAccountIds(db, doc.company_id ?? 1);
     const fxItems = items.filter((line) => fxAccounts.has(line.account_id)).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }));
     const fxAmount = fxItems.reduce((sum, x) => sum - netOf(x.line), 0);
@@ -229,11 +281,14 @@ export function cashFlow(db, { from, to, company_id, analyticAccountIds } = {}) 
     if (!(entry.line_ids ?? []).some((l) => cash.has(l.account_id))) continue;
     const counterpart = (entry.line_ids ?? []).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
       .find((x) => x.line.partner_id === doc.partner_id && ['asset_receivable', 'liability_payable'].includes(x.account?.account_type));
-    const source = (doc.line_ids ?? []).map((line) => ({ line, account: read(db, 'account.account', line.account_id) }))
-      .filter((x) => x.account && !['asset_receivable', 'liability_payable', 'asset_cash'].includes(x.account.account_type));
-    const denominator = source.reduce((sum, x) => sum + netOf(x.line), 0);
-    if (!counterpart || !denominator) continue;
-    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment));
+    const sourceData = documentSources.get(doc.id);
+    const source = cashFlowSelectedSources(sourceData, analyticAccountIds);
+    const denominator = cashFlowSourceTotal(source);
+    const fullDenominator = cashFlowSourceTotal(sourceData.all);
+    if (!counterpart || !denominator || !fullDenominator) continue;
+    const share = analyticAccountIds?.length ? denominator / fullDenominator : 1;
+    if (!share) continue;
+    const amount = Math.sign(-netOf(counterpart.line)) * Math.abs(appliedValue(db, doc, payment)) * share;
     const attribution = { company_id: entry.company_id, date: effDate };
     add(counterpart.account, -amount, attribution);
     for (const x of source) add(x.account, amount * netOf(x.line) / denominator, attribution);

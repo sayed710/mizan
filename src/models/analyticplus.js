@@ -6,7 +6,7 @@ import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems } from './ledger.js';
-import { documentCurrency, round } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
 export { isSectionOrNote } from './taxes.js';
@@ -272,8 +272,10 @@ const day = (date) => {
   return value / 86400000;
 };
 
-const budgetCompanyError = (db, budget) => !budget.company_id || !read(db, 'res.company', budget.company_id)
-  ? 'Select an existing company for the budget' : null;
+const budgetCompanyError = (db, budget, selectedCompanyId = null) => {
+  const companyId = budget.company_id ?? selectedCompanyId;
+  return !companyId || !read(db, 'res.company', companyId) ? 'Select an existing company for the budget' : null;
+};
 
 /** Posted bills consume commitments only through explicit order-line links, never product or reference guesses. */
 function postedPurchaseQuantities(db, order) {
@@ -285,6 +287,7 @@ function postedPurchaseQuantities(db, order) {
     if ((move.company_id ?? 1) !== (order.company_id ?? 1)) throw new Error('Purchase order and posted bill must belong to the same company');
     for (const line of move.invoice_line_ids ?? []) {
       if (isSectionOrNote(line)) continue;
+      if (!line.purchase_line_key) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
       const source = byKey.get(line.purchase_line_key);
       if (!source || source.product_id !== line.product_id) throw new Error('Link each posted bill line to its purchase order line before reporting budget commitments');
       let qty = Number(line.qty) || 0;
@@ -307,7 +310,7 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
       if (isSectionOrNote(line)) return [];
       const qty = Math.max(0, (Number(line.qty) || 0) - (billed.get(line.purchase_line_key) ?? 0));
       if (!qty) return [];
-      const distribution = distributionOfLine(line);
+      const distribution = distributionOfLine(line, db, { ...order, move_type: 'in_invoice' });
       if (budgetLine.analytic_account_id && !normalizeDistribution(distribution, db)[budgetLine.analytic_account_id]) return [];
       const accountId = budgetLine.account_id || budgetLine.general_account
         ? invoiceLineAccount(db, { ...order, move_type: 'in_invoice' }, line) : null;
@@ -321,12 +324,13 @@ function budgetCommitmentLines(db, budgetLine, { from, to, company_id }) {
 }
 
 /** Report full-period actuals and inclusive elapsed-day planned amounts as of atDate. */
-export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {}) {
+export function budgetReport(db, budgetId, atDate = today(), { period = {}, company_id: selectedCompanyId = null } = {}) {
   const budget = read(db, 'account.budget', budgetId);
   if (!budget) throw new Error('Budget not found');
-  const companyError = budgetCompanyError(db, budget);
+  const companyError = budgetCompanyError(db, budget, selectedCompanyId);
   if (companyError) throw new Error(companyError);
-  const companyId = budget.company_id;
+  const companyId = budget.company_id ?? selectedCompanyId;
+  const companyCurrency = companyCurrencyRecord(db, companyId);
   const start = day(budget.date_from);
   const end = day(budget.date_to);
   if (end < start) throw new Error('Budget end date must be on or after its start date');
@@ -355,17 +359,17 @@ export function budgetReport(db, budgetId, atDate = today(), { period = {} } = {
               move_id: item.move_id,
               account_id: null,
               general_account: read(db, 'account.account', item.account_id)?.code || '',
-              amount: round((Number(item.credit) || 0) - (Number(item.debit) || 0)),
+              amount: roundCurrency((Number(item.credit) || 0) - (Number(item.debit) || 0), companyCurrency),
               company_id: companyId,
             }))
             .filter((item) => item.amount !== 0)
         : [];
-    const practical = round(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0));
+    const practical = roundCurrency(analytic_lines.reduce((sum, item) => sum + (Number(item.amount) || 0), 0), companyCurrency);
     const commitment_lines = line.analytic_account_id || line.account_id || line.general_account
       ? budgetCommitmentLines(db, line, { from, to, company_id: companyId }) : [];
-    const committed = round(commitment_lines.reduce((sum, line) => sum + line.amount, 0));
-    const theoretical = round(planned * fraction);
-    return { ...line, planned, practical, committed, theoretical, variance: round(practical - planned), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
+    const committed = roundCurrency(commitment_lines.reduce((sum, line) => sum + line.amount, 0), companyCurrency);
+    const theoretical = roundCurrency(planned * fraction, companyCurrency);
+    return { ...line, planned, practical, committed, theoretical, variance: roundCurrency(practical - planned, companyCurrency), achievement: theoretical ? round(practical / theoretical * 100) : 0, analytic_lines, commitment_lines };
   });
 }
 

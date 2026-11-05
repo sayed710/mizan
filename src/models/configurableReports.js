@@ -77,7 +77,7 @@ function matches(db, account, selectors) {
 }
 
 /** Preserve the posted invoice source allocations when one journal item combines invoice lines. */
-function analyticWeights(db, item) {
+function analyticWeights(db, item, analyticAccountIds) {
   const move = read(db, 'account.move', item.move_id);
   // Fallback distributions resolve against the document company.
   const lineContext = { ...move, company_id: move?.company_id ?? item.company_id ?? 1 };
@@ -95,14 +95,20 @@ function analyticWeights(db, item) {
       if (line) add(line, Math.abs(Number(source.amount) || 0) / total, lineContext);
     }
   } else add(item, 1, lineContext);
+  if (analyticAccountIds?.length) {
+    const selected = new Set(analyticAccountIds.map(Number));
+    const selectedTotal = [...weights].reduce((sum, [id, weight]) => sum + (selected.has(id) ? weight : 0), 0);
+    if (!selectedTotal) return new Map();
+    return new Map([...weights].filter(([id]) => selected.has(id)).map(([id, weight]) => [id, weight / selectedTotal]));
+  }
   return weights;
 }
 
 /** One column per matched partner or analytic account of each horizontal group rule, plus the unmatched share. */
-export function groupBuckets(db, group, items) {
+export function groupBuckets(db, group, items, { analyticAccountIds } = {}) {
   // Weights are memoised per item and computed on demand, so callers may pass rebuilt copies of the items.
   const cache = new WeakMap();
-  const analytic = { get: (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item)).get(item) };
+  const analytic = { get: (item) => cache.get(item) ?? cache.set(item, analyticWeights(db, item, analyticAccountIds)).get(item) };
   return group.rule_ids.flatMap((rule, index) => {
     const domain = idsFor(rule);
     const model = rule.field === 'partner' ? 'res.partner' : 'account.analytic.account';
