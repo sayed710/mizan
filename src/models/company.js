@@ -232,9 +232,15 @@ export function withCompany(models) {
   }));
 }
 
-function companyGuard(db, before, r) {
+// Period locks and the audit trail are accounting controls: over sync only administrators may change them.
+const CONTROL_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'hard_lock_date', 'tax_lock_dates', 'audit_trail'];
+
+function companyGuard(db, before, r, ctx) {
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
+  if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(r[field] ?? null))) {
+    return 'Only administrators can change lock dates or the audit trail';
+  }
   const parent = r.parent_id && record(db, 'res.company', r.parent_id);
   if (r.parent_id && !parent) return 'Select an existing parent company';
   const visited = new Set([r.id]);

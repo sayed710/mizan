@@ -327,7 +327,16 @@ const cookie = (value, maxAge) => `${COOKIE}=${value}; HttpOnly; SameSite=Lax; P
 writeSql("INSERT OR IGNORE INTO kv (key, value) VALUES ('website_cookie_secret', ?)", randomBytes(32).toString('hex'));
 const PAGE_SECRET = sql.prepare("SELECT value FROM kv WHERE key = 'website_cookie_secret'").get().value;
 // Page unlock cookie: a scrypt key bound to the page and its current password, so a password change revokes old cookies.
-const pageToken = (p) => scryptSync(String(p.visibility_password ?? ''), `${PAGE_SECRET}:${p.id}`, 32).toString('hex');
+// Cached per page and password (both server-side), so request cookies never trigger a fresh scrypt run.
+const pageTokens = new Map();
+const pageToken = (p) => {
+  const key = `${p.id} ${p.visibility_password ?? ''}`;
+  if (!pageTokens.has(key)) {
+    if (pageTokens.size >= 1000) pageTokens.clear(); // ponytail: wholesale reset, an LRU if sites ever hold more pages
+    pageTokens.set(key, scryptSync(String(p.visibility_password ?? ''), `${PAGE_SECRET}:${p.id}`, 32).toString('hex'));
+  }
+  return pageTokens.get(key);
+};
 // The cookie name carries a keyed hash of the page id, not the record id itself.
 const pageCookie = (p) => `mizan_page_${createHash('sha256').update(`${PAGE_SECRET}:${p.id}`).digest('hex').slice(0, 24)}`;
 const pageUnlocked = (req, p) => {

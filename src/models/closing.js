@@ -16,8 +16,23 @@ const side = (amount) => ({ debit: Math.max(0, round(amount)), credit: Math.max(
 const sameLines = (a, b) => a.length === b.length && a.every((l, i) => l.account_id === b[i].account_id && round(l.debit) === round(b[i].credit) && round(l.credit) === round(b[i].debit));
 
 /** Closing provenance is recorded by the closing workflow, not inferred from entry contents. */
-function isClosingEntry(year, move) {
-  return !!move && move.closing_fiscal_year_id === year.id && (move.company_id ?? 1) === (year.company_id ?? 1) && move.state === 'posted' && move.move_type === 'entry';
+/** The closing lines for a year: each P&L balance cleared against the company's current-year earnings account. */
+function closingLines(db, year) {
+  const earningsAccount = currentYearEarningsAccount(db, year.company_id);
+  const companyView = { ...db, settings: { ...db.settings, current_company_id: year.company_id } };
+  const rows = balances(companyView, journalItems(db, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
+    .filter((r) => (!r.account.company_id || r.account.company_id === year.company_id) && pnlTypes.includes(r.account.account_type) && r.balance);
+  const lines = rows.map((r) => ({ account_id: r.account.id, ...side(-r.balance) }));
+  lines.push({ account_id: earningsAccount.id, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
+  if (lines.length === 1) lines.push({ account_id: earningsAccount.id, debit: 0, credit: 0 });
+  return lines;
+}
+
+/** The genuine closing entry: posted for the year and booking exactly the year's closing lines (Qodo 13). */
+function isClosingEntry(db, year, move) {
+  if (!move || move.closing_fiscal_year_id !== year.id || (move.company_id ?? 1) !== (year.company_id ?? 1) || move.state !== 'posted' || move.move_type !== 'entry') return false;
+  const without = { ...db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).filter((m) => m.id !== move.id && m.id !== year.opening_move_id) } };
+  return sameLines(closingLines(without, year).map((l) => ({ ...l, debit: l.credit, credit: l.debit })), move.line_ids ?? []);
 }
 
 /** The genuine reopening entry: posted, named for the year, and the exact mirror of its closing entry. */
@@ -40,7 +55,7 @@ function yearGuard(db, before, after) {
   if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && (before?.opening_move_id || after.state !== 'open')) return 'The reopening entry is set by reopening the fiscal year';
   if (entryOff(after.closing_move_id) || entryOff(after.opening_move_id)) return 'Closing entries are dated on the fiscal year end';
   // Only the real entries made by closing or reopening may be named: an ordinary entry would vanish from the P&L.
-  if (closes && !isClosingEntry(after, read(db, 'account.move', after.closing_move_id))) return 'The closing entry must be the one made by closing this fiscal year';
+  if (closes && !isClosingEntry(db, after, read(db, 'account.move', after.closing_move_id))) return 'The closing entry must be the one made by closing this fiscal year';
   if (after.opening_move_id && after.opening_move_id !== before?.opening_move_id && !isReopeningEntry(db, after, read(db, 'account.move', after.opening_move_id))) return 'The reopening entry must be the one made by reopening this fiscal year';
   if (search(db, 'account.fiscal.year').some((y) => y.id !== after.id && [after.closing_move_id, after.opening_move_id].filter(Boolean).some((m) => y.closing_move_id === m || y.opening_move_id === m))) return 'That entry already belongs to another fiscal year';
   return search(db, 'account.fiscal.year').some((y) => y.id !== after.id && (y.company_id ?? 1) === after.company_id && y.date_from <= after.date_to && y.date_to >= after.date_from)
@@ -63,14 +78,8 @@ export function closeFiscalYear(db, yearId, { date } = {}) {
   if (search(db, 'account.move').some((m) => (m.company_id ?? 1) === year.company_id && m.state === 'draft' && (m.date ?? m.invoice_date) >= year.date_from && (m.date ?? m.invoice_date) <= year.date_to)) {
     throw new Error('Post or cancel draft moves inside this fiscal year before closing');
   }
-  const earningsAccount = currentYearEarningsAccount(db, year.company_id);
+  const lines = closingLines(db, year);
   const next = db;
-  const companyView = { ...next, settings: { ...next.settings, current_company_id: year.company_id } };
-  const rows = balances(companyView, journalItems(next, { from: year.date_from, to: year.date_to, company_id: year.company_id }))
-    .filter((r) => (!r.account.company_id || r.account.company_id === year.company_id) && pnlTypes.includes(r.account.account_type) && r.balance);
-  const lines = rows.map((r) => ({ account_id: r.account.id, ...side(-r.balance) }));
-  lines.push({ account_id: earningsAccount.id, ...side(round(rows.reduce((s, r) => s + r.balance, 0))) });
-  if (lines.length === 1) lines.push({ account_id: earningsAccount.id, debit: 0, credit: 0 });
   const entry = postEntry(next, { journal: 'MISC', date: year.date_to, ref: `Fiscal closing: ${year.name}`, company: year.company_id, lines });
   const marked = { ...entry.db, records: { ...entry.db.records, 'account.move': entry.db.records['account.move'].map((m) => m.id === entry.id ? { ...m, closing_fiscal_year_id: yearId } : m) } };
   // The year references its closing entry first: only such an entry may carry the closing flag.
@@ -83,7 +92,7 @@ export function reopenFiscalYear(db, yearId) {
   const year = getYear(db, yearId);
   if (year.state !== 'closed') throw new Error('This fiscal year is already open');
   const closing = read(db, 'account.move', year.closing_move_id);
-  if (!isClosingEntry(year, closing)) throw new Error('The recorded closing entry is missing or has no closing provenance');
+  if (!isClosingEntry(db, year, closing)) throw new Error('The recorded closing entry is missing or has no closing provenance');
   // Open the year before booking into it: a closed year locks its period.
   const next = write(db, 'account.fiscal.year', yearId, { state: 'open' });
   const entry = postEntry(next, {

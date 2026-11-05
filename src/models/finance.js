@@ -482,7 +482,13 @@ function securedMoveRule(before, after) {
 }
 
 export function moveGuard(db, before, after, ctx) {
-  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after);
+  return securedMoveRule(before, after) ?? lockRule(db, before, after, ctx) ?? accountsError(db, before, after) ?? postedMoveRule(db, before, after) ?? pendingReversalRule(db, before, after);
+}
+
+/** A scheduled reversal posts only while the entry it reverses is still posted (Qodo 24). */
+function pendingReversalRule(db, before, after) {
+  if (after.state !== 'posted' || before?.state === 'posted' || !after.reversed_entry_id) return null;
+  return read(db, 'account.move', after.reversed_entry_id)?.state === 'posted' ? null : 'The entry this reverses is no longer posted';
 }
 
 function lockRule(db, before, after, ctx) {
@@ -561,8 +567,9 @@ export function moveDeleteGuard(db, move, staged = db) {
   if (bookedByBank(db, move.id) || bookedByBank(staged, move.id)) return 'This entry is matched with a reconciled bank transaction and cannot be deleted';
   const lock = [companyLockDate(db, move), taxLockFor(db, move), closedYearLock(db, move.company_id ?? 1)].sort().at(-1);
   if (lock && moveDate(move) <= lock) return `The period up to ${lock} is locked`;
-  const company = read(db, 'res.company', move.company_id ?? 1);
-  if (company?.audit_trail && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
+  // The trail counts if it is on before or after the change set (enabling it alongside a deletion still protects).
+  const audited = [db, staged].some((d) => read(d, 'res.company', move.company_id ?? 1)?.audit_trail);
+  if (audited && move.name && move.name !== '/') return 'Numbered entries cannot be deleted while the audit trail is active; cancel them instead';
   if (move.state === 'posted') return 'Posted entries cannot be deleted; reset them to draft first';
   if (backsSettlement(db, move.id) || backsSettlement(staged, move.id)) return 'This entry records a payment; reverse the payment instead';
   return null;

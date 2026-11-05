@@ -330,9 +330,20 @@ export function postCompanyDeferrals(db, companyId, upTo = today()) {
     .reduce((next, schedule) => postDueEntries(next, schedule, upTo), db);
 }
 
+/**
+ * A schedule cancels only once its own posted recognition is reversed. With `grouped`, open grouped entries also
+ * block (manual cancel); resetting the source document instead corrects grouped contributions with adjustment entries.
+ */
+function cancelDeferralError(db, schedule, { grouped = false } = {}) {
+  const openGrouped = grouped && (db.records['account.move'] ?? []).some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === schedule.id));
+  return openGrouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id) ? 'Reverse the recognition entries before cancelling this deferral' : null;
+}
+
 export const deferredModels = {
   'account.deferral': {
     label: 'Deferrals',
+    // Enforced on every write path, not only the Cancel button (Qodo 12).
+    guard: (db, before, after) => (after.state === 'cancel' && before?.state !== 'cancel' ? cancelDeferralError(db, after) : null),
     actions: {
       postDueEntries,
       postCompanyDeferrals,
@@ -386,9 +397,8 @@ export const deferredModels = {
         { label: 'Compute', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: computeBoard(db, r) }) },
         { label: 'Post Due Entries', primary: true, when: (r) => ['running', 'done'].includes(r.state), run: (db, r) => ({ db: postDueEntries(db, read(db, 'account.deferral', r.id)) }) },
         { label: 'Cancel', when: (r) => ['draft', 'running'].includes(r.state), run: (db, r) => {
-          const schedule = read(db, 'account.deferral', r.id);
-          const grouped = (db.records['account.move'] ?? []).some((move) => move.is_deferred_grouped && !move.reversed_entry_id && move.state === 'posted' && (move.deferred_contributions ?? []).some((c) => c.schedule_id === r.id));
-          if (grouped || (schedule.board ?? []).some((line) => line.move_id && !line.reversal_move_id)) throw new Error('Reverse the recognition entries before cancelling this deferral');
+          const error = cancelDeferralError(db, read(db, 'account.deferral', r.id), { grouped: true });
+          if (error) throw new Error(error);
           return { db: write(db, 'account.deferral', r.id, { state: 'cancel' }) };
         } },
       ],
