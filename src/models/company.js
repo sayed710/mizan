@@ -1,7 +1,8 @@
 import { create, read, updateSettings, write } from '../orm.js';
-import { fiscalPositionFor, lineTaxOf, productTax, taxSnapshot } from './taxes.js';
+import { fiscalPositionFor, lineTaxOf, productTax, taxGroups, taxSnapshot } from './taxes.js';
 import { postCompanyDeferrals } from './deferred.js';
-import { today } from './common.js';
+import { companyRoundingMethod, today } from './common.js';
+import { documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
 
@@ -31,6 +32,27 @@ export function documentCompany(db, document) {
   if (!company) return null;
   const currency = company.currency_id ? read(db, 'res.currency', company.currency_id) : null;
   return { ...company, currency: currency?.name ?? null };
+}
+
+/** Postal address lines for a company or contact, in print order; blank parts are omitted. */
+export function addressLines(record, taxIdLabel = 'Tax ID') {
+  if (!record) return [];
+  return [
+    record.street,
+    [record.zip, record.city].filter(Boolean).join(' '),
+    record.country,
+    record.vat ? `${taxIdLabel}: ${record.vat}` : '',
+  ].filter(Boolean);
+}
+
+/**
+ * Per-tax base and amount for a document's lines, from their stored tax snapshots.
+ * Shared by the printed document and the emailed copy so both show the same detail.
+ */
+export function documentTaxBreakdown(db, record, lines = []) {
+  const currency = documentCurrency(db, record);
+  return taxGroups(lines, () => null, 1, currency, currency, { roundingMethod: companyRoundingMethod(db, record?.company_id) })
+    .map(({ tax_name: label, base, amount }) => ({ label, base, amount }));
 }
 
 /** Select active companies without changing the caller's database or selection. */
