@@ -595,7 +595,7 @@ function reconcileIndex(db) {
   const push = (map, key, value) => map.set(key, [...(map.get(key) ?? []), value]);
   const applications = new Map();
   for (const invoice of db.records['account.move'] ?? []) {
-    for (const row of invoice.payments ?? []) {
+    for (const row of (invoice.payments ?? []).filter((r) => !r.unapplied)) {
       push(applications, row.move_id, { invoice, row });
       if (row.reversed && row.reversal_move_id) push(applications, row.reversal_move_id, { invoice, row });
     }
@@ -636,6 +636,11 @@ export function reconciledJournalItems(db, move) {
   });
 }
 
+/** Identity of an embedded journal line, independent of its position and derived matching state. */
+export function journalItemIdentity({ reconciled: _reconciled, ...line }) {
+  return JSON.stringify(line);
+}
+
 /** Journal items with their move date, optionally limited by review status, date and company. */
 export function journalItems(db, { from, to, company_id, company, reviewMode = 'posted' } = {}) {
   const targetCompany = company_id ?? company;
@@ -655,6 +660,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       const isTaxSettlement = settlementMoves.has(m.id) || (!!m.is_tax_payment && !!m.tax_return_id);
       return reconciledJournalItems(db, m).map((l) => ({
         ...l,
+        line_identity: journalItemIdentity(l),
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,

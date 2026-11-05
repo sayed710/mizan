@@ -23,6 +23,13 @@ export function setLang(next) {
 }
 
 const ar = {
+  '{n} selected': 'تم تحديد {n}',
+  'This removes the matching: payments stay posted and their credit becomes available again. Write-offs and direct bank matches are reversed on the selected date.': 'يزيل هذا المطابقة: تبقى المدفوعات مرحّلة ويعود رصيدها متاحاً. تُعكس عمليات الشطب والمطابقات البنكية المباشرة في التاريخ المحدد.',
+  'Amount in Invoice Currency': 'المبلغ بعملة الفاتورة',
+  'Available balance': 'الرصيد المتاح',
+  'Select a journal': 'اختر دفتر يومية',
+  'Select an account': 'اختر حساباً',
+  'Select journal item {entry}: {account} — {label}': 'تحديد بند اليومية {entry}: {account} — {label}',
   'Download CSV': 'تنزيل CSV',
   'Report not found': 'لم يتم العثور على التقرير',
   'Accounting Reports': 'التقارير المحاسبية', 'Accounting Report': 'التقرير المحاسبي', 'Horizontal Groups': 'المجموعات الأفقية',

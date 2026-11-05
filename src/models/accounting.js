@@ -198,9 +198,11 @@ export function paymentGuard(db, before, after, ctx) {
   if (old.some((p, i) => p?.move_id && payments[i]?.move_id !== p.move_id)) return 'A recorded payment cannot be removed or re-linked';
   for (const [i, p] of payments.entries()) {
     const prior = old[i];
-    if (prior?.reversed && (!p.reversed || p.reversal_move_id !== prior.reversal_move_id || p.reversal_date !== prior.reversal_date)) return 'A reversed payment cannot be restored';
-    if (prior && Object.keys(prior).some((k) => !['reversed', 'reversal_move_id', 'reversal_date'].includes(k) && JSON.stringify(p[k]) !== JSON.stringify(prior[k]))) return 'A recorded payment cannot be changed';
-    if (p.reversed) {
+    if (prior?.reversed && (!p.reversed || p.reversal_move_id !== prior.reversal_move_id || p.reversal_date !== prior.reversal_date || p.unapplied !== prior.unapplied)) return 'A reversed payment cannot be restored';
+    if (prior && Object.keys({ ...prior, ...p }).some((k) => !['reversed', 'reversal_move_id', 'reversal_date', 'unapplied'].includes(k) && JSON.stringify(p[k]) !== JSON.stringify(prior[k]))) return 'A recorded payment cannot be changed';
+    // An unapplied credit leaves its payment entry posted; it only needs the date the matching was removed.
+    if (p.unapplied && (!p.reversed || p.reversal_move_id || !p.reversal_date || (p.date && p.reversal_date < p.date))) return 'An unapplied payment needs its unapplication date and no reversing entry';
+    if (p.reversed && !p.unapplied) {
       const original = read(db, 'account.move', p.move_id);
       const reversal = read(db, 'account.move', p.reversal_move_id);
       if (!original || reversal?.state !== 'posted' || reversal.reversed_entry_id !== original.id

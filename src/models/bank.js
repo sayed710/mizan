@@ -331,7 +331,7 @@ function unreconcileError(db, before, after) {
 }
 
 /** Release a match by posting linked reversals; existing payments are not reversed. */
-function unreconcile(db, line) {
+export function unreconcile(db, line) {
   const bankId = line.bank_move_id ?? (line.payment_id ? line.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = line.allocations ?? [];

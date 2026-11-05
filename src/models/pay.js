@@ -1,16 +1,16 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { invoiceCounterpartAccount, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
-import { isInvoice, payMove, releaseCashBasis, residual } from './accounting.js';
-import { datedLockDelete, datedLockGuard, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
+import { isInvoice, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
+import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
-import { rateAt } from './currency.js';
+import { rateAt, toCompany } from './currency.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
-import { isPaymentMatched } from './bank.js';
+import { isPaymentMatched, unreconcile } from './bank.js';
 import { shouldBePaid } from './billcontrol.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -18,6 +18,103 @@ const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'U
 // Which open documents a payment settles, by direction and partner side.
 const amountMismatch = (a, b) => round(Number(a) - b) !== 0;
 const SETTLES = { customer: { inbound: ['out_invoice'], outbound: ['out_refund'] }, supplier: { inbound: ['in_refund'], outbound: ['in_invoice'] } };
+
+/** Resolve a selection against current records, never against list order or a caller's stale values. */
+function selectedItems(db, selections) {
+  if (!selections?.length) throw new Error('Select journal items first');
+  const seen = new Set();
+  return selections.map(({ move_id, line_identity }) => {
+    const key = JSON.stringify([move_id, line_identity]);
+    if (seen.has(key)) throw new Error('Select each journal item only once');
+    seen.add(key);
+    const move = read(db, 'account.move', move_id);
+    const matches = (move?.line_ids ?? []).filter((line) => journalItemIdentity(line) === line_identity);
+    if (move?.state !== 'posted' || matches.length !== 1) throw new Error('The selected journal item is missing, ambiguous or no longer posted; refresh the list');
+    const [line] = matches;
+    const account = read(db, 'account.account', line.account_id);
+    const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+    if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
+    if ((move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id).length !== 1) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
+    return { move, line, counterpart };
+  });
+}
+
+/** Match exactly the chosen payment credit and document through the existing payment allocation model. */
+export function reconcileJournalItems(db, selections, { date, amount = null } = {}) {
+  const items = selectedItems(db, selections);
+  if (!validDate(date)) throw new Error('Enter a valid reconciliation date');
+  if (items.length !== 2) throw new Error('Select one invoice counterpart and one payment counterpart');
+  const invoices = items.filter(({ move }) => isInvoice(move));
+  if (invoices.length !== 1) throw new Error('Select one invoice counterpart and one payment counterpart');
+  const [invoice] = invoices;
+  const source = items.find((item) => item !== invoice);
+  if (source.line.account_id !== invoice.line.account_id || source.line.partner_id !== invoice.line.partner_id) throw new Error('Selected items must have the same account and partner');
+  if (!invoice.counterpart) throw new Error('Select the invoice receivable or payable item');
+  const payments = search(db, 'account.payment').filter((p) => p.move_id === source.move.id && p.state === 'posted');
+  if (payments.length !== 1) throw new Error('The selected entry must have an explicit posted payment link');
+  if (date < (invoice.move.invoice_date ?? '')) throw new Error('Reconciliation date cannot be before the invoice date');
+  return applyPaymentCredit(db, payments[0].id, invoice.move.id, date, amount);
+}
+
+/** Write off only an explicitly selected document counterpart, using explicit journal/account choices. */
+export function writeoffJournalItem(db, selections, { date, amount, journalId, accountId, label } = {}) {
+  const items = selectedItems(db, selections);
+  if (items.length !== 1 || !isInvoice(items[0].move) || !items[0].counterpart) throw new Error('Select one invoice receivable or payable item to write off');
+  const [{ move }] = items;
+  if (!validDate(date) || date < (move.invoice_date ?? '')) throw new Error('Enter a valid write-off date on or after the invoice date');
+  if (!journalId) throw new Error('Select a write-off journal');
+  if (!accountId) throw new Error('Select a write-off account');
+  const account = read(db, 'account.account', accountId);
+  if (!account || account.active === false || account.deprecated || ['asset_receivable', 'liability_payable', 'off_balance'].includes(account.account_type) || accountId === items[0].line.account_id) throw new Error('Select an active write-off counterpart account, not a receivable or payable');
+  if (!Number.isFinite(Number(amount)) || !(Number(amount) > 0) || Number(amount) > residual(move, db)) throw new Error('Enter a positive write-off amount within the remaining invoice balance');
+  return settleWriteoff(db, move.id, Number(amount), toCompany(db, move.currency_id, Number(amount), date, move.company_id), date, { journalId, accountId, label }).db;
+}
+
+/** Release the selected settlements through their owning bank/payment reversal workflow. */
+export function unreconcileJournalItems(db, selections, { date } = {}) {
+  const items = selectedItems(db, selections);
+  if (!validDate(date)) throw new Error('Enter a valid reversal date');
+  const unapplications = new Map();
+  const bankIds = new Set();
+  const writeoffs = new Map();
+  for (const { move, line, counterpart } of items) {
+    if (isInvoice(move) && !counterpart) throw new Error('Select the invoice receivable or payable item');
+    const applications = isInvoice(move) ? [] : search(db, 'account.move').filter((invoice) => invoice.partner_id === line.partner_id && (invoice.line_ids ?? []).some((l) => l.account_id === line.account_id) && (invoice.payments ?? []).some((row) => !row.reversed && row.move_id === move.id));
+    const rows = isInvoice(move) ? (move.payments ?? []).filter((row) => !row.reversed) : [];
+    const sourceIds = new Set(isInvoice(move) ? rows.map((row) => row.move_id) : [move.id]);
+    const payments = search(db, 'account.payment').filter((p) => p.state === 'posted' && sourceIds.has(p.move_id));
+    // An invoice item only releases bank lines reconciled directly against it; a bank match of a payment belongs to the payment's items.
+    const banks = search(db, 'account.bank.statement.line').filter((b) => b.bank_move_id && (isInvoice(move)
+      ? (b.allocations ?? []).some((a) => a.invoice_id === move.id && (sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id)))
+      : sourceIds.has(b.bank_move_id) || sourceIds.has(b.payment_move_id) || payments.some((p) => b.payment_id === p.id || (b.payment_ids ?? []).includes(p.id))
+        || (b.allocations ?? []).some((a) => sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id))));
+    if (!isInvoice(move) && !banks.length && !applications.length) throw new Error('The selected item has no active settlement');
+    if (!isInvoice(move) && !counterpart && !payments.some((p) => p.outstanding_account_id === line.account_id) && !banks.some((b) => read(db, 'account.journal', b.journal_id)?.suspense_account_id === line.account_id)) throw new Error('Select a linked receivable, payable, outstanding or suspense item');
+    for (const bank of banks) bankIds.add(bank.id);
+    const bankMatched = (moveId) => banks.some((b) => b.bank_move_id === moveId || b.payment_move_id === moveId || (b.allocations ?? []).some((a) => a.payment_move_id === moveId || a.writeoff_move_id === moveId));
+    // Unreconcile only removes the matching: payments stay posted and their credit becomes available again.
+    if (counterpart && !isInvoice(move) && payments.length && !bankMatched(move.id)) for (const invoice of applications) unapplications.set(`${invoice.id}:${move.id}`, { invoiceId: invoice.id, moveId: move.id });
+    for (const row of rows) {
+      if (row.discount && payments.some((p) => p.move_id === row.payment_move_id)) continue;
+      if (bankMatched(row.move_id)) continue;
+      if (payments.some((p) => p.move_id === row.move_id)) { unapplications.set(`${move.id}:${row.move_id}`, { invoiceId: move.id, moveId: row.move_id }); continue; }
+      const source = read(db, 'account.move', row.move_id);
+      if (source?.move_type !== 'entry' || row.discount) throw new Error('This settlement must be reversed from its originating document workflow');
+      writeoffs.set(`${move.id}:${row.move_id}`, { invoiceId: move.id, moveId: row.move_id });
+    }
+    if (!isInvoice(move) && !payments.length && !banks.length) {
+      if (applications.length !== 1) throw new Error('No uniquely linked settlement can be unreconciled for this item');
+      writeoffs.set(`${applications[0].id}:${move.id}`, { invoiceId: applications[0].id, moveId: move.id });
+    }
+    if (isInvoice(move) && !rows.length) throw new Error('The selected invoice has no active settlements');
+  }
+  // These functions return immutable snapshots: publish nothing unless the whole operation succeeds.
+  let next = db;
+  for (const id of bankIds) next = unreconcile(next, read(next, 'account.bank.statement.line', id)).db;
+  for (const { invoiceId, moveId } of unapplications.values()) next = unapplyPaymentCredit(next, invoiceId, moveId, date);
+  for (const { invoiceId, moveId } of writeoffs.values()) next = reverseWriteoff(next, invoiceId, moveId, date);
+  return next;
+}
 
 /**
  * Post a draft payment. With an invoice it pays that invoice; otherwise one entry is booked for the whole amount
@@ -201,6 +298,48 @@ export function applyPaymentCredit(db, paymentIdOrRec, invoiceIdOrRec, date = to
 
   const withPayment = write(nextDb, 'account.payment', payment.id, { unapplied: left });
   return postNote(withPayment, 'account.payment', payment.id, `Applied ${money(taken)} credit to ${invoice.name}`);
+}
+
+/** Validate an exact application inverse before any journal entry or balance is changed. */
+function paymentUnapplication(db, invoiceId, paymentMoveId, date) {
+  const invoice = read(db, 'account.move', invoiceId);
+  const matches = (invoice?.payments ?? []).filter((row) => !row.reversed && row.move_id === paymentMoveId);
+  const payments = search(db, 'account.payment').filter((p) => p.move_id === paymentMoveId && p.state === 'posted');
+  if (!isInvoice(invoice) || invoice?.state !== 'posted' || matches.length !== 1 || payments.length !== 1) throw new Error('Select one active application of a posted payment');
+  const [row] = matches;
+  const [payment] = payments;
+  if (!validDate(date) || date < row.date) throw new Error('Enter an unapplication date on or after the application date');
+  if ((payment.company_id ?? 1) !== (invoice.company_id ?? 1) || !sameCommercialPartner(db, payment.partner_id, invoice.partner_id)) throw new Error('Payment and invoice must belong to the same company and partner');
+  if (row.discount || payment.return_id || payment.is_tax_payment) throw new Error('Unapply this settlement from its originating document workflow');
+  if (!Number.isFinite(row.payment_company_amount) || !(row.payment_company_amount > 0)) throw new Error('The application is missing its explicit payment company amount; repair the settlement link first');
+  const source = read(db, 'account.move', paymentMoveId);
+  if (source?.state !== 'posted' || search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === paymentMoveId)) throw new Error('The payment entry must remain posted and unreversed');
+  const fxError = settlementFxError(db, invoice, row);
+  if (fxError) throw new Error(fxError);
+  for (const id of [row.payment_fx_move_id, row.cash_basis_move_id].filter(Boolean)) {
+    const entry = read(db, 'account.move', id);
+    if (entry?.state !== 'posted' || entry.move_type !== 'entry' || (entry.company_id ?? 1) !== (invoice.company_id ?? 1) || date < entry.invoice_date || search(db, 'account.move').some((m) => m.state !== 'cancel' && m.reversed_entry_id === id)) throw new Error('The linked exchange or cash-basis entry cannot be reversed on this date');
+    const journal = read(db, 'account.journal', entry.journal_id);
+    if (!journal) throw new Error('The linked settlement journal is missing');
+  }
+  // An unapplied row is inactive like a reversed one, but the payment itself stays posted: no reversing entry exists.
+  const paymentsAfter = invoice.payments.map((p) => p === row ? { ...p, reversed: true, unapplied: true, reversal_date: date } : p);
+  const invoiceValues = { amount_paid: roundCurrency(Number(invoice.amount_paid) - Number(row.amount), documentCurrency(db, invoice)), payments: paymentsAfter, payment_date: paymentsAfter.filter((p) => !p.reversed).at(-1)?.date ?? null };
+  const unapplied = roundCurrency(Number(payment.unapplied) + row.payment_company_amount, companyCurrencyRecord(db, invoice.company_id));
+  const lockError = datedLockGuard(['unapplied'], (p) => p.state === 'posted')(db, payment, { ...payment, unapplied })
+    ?? lockedSettlementInvariant(db, { ...invoice, ...invoiceValues }, invoice);
+  if (lockError) throw new Error(lockError);
+  return { invoice, row, payment, invoiceValues, unapplied };
+}
+
+/** Remove a matching, not its payment: restore credit and reverse only application-specific FX and cash basis. */
+export function unapplyPaymentCredit(db, invoiceId, paymentMoveId, date = today()) {
+  const { invoice, row, payment, invoiceValues, unapplied } = paymentUnapplication(db, invoiceId, paymentMoveId, date);
+  let next = db;
+  if (row.payment_fx_move_id) next = reverseEntry(next, read(next, 'account.move', row.payment_fx_move_id), date, { reconciliation_reversal: true }).db;
+  next = reverseCashBasis(next, row, invoice, date);
+  next = write(next, 'account.payment', payment.id, { unapplied });
+  return write(next, 'account.move', invoice.id, invoiceValues);
 }
 
 /** Post a linked mirror of an existing entry (optionally in a chosen journal/date, or reverse-and-create a new draft). */
