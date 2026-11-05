@@ -182,12 +182,24 @@ export function postPayment(db, p) {
   }
   const companyCurrency = companyCurrencyRecord(db, currentPayment.company_id);
   const companyRound = (n) => roundCurrency(n, companyCurrency);
-  const amount = companyRound(Number(currentPayment.amount));
+  const isForeignCurrency = !!currentPayment.currency_id && currentPayment.currency_id !== companyCurrency.id;
+  // For foreign-currency payments: debit/credit in company currency; lines also carry currency_id + amount_currency.
+  const rawAmount = Number(currentPayment.amount);
+  const amount = isForeignCurrency
+    ? toCompany(db, currentPayment.currency_id, rawAmount, date, currentPayment.company_id)
+    : companyRound(rawAmount);
+  const payCurrency = isForeignCurrency ? read(db, 'res.currency', currentPayment.currency_id) : null;
+  const foreignDocAmount = isForeignCurrency ? roundCurrency(rawAmount, payCurrency) : null;
+  // Both lines get currency metadata with opposite signs so the entry is balanced in foreign currency too.
+  const lineWithFx = (line, sign) =>
+    isForeignCurrency ? { ...line, currency_id: currentPayment.currency_id, amount_currency: sign * foreignDocAmount } : line;
   const { db: booked, id: moveId } = postEntry(db, {
     journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || name,
     lines: inbound
-      ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, { account: counterpart, credit: amount, partner_id: currentPayment.partner_id }]
-      : [{ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, { account: liquidity, credit: amount, partner_id: currentPayment.partner_id }],
+      ? [lineWithFx({ account: liquidity, debit: amount, partner_id: currentPayment.partner_id }, 1),
+         lineWithFx({ account: counterpart, credit: amount, partner_id: currentPayment.partner_id }, -1)]
+      : [lineWithFx({ account: counterpart, debit: amount, partner_id: currentPayment.partner_id }, 1),
+         lineWithFx({ account: liquidity, credit: amount, partner_id: currentPayment.partner_id }, -1)],
     company: currentPayment.company_id ?? 1,
     is_tax_payment: Boolean(currentPayment.is_tax_payment || currentPayment.return_id),
     tax_return_id: currentPayment.return_id ?? null,

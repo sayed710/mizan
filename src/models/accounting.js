@@ -722,7 +722,18 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const extra = excess > 0 ? companyRound(toCompany(db, r.currency_id, value + excess, date, r.company_id) - bank) : 0;
   const foreign = !!r.currency_id && r.currency_id !== companyCurrencyRecord(db, r.company_id)?.id;
   const foreignAmount = (value) => foreign ? { currency_id: r.currency_id, amount_currency: docRound(value) } : {};
-  const liquidityForeignAmount = (value) => journal?.currency_id === r.currency_id ? foreignAmount(value) : {};
+  // Liquidity line must carry currency metadata whenever the payment journal has a designated foreign currency,
+  // even if the invoice itself is in the company currency (Odoo 20 behaviour: journal currency wins for bank lines).
+  const journalCurrency = journal?.currency_id ?? null;
+  const journalIsForeign = !!journalCurrency && journalCurrency !== companyCurrencyRecord(db, r.company_id)?.id;
+  const liquidityForeignAmount = (value) => {
+    if (journalCurrency === r.currency_id) return foreignAmount(value);
+    if (!journalIsForeign) return {};
+    // Journal currency differs from both invoice and company currency: convert bank amount to journal currency.
+    const journalCurrencyRec = read(db, 'res.currency', journalCurrency);
+    const liquidityAmount = roundCurrency(Math.abs(bank + extra) * rateAt(db, journalCurrency, date, r.company_id) * Math.sign(value), journalCurrencyRec);
+    return { currency_id: journalCurrency, amount_currency: liquidityAmount };
+  };
   const credit = excess > 0 ? [sale ? { account: counterpartCode, credit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(-excess) } : { account: counterpartCode, debit: extra, partner_id: r.partner_id, name: 'Outstanding credit', ...foreignAmount(excess) }] : [];
   const { db: withEntry, id: paymentMove } = postEntry(db, {
     journal: via.code, journal_id: journal?.id, date, ref: `Payment ${r.name}`, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
