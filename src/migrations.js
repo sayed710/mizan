@@ -845,7 +845,23 @@ MIGRATIONS.push({ version: 33, name: 'Explicit payroll, cash basis and rounding 
   } };
 } });
 
-MIGRATIONS.push({ version: 34, name: 'Per-company lock dates and accounting settings on res.company', up: (db) => {
+MIGRATIONS.push({ version: 34, name: 'Default general journal for companies with a single general journal', up: (db) => {
+  const journals = db.records?.['account.journal'] ?? [];
+  const unresolved = [];
+  const companies = (db.records?.['res.company'] ?? []).map((company) => {
+    if (company.default_general_journal_id) return company;
+    const candidates = journals.filter((j) => j.type === 'general' && (j.company_id ?? 1) === company.id);
+    if (candidates.length === 1) return { ...company, default_general_journal_id: candidates[0].id };
+    unresolved.push([company.id, candidates.length]);
+    return company;
+  });
+  // The note lives in the company's chatter, which is stored with the database and shown to administrators.
+  return unresolved.reduce((next, [id, count]) => postNote(next, 'res.company', id,
+    `Upgrade: this company has ${count} general journals, so no default general journal was chosen. Set the default general journal in the company settings before revaluing foreign balances.`),
+  { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
+} });
+
+MIGRATIONS.push({ version: 35, name: 'Per-company lock dates and accounting settings on res.company', up: (db) => {
   const settings = db.settings ?? {};
   const companyRows = db.records?.['res.company'] ?? [];
   const companyIds = new Set(companyRows.map((c) => c.id));
@@ -950,7 +966,7 @@ MIGRATIONS.push({ version: 34, name: 'Per-company lock dates and accounting sett
   const reportKeys = [...Object.keys(unplacedSettings), ...Object.keys(unplacedTaxLocks)];
   if (reportKeys.length && companyIds.has(1)) {
     nextDb = postNote(nextDb, 'res.company', 1,
-      `Migration 34 retained company accounting values that could not be placed: ${[...new Set(reportKeys)].join(', ')}. See the unplaced company accounting settings in General Settings data.`);
+      `Migration 35 retained company accounting values that could not be placed: ${[...new Set(reportKeys)].join(', ')}. See the unplaced company accounting settings in General Settings data.`);
   }
   return nextDb;
 } });

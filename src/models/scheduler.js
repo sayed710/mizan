@@ -47,7 +47,9 @@ export function runScheduledJobs(db, at = today(), { onError = () => {}, deliver
     ['timeoff', (db, at) => (db.records['hr.leave.allocation'] ?? []).filter((a) => a.state === 'validate' && a.allocation_type === 'accrual').reduce((acc, a) => accrue(acc, a, at), db)],
     ['accounting', (db, at) => (db.records['account.asset'] ?? []).filter((a) => a.state === 'open')
       .reduce((acc, a) => tolerant(postDepreciation)(acc, acc.records['account.asset'].find((x) => x.id === a.id), at), db)],
-    ['accounting', tolerant(postAutoPostMoves)],
+    ['accounting', tolerant(function postAutoPostMovesJob(d, when) {
+      return postAutoPostMoves(d, when, { onError: (job, e) => { try { onError(job, e); } catch (reporter) { console.error(`Scheduler error reporter failed for ${job}:`, reporter); } } });
+    })],
     ['subscriptions', tolerant(subscriptionJobs)],
     ['maintenance', schedulePreventive],
     ['inventory', (db, at) => replenish(db, at)],

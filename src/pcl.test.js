@@ -238,12 +238,12 @@ test('pcl: sync security - non-admin cannot alter lock dates or audit trail on r
   );
 });
 
-test('pcl: migration 34 migrates legacy global settings to res.company with unplaced preservation', () => {
+test('pcl: migration 35 migrates legacy global settings to res.company with unplaced preservation', () => {
   const db = seed();
   const c2 = createCompany(db, { name: 'Migrated Co 2' });
   const legacyDb = {
     ...c2.db,
-    schema_version: 33,
+    schema_version: 34,
     settings: {
       ...c2.db.settings,
       lock_date: '2025-06-30',
@@ -265,7 +265,7 @@ test('pcl: migration 34 migrates legacy global settings to res.company with unpl
 
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 34);
+  assert.equal(migrated.schema_version, 35);
 
   // Company 1 has migrated values
   const comp1 = read(migrated, 'res.company', 1);
@@ -303,7 +303,7 @@ test('pcl: migration 34 migrates legacy global settings to res.company with unpl
 
   // Migration is idempotent
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 34);
+  assert.equal(twice.schema_version, 35);
   assert.equal(read(twice, 'res.company', 1).lock_date, '2025-06-30');
   assert.equal(read(twice, 'res.company', 1).tax_lock_date, '2025-02-28');
 });

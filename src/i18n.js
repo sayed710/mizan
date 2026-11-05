@@ -385,6 +385,7 @@ const ar = {
   'Other Expenses': 'مصروفات أخرى', 'Net Income': 'صافي الدخل', Assets: 'الأصول', 'Total Assets': 'إجمالي الأصول', Liabilities: 'الخصوم',
   Equity: 'حقوق الملكية', 'Current Year Earnings': 'أرباح العام الحالي', 'Current Year Earnings Account': 'حساب أرباح العام الحالي', 'Liabilities + Equity': 'الخصوم + حقوق الملكية',
   'Initial Balance': 'الرصيد الافتتاحي', Period: 'الفترة', 'This Quarter': 'هذا الربع', 'All Dates': 'كل التواريخ', Journal: 'اليومية', 'Bank Journal': 'يومية البنك',
+  'Choose a bank or cash journal': 'اختر دفتر يومية البنك أو النقدية',
   'Account Name': 'اسم الحساب', 'Journal Name': 'اسم اليومية', 'Short Code': 'الكود المختصر', 'Default Account': 'الحساب الافتراضي',
   'Suspense Account': 'الحساب المعلق', 'Cash Profit Account': 'حساب أرباح الصندوق', 'Cash Loss Account': 'حساب خسائر الصندوق', 'Expense Tax': 'ضريبة المصروف', 'Expense Journal': 'دفتر يومية المصروفات',
   'Invoice Sequence Prefix': 'بادئة تسلسل الفواتير', 'Next Invoice Number': 'رقم الفاتورة التالي',
