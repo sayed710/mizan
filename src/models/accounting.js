@@ -6,7 +6,7 @@ import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
-import { cashBasisTransitionAccount, cashBasisTaxes, fiscalPositionFor, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
+import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -827,13 +827,13 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const roundingMethod = companyRoundingMethod(db, r.company_id);
   const side = refund ? 'refund' : 'invoice';
-  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, {
+  const { taxes: rawTaxGroups, bases: baseGroups } = cashBasisGroups(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, {
     roundingMethod,
     side,
     lineAccount: (line) => invoiceLineAccount(db, r, line),
     mapAccount: (id) => mapAccount(db, r.fiscal_position_id, id),
-  })
-    .map((g) => ({ ...g, account: configuredAccount(db, g.account_id, r.company_id, 'tax repartition', g.tax_name || 'the tax') }));
+  });
+  const groups = rawTaxGroups.map((g) => ({ ...g, account: configuredAccount(db, g.account_id, r.company_id, 'tax repartition', g.tax_name || 'the tax') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
@@ -856,7 +856,28 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
       ? [{ account: transition, debit: value, partner_id: r.partner_id }, { ...tax, credit: value }]
       : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id }];
   });
-  const posted = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
+  const dueBases = baseGroups.map((bg) => {
+    const baseAccount = bg.account_id ?? cashBasisTransitionAccount(db, bg.tax_id, r.company_id);
+    const tagged = final ? released.get(releasedTaxKey(baseAccount, bg.tax_id, bg.tax_name, bg.tax_tag_ids)) : null;
+    const priorBase = tagged?.base ?? 0;
+    return { ...bg, account_id: baseAccount, base: companyRound(final ? bg.base - priorBase : bg.base * share) };
+  }).filter((bg) => bg.base);
+  const baseLines = dueBases.map((bg) => ({
+    account_id: bg.account_id,
+    partner_id: r.partner_id,
+    name: bg.tax_name || 'Cash basis base',
+    tax_id: bg.tax_id,
+    tax_name: bg.tax_name,
+    tax_tag_ids: bg.tax_tag_ids,
+    tax_grid_base: true,
+    tax_grid_release: true,
+    tax_base: refund ? -bg.base : bg.base,
+    tax_base_signed: true,
+    tax_side: sale ? 'sale' : 'purchase',
+    debit: 0,
+    credit: 0,
+  }));
+  const posted = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines: [...lines, ...baseLines], company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
   return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id }) };
 }
 

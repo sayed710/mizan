@@ -320,14 +320,14 @@ export function taxRepartitionSplits(t, line, side, currency) {
     return portions;
   };
   const amounts = split(t.amount);
-  const bases = split(t.base);
-  return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: bases[i] })) };
+  return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === 0 ? t.base : 0 })) };
 }
 
-/** Cash-basis tax per final account and tax (company currency) carried by an invoice's lines, split per repartition row. */
-export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) => {
+/** Cash-basis tax and base turnover per account and tags carried by an invoice's lines. */
+export function cashBasisGroups(lines, rate = 1, documentCurrency = null, companyCurrency = null, options = {}) {
   const side = options.side ?? 'invoice';
-  const by = new Map();
+  const byTax = new Map();
+  const byBase = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
     for (const t of computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null, side }).taxes) {
@@ -339,17 +339,31 @@ export const cashBasisTaxes = (lines, rate = 1, documentCurrency = null, company
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((x, y) => x - y);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids, cash_basis: true, document_base: 0, document_amount: 0 };
-        by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
+        const g = byTax.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids, cash_basis: true, document_base: 0, document_amount: 0 };
+        byTax.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
+      }
+      const baseRow = taxRepartitionLine(t, side, 'base') ?? taxRepartitionLine(l, side, 'base');
+      const tag_ids = [...(baseRow?.tag_ids ?? [])].sort((x, y) => x - y);
+      if (tag_ids.length) {
+        const account_id = options.lineAccount?.(l) ?? null;
+        const tax_id = t.tax_id ?? null;
+        const key = `${account_id}|${tax_id ?? ''}|${tag_ids.join(',')}`;
+        const g = byBase.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids: tag_ids, cash_basis: true, document_base: 0 };
+        byBase.set(key, { ...g, document_base: g.document_base + t.base });
       }
     }
   }
-  return [...by.values()].map(({ document_base, document_amount, ...group }) => {
+  const taxes = [...byTax.values()].map(({ document_base, document_amount, ...group }) => {
     const tax = roundCurrency(document_amount, documentCurrency);
     const base = roundCurrency(document_base, documentCurrency);
     return { ...group, amount: roundCurrency(tax / rate, companyCurrency), base: roundCurrency(base / rate, companyCurrency), document_amount: tax };
   }).filter((g) => g.amount || g.base);
-};
+  const bases = [...byBase.values()].map(({ document_base, ...group }) => {
+    const base = roundCurrency(document_base, documentCurrency);
+    return { ...group, base: roundCurrency(base / rate, companyCurrency) };
+  }).filter((g) => g.base);
+  return { taxes, bases };
+}
 
 /** Tax of one line: fixed per unit, or a percentage added to / included in the price. */
 export function lineTaxOf(l) {

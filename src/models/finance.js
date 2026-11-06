@@ -629,7 +629,7 @@ function taxItems(db, period) {
   const moves = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
   const transitions = new Set(cashBasisTransitionAccounts(db, companyId));
   return journalItems(db, period).flatMap((l) => {
-    if (l.is_closing || l.is_tax_closing || l.is_tax_payment) return [];
+    if (l.is_closing || l.is_tax_closing || l.is_tax_payment || (l.tax_grid_base && !l.tax_zero)) return [];
     const move = l.tax_name && moves.get(l.move_id);
     const documentSide = ['out_invoice', 'out_refund'].includes(move?.move_type) ? 'sale' : ['in_invoice', 'in_refund'].includes(move?.move_type) ? 'purchase' : null;
     const sale = accounts.sale.has(l.account_id), purchase = accounts.purchase.has(l.account_id);
@@ -856,10 +856,9 @@ export function taxesByGrid(db, period = {}) {
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
       const row = rows.get(id) ?? { id, name: tag.name, base: 0, tax: 0 };
-      if (line.tax_grid_base) row.base = round(row.base + value);
+      if (line.tax_grid_base) row.base = round(row.base + (line.tax_grid_release ? (Number(line.tax_base) || 0) : value));
       else if (line.tax_name && !line.tax_zero && line.tax_side) {
         row.tax = round(row.tax + value);
-        if (line.tax_grid_release) row.base = round(row.base + (Number(line.tax_base) || 0));
       }
       rows.set(id, row);
     }
