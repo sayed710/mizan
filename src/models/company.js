@@ -213,6 +213,15 @@ export function companyFilter(db, records, model = null) {
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }
 
+const RECIPIENT_BANK_FIELDS = {
+  partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
+};
+
+export function recipientBankCompanyError(db, record, company = record?.company_id ?? 1) {
+  if (!record?.partner_bank_id) return null;
+  return checkCompany(db, RECIPIENT_BANK_FIELDS, record, company);
+}
+
 function checkCompany(db, fields, r, company) {
   if (shared(company)) return null;
   for (const [key, field] of Object.entries(fields)) {
@@ -222,7 +231,7 @@ function checkCompany(db, fields, r, company) {
         if (error) return error;
       }
     }
-    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal'].includes(field.relation)) continue;
+    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal', 'res.partner.bank'].includes(field.relation)) continue;
     const linked = record(db, field.relation, r[key]);
     if (linked && !shared(linked.company_id) && linked.company_id !== company) return `${field.label}: select a record shared with or belonging to this company`;
   }

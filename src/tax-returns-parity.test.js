@@ -1128,37 +1128,21 @@ test('outbound payment actions reject another company’s recipient bank and all
   const own = create(foreign.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-ONE', company_id: 1 });
   const shared = create(own.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SHARED' });
   const confirmPayment = models['account.payment'].form.buttons.find((button) => button.label === 'Confirm');
-  const confirmBill = models['account.move'].form.buttons.find((button) => button.label === 'Confirm');
-  const validateBatch = models['account.batch.payment'].form.buttons.find((button) => button.label === 'Validate');
   const makePayment = (source, bankId, companyId = 1, invoiceId = null) => create(source, 'account.payment', {
     partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100,
     company_id: companyId, partner_bank_id: bankId, invoice_id: invoiceId,
   });
   const confirm = (payment) => confirmPayment.run(payment.db, read(payment.db, 'account.payment', payment.id)).db;
-  const wrong = makePayment(shared.db, foreign.id);
-  assert.throws(() => confirm(wrong), /bank account.*company/i);
-  assert.equal(read(wrong.db, 'account.payment', wrong.id).state, 'draft');
-  assert.throws(() => confirm(makePayment(shared.db, own.id, company.id)), /bank account.*company/i);
+  assert.throws(() => makePayment(shared.db, foreign.id), /select a record shared with or belonging to this company/i);
+  assert.throws(() => makePayment(shared.db, own.id, company.id), /select a record shared with or belonging to this company/i);
   for (const bankId of [own.id, shared.id, null]) {
     const payment = makePayment(shared.db, bankId);
     assert.equal(read(confirm(payment), 'account.payment', payment.id).state, 'posted');
   }
   const otherCompanyPayment = makePayment(shared.db, foreign.id, company.id);
   assert.equal(read(confirm(otherCompanyPayment), 'account.payment', otherCompanyPayment.id).state, 'posted');
-  const bill = create(shared.db, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, company_id: 1,
-    partner_bank_id: foreign.id, invoice_date: today(), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
-  const posted = confirmBill.run(bill.db, read(bill.db, 'account.move', bill.id)).db;
-  const register = models['account.move'].form.buttons.find((button) => button.label === 'Register Payment');
-  assert.throws(() => register.run(posted, read(posted, 'account.move', bill.id), {
-    amount: 100, date: today(), journal_id: defaultPaymentJournal(posted),
-  }), /bank account.*company/i);
-  assert.throws(() => confirm(makePayment(posted, null, 1, bill.id)), /bank account.*company/i);
-  const noBank = write(posted, 'account.move', bill.id, { partner_bank_id: null });
-  assert.throws(() => confirm(makePayment(noBank, foreign.id, 1, bill.id)), /bank account.*company/i);
-  const batch = create(posted, 'account.batch.payment', { batch_type: 'outbound', check_number_start: 1,
-    lines: [{ move_id: bill.id, amount: 100 }] });
-  assert.throws(() => validateBatch.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)), /bank account.*company/i);
-  assert.equal(read(batch.db, 'account.move', bill.id).amount_paid, 0);
+  assert.throws(() => create(shared.db, 'account.move', { move_type: 'in_invoice', partner_id: vendor.id, company_id: 1,
+    partner_bank_id: foreign.id, invoice_date: today(), invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] }), /select a record shared with or belonging to this company/i);
 });
 
 test('batch payment form action posts each bill settlement to the selected bank', () => {

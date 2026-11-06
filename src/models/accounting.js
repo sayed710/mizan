@@ -6,7 +6,7 @@ import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
-import { cashBasisTransitionAccount, cashBasisTaxes, fiscalPositionFor, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
+import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -20,6 +20,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
+import { recipientBankCompanyError } from './company.js';
 
 export { invoiceTaxAmount, total, applyPaymentCredit };
 
@@ -450,6 +451,8 @@ export function postedInvoiceLines(db, move, name = move.name) {
 /** Post a draft move: invoices get their journal items generated; manual entries must balance. */
 export function postMove(db, id) {
   let r = read(db, 'account.move', id);
+  const bankError = recipientBankCompanyError(db, r);
+  if (bankError) throw new Error(bankError);
   const order = r.move_type === 'out_invoice' && r.sale_id && !r.correction_of_id && read(db, 'sale.order', r.sale_id);
   if (order && (r.invoice_line_ids ?? []).some((l) => !l.down_payment_key)
     && !(r.invoice_line_ids ?? []).some((l) => l.down_payment_key && Number(l.qty) > 0)) {
@@ -687,13 +690,17 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   const r = read(db, 'account.move', id);
   if (!Number.isFinite(Number(amount))) throw new Error('Payment amount must be finite');
   if (r?.state !== 'posted' || !isInvoice(r)) throw new Error('Only posted invoices and bills can be paid');
+  const moveBankError = recipientBankCompanyError(db, r);
+  if (moveBankError) throw new Error(moveBankError);
+  const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
+  const payBankError = recipientBankCompanyError(db, payRec);
+  if (payBankError) throw new Error(payBankError);
   if (shouldBePaid(db, r) === 'exception') throw new Error('Resolve or approve the three-way matching exception before registering payment');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, r));
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, r.company_id));
   amount = docRound(amount);
   const value = Math.min(amount, residual(r, db));
   if (!(value > 0)) return db;
-  const payRec = paymentId ? read(db, 'account.payment', paymentId) : null;
   if (paymentId && (!payRec || payRec.partner_id !== r.partner_id || payRec.payment_type !== (isInbound(r) ? 'inbound' : 'outbound') || payRec.partner_type !== (isPurchase(r) ? 'supplier' : 'customer'))) {
     throw new Error('Payment must match the invoice partner and direction');
   }
@@ -787,24 +794,33 @@ const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
   ? JSON.stringify([account, taxId, [...tags].sort((a, b) => a - b)])
   : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
 
-/** Tax already released for an invoice, per tax account code. */
+const releasedBaseKey = (account, tags = []) => JSON.stringify([account, [...(tags ?? [])].sort((a, b) => a - b)]);
+
+/** Tax and base already released for an invoice. */
 const releasedTaxes = (db, r) => {
-  const released = new Map();
+  const taxes = new Map();
+  const bases = new Map();
   for (const m of db.records['account.move'] ?? []) {
     if (m.cash_basis_origin_move_id !== r.id || (m.company_id ?? 1) !== (r.company_id ?? 1) || m.state !== 'posted') continue;
     for (const l of m.line_ids ?? []) {
       const code = l.account_id;
-      const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
-      const previous = released.get(key) ?? { amount: 0, base: 0 };
       const zeroTax = !(Number(l.debit) || Number(l.credit));
       // Signed bases (and older zero-amount bases) include the refund direction.
       // Legacy nonzero reversals retain the original unsigned base, so undo it here.
       const base = (Number(l.tax_base) || 0) * ((l.tax_base_signed || zeroTax) && isRefund(r) ? -1 : 1)
         * (!l.tax_base_signed && !zeroTax && m.reversed_entry_id ? -1 : 1);
-      released.set(key, { amount: previous.amount + ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0)), base: previous.base + base });
+      if (l.tax_grid_base) {
+        const key = releasedBaseKey(code, l.tax_tag_ids);
+        bases.set(key, (bases.get(key) ?? 0) + base);
+      } else {
+        const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
+        const previous = taxes.get(key) ?? { amount: 0, base: 0 };
+        const amount = ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0));
+        taxes.set(key, { amount: previous.amount + amount, base: previous.base + base });
+      }
     }
   }
-  return released;
+  return { taxes, bases };
 };
 
 /**
@@ -820,25 +836,25 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrency);
   const roundingMethod = companyRoundingMethod(db, r.company_id);
   const side = refund ? 'refund' : 'invoice';
-  const groups = cashBasisTaxes(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, {
+  const { taxes: rawTaxGroups, bases: baseGroups } = cashBasisGroups(r.invoice_line_ids, rateAt(db, r.currency_id, r.invoice_date ?? date, r.company_id), documentCurrency(db, r), companyCurrency, {
     roundingMethod,
     side,
     lineAccount: (line) => invoiceLineAccount(db, r, line),
     mapAccount: (id) => mapAccount(db, r.fiscal_position_id, id),
-  })
-    .map((g) => ({ ...g, account: configuredAccount(db, g.account_id, r.company_id, 'tax repartition', g.tax_name || 'the tax') }));
+  });
+  const groups = rawTaxGroups.map((g) => ({ ...g, account: configuredAccount(db, g.account_id, r.company_id, 'tax repartition', g.tax_name || 'the tax') }));
   const due = groups.map((g) => {
     const accountTotal = groups.filter((x) => x.account === g.account).reduce((s, x) => s + x.amount, 0);
     // Older releases were not tagged; allocate their account total across its taxes.
-    const tagged = final ? released.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids)) : null;
-    const legacy = final ? released.get(`${g.account}:`) : null;
+    const tagged = final ? released.taxes.get(releasedTaxKey(g.account, g.tax_id, g.tax_name, g.tax_tag_ids)) : null;
+    const legacy = final ? released.taxes.get(`${g.account}:`) : null;
     const legacyShare = accountTotal ? g.amount / accountTotal : 0;
     const prior = (tagged?.amount ?? 0) + (legacy?.amount ?? 0) * legacyShare;
     const priorBase = (tagged?.base ?? 0) + (legacy?.base ?? 0) * legacyShare;
     return { ...g, amount: companyRound(final ? g.amount - prior : g.amount * Math.abs(share)), base: companyRound(final ? g.base - priorBase : g.base * share) };
   })
     .filter((g) => g.amount || g.base);
-  if (!due.length) return { db, id: null };
+  if (!due.length && !baseGroups.length) return { db, id: null };
   // The released tax lands on the tax account tagged with its tax and base, so the return counts it when paid.
   const lines = due.flatMap(({ account, amount, base, tax_id, tax_name, tax_tag_ids }) => {
     // The base is signed independently of the tax amount, including reversals and refunds.
@@ -849,7 +865,36 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
       ? [{ account: transition, debit: value, partner_id: r.partner_id }, { ...tax, credit: value }]
       : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id }];
   });
-  const posted = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${r.name}`, lines, company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null });
+  const dueBases = baseGroups.map((bg) => {
+    const baseAccount = bg.account_id ?? (bg.tax_id ? cashBasisTransitionAccount(db, bg.tax_id, r.company_id) : null);
+    const tagged = final ? released.bases.get(releasedBaseKey(baseAccount, bg.tax_tag_ids)) : null;
+    const priorBase = tagged ?? 0;
+    return { ...bg, account_id: baseAccount, base: companyRound(final ? bg.base - priorBase : bg.base * share) };
+  }).filter((bg) => bg.base);
+  if (!lines.length && !dueBases.length) return { db, id: null };
+  const baseLines = dueBases.map((bg) => ({
+    account_id: bg.account_id,
+    partner_id: r.partner_id,
+    name: bg.tax_name || 'Cash basis base',
+    tax_id: bg.tax_id ?? null,
+    tax_name: bg.tax_name || 'Cash basis base',
+    tax_tag_ids: bg.tax_tag_ids,
+    tax_grid_base: true,
+    tax_grid_release: true,
+    tax_base: refund ? -bg.base : bg.base,
+    tax_base_signed: true,
+    tax_side: sale ? 'sale' : 'purchase',
+    debit: 0,
+    credit: 0,
+  }));
+  const posted = postEntry(db, {
+    journal: 'MISC',
+    date,
+    ref: `Cash basis taxes ${r.name}`,
+    lines: [...lines, ...baseLines],
+    company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
+    system_generated: true,
+  });
   return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id }) };
 }
 
