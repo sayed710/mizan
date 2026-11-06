@@ -1,7 +1,7 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
 import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
-import { candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
+import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
@@ -42,17 +42,20 @@ export function ruleMatches(rule, line) {
   return amountMatches(rule, amount) && labelMatches(rule, line?.payment_ref);
 }
 
-/** Split a balance over counterpart lines: fixed amounts first, then percentages of the rest. */
+/** Split a balance over counterpart lines: fixed amounts first, then each percentage line its percentage
+ * of the rest (the whole rest when the percentages total 100). A partial rule books only its own share,
+ * so the caller can leave the remainder open on the statement line; the split never exceeds the balance. */
 function splitCounterparts(lines, balance, currency) {
   const amountOf = (l) => Number(l.amount) || 0;
   const fixed = lines.filter((l) => l.amount_type === 'fixed');
   const rest = roundCurrency(balance - fixed.reduce((s, l) => s + roundCurrency(amountOf(l), currency), 0), currency);
-  const pct = lines.filter((l) => l.amount_type !== 'fixed').reduce((s, l) => s + amountOf(l), 0);
-  if (rest < 0 || roundCurrency(rest * (1 - pct / 100), currency) !== 0) throw new Error('The counterpart lines do not cover the whole amount');
   const variable = lines.filter((l) => l.amount_type !== 'fixed');
-  const shares = variable.length && rest ? allocateCents(rest, variable.map(amountOf), currency) : variable.map(() => 0);
+  const pct = variable.reduce((s, l) => s + amountOf(l), 0);
+  const shares = pct === 100 && variable.length && rest > 0 ? allocateCents(rest, variable.map(amountOf), currency) : variable.map((l) => roundCurrency(rest * amountOf(l) / 100, currency));
   let index = 0;
-  return lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? roundCurrency(amountOf(l), currency) : shares[index++] }));
+  const split = lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? roundCurrency(amountOf(l), currency) : shares[index++] }));
+  if (roundCurrency(split.reduce((sum, l) => sum + l.value, 0) - balance, currency) > 0) throw new Error('The counterpart lines exceed the amount to reconcile');
+  return split;
 }
 
 function writeOff(db, rule, line) {
@@ -63,7 +66,9 @@ function writeOff(db, rule, line) {
   const currency = read(db, 'res.currency', journalCurrency);
   const balance = line.open_amount != null ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency) : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
-  const counterparts = splitCounterparts(rule.line_ids ?? [], balance, currency).filter((l) => l.value);
+  const split = splitCounterparts(rule.line_ids ?? [], balance, currency);
+  const counterparts = split.filter((l) => l.value);
+  if (!counterparts.length) throw new Error('The counterpart lines do not cover any amount');
   for (const counterpart of counterparts) {
     const account = read(db, 'account.account', counterpart.account_id);
     if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${rule.name}`);
@@ -72,8 +77,9 @@ function writeOff(db, rule, line) {
   }
   const partner_id = line.partner_id ?? null;
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
+  const companyCurrency = companyCurrencyRecord(db, company);
   const via = paymentJournal(db, line.journal_id, company);
-  const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrencyRecord(db, company)), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
+  const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
   const items = counterparts.flatMap((l) => {
     const taxRecs = expandTaxIds(db, l.tax_ids ?? []);
     for (const tax of taxRecs) {
@@ -144,17 +150,44 @@ function writeOff(db, rule, line) {
   });
   const counterpartSide = incoming ? 'credit' : 'debit';
   const opposingSide = incoming ? 'debit' : 'credit';
-  const counterpartTotal = items.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0);
-  const gap = roundCurrency(companyValue - counterpartTotal, companyCurrencyRecord(db, company));
-  if (gap && items.length) { items[0][counterpartSide] = roundCurrency((Number(items[0][counterpartSide]) || 0) + gap, companyCurrencyRecord(db, company)); }
-  const { db: booked, id } = postEntry(db, {
+  const counterpartTotal = roundCurrency(items.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0), companyCurrency);
+  const itemCurrency = roundCurrency(items.reduce((sum, item) => sum + (Number(item.amount_currency) || 0), 0), currency);
+  // Full coverage is decided on the split itself; company-currency rounding of a full split is absorbed below.
+  const fullCoverage = roundCurrency(split.reduce((sum, l) => sum + l.value, 0), currency) === balance;
+  if (fullCoverage && items.length) {
+    const gap = roundCurrency(companyValue - counterpartTotal, companyCurrency);
+    if (gap) items[0][counterpartSide] = roundCurrency((Number(items[0][counterpartSide]) || 0) + gap, companyCurrency);
+  }
+  let current = db;
+  let bankMoveId = line.bank_move_id ?? null;
+  let openAmount = 0;
+  let allocated = companyValue;
+  let entryLines = [side(balance, incoming, { account: bankMoveId ? ensureBankSuspense(db, company, via.id).id : via.accountId, partner_id }), ...items];
+  if (!fullCoverage) {
+    // The bank movement is booked once into the bank suspense account; this entry clears only its share.
+    const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
+    current = bookedBank.db;
+    bankMoveId = bookedBank.bankMoveId;
+    openAmount = roundCurrency(companyValue - counterpartTotal, companyCurrency);
+    allocated = counterpartTotal;
+    entryLines = [{
+      account: bookedBank.suspense,
+      partner_id,
+      [incoming ? 'debit' : 'credit']: counterpartTotal,
+      ...(foreign ? { currency_id: journalCurrency, amount_currency: -itemCurrency } : {}),
+    }, ...items];
+  }
+  const { db: booked, id } = postEntry(current, {
     journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1,
-    lines: [
-      side(balance, incoming, { account: line.bank_move_id ? ensureBankSuspense(db, company, via.id).id : via.accountId, partner_id }),
-      ...items,
-    ],
+    lines: entryLines,
   });
-  return write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: companyValue }] });
+  return write(booked, 'account.bank.statement.line', line.id, {
+    state: fullCoverage ? 'reconciled' : 'to_check',
+    move_id: id,
+    bank_move_id: bankMoveId ?? id,
+    open_amount: openAmount,
+    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: allocated }],
+  });
 }
 
 /** Apply a rule to a statement line: match an unambiguous invoice/bill, or post its write-off entry. */

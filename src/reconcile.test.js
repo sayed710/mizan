@@ -45,7 +45,11 @@ test('a write-off splits fixed then percentage counterparts into one balanced ba
   const credit = (code) => move.line_ids.find((l) => l.account_id === accountId(after, code)).credit;
   assert.equal(move.line_ids.find((l) => l.account_id === accountId(after, '101401')).debit, 1000);
   assert.deepEqual([credit('690000'), credit('600000'), credit('450000')], [10, 330, 660]);
-  assert.throws(() => applyRule(db, rule({ line_ids: [{ account_code: '600000', amount_type: 'percentage', amount: 50 }] }), read(db, LINE, id)), /cover/);
+  const partial = applyRule(db, rule({ line_ids: [{ account_id: accountId(db, '600000'), amount_type: 'percentage', amount: 50 }] }), read(db, LINE, id));
+  const partialLine = read(partial, LINE, id);
+  assert.equal(partialLine.state, 'to_check');
+  assert.equal(partialLine.open_amount, 500);
+  assert.equal(read(partial, 'account.move', partialLine.move_id).line_ids.find((l) => l.account_id === accountId(partial, '600000')).credit, 500);
 });
 
 test('invoice matching reconciles a statement line with the posted invoice for its amount', () => {
