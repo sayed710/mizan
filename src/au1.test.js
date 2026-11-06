@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seed } from './seed.js';
-import { create, read, search } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { postMove, payMove } from './models/accounting.js';
+import { postEntry } from './models/ledger.js';
 import { taxesByGrid, taxesByTax, taxReport } from './models/finance.js';
 import { taxSnapshot } from './models/taxes.js';
 
@@ -363,4 +364,422 @@ test('Finding 1 & 8: 60/40 cash basis sale tax after full payment and two half p
   const netGrid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
   assert.equal(netGrid.find((r) => r.id === baseTag.id)?.base ?? 0, 0);
   assert.equal(netGrid.find((r) => r.id === taxTag.id)?.tax ?? 0, 0);
+});
+
+test('Finding 1: two cash-basis taxes sharing a base tag show base once in taxesByGrid after partial and final payment', () => {
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Box 01', applicability: 'taxes', tax_negate: false });
+  db = baseTag.db;
+  const taxTag1 = create(db, 'account.account.tag', { name: '+Box 21', applicability: 'taxes', tax_negate: false });
+  db = taxTag1.db;
+  const taxTag2 = create(db, 'account.account.tag', { name: '+Box 22', applicability: 'taxes', tax_negate: false });
+  db = taxTag2.db;
+
+  const taxAcc1 = create(db, 'account.account', { name: 'VAT 10%', code: '131031', account_type: 'asset_current' });
+  db = taxAcc1.db;
+  const taxAcc2 = create(db, 'account.account', { name: 'VAT 5%', code: '131032', account_type: 'asset_current' });
+  db = taxAcc2.db;
+  const transAcc1 = create(db, 'account.account', { name: 'VAT Transition 1', code: '131131', account_type: 'asset_current' });
+  db = transAcc1.db;
+  const transAcc2 = create(db, 'account.account', { name: 'VAT Transition 2', code: '131132', account_type: 'asset_current' });
+  db = transAcc2.db;
+
+  const tax1 = create(db, 'account.tax', {
+    name: '10% Cash Basis 1',
+    amount: 10,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc1.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag1.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag1.id] },
+    ],
+  });
+  db = tax1.db;
+
+  const tax2 = create(db, 'account.tax', {
+    name: '5% Cash Basis 2',
+    amount: 5,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc2.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc2.id, tag_ids: [taxTag2.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc2.id, tag_ids: [taxTag2.id] },
+    ],
+  });
+  db = tax2.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const snap1 = taxSnapshot(read(db, 'account.tax', tax1.id));
+  const snap2 = taxSnapshot(read(db, 'account.tax', tax2.id));
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Shared CB Line', qty: 1, price_unit: 1000, tax_breakdown: [snap1, snap2] },
+    ],
+  });
+  db = bill.db;
+  db = postMove(db, bill.id);
+
+  // Partial payment: 575 (50% of 1150)
+  db = payMove(db, bill.id, 575, '2025-01-15');
+  let grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 500);
+  assert.equal(grid.find((r) => r.id === taxTag1.id)?.tax, 50);
+  assert.equal(grid.find((r) => r.id === taxTag2.id)?.tax, 25);
+
+  // Final payment: remaining 575 (50%)
+  db = payMove(db, bill.id, 575, '2025-01-20');
+  grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  // The shared base tag must show 1000, not 2000!
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag1.id)?.tax, 100);
+  assert.equal(grid.find((r) => r.id === taxTag2.id)?.tax, 50);
+});
+
+test('Finding 1: accrual tax and cash-basis tax sharing a base tag show base once in taxesByGrid', () => {
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Box 01', applicability: 'taxes', tax_negate: false });
+  db = baseTag.db;
+  const taxTag1 = create(db, 'account.account.tag', { name: '+Box 21', applicability: 'taxes', tax_negate: false });
+  db = taxTag1.db;
+  const taxTag2 = create(db, 'account.account.tag', { name: '+Box 22', applicability: 'taxes', tax_negate: false });
+  db = taxTag2.db;
+
+  const taxAcc1 = create(db, 'account.account', { name: 'VAT Accrual 10%', code: '131041', account_type: 'asset_current' });
+  db = taxAcc1.db;
+  const taxAcc2 = create(db, 'account.account', { name: 'VAT CB 5%', code: '131042', account_type: 'asset_current' });
+  db = taxAcc2.db;
+  const transAcc2 = create(db, 'account.account', { name: 'VAT Transition CB', code: '131142', account_type: 'asset_current' });
+  db = transAcc2.db;
+
+  // Accrual tax
+  const tax1 = create(db, 'account.tax', {
+    name: '10% Accrual',
+    amount: 10,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag1.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag1.id] },
+    ],
+  });
+  db = tax1.db;
+
+  // Cash basis tax sharing baseTag
+  const tax2 = create(db, 'account.tax', {
+    name: '5% Cash Basis',
+    amount: 5,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc2.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc2.id, tag_ids: [taxTag2.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc2.id, tag_ids: [taxTag2.id] },
+    ],
+  });
+  db = tax2.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const snap1 = taxSnapshot(read(db, 'account.tax', tax1.id));
+  const snap2 = taxSnapshot(read(db, 'account.tax', tax2.id));
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Mixed Accrual and CB Line', qty: 1, price_unit: 1000, tax_breakdown: [snap1, snap2] },
+    ],
+  });
+  db = bill.db;
+  db = postMove(db, bill.id);
+
+  // On invoice post: accrual tax already emitted base 1000 for baseTag
+  let grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag1.id)?.tax, 100);
+  assert.equal(grid.find((r) => r.id === taxTag2.id)?.tax ?? 0, 0);
+
+  // Partial payment: 575
+  db = payMove(db, bill.id, 575, '2025-01-15');
+  grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  // Base must NOT be duplicated to 1500!
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag1.id)?.tax, 100);
+  assert.equal(grid.find((r) => r.id === taxTag2.id)?.tax, 25);
+
+  // Final payment: 575
+  db = payMove(db, bill.id, 575, '2025-01-20');
+  grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  // Base must NOT be duplicated to 2000!
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag1.id)?.tax, 100);
+  assert.equal(grid.find((r) => r.id === taxTag2.id)?.tax, 50);
+});
+
+test('Finding 3: cash-basis tax where tax row has no account and shares base row tags does not omit base in final payment', () => {
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Box 01', applicability: 'taxes', tax_negate: false });
+  db = baseTag.db;
+  const transAcc = create(db, 'account.account', { name: 'VAT Transition F3', code: '131151', account_type: 'asset_current' });
+  db = transAcc.db;
+
+  // Tax row has no account_id (account_id: null) and its tags match base row!
+  const tax = create(db, 'account.tax', {
+    name: '10% Cash Basis Shared Line Account',
+    amount: 10,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: null, tag_ids: [baseTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: null, tag_ids: [baseTag.id] },
+    ],
+  });
+  db = tax.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Expense F3', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', tax.id)) },
+    ],
+  });
+  db = bill.db;
+  db = postMove(db, bill.id);
+
+  // Partial 50% payment (550 of 1100)
+  db = payMove(db, bill.id, 550, '2025-01-12');
+  let grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 500);
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.tax, 50);
+
+  // Final 50% payment (remaining 550)
+  db = payMove(db, bill.id, 550, '2025-01-20');
+  grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  // Prior bug subtracted 100 from 100 leaving grid at 50; fixed grid shows full 1000 base and 100 tax!
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.tax, 100);
+});
+
+test('Finding 4: zero-share tax repartition row does not carry the base or post a zero-tax line', () => {
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Box Base', applicability: 'taxes', tax_negate: false });
+  db = baseTag.db;
+  const zeroTag = create(db, 'account.account.tag', { name: '+Box ZeroShare', applicability: 'taxes', tax_negate: false });
+  db = zeroTag.db;
+  const taxTag = create(db, 'account.account.tag', { name: '+Box ActiveShare', applicability: 'taxes', tax_negate: false });
+  db = taxTag.db;
+
+  const taxAcc0 = create(db, 'account.account', { name: 'VAT Zero Account', code: '131061', account_type: 'asset_current' });
+  db = taxAcc0.db;
+  const taxAcc1 = create(db, 'account.account', { name: 'VAT 20% Active Account', code: '131062', account_type: 'asset_current' });
+  db = taxAcc1.db;
+
+  const tax = create(db, 'account.tax', {
+    name: '20% Tax with 0% First Row',
+    amount: 20,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 0, repartition_type: 'tax', account_id: taxAcc0.id, tag_ids: [zeroTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 0, repartition_type: 'tax', account_id: taxAcc0.id, tag_ids: [zeroTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc1.id, tag_ids: [taxTag.id] },
+    ],
+  });
+  db = tax.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Expense F4', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', tax.id)) },
+    ],
+  });
+  db = bill.db;
+  db = postMove(db, bill.id);
+
+  const posted = read(db, 'account.move', bill.id);
+  // Row 0 has 0 factor, so it must not produce a journal line on taxAcc0
+  assert.equal(posted.line_ids.some((l) => l.account_id === taxAcc0.id), false);
+  // Active row on taxAcc1 carries the tax and the base
+  const activeLine = posted.line_ids.find((l) => l.account_id === taxAcc1.id);
+  assert.ok(activeLine, 'Active tax line must exist on taxAcc1');
+  assert.equal(activeLine.debit, 200);
+  assert.equal(activeLine.tax_base, 1000);
+
+  // taxesByTax shows base 1000 and tax 200 once
+  const byTax = taxesByTax(db, { from: '2025-01-01', to: '2025-01-31' });
+  const row = byTax.find((t) => t.tax_id === tax.id);
+  assert.ok(row);
+  assert.equal(row.base, 1000);
+  assert.equal(row.tax, 200);
+
+  // taxesByGrid
+  const grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag.id)?.tax, 200);
+  assert.equal(grid.find((r) => r.id === zeroTag.id), undefined);
+});
+
+test('Finding 5: paying cash-basis invoice with base tags succeeds under mandatory analytic plan', () => {
+  let db = seed();
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'mandatory' });
+  db = plan.db;
+  const analyticAcc = create(db, 'account.analytic.account', { name: 'Alpha', plan_id: plan.id });
+  db = analyticAcc.db;
+
+  const baseTag = create(db, 'account.account.tag', { name: '+Box 01', applicability: 'taxes', tax_negate: false });
+  db = baseTag.db;
+  const taxTag = create(db, 'account.account.tag', { name: '+Box 21', applicability: 'taxes', tax_negate: false });
+  db = taxTag.db;
+
+  const taxAcc = create(db, 'account.account', { name: 'VAT 20%', code: '131071', account_type: 'asset_current' });
+  db = taxAcc.db;
+  const transAcc = create(db, 'account.account', { name: 'VAT Transition F5', code: '131171', account_type: 'asset_current' });
+  db = transAcc.db;
+
+  const tax = create(db, 'account.tax', {
+    name: '20% Cash Basis Analytic',
+    amount: 20,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [taxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [taxTag.id] },
+    ],
+  });
+  db = tax.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Expense with Analytic', qty: 1, price_unit: 1000, analytic_distribution: { [analyticAcc.id]: 100 }, ...taxSnapshot(read(db, 'account.tax', tax.id)) },
+    ],
+  });
+  db = bill.db;
+  db = postMove(db, bill.id);
+
+  // Payment must not fail on mandatory plan check for zero-amount base lines
+  assert.doesNotThrow(() => {
+    db = payMove(db, bill.id, 1200, '2025-01-15');
+  });
+
+  const grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  assert.equal(grid.find((r) => r.id === baseTag.id)?.base, 1000);
+  assert.equal(grid.find((r) => r.id === taxTag.id)?.tax, 200);
+});
+
+test('Finding 6: legacy cash-basis release move without base lines still contributes base to taxesByGrid', () => {
+  let db = seed();
+  const tag = create(db, 'account.account.tag', { name: '+Legacy Box', applicability: 'taxes', tax_negate: false });
+  db = tag.db;
+  const taxAcc = create(db, 'account.account', { name: 'VAT Legacy', code: '131081', account_type: 'asset_current' });
+  db = taxAcc.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Expense Legacy', qty: 1, price_unit: 1000, tax: 0 },
+    ],
+  });
+  db = postMove(bill.db, bill.id);
+  const invoice = read(db, 'account.move', bill.id);
+
+  // A legacy cash basis release has cash_basis_origin_move_id and tax_grid_release lines, but NO tax_grid_base lines
+  const legacyRelease = postEntry(db, {
+    journal: 'MISC',
+    date: '2025-01-15',
+    ref: `Cash basis taxes ${invoice.name}`,
+    company: 1,
+    lines: [
+      {
+        account_id: taxAcc.id,
+        partner_id: partner.id,
+        name: 'Legacy VAT',
+        tax_name: 'Legacy VAT',
+        debit: 200,
+        credit: 0,
+        tax_base: 1000,
+        tax_side: 'purchase',
+        tax_tag_ids: [tag.id],
+        tax_grid_release: true,
+      },
+      {
+        account_id: 1,
+        partner_id: partner.id,
+        name: 'Transition Counterpart',
+        debit: 0,
+        credit: 200,
+      },
+    ],
+  });
+  db = write(legacyRelease.db, 'account.move', legacyRelease.id, { cash_basis_origin_move_id: invoice.id });
+
+  const grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  const row = grid.find((r) => r.id === tag.id);
+  assert.ok(row, 'Legacy tag row must exist in grid');
+  assert.equal(row.base, 1000);
+  assert.equal(row.tax, 200);
 });

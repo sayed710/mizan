@@ -852,6 +852,7 @@ export function taxesByGrid(db, period = {}) {
     if (!side) continue;
     const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
     const value = side === 'sale' ? -balance : balance;
+    const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && !(move.line_ids ?? []).some((l) => l.tax_grid_base));
     for (const id of line.tax_tag_ids ?? []) {
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
@@ -859,6 +860,7 @@ export function taxesByGrid(db, period = {}) {
       if (line.tax_grid_base) row.base = round(row.base + (line.tax_grid_release ? (Number(line.tax_base) || 0) : value));
       else if (line.tax_name && !line.tax_zero && line.tax_side) {
         row.tax = round(row.tax + value);
+        if (isLegacyRelease) row.base = round(row.base + (Number(line.tax_base) || 0));
       }
       rows.set(id, row);
     }

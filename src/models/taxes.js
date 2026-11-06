@@ -45,6 +45,12 @@ export function taxRepartitionLine(tax, side = 'invoice', type = 'tax') {
   return taxRepartitionLines(tax, side).find((l) => l.repartition_type === type) ?? null;
 }
 
+/** Base repartition tags for a tax or line snapshot on the requested side. */
+export function taxBaseTags(tax, side = 'invoice', fallback = null) {
+  const row = taxRepartitionLine(tax, side, 'base') ?? (fallback ? taxRepartitionLine(fallback, side, 'base') : null);
+  return row?.tag_ids ?? [];
+}
+
 /** Default 1 base row and 1 100% tax row per side. */
 export const defaultTaxRepartitionLines = (accountId = null, tagIds = [], baseTagIds = null) => {
   const baseTags = baseTagIds ? [...baseTagIds] : [...tagIds];
@@ -320,7 +326,8 @@ export function taxRepartitionSplits(t, line, side, currency) {
     return portions;
   };
   const amounts = split(t.amount);
-  return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === 0 ? t.base : 0 })) };
+  const contributing = factors.reduce((best, f, i) => (Math.abs(f) > Math.abs(factors[best]) ? i : best), 0);
+  return { explicit, splits: taxRows.map((row, i) => ({ row, amount: amounts[i], base: i === contributing ? t.base : 0 })) };
 }
 
 /** Cash-basis tax and base turnover per account and tags carried by an invoice's lines. */
@@ -330,7 +337,11 @@ export function cashBasisGroups(lines, rate = 1, documentCurrency = null, compan
   const byBase = new Map();
   for (const l of lines ?? []) {
     if (isSectionOrNote(l)) continue;
-    for (const t of computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null, side }).taxes) {
+    const computed = computeLineTaxes(l, { currency: documentCurrency, roundingMethod: options.roundingMethod ?? null, side });
+    const accrualBaseTags = new Set(
+      computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => taxBaseTags(t, side, l))
+    );
+    for (const t of computed.taxes) {
       if (!t.tax_cash_basis) continue;
       const { explicit, splits } = taxRepartitionSplits(t, l, side, documentCurrency);
       for (const { row, amount, base } of splits) {
@@ -342,14 +353,19 @@ export function cashBasisGroups(lines, rate = 1, documentCurrency = null, compan
         const g = byTax.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids, cash_basis: true, document_base: 0, document_amount: 0 };
         byTax.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
       }
-      const baseRow = taxRepartitionLine(t, side, 'base') ?? taxRepartitionLine(l, side, 'base');
-      const tag_ids = [...(baseRow?.tag_ids ?? [])].sort((x, y) => x - y);
-      if (tag_ids.length) {
+    }
+    const cbTaxes = computed.taxes.filter((t) => t.tax_cash_basis);
+    if (cbTaxes.length) {
+      const baseTags = [
+        ...new Set(cbTaxes.flatMap((t) => taxBaseTags(t, side, l)))
+      ]
+        .filter((tagId) => !accrualBaseTags.has(tagId))
+        .sort((a, b) => a - b);
+      if (baseTags.length) {
         const account_id = options.lineAccount?.(l) ?? null;
-        const tax_id = t.tax_id ?? null;
-        const key = `${account_id}|${tax_id ?? ''}|${tag_ids.join(',')}`;
-        const g = byBase.get(key) ?? { account_id, tax_id, tax_name: taxLabel(t), tax_tag_ids: tag_ids, cash_basis: true, document_base: 0 };
-        byBase.set(key, { ...g, document_base: g.document_base + t.base });
+        const key = `${account_id}|${baseTags.join(',')}`;
+        const g = byBase.get(key) ?? { account_id, tax_tag_ids: baseTags, cash_basis: true, document_base: 0 };
+        byBase.set(key, { ...g, document_base: g.document_base + computed.untaxed });
       }
     }
   }

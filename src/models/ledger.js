@@ -3,7 +3,7 @@ import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
@@ -210,10 +210,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
     const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
     const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
-    const baseTagsOf = (taxObj) => {
-      const baseRow = taxRepartitionLine(taxObj ?? l, isRefund ? 'refund' : 'invoice', 'base');
-      return baseRow?.tag_ids ?? [];
-    };
+    const side = isRefund ? 'refund' : 'invoice';
 
     if (!computed.taxes.some((tax) => tax.amount) && !cashBasis) {
       const zeroTaxes = computed.taxes.length
@@ -222,7 +219,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       for (const [compIndex, t] of zeroTaxes.entries()) {
         const zero = taxLabel(t);
         const zeroTaxId = t.tax_id ?? null;
-        const tags = [...new Set(baseTagsOf(t))].sort((a, b) => a - b);
+        const tags = [...new Set(taxBaseTags(t, side, l))].sort((a, b) => a - b);
         const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
         const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
         if (compIndex === 0) {
@@ -236,8 +233,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       const zero = '';
       const zeroTaxId = null;
       const tags = [...new Set(computed.taxes.length
-        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => baseTagsOf(t))
-        : cashBasis ? [] : baseTagsOf(null))].sort((a, b) => a - b);
+        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => taxBaseTags(t, side, l))
+        : cashBasis ? [] : taxBaseTags(null, side, l))].sort((a, b) => a - b);
       const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
       const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
@@ -329,7 +326,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const tax = docRound(document_amount);
     const base = docRound(document_base);
     return { ...group, document_amount: tax, amount: companyRound(tax / rate), base: companyRound(base / rate) };
-  });
+  }).filter((g) => g.amount || g.base || g.document_amount || g.document_base);
 
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
@@ -525,7 +522,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
       }
     }
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
-    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   if (analyticPostingHooks?.checkMandatoryPlans) {
