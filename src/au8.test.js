@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read, search, unlink, write } from './orm.js';
+import { create, read, search, setActiveCompany, unlink, write } from './orm.js';
 import { seed } from './seed.js';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
 import { postMove, payMove } from './models/accounting.js';
@@ -119,14 +119,15 @@ test('Cross-company partner bank: a bank account without a company stays allowed
   db = c2Res.db;
   const c2Id = c2Res.id;
 
-  // Bank account without a company (shared master data)
+  // Bank account explicitly shared (null company): still accepted for every company by the company check.
   const sharedBank = create(db, 'res.partner.bank', {
     partner_id: 1,
     account_number: 'SHARED-IBAN-100',
+    company_id: null,
     allow_out_payment: true,
   });
   db = sharedBank.db;
-  assert.equal(read(db, 'res.partner.bank', sharedBank.id).company_id, undefined, 'Shared bank account has no company_id');
+  assert.equal(read(db, 'res.partner.bank', sharedBank.id).company_id, null, 'Shared bank account has company_id null');
 
   // Allowed on Company 1 bill
   const c1Bill = create(db, 'account.move', {
@@ -165,6 +166,30 @@ test('Cross-company partner bank: a bank account without a company stays allowed
   });
   const postedC2 = postMove(c2Bill.db, c2Bill.id);
   assert.equal(read(postedC2, 'account.move', c2Bill.id).state, 'posted');
+});
+
+test('Bank account created without an explicit company takes the active company', () => {
+  let db = seed();
+  const c2Res = createCompanyWithDefaultInvoiceJournals(db, { name: 'Company Two' });
+  db = c2Res.db;
+  const c2Id = c2Res.id;
+  try {
+    setActiveCompany(2);
+    const inC2 = create(db, 'res.partner.bank', {
+      partner_id: 1,
+      account_number: 'ACTIVE-C2-BANK-777',
+      allow_out_payment: true,
+    });
+    assert.equal(read(inC2.db, 'res.partner.bank', inC2.id).company_id, c2Id, 'Bank account defaults to the active company');
+
+    setActiveCompany(1);
+    const inC1 = create(inC2.db, 'res.partner.bank', {
+      partner_id: 1,
+      account_number: 'ACTIVE-C1-BANK-777',
+      allow_out_payment: true,
+    });
+    assert.equal(read(inC1.db, 'res.partner.bank', inC1.id).company_id, 1, 'Bank account created under company 1 stays scoped to it');
+  } finally { setActiveCompany(null); }
 });
 
 test('Cross-company partner bank: postMove and payment posting reject pre-existing foreign-company bank before writing', () => {
