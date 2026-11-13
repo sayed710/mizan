@@ -3,7 +3,7 @@ import { read } from '../orm.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, journalEntriesView } from './accounting.js';
+import { accountingModels, journalEntriesView, purchaseInvoiceView, salesInvoiceView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels } from './pay.js';
@@ -187,7 +187,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_invoice',
           defaults: { move_type: 'out_invoice' },
-          listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date' },
+          ...salesInvoiceView,
           emptyHelp: {
             title: 'Create a customer invoice',
             text: 'Create invoices, register payments and keep track of the discussions with your customers.',
@@ -199,7 +199,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_refund',
           defaults: { move_type: 'out_refund' },
-          listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date' },
+          ...salesInvoiceView,
         },
         { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, listLabels: { partner_id: 'Customer' } },
         { key: 'products', label: 'Products', model: 'product' },
@@ -212,7 +212,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_invoice',
           defaults: { move_type: 'in_invoice' },
-          listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date' },
+          ...purchaseInvoiceView,
           emptyHelp: {
             title: 'Create a vendor bill',
             text: 'Create invoices, register payments and keep track of the discussions with your vendors.',
@@ -224,7 +224,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_refund',
           defaults: { move_type: 'in_refund' },
-          listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date' },
+          ...purchaseInvoiceView,
         },
         { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, listLabels: { partner_id: 'Vendor' } },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },

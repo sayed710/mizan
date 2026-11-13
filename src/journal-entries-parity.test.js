@@ -146,11 +146,11 @@ test('Journal Entries list shows Odoo 20 columns, signed company-currency Total,
   assert.equal(read(db, 'account.move', invId).amount_total_signed, 50);
   assert.equal(read(db, 'account.move', billId).amount_total_signed, -200);
 
-  // Invoices and bills menus must keep their original list config and model overdue filter.
+  // Invoices and bills menus preserve their Odoo 20 invoice/bill list config (distinct from Journal Entries) and overdue filter.
   const invLeaf = findLeafByKey(menusFor('accounting'), 'invoices');
   const billLeaf = findLeafByKey(menusFor('accounting'), 'bills');
-  assert.equal(invLeaf.list, undefined);
-  assert.equal(billLeaf.list, undefined);
+  assert.ok(invLeaf.list.includes('status_in_payment') && invLeaf.list.includes('invoice_user_id') && !invLeaf.list.includes('payment_reference'));
+  assert.ok(billLeaf.list.includes('status_in_payment') && billLeaf.list.includes('payment_reference') && !billLeaf.list.includes('invoice_user_id'));
   assert.ok(models['account.move'].filters.flat().some((f) => f.id === 'overdue'));
 
   const leaf = entriesLeaf();

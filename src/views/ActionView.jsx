@@ -57,6 +57,9 @@ export function ActionView({ leaf, base, params }) {
   const optionalList = leaf.optionalList ?? def.optionalList ?? [];
   const searchFields = leaf.searchFields ?? def.searchFields ?? null;
   const listLabels = leaf.listLabels ?? def.listLabels ?? null;
+  const listFields = leaf.listFields ?? def.listFields ?? null;
+  const listDecoration = leaf.listDecoration ?? def.listDecoration ?? null;
+  const groupByLabels = leaf.groupByLabels ?? def.groupByLabels ?? null;
   // ?filter=<id> (repeatable) preselects the model's named filters, e.g. links from dashboard tiles.
   const urlFilters = params.getAll('filter').filter((id) => (filters ?? []).flat().some((f) => f.id === id));
   const [search, setSearch] = useState(() => {
@@ -103,7 +106,7 @@ export function ActionView({ leaf, base, params }) {
     download(`${model}.csv`, toCsv([
       listCols.map((f) => colLabel(def.fields, f, listLabels)),
       ...rows.map((r) => listCols.map((f) => {
-        const field = def.fields[f];
+        const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
         return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f], r);
       })),
     ]));
@@ -171,10 +174,10 @@ export function ActionView({ leaf, base, params }) {
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
-        view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} />
+        view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />
       <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} list={listCols} optionalList={optionalList} optionalStorageKey={optionalList.length ? `mizan-list-cols:${leaf.key || model}` : null} listLabels={listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
+      {view === 'list' && <List key={leaf.key || model} db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} list={listCols} optionalList={optionalList} listFields={listFields} listDecoration={listDecoration} optionalStorageKey={leaf.key ? `mizan-list-cols:${leaf.key}` : null} listLabels={listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}

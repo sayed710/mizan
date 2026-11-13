@@ -1478,6 +1478,17 @@ const ar = {
   'Bank transaction': 'معاملة بنكية',
   'Auto-post until': 'الترحيل التلقائي حتى',
   'Journal entry is not balanced: total debit must equal total credit.': 'القيد المحاسبي غير متوازن: يجب أن يتساوى إجمالي المدين مع إجمالي الدائن.',
+  'My Invoices': 'فواتيري',
+  'Invoice Currency': 'عملة الفاتورة',
+  'Bill Currency': 'عملة فاتورة المورد',
+  'Accounting Date: This Month': 'تاريخ القيد: هذا الشهر',
+  'Accounting Date: This Year': 'تاريخ القيد: هذه السنة',
+  'Due Date: This Month': 'تاريخ الاستحقاق: هذا الشهر',
+  'Due Date: This Year': 'تاريخ الاستحقاق: هذه السنة',
+  'In 1 day': 'خلال يوم واحد',
+  'In {n} days': 'خلال {n} أيام',
+  '1 day ago': 'منذ يوم واحد',
+  '{n} days ago': 'منذ {n} أيام',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

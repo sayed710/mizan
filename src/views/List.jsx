@@ -11,7 +11,8 @@ import { RateNote } from './RateNote.jsx';
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
   const [f, dir] = sort;
-  const text = (r) => display(db, fields[f], r[f]);
+  const field = fields[f];
+  const text = (r) => (field?.type === 'date' ? String(r[f] ?? '') : display(db, field, r[f]));
   return [...records].sort((a, b) => {
     const x = a[f];
     const y = b[f];
@@ -33,9 +34,16 @@ export function reorderSequenceUpdates(records, fromId, toId, field = 'sequence'
 
 export const colLabel = (fields, f, listLabels) => t(listLabels?.[f] ?? fields[f].label);
 
+const resolveListFields = (fields, listFields) => {
+  if (!listFields) return fields;
+  const resolved = { ...fields };
+  for (const [k, v] of Object.entries(listFields)) if (resolved[k]) resolved[k] = { ...resolved[k], ...v };
+  return resolved;
+};
+
 /** Compute the ordered visible columns for a list view given company count and optional toggles. */
-export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null } = {}) {
-  const fields = def.fields;
+export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null, listFields = null } = {}) {
+  const fields = resolveListFields(def.fields, listFields);
   const isVisible = (f, defaultVisible) => optionalState[f] ?? defaultVisible;
   const multiCompany = companiesOf(db).length > 1;
   const baseCols = (list ?? def.list).filter((f) => !fields[f]?.multiCompanyOnly || multiCompany);
@@ -67,11 +75,11 @@ const Totals = ({ db, cols, fields, records }) =>
     );
   });
 
-export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
+export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, listFields = null, listDecoration = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
   const def = models[model];
-  const fields = def.fields;
+  const fields = resolveListFields(def.fields, listFields);
   const [optionalState, , toggleCol] = useOptionalColumns(optionalStorageKey ?? `mizan-list-cols:${model}`);
-  const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList });
+  const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList, listFields });
   const handleField = cols.find((f) => fields[f]?.widget === 'handle');
   const [sort, setSort] = useState(null);
   const [dragId, setDragId] = useState(null);
@@ -117,7 +125,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       onDrop={canDrag ? (e) => { e.preventDefault(); dropRow(r.id); } : undefined}
       onClick={() => open(r.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(r.id); }}
-      className={`${selected.has(r.id) ? 'selected' : ''} ${def.listDecoration?.(r) ?? ''}`}
+      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r) ?? ''}`}
     >
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
@@ -135,7 +143,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         const text = editable ? null : display(db, field, r[f], r);
         const badge = editable ? null : badgeClass(field.badge, r[f]);
         return (
-          <td key={f} className={isNumeric(field) ? 'num' : ''}
+          <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
             {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />

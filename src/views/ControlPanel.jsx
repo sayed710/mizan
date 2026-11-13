@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { updateSettings } from '../orm.js';
-import { commit, getDb } from '../store.js';
+import { commit, companiesOf, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { Icon, useDismiss } from '../ui.jsx';
 
@@ -10,14 +10,16 @@ export const emptySearch = (model, rel = null) => ({ terms: [], filters: models[
 
 const filterLabel = (model, id, filters = null) => t((filters ?? models[model].filters ?? []).flat().find((f) => f.id === id)?.label ?? id);
 
-function Facets({ model, search, setSearch, filters = null, listLabels = null }) {
+const groupByLabel = (def, g, listLabels, groupByLabels) => t(groupByLabels?.[g] ?? def.groupByLabels?.[g] ?? listLabels?.[g] ?? def.fields[g].label);
+
+function Facets({ model, search, setSearch, filters = null, listLabels = null, groupByLabels = null }) {
   const def = models[model];
   const fields = def.fields;
   const facets = [
     ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(search.rel.fieldLabel ?? fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
     ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id, filters)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
     ...(search.archived ? [{ key: 'a', icon: <Icon name="filter" size={11} />, label: t('Archived'), clear: { archived: false } }] : []),
-    ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => t(listLabels?.[g] ?? def.groupByLabels?.[g] ?? fields[g].label)).join(' › '), clear: { groupBy: [] } }] : []),
+    ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => groupByLabel(def, g, listLabels, groupByLabels)).join(' › '), clear: { groupBy: [] } }] : []),
     ...search.terms.map((term, i) => ({ key: `s${i}`, icon: t('Search'), label: term, clear: { terms: search.terms.filter((_, j) => j !== i) } })),
   ];
   return facets.map((f) => (
@@ -28,9 +30,10 @@ function Facets({ model, search, setSearch, filters = null, listLabels = null })
   ));
 }
 
-function SearchPanel({ model, search, setSearch, onClose, filters = null, groupBys = null, listLabels = null }) {
+function SearchPanel({ model, search, setSearch, onClose, filters = null, groupBys = null, listLabels = null, groupByLabels = null, listFields = null }) {
   const def = models[model];
   const fields = def.fields;
+  const multiCompany = companiesOf(getDb()).length > 1;
   const favorites = getDb().settings?.favorites?.[model] ?? [];
   const toggle = (key, value) => {
     const list = search[key];
@@ -66,9 +69,9 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
       <section>
         <h3>≡ {t('Group By')}</h3>
         <ul>
-          {(groupBys ?? def.groupBys ?? []).map((g) => (
+          {(groupBys ?? def.groupBys ?? []).filter((g) => !(fields[g]?.multiCompanyOnly || (listFields ?? def.listFields)?.[g]?.multiCompanyOnly) || multiCompany).map((g) => (
             <li key={g}>
-              <button type="button" aria-pressed={search.groupBy.includes(g)} onClick={() => toggle('groupBy', g)}>{t(listLabels?.[g] ?? def.groupByLabels?.[g] ?? fields[g].label)}</button>
+              <button type="button" aria-pressed={search.groupBy.includes(g)} onClick={() => toggle('groupBy', g)}>{groupByLabel(def, g, listLabels, groupByLabels)}</button>
             </li>
           ))}
         </ul>
@@ -88,7 +91,7 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
   );
 }
 
-export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra, filters = null, groupBys = null, listLabels = null }) {
+export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra, filters = null, groupBys = null, listLabels = null, groupByLabels = null, listFields = null }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -115,7 +118,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
       <div className="search-wrap" ref={ref}>
         <div className="search" role="search">
           <span className="search-icon" aria-hidden="true">⌕</span>
-          <Facets model={model} search={search} setSearch={setSearch} filters={filters} listLabels={listLabels} />
+          <Facets model={model} search={search} setSearch={setSearch} filters={filters} listLabels={listLabels} groupByLabels={groupByLabels} />
           <input
             value={text}
             placeholder={t('Search...')}
@@ -131,7 +134,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
             <Icon name="chevron" size={14} />
           </button>
         </div>
-        {open && <SearchPanel model={model} search={search} setSearch={setSearch} onClose={() => setOpen(false)} filters={filters} groupBys={groupBys} listLabels={listLabels} />}
+        {open && <SearchPanel model={model} search={search} setSearch={setSearch} onClose={() => setOpen(false)} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />}
       </div>
       <div className="cp-right">
         {extra}

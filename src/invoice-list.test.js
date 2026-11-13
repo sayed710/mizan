@@ -72,7 +72,7 @@ async function mountMoveList(leaf, initialDb = seed()) {
 }
 
 const headerLabels = (host) => allFind(host, (n) => n.tagName === 'THEAD')
-  .flatMap((thead) => allFind(thead, (n) => n.tagName === 'TH' && !hasClass(n, 'check')))
+  .flatMap((thead) => allFind(thead, (n) => n.tagName === 'TH' && !hasClass(n, 'check') && !hasClass(n, 'o2m-cols-th')))
   .map((th) => th.textContent.trim());
 
 test('customer invoice and vendor bill lists match Odoo 20 column order and labels', async () => {
@@ -169,7 +169,7 @@ test('invoice and bill list Status column renders a single badge for draft, canc
 
     const statusBadges = rows.map((tr) => {
       const tds = allFind(tr, (n) => n.tagName === 'TD');
-      const statusCell = tds.at(-1);
+      const statusCell = tds.at(-2);
       const badges = allFind(statusCell, (n) => n.tagName === 'SPAN' && hasClass(n, 'badge'));
       assert.equal(badges.length, 1, 'status cell renders exactly one badge');
       return badges[0].textContent.trim();
@@ -226,14 +226,14 @@ test('invoice and bill list footer sums Tax Excluded, Total, and Amount Due in c
     const tfoot = find(ctx.host, (n) => n.tagName === 'TFOOT');
     assert.ok(tfoot, 'list renders footer totals');
     const cells = allFind(tfoot, (n) => n.tagName === 'TD').map((td) => td.textContent.trim());
-    // Leading check column + 8 data columns: Number, Customer, Invoice Date, Due Date, Tax Excluded, Total, Amount Due, Status.
-    assert.deepEqual(cells, ['', '', '', '', '', '$150.00', '$165.00', '$115.00', '']);
+    // Leading check column + 8 visible data columns + optional-columns toggle spacer.
+    assert.deepEqual(cells, ['', '', '', '', '', '$150.00', '$165.00', '$115.00', '', '']);
 
     await ctx.render(leafFor('Vendors', 'bills'));
     const billFoot = find(ctx.host, (n) => n.tagName === 'TFOOT');
     assert.ok(billFoot, 'vendor bill list renders footer totals');
     const billCells = allFind(billFoot, (n) => n.tagName === 'TD').map((td) => td.textContent.trim());
-    assert.deepEqual(billCells, ['', '', '', '', '', '$200.00', '$200.00', '$200.00', '']);
+    assert.deepEqual(billCells, ['', '', '', '', '', '$200.00', '$200.00', '$200.00', '', '']);
   } finally {
     await ctx.done();
   }

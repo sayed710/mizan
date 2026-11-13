@@ -1,6 +1,7 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -209,6 +210,60 @@ const paymentState = (r, db) => {
   if (res == null) return 'unavailable';
   if (res === 0) return 'paid';
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
+};
+
+/** Resolve the signed-in user's linked employee id from hr.employee.user_login, or null when unlinked. */
+const currentUserId = (db) => (db ? employeeFor(db, currentActor()?.login)?.id ?? null : null);
+
+/** Compute the unsigned untaxed subtotal in the document's own currency, or null if unconfigured. */
+const untaxedAmount = (r, db) => {
+  let curr;
+  try {
+    curr = documentCurrency(db, r);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
+  return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed;
+};
+
+/** Sign a document-currency amount: credit notes and vendor refunds show as negative, avoiding -0. */
+const signedDocumentAmount = (r, value) => {
+  if (value == null) return null;
+  return value === 0 ? 0 : (isRefund(r) ? -1 : 1) * value;
+};
+
+/**
+ * Compute Odoo 20 `status_in_payment` for an invoice, credit note, bill, or refund:
+ * distinguishes `reversed` (settled solely by reversing credit notes), `in_payment` (settled via an outstanding
+ * payment not yet matched to a bank statement), `blocked` (three-way matching exception), and `cancel`/`draft`.
+ */
+export const statusInPayment = (r, db) => {
+  if (r.state === 'draft') return 'draft';
+  if (r.state === 'cancel') return 'cancel';
+  if (!isInvoice(r)) return r.state ?? 'draft';
+  const payState = paymentState(r, db);
+  if (payState === 'unavailable') return 'unavailable';
+  if (payState === 'paid') {
+    const active = (r.payments ?? []).filter((p) => !p.reversed);
+    if (db && active.length) {
+      const moveById = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+      const paymentByMove = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+      const allReversals = active.every((p) => {
+        const m = moveById.get(p.move_id);
+        return m && isRefund(m) && m.reversed_entry_id === r.id;
+      });
+      if (allReversals) return 'reversed';
+      const hasOutstanding = active.some((p) => {
+        const payment = paymentByMove.get(p.payment_move_id ?? p.move_id);
+        return payment && payment.state === 'posted' && payment.outstanding_account_id && !isPaymentMatched(db, payment);
+      });
+      if (hasOutstanding) return 'in_payment';
+    }
+    return 'paid';
+  }
+  if (db && shouldBePaid(db, r) === 'exception') return 'blocked';
+  return payState;
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -1557,6 +1612,86 @@ export const journalEntriesView = {
   groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date'],
 };
 
+const INVOICE_LIST_FIELDS = {
+  name: { bold: true },
+  journal_id: { optional: 'hide' },
+  invoice_date: { optional: 'show' },
+  date: { optional: 'hide' },
+  invoice_date_due: {
+    optional: 'show',
+    widget: 'remaining_days',
+    hideWhen: (r, db) => ['paid', 'in_payment', 'reversed', 'cancel'].includes(statusInPayment(r, db)),
+  },
+  invoice_origin: { optional: 'hide' },
+  payment_reference: { optional: 'hide' },
+  ref: { optional: 'hide' },
+  invoice_user_id: { optional: 'hide' },
+  activities: { optional: 'hide' },
+  company_id: { optional: 'hide', multiCompanyOnly: true },
+  amount_untaxed_in_currency_signed: { optional: 'show', sum: 'Total' },
+  amount_tax_in_currency_signed: { optional: 'hide', sum: 'Total' },
+  amount_total_in_currency_signed: { optional: 'show', bold: true, sum: 'Total' },
+  amount_residual_in_currency_signed: { optional: 'show', sum: 'Total' },
+  currency_id: { optional: 'hide' },
+};
+
+/** Highlight draft documents as info and cancelled documents as muted on invoice/bill lists. */
+const invoiceListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state === 'cancel' ? 'muted' : null);
+
+/** Build Odoo 20 search panel filter groups for sales or purchase invoice/refund lists. */
+const invoiceSearchFilters = ({ purchases = false } = {}) => [
+  [{ id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) }],
+  [
+    { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
+    { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' },
+    { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
+  ],
+  [
+    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
+    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
+    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+  ],
+  monthFilters('invoice_date', 'Invoice Date'),
+  ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
+  monthFilters('invoice_date_due', 'Due Date'),
+];
+
+const INVOICE_GROUP_BYS = ['invoice_user_id', 'partner_id', 'status_in_payment', 'journal_id', 'company_id', 'invoice_date', 'invoice_date_due', 'date'];
+const INVOICE_GROUP_BY_LABELS = { partner_id: 'Partner', invoice_date: 'Invoice Date', date: 'Accounting Date', status_in_payment: 'Status' };
+const INVOICE_SEARCH_FIELDS = ['name', 'invoice_origin', 'ref', 'payment_reference', 'partner_id', 'journal_id', 'invoice_user_id'];
+
+export const salesInvoiceView = {
+  list: [
+    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'ref', 'invoice_user_id', 'activities', 'company_id',
+    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'currency_id', 'status_in_payment',
+  ],
+  listFields: INVOICE_LIST_FIELDS,
+  listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
+  groupByLabels: INVOICE_GROUP_BY_LABELS,
+  listDecoration: invoiceListDecoration,
+  searchFields: INVOICE_SEARCH_FIELDS,
+  filters: invoiceSearchFilters({ purchases: false }),
+  groupBys: INVOICE_GROUP_BYS,
+};
+
+export const purchaseInvoiceView = {
+  list: [
+    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'payment_reference', 'ref', 'activities', 'company_id',
+    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'currency_id', 'status_in_payment',
+  ],
+  listFields: INVOICE_LIST_FIELDS,
+  listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
+  groupByLabels: INVOICE_GROUP_BY_LABELS,
+  listDecoration: invoiceListDecoration,
+  searchFields: INVOICE_SEARCH_FIELDS,
+  filters: invoiceSearchFilters({ purchases: true }),
+  groupBys: INVOICE_GROUP_BYS,
+};
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -1925,6 +2060,7 @@ export const accountingModels = {
         domain: (j, r, db) => (!j.company_id || j.company_id === (r?.company_id ?? db?.settings?.current_company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
       date: { type: 'date', label: 'Accounting Date' },
@@ -1951,22 +2087,33 @@ export const accountingModels = {
       amount_untaxed: {
         type: 'monetary',
         label: 'Tax Excluded',
-        compute: (r, db) => {
-          let curr;
-          try {
-            curr = documentCurrency(db, r);
-          } catch (err) {
-            if (/configure.*currency/i.test(err?.message)) return null;
-            throw err;
-          }
-          return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed;
-        },
+        compute: untaxedAmount,
+      },
+      amount_untaxed_in_currency_signed: {
+        type: 'monetary',
+        label: 'Tax Excluded',
+        compute: (r, db) => signedDocumentAmount(r, untaxedAmount(r, db)),
       },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
+      amount_tax_in_currency_signed: {
+        type: 'monetary',
+        label: 'Tax',
+        compute: (r, db) => signedDocumentAmount(r, invoiceTaxAmount(r, db)),
+      },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
+      amount_total_in_currency_signed: {
+        type: 'monetary',
+        label: 'Total',
+        compute: (r, db) => signedDocumentAmount(r, total(r, db)),
+      },
       amount_total_signed: { type: 'monetary', label: 'Total', currency: 'company', compute: signedCompanyTotal },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },
+      amount_residual_in_currency_signed: {
+        type: 'monetary',
+        label: 'Amount Due',
+        compute: (r, db) => signedDocumentAmount(r, residual(r, db)),
+      },
       payment_state: {
         type: 'selection',
         label: 'Payment Status',
@@ -1976,23 +2123,31 @@ export const accountingModels = {
       status_in_payment: {
         type: 'selection',
         label: 'Status',
-        compute: (r, db) => (r.state === 'posted' && isInvoice(r) ? paymentState(r, db) : (r.state ?? 'draft')),
+        compute: statusInPayment,
         options: [
           ['draft', 'Draft'],
           ['posted', 'Posted'],
+          ['sent', 'Sent'],
           ['cancel', 'Cancelled'],
+          ['blocked', 'Blocked'],
           ['not_paid', 'Not Paid'],
           ['partial', 'Partially Paid'],
+          ['in_payment', 'In Payment'],
           ['paid', 'Paid'],
+          ['reversed', 'Reversed'],
           ['unavailable', 'Unavailable'],
         ],
         badge: {
           draft: 'info',
-          posted: 'success',
-          cancel: 'muted',
+          cancel: 'danger',
+          blocked: 'danger',
+          posted: 'muted',
+          sent: 'muted',
           not_paid: 'warning',
-          partial: 'warning',
+          partial: 'muted',
+          in_payment: 'success',
           paid: 'success',
+          reversed: 'success',
           unavailable: 'muted',
         },
       },
@@ -2043,7 +2198,10 @@ export const accountingModels = {
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
-      if ((vals.move_type ?? 'out_invoice') !== 'entry') return {};
+      if ((vals.move_type ?? 'out_invoice') !== 'entry') {
+        const salesperson = vals.invoice_user_id == null ? currentUserId(db) : null;
+        return salesperson ? { invoice_user_id: salesperson } : {};
+      }
       const date = vals.date ?? vals.invoice_date ?? today();
       const companyId = vals.company_id ?? db?.settings?.current_company_id ?? 1;
       const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
@@ -2053,18 +2211,14 @@ export const accountingModels = {
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),
       };
     },
-    filters: [
-      [{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
-      [
-        { id: 'unpaid', label: 'Not Paid', fn: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' },
-        { id: 'overdue', label: 'Overdue', fn: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' && r.invoice_date_due < today() },
-      ],
-    ],
-    groupBys: ['partner_id', 'journal_id', 'state', 'payment_state', 'invoice_date', 'invoice_date_due'],
+    searchFields: INVOICE_SEARCH_FIELDS,
+    filters: invoiceSearchFilters({ purchases: true }),
+    groupBys: INVOICE_GROUP_BYS,
+    groupByLabels: INVOICE_GROUP_BY_LABELS,
     views: ['list', 'kanban', 'graph', 'pivot', 'calendar'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total', 'invoice_date_due'], badge: 'payment_state' },
     list: ['name', 'partner_id', 'invoice_date', 'invoice_date_due', 'amount_untaxed', 'amount_total', 'amount_residual', 'status_in_payment'],
-    listDecoration: (r) => (r.state === 'draft' ? 'info' : r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' && r.invoice_date_due < today() ? 'danger' : null),
+    listDecoration: invoiceListDecoration,
     graph: { groupBy: 'invoice_date', measure: 'amount_total' },
     pivot: { row: 'partner_id', col: 'payment_state', measure: 'amount_total' },
     calendar: { date: 'invoice_date_due' },

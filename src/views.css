@@ -260,6 +260,8 @@ html[dir='rtl'] body { font-family: 'Segoe UI', Tahoma, 'Noto Sans Arabic', syst
 .caret { display: inline-block; width: 14px; color: var(--muted); }
 .list tr.danger td { color: var(--danger); }
 .list tr.info td { color: #1d6fa5; }
+.list tr.muted td { color: var(--muted); }
+.list td.bold { font-weight: 600; }
 .list.pivot th[scope='row'] { text-align: start; font-weight: 600; }
 .list.pivot tfoot th, .list.pivot tfoot td { font-weight: 700; }
 

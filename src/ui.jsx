@@ -6,7 +6,7 @@ import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
-import { parseAmount } from './models/common.js';
+import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
@@ -63,8 +63,25 @@ export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: '
 const localInput = (iso) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
+const utcDayMs = (iso) => {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  return Date.UTC(y, m - 1, d);
+};
+
+/** Format an ISO date relative to `refDate` (e.g. "Today", "In 5 days", "3 days ago"). */
+export function formatRelativeDate(iso, refDate = today()) {
+  if (!iso) return '';
+  const diff = Math.round((utcDayMs(iso) - utcDayMs(refDate)) / 86400000);
+  if (diff === 0) return t('Today');
+  if (diff === 1) return t('In 1 day');
+  if (diff > 1) return t('In {n} days', { n: diff });
+  if (diff === -1) return t('1 day ago');
+  return t('{n} days ago', { n: -diff });
+}
+
 /** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
 export function display(db, field, value, rec = null) {
+  if (rec && field.hideWhen?.(rec, db)) return '';
   if (value == null || value === '') return '';
   switch (field.type) {
     case 'monetary': {
@@ -88,7 +105,7 @@ export function display(db, field, value, rec = null) {
     case 'distribution': return JSON.stringify(value);
     case 'binary': return value?.name ?? '';
     case 'html': return String(value ?? '');
-    case 'date': return formatDate(value);
+    case 'date': return field.widget === 'remaining_days' ? formatRelativeDate(value) : formatDate(value);
     case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
   }
