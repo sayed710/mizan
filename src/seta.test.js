@@ -296,8 +296,8 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
     },
   };
   const migrated = migrate(oldDb);
-  assert.equal(SCHEMA_VERSION, 48);
-  assert.equal(migrated.schema_version, 48);
+  assert.equal(SCHEMA_VERSION, 51);
+  assert.equal(migrated.schema_version, 51);
   assert.equal('lock_date' in migrated.settings, false);
   assert.equal('sale_lock_date' in migrated.settings, false);
   assert.equal('purchase_lock_date' in migrated.settings, false);

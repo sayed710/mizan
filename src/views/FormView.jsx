@@ -76,6 +76,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
   if (typeof item === 'string') {
     const field = def.fields[item];
     if (field?.multiCompanyOnly && !multiCompany) return null;
+    if (field?.hideWhen?.(current, db)) return null;
     const itemReadonly = lockFor(def, readonly, item, current, db);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
       const isReadonly = itemReadonly || fieldReadonly(field, current, db);
@@ -84,7 +85,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
     return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} />;
   }
   if (item && Array.isArray(item.fields)) {
-    const visibleFields = item.fields.filter((f) => !def.fields[f]?.multiCompanyOnly || multiCompany);
+    const visibleFields = item.fields.filter((f) => (!def.fields[f]?.multiCompanyOnly || multiCompany) && !def.fields[f]?.hideWhen?.(current, db));
     if (!visibleFields.length) return null;
     const first = def.fields[visibleFields[0]];
     const firstReadonly = lockFor(def, readonly, visibleFields[0], current, db) || fieldReadonly(first, current, db);
@@ -110,6 +111,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
     );
   }
   if (def.fields[item.field]?.multiCompanyOnly && !multiCompany) return null;
+  if (def.fields[item.field]?.hideWhen?.(current, db)) return null;
   return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} isNew={isNew} />;
 }
 
@@ -151,9 +153,13 @@ function SmartButtons({ db, model, rec, smart }) {
         }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];
-        const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
+        const ids = s.ids ? (rec.id == null ? [] : s.ids(db, rec)) : null;
+        const recs = ids
+          ? (ids.length ? viewRecords(db, s.model).filter((r) => ids.includes(r[s.field])) : [])
+          : (value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value));
+        const relParam = ids ? ids.join(',') : value;
         return (
-          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${value}`}>
+          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${relParam}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>
@@ -505,7 +511,7 @@ export function FormView({ leaf, id, base, params }) {
   const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())) && (!b.visible || b.visible(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
-  const tabs = resolve(def.form.tabs);
+  const tabs = resolve(def.form.tabs)?.filter((tb) => !tb.when || tb.when(current, db));
   const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   // A non-blocking warning shown above the form, such as an exceeded credit limit.
   const warning = def.form.warning?.(current, db) ?? null;

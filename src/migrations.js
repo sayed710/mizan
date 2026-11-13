@@ -1250,6 +1250,21 @@ MIGRATIONS.push({ version: 48, name: 'tax-groups-and-cash-rounding-parity', up(d
   };
 } });
 
+MIGRATIONS.push({ version: 51, name: 'analytic-plans-sequence-backfill', up(db) {
+  const plans = db.records['account.analytic.plan'] ?? [];
+  if (!plans.length) return db;
+  let nextSeq = Math.max(0, ...plans.map((p) => Number(p.sequence) || 0));
+  const nextPlans = plans.map((p) => ({
+    ...p,
+    sequence: p.sequence ?? (nextSeq += 10),
+    ...(!p.parent_id && !p.default_applicability ? { default_applicability: 'optional' } : {}),
+  }));
+  return {
+    ...db,
+    records: { ...db.records, 'account.analytic.plan': nextPlans },
+  };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

@@ -22,18 +22,20 @@ export { actionRecords } from '../companyView.js';
 /** `rel=field:id` narrows an action to records linked to one parent (smart buttons). */
 export function parseRel(db, model, raw) {
   if (!raw) return null;
-  const [field, id] = raw.split(':');
+  const [field, rawIds] = raw.split(':');
+  const parts = (rawIds ?? '').split(',').filter(Boolean).map(Number);
+  const id = parts[0] ?? 0;
   if (model === 'account.move' && field === 'payment_id') {
-    const payment = read(db, 'account.payment', Number(id));
-    return { field, fieldLabel: 'Payment', id: Number(id), label: payment?.name ?? `#${id}` };
+    const payment = read(db, 'account.payment', id);
+    return { field, fieldLabel: 'Payment', id, label: payment?.name ?? `#${id}` };
   }
   if (model === 'account.deferral' && field === 'move_id') {
-    const move = read(db, 'account.move', Number(id));
-    return { field, fieldLabel: 'Journal Entry', id: Number(id), label: move?.name ?? `#${id}` };
+    const move = read(db, 'account.move', id);
+    return { field, fieldLabel: 'Journal Entry', id, label: move?.name ?? `#${id}` };
   }
   const f = models[model].fields[field];
   if (!f || f.type !== 'many2one') return null;
-  return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };
+  return { field, id, ...(parts.length > 1 ? { ids: parts } : {}), label: read(db, f.relation, id)?.name ?? `#${id}` };
 }
 
 const download = (name, text) => {
@@ -78,7 +80,7 @@ export function ActionView({ leaf, base, params }) {
   const offset = page.key === pageKey ? page.offset : 0;
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
-  const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
+  const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.ids ? search.rel.ids.join(',') : search.rel.id}` : '';
   const needsArchived = Boolean(leaf.includeArchived ?? def.includeArchived)
     || search.filters.some((id) => (filters ?? []).flat().find((f) => f.id === id)?.includeArchived);
   const archiveMode = search.archived ? true : (needsArchived ? 'all' : false);

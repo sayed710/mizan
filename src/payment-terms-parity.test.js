@@ -354,7 +354,7 @@ test('migration 47 backfills active and display_on_invoice on existing payment t
   };
   const migrated = migrate(legacy);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 48);
+  assert.equal(SCHEMA_VERSION, 51);
   for (const term of migrated.records['account.payment.term']) {
     assert.equal(term.active, true);
     assert.equal(term.display_on_invoice, true);

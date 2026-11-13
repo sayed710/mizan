@@ -1582,6 +1582,11 @@ const ar = {
   'ZIP': 'الرمز البريدي',
   'Bank Information': 'معلومات البنك',
   'Bank Address': 'عنوان البنك',
+  // Analytic Plans & Accounts (Odoo 20 parity)
+  Subplans: 'الخطط الفرعية',
+  'Associated Partner': 'الشريك المرتبط',
+  'e.g. Project XYZ': 'مثال: مشروع XYZ',
+  'A plan cannot be its own ancestor': 'لا يمكن أن تكون الخطة سلفاً لنفسها',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
