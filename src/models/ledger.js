@@ -665,14 +665,40 @@ export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.a
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 
+/** IDs of active payments linked to a bank statement line (batch, multi-select, or single). */
+export function statementPaymentIds(db, line) {
+  if (!line) return [];
+  if (line.batch_payment_id) {
+    return [...new Set((read(db, 'account.batch.payment', line.batch_payment_id)?.lines ?? [])
+      .filter((l) => !l.cancelled && l.payment_id)
+      .map((l) => l.payment_id))];
+  }
+  if (Array.isArray(line.payment_ids) && line.payment_ids.length > 0) {
+    return [...new Set(line.payment_ids.filter(Boolean))];
+  }
+  return line.payment_id ? [line.payment_id] : [];
+}
+
 /** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
 export function bookedStatementAmount(db, line) {
   if (!line.bank_move_id) return statementCompanyAmount(db, line);
   const company = line.company_id ?? 1;
-  const entry = read(db, 'account.move', line.bank_move_id);
   const account = paymentJournal(db, line.journal_id, company).accountId;
-  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
-  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
+  const sign = line.amount > 0 ? 1 : -1;
+  const directMoves = line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
+    ? statementPaymentIds(db, line)
+        .map((id) => read(db, 'account.payment', id))
+        .filter((p) => p && !p.outstanding_account_id && p.move_id)
+        .map((p) => p.move_id)
+    : [];
+  const moveIds = new Set([line.bank_move_id, ...directMoves]);
+  const total = [...moveIds].reduce((sum, moveId) => {
+    const entry = read(db, 'account.move', moveId);
+    return sum + (entry?.line_ids ?? [])
+      .filter((l) => l.account_id === account)
+      .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
+  }, 0);
+  return roundCurrency(total, companyCurrencyRecord(db, company));
 }
 
 /** Check whether a payment is already matched by an active allocation or a reconciled statement line. */

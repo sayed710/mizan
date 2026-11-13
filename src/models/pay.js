@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry } from './ledger.js';
+import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry, statementPaymentIds } from './ledger.js';
 import { applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -102,12 +102,14 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
     // An invoice item only releases bank lines reconciled directly against it; a bank match of a payment belongs to the payment's items.
     const banks = search(db, 'account.bank.statement.line').filter((b) => b.bank_move_id && (isInvoice(move)
       ? (b.allocations ?? []).some((a) => a.invoice_id === move.id && (sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id)))
-      : sourceIds.has(b.bank_move_id) || sourceIds.has(b.payment_move_id) || payments.some((p) => b.payment_id === p.id || (b.payment_ids ?? []).includes(p.id))
+      : sourceIds.has(b.bank_move_id) || sourceIds.has(b.payment_move_id) || payments.some((p) => statementPaymentIds(db, b).includes(p.id))
         || (b.allocations ?? []).some((a) => sourceIds.has(a.payment_move_id) || sourceIds.has(a.writeoff_move_id))));
     if (!isInvoice(move) && !banks.length && !applications.length) throw new Error('The selected item has no active settlement');
     if (!isInvoice(move) && !counterpart && !isPaymentOutstanding && !banks.some((b) => read(db, 'account.journal', b.journal_id)?.suspense_account_id === line.account_id)) throw new Error('Select a linked receivable, payable, outstanding or suspense item');
     for (const bank of banks) bankIds.add(bank.id);
-    const bankMatched = (moveId) => banks.some((b) => b.bank_move_id === moveId || b.payment_move_id === moveId || (b.allocations ?? []).some((a) => a.payment_move_id === moveId || a.writeoff_move_id === moveId));
+    const bankMatched = (moveId) => banks.some((b) => b.bank_move_id === moveId || b.payment_move_id === moveId
+      || (b.allocations ?? []).some((a) => a.payment_move_id === moveId || a.writeoff_move_id === moveId)
+      || statementPaymentIds(db, b).some((id) => payments.some((p) => p.id === id && p.move_id === moveId)));
     // Unreconcile only removes the matching: payments stay posted and their credit becomes available again.
     if ((counterpart || isPaymentOutstanding) && !isInvoice(move) && payments.length && !bankMatched(move.id)) for (const invoice of applications) unapplications.set(`${invoice.id}:${move.id}`, { invoiceId: invoice.id, moveId: move.id });
     for (const row of rows) {
