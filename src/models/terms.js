@@ -63,10 +63,18 @@ export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = 
   return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
 }
 
+export const DISCOUNT_TAX_COMPUTATIONS = new Set(['excluded', 'included', 'mixed']);
+
+/** Resolve the canonical discount tax computation mode for a payment term (defaults to 'included' when unset). */
+export function discountTaxComputation(term) {
+  if (!term) return null;
+  return DISCOUNT_TAX_COMPUTATIONS.has(term.discount_tax_computation) ? term.discount_tax_computation : 'included';
+}
+
 /** Share of the invoice's tax kept when the term reduces tax for its early-payment discount (1 when it does not). */
 export function mixedDiscountFactor(term) {
   const percent = Number(term?.discount_percent) || 0;
-  return term?.early_discount && term.discount_tax_computation === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
+  return term?.early_discount && discountTaxComputation(term) === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
@@ -107,6 +115,9 @@ export const termModels = {
       note: { type: 'text', label: 'Note' },
     },
     defaults: () => ({ early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
+    createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
+    onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
+    guard: (_db, _before, after) => (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) ? 'Select a discount tax computation mode' : null),
     kanban: { title: 'name', lines: ['early_discount'] },
     list: ['name', 'early_discount'],
     form: {

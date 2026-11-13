@@ -2,7 +2,7 @@
 import { create, postNote, read, search, write } from '../orm.js';
 import { nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
-import { isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
+import { applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
@@ -40,11 +40,20 @@ function selectedItems(db, selections) {
   });
 }
 
-/** Match exactly the chosen payment credit and document through the existing payment allocation model. */
+/** Match a payment credit or standalone credit note against an open invoice using the underlying workflow. */
 export function reconcileJournalItems(db, selections, { date, amount = null } = {}) {
   const items = selectedItems(db, selections);
   if (!validDate(date)) throw new Error('Enter a valid reconciliation date');
-  if (items.length !== 2) throw new Error('Select one invoice counterpart and one payment counterpart');
+  if (items.length !== 2) throw new Error('Select one invoice counterpart and one payment or credit note counterpart');
+  const docs = items.filter(({ move }) => ['out_invoice', 'in_invoice'].includes(move.move_type));
+  const refunds = items.filter(({ move }) => ['out_refund', 'in_refund'].includes(move.move_type));
+  if (docs.length === 1 && refunds.length === 1) {
+    const [doc] = docs;
+    const [refund] = refunds;
+    if (!doc.counterpart || !refund.counterpart) throw new Error('Select the invoice and credit note receivable or payable items');
+    if (refund.line.account_id !== doc.line.account_id || refund.line.partner_id !== doc.line.partner_id) throw new Error('Selected items must have the same account and partner');
+    return applyCreditNote(db, refund.move.id, doc.move.id, date, amount);
+  }
   const invoices = items.filter(({ move }) => isInvoice(move));
   if (invoices.length !== 1) throw new Error('Select one invoice counterpart and one payment counterpart');
   const [invoice] = invoices;

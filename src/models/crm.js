@@ -131,6 +131,7 @@ export const crmModels = {
           company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
           followup_level_delay: { type: 'integer', label: 'Last Reminder Level (days)' },
           followup_date: { type: 'date', label: 'Last Reminder' },
+          followup_oldest_date: { type: 'date', label: 'Oldest Overdue Date', hidden: true },
           followup_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level' },
           followup_last_level: { type: 'many2one', relation: 'account.followup.level', label: 'Level', hidden: true },
           followup_channel: { type: 'char', label: 'Channel', hidden: true },

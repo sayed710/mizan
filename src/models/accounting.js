@@ -1,13 +1,13 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
-import { creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
+import { creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
 import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
-import { dueDate, earlyDiscount } from './terms.js';
+import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
@@ -535,7 +535,8 @@ export function postMove(db, id) {
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const counterpart = intercompanyBill(db, r);
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, line_ids, invoice_line_ids: resolvedLines }), id);
+  const dueUpdate = r.invoice_payment_term_id ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }) : {};
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -594,6 +595,45 @@ function creditCheck(db, note) {
   if (docRound(credited + total(note, db)) > docRound(total(invoice, db))) throw new Error(`Credit notes would exceed ${invoice.name}: ${money(docRound(total(invoice, db) - credited))} is left to credit`);
 }
 
+/** Apply an open credit note (reversed_entry_id-linked or standalone) against an open invoice or bill. */
+export function applyCreditNote(db, noteId, invoiceId, date = null, amount = null) {
+  const note = read(db, 'account.move', noteId);
+  const invoice = read(db, 'account.move', invoiceId);
+  const pairError = creditNotePairError(db, note, invoice);
+  if (pairError) throw new Error(pairError);
+  if (amount != null && (!Number.isFinite(Number(amount)) || Number(amount) <= 0)) throw new Error('The applied amount must be a positive number');
+  const appDate = date ?? note.invoice_date ?? today();
+  if (!validDate(appDate)) throw new Error('Enter a valid reconciliation date');
+  if (appDate < (invoice.invoice_date ?? '') || appDate < (note.invoice_date ?? '')) {
+    throw new Error('Reconciliation date cannot be before the invoice or credit note date');
+  }
+  const available = Math.min(residual(note, db), residual(invoice, db));
+  if (!(available > 0)) throw new Error('The invoice or credit note has no remaining open balance');
+  const currency = documentCurrency(db, invoice);
+  const value = roundCurrency(amount != null ? Math.min(Number(amount), available) : available, currency);
+  if (!(value > 0)) return db;
+  const invoicePortion = settlementCompanyAmount(db, invoice, value);
+  const notePortion = settlementCompanyAmount(db, note, value);
+  const settle = (next, r, other) => write(next, 'account.move', r.id, {
+    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: null }],
+  });
+  let next = settle(settle(db, invoice, note), note, invoice);
+  // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
+  const sale = !isPurchase(invoice);
+  const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
+  if (gap) {
+    const account = invoiceCounterpartAccount(db, invoice);
+    const fxAmount = Math.abs(gap);
+    // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
+    const clearsDebit = sale ? gap < 0 : gap > 0;
+    const open = clearsDebit ? { account, debit: fxAmount, partner_id: invoice.partner_id } : { account, credit: fxAmount, partner_id: invoice.partner_id };
+    const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? fxAmount : -fxAmount);
+    const fx = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date: appDate, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines] });
+    next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
+  }
+  return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
+}
+
 /**
  * A posted credit note settles what is still due on its invoice: both record the other in their payments and paid
  * amount, as a reconciliation would. Their receivable/payable lines already offset in the ledger.
@@ -603,27 +643,7 @@ function offsetCreditNote(db, noteId) {
   const invoice = read(db, 'account.move', note.reversed_entry_id);
   const value = Math.min(total(note, db), residual(invoice, db));
   if (!(value > 0)) return db;
-  const date = note.invoice_date ?? today();
-  const invoicePortion = settlementCompanyAmount(db, invoice, value);
-  const notePortion = settlementCompanyAmount(db, note, value);
-  const settle = (next, r, other) => write(next, 'account.move', r.id, {
-    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: date, payments: [...(r.payments ?? []), { date, amount: value, move_id: other.id, cash_basis_move_id: null }],
-  });
-  let next = settle(settle(db, invoice, note), note, invoice);
-  // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
-  const sale = !isPurchase(invoice);
-  const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
-  if (gap) {
-    const account = invoiceCounterpartAccount(db, invoice);
-    const amount = Math.abs(gap);
-    // The receivable/payable balance left by the two rates is cleared against the exchange gain or loss.
-    const clearsDebit = sale ? gap < 0 : gap > 0;
-    const open = clearsDebit ? { account, debit: amount, partner_id: invoice.partner_id } : { account, credit: amount, partner_id: invoice.partner_id };
-    const fxLines = exchangeLines(db, invoice.company_id, clearsDebit ? amount : -amount);
-    const fx = postEntry(next, { journal: 'MISC', company: invoice.company_id ?? 1, date, ref: `Exchange difference ${note.name}`, lines: [open, ...fxLines] });
-    next = { ...fx.db, records: { ...fx.db.records, 'account.move': fx.db.records['account.move'].map((entry) => entry.id === fx.id ? { ...entry, fx_payment_move_id: note.id, fx_invoice_id: invoice.id } : entry) } };
-  }
-  return postNote(next, 'account.move', invoice.id, `${money(value)} settled by credit note ${note.name}`);
+  return applyCreditNote(db, noteId, invoice.id, note.invoice_date ?? today(), value);
 }
 
 /** Bill lines booked on a fixed-asset account become draft assets (once per bill line). */
@@ -1081,13 +1101,13 @@ export function discountAvailable(db, r, date = today()) {
   const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
   const currency = documentCurrency(db, r);
   const roundingMethod = companyRoundingMethod(db, r?.company_id);
-  const base = ['excluded', 'mixed'].includes(term?.discount_tax_computation) ? amounts(r.invoice_line_ids, currency, { roundingMethod }).untaxed : total(r, db);
+  const base = ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? amounts(r.invoice_line_ids, currency, { roundingMethod }).untaxed : total(r, db);
   return term && !(Number(r.amount_paid) > 0) ? earlyDiscount(term, base, r.invoice_date, date, currency) : 0;
 }
 
 /** Reverse the discounted share of invoice-basis taxes using their posted accounts and bases. */
 function discountTaxLines(db, invoice, term, discount) {
-  if (term?.discount_tax_computation !== 'included') return [];
+  if (discountTaxComputation(term) !== 'included') return [];
   const share = discount / (total(invoice, db) || 1);
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, invoice.company_id));
   return (invoice.line_ids ?? []).filter((line) => line.tax_name && !line.tax_zero).map((line) => ({
@@ -1119,10 +1139,11 @@ export function payWithDiscount(db, id, amount, date = today(), options = {}) {
   if (!(gap > 0) || discount < gap) return paid;
   const value = settlementCompanyAmount(paid, read(paid, 'account.move', id), discount);
   const counterpart = invoiceCounterpartAccount(db, r);
-  const taxes = discountTaxLines(db, r, read(db, 'account.payment.term', r.invoice_payment_term_id), discount);
+  const term = read(db, 'account.payment.term', r.invoice_payment_term_id);
+  const taxes = discountTaxLines(db, r, term, discount);
   const taxValue = companyRound(taxes.reduce((sum, line) => sum + (sale ? line.debit - line.credit : line.credit - line.debit), 0));
   const share = discount / (total(r, db) || 1);
-  const bases = read(db, 'account.payment.term', r.invoice_payment_term_id)?.discount_tax_computation === 'included'
+  const bases = discountTaxComputation(term) === 'included'
     ? (r.line_ids ?? []).filter((line) => line.tax_grid_base && line.tax_tag_ids?.length).map((line) => ({
       account: discountAccount, partner_id: r.partner_id, tax_tag_ids: line.tax_tag_ids,
       tax_grid_base: true, tax_side: isPurchase(r) ? 'purchase' : 'sale',
@@ -1156,7 +1177,7 @@ function registerPayment(db, r, values = {}) {
   return { db: payWithDiscount(db, r.id, amount, date, { journalId: payment.id }) };
 }
 
-export { isOutstandingCreditFor, outstandingPaymentCredits };
+export { isOutstandingCreditFor, isOutstandingCreditNoteFor, outstandingCreditNotes, outstandingCredits, outstandingPaymentCredits };
 
 /** A posted payment with unapplied credit that can settle `r`: same company, same commercial partner, matching direction. */
 function isOutstandingCreditFor(db, r, p) {
@@ -1173,10 +1194,39 @@ function isOutstandingCreditFor(db, r, p) {
     && shouldBePaid(db, r) !== 'exception';
 }
 
+/** A posted credit note with open balance that can settle `r`: matching pair, positive residual, bill payable. */
+function isOutstandingCreditNoteFor(db, r, note) {
+  return !creditNotePairError(db, note, r)
+    && residual(note, db) > 0
+    && shouldBePaid(db, r) !== 'exception';
+}
+
 /** Outstanding (unapplied) payment credits for a posted open invoice or vendor bill, in record order. */
 function outstandingPaymentCredits(db, r) {
   if (!r || r.state !== 'posted' || !isInvoice(r) || !(residual(r, db) > 0)) return [];
   return (db?.records['account.payment'] ?? []).filter((p) => isOutstandingCreditFor(db, r, p));
+}
+
+/** Outstanding posted credit notes for a posted open invoice or vendor bill, in record order. */
+function outstandingCreditNotes(db, r) {
+  if (!r || r.state !== 'posted' || !isInvoice(r) || isRefund(r) || !(residual(r, db) > 0)) return [];
+  return (db?.records['account.move'] ?? []).filter((m) => isOutstandingCreditNoteFor(db, r, m));
+}
+
+/** All outstanding credit rows (unapplied payments + open credit notes) formatted for the invoice form widget. */
+function outstandingCredits(db, r) {
+  return [
+    ...outstandingPaymentCredits(db, r),
+    ...outstandingCreditNotes(db, r).map((note) => ({
+      id: `move:${note.id}`,
+      move_id: note.id,
+      name: note.name,
+      date: note.invoice_date ?? note.date,
+      unapplied: residual(note, db),
+      company_id: note.company_id,
+      currency_id: note.currency_id,
+    })),
+  ];
 }
 
 const termDue = (db, r, { clear = false } = {}) => {
@@ -1780,7 +1830,7 @@ export const accountingModels = {
         ]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),
       footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
-      // The outstanding-credits widget lists the posted payments with unapplied credit and applies a chosen one in full.
+      // The outstanding-credits widget lists unapplied payments and open credit notes and applies a chosen one.
       outstandingCredits: {
         title: 'Outstanding Credits',
         applyLabel: 'Add',
@@ -1789,8 +1839,16 @@ export const accountingModels = {
           { name: 'date', label: 'Paid on' },
           { name: 'unapplied', label: 'Available Credit', money: true },
         ],
-        list: (db, r) => outstandingPaymentCredits(db, r),
-        apply: (db, r, paymentId) => ({ db: applyPaymentCredit(db, paymentId, r.id, today()) }),
+        list: (db, r) => outstandingCredits(db, r),
+        apply: (db, r, creditId) => {
+          if (typeof creditId === 'string' && creditId.startsWith('move:')) {
+            const noteId = Number(creditId.slice(5));
+            const note = read(db, 'account.move', noteId);
+            const appDate = [today(), r.invoice_date, note?.invoice_date].filter(Boolean).sort().at(-1);
+            return { db: applyCreditNote(db, noteId, r.id, appDate) };
+          }
+          return { db: applyPaymentCredit(db, creditId, r.id, today()) };
+        },
       },
       chatter: true,
     },

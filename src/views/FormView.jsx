@@ -147,7 +147,7 @@ function OutstandingCredits({ db, spec, current, onApply }) {
         </tr></thead>
         <tbody>
           {rows.map((row) => {
-            const currency = spec.fields.some((f) => f.money) ? companyCurrencyRecord(db, row.company_id ?? 1) : null;
+            const currency = spec.fields.some((f) => f.money) ? (read(db, 'res.currency', row.currency_id) ?? companyCurrencyRecord(db, row.company_id ?? 1)) : null;
             return (
               <tr key={row.id}>
                 {spec.fields.map((f) => (

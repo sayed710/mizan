@@ -6,7 +6,7 @@ import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
-import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
+import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
@@ -427,7 +427,7 @@ export function invoiceLines(db, move) {
     const amount = companyRound(targetCompany - allocated);
     allocated = companyRound(allocated + amount);
     const discountDoc = term?.early_discount && index === 0
-      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(term.discount_tax_computation) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
+      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
       : 0;
     const discountCompany = discountDoc ? companyRound(discountDoc / rate) : 0;
     return {

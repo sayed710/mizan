@@ -648,7 +648,7 @@ const ar = {
   'Three-Way Matching': 'المطابقة الثلاثية', 'Should Be Paid': 'توصية الدفع', Exception: 'استثناء', 'Approve for Payment': 'الموافقة على الدفع', 'Reset Payment Review': 'إعادة مراجعة الدفع',
   'Audit Trail': 'سجل التدقيق', 'Only administrators can read the audit trail': 'سجل التدقيق متاح للمسؤولين فقط', Change: 'التغيير', 'Payment reminder': 'تذكير بالدفع',
   'Payment Terms': 'شروط الدفع', 'Early Discount': 'خصم السداد المبكر', 'Discount Days': 'أيام الخصم', 'Due Terms': 'شروط الاستحقاق',
-  'Next Action Date': 'تاريخ الإجراء التالي',
+  'Next Action Date': 'تاريخ الإجراء التالي', 'Oldest Overdue Date': 'أقدم تاريخ استحقاق',
   'Discount Tax Computation': 'حساب ضريبة الخصم', 'Discount before tax': 'الخصم قبل الضريبة', 'Discount including tax': 'الخصم شامل الضريبة',
   'Early Payment Discount Expense Account': 'حساب مصروف خصم السداد المبكر', 'Early Payment Discount Income Account': 'حساب إيراد خصم السداد المبكر',
   'Value Type': 'نوع القيمة', 'Delay Type': 'نوع المهلة', Percent: 'نسبة', Fixed: 'ثابت', 'Days after invoice date': 'أيام بعد تاريخ الفاتورة',
