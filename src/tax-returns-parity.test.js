@@ -395,13 +395,13 @@ test('partner bank partial updates retain the account number and reject foreign 
 
 test('partner bank tab uses registered bank model validation for creates and partial updates', () => {
   const partner = create(seed(), 'res.partner', { name: 'Validated bank owner' });
-  const bank = create(partner.db, 'res.partner.bank', { partner_id: partner.id, account_number: 'EG 123', bank_name: 'Before', bank_bic: 'VALID' });
+  const bank = create(partner.db, 'res.partner.bank', { partner_id: partner.id, account_number: 'EG 123', bank_name: 'Before', bank_bic: 'VALIDBIC' });
   const bankModel = models['res.partner.bank'];
   const guard = bankModel.guard;
-  bankModel.guard = (db, before, after, ctx) => guard?.(db, before, after, ctx) ?? (after.bank_bic === 'BLOCKED' ? 'Bank validation refused this identifier' : null);
+  bankModel.guard = (db, before, after, ctx) => guard?.(db, before, after, ctx) ?? (after.bank_bic === 'BLOCKED1' ? 'Bank validation refused this identifier' : null);
   try {
-    assert.throws(() => write(bank.db, 'res.partner', partner.id, { bank_ids: [{ id: bank.id, bank_bic: 'BLOCKED' }] }), /bank validation/i);
-    assert.throws(() => create(bank.db, 'res.partner', { name: 'Invalid new owner', bank_ids: [{ account_number: 'NEW', bank_bic: 'BLOCKED' }] }), /bank validation/i);
+    assert.throws(() => write(bank.db, 'res.partner', partner.id, { bank_ids: [{ id: bank.id, bank_bic: 'BLOCKED1' }] }), /bank validation/i);
+    assert.throws(() => create(bank.db, 'res.partner', { name: 'Invalid new owner', bank_ids: [{ account_number: 'NEW', bank_bic: 'BLOCKED1' }] }), /bank validation/i);
     const updated = write(bank.db, 'res.partner', partner.id, { bank_ids: [{ id: bank.id, bank_name: null, allow_out_payment: false }] });
     assert.equal(read(updated, 'res.partner.bank', bank.id).account_number, 'EG 123');
     assert.equal(read(updated, 'res.partner.bank', bank.id).bank_name, null);
@@ -1092,8 +1092,8 @@ test('outbound payment actions allow no recipient bank and persist a chosen bill
   const validate = models['account.batch.payment'].form.buttons.find((b) => b.label === 'Validate');
   assert.equal(read(validate.run(batch.db, read(batch.db, 'account.batch.payment', batch.id)).db, 'account.batch.payment', batch.id).state, 'posted');
 
-  const first = create(draft.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'FIRST' });
-  const second = create(first.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SECOND' });
+  const first = create(draft.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'FIRST', allow_out_payment: true });
+  const second = create(first.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SECOND', allow_out_payment: true });
   const bill = makeBill(second.db, second.id);
   const conflict = create(bill.db, 'account.payment', { partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100, invoice_id: bill.id, partner_bank_id: first.id });
   assert.throws(() => confirmPayment.run(conflict.db, read(conflict.db, 'account.payment', conflict.id)), /bank account.*match/i);
@@ -1124,9 +1124,9 @@ test('outbound payment actions reject another company’s recipient bank and all
   const initial = seed();
   const company = createCompany(initial, { name: 'Other paying company' });
   const vendor = create(company.db, 'res.partner', { name: 'Company-aware vendor' });
-  const foreign = create(vendor.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-TWO', company_id: company.id });
-  const own = create(foreign.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-ONE', company_id: 1 });
-  const shared = create(own.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SHARED' });
+  const foreign = create(vendor.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-TWO', company_id: company.id, allow_out_payment: true });
+  const own = create(foreign.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'COMPANY-ONE', company_id: 1, allow_out_payment: true });
+  const shared = create(own.db, 'res.partner.bank', { partner_id: vendor.id, account_number: 'SHARED', allow_out_payment: true });
   const confirmPayment = models['account.payment'].form.buttons.find((button) => button.label === 'Confirm');
   const makePayment = (source, bankId, companyId = 1, invoiceId = null) => create(source, 'account.payment', {
     partner_id: vendor.id, partner_type: 'supplier', payment_type: 'outbound', amount: 100,

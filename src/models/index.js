@@ -3,10 +3,10 @@ import { read } from '../orm.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels, journalEntriesView } from './accounting.js';
+import { accountingModels, journalEntriesView, purchaseInvoiceView, salesInvoiceView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
-import { payModels } from './pay.js';
+import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
 import { elearningModels } from './elearning.js';
 import { surveyModels } from './surveys.js';
 import { smsModels } from './sms.js';
@@ -93,6 +93,9 @@ import { appAnalyses } from './analysis.js';
 import { orderpointModels } from './orderpoint.js';
 import { productConfigModels } from './productconfig.js';
 import { configurableReportModels } from './configurableReports.js';
+
+// Generic entry menus search like Journal Entries, not like invoices.
+const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
 
 export { today } from './common.js';
 
@@ -187,7 +190,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_invoice',
           defaults: { move_type: 'out_invoice' },
-          listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date' },
+          ...salesInvoiceView,
           emptyHelp: {
             title: 'Create a customer invoice',
             text: 'Create invoices, register payments and keep track of the discussions with your customers.',
@@ -199,9 +202,9 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'out_refund',
           defaults: { move_type: 'out_refund' },
-          listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date' },
+          ...salesInvoiceView,
         },
-        { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, listLabels: { partner_id: 'Customer' } },
+        { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
         { key: 'products', label: 'Products', model: 'product' },
         customers,
       ] },
@@ -212,7 +215,7 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_invoice',
           defaults: { move_type: 'in_invoice' },
-          listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date' },
+          ...purchaseInvoiceView,
           emptyHelp: {
             title: 'Create a vendor bill',
             text: 'Create invoices, register payments and keep track of the discussions with your vendors.',
@@ -224,9 +227,9 @@ const allApps = [
           model: 'account.move',
           domain: (r) => r.move_type === 'in_refund',
           defaults: { move_type: 'in_refund' },
-          listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date' },
+          ...purchaseInvoiceView,
         },
-        { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, listLabels: { partner_id: 'Vendor' } },
+        { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
         { key: 'products', label: 'Products', model: 'product' },
         vendors,
@@ -234,10 +237,10 @@ const allApps = [
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
           { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
-          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line' },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
-          { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+          { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
         ] },
                 { label: 'Assets & Liabilities', children: [
           { key: 'assets', label: 'Assets', model: 'account.asset' },
@@ -257,7 +260,7 @@ const allApps = [
           { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
           { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' } },
           { key: 'unreconciled', label: 'Unreconciled', type: 'report', report: 'unreconciledItems', reviewMode: 'unreconciled' },
-          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
+          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
@@ -331,12 +334,12 @@ const allApps = [
           { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
           { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
-          { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list' },
+          { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list', defaultFilters: ['sale', 'purchase'], includeArchived: true },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal' },
           { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
           { key: 'currencies', label: 'Currencies', model: 'res.currency' },
-          { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position' },
+          { key: 'fiscal-positions', label: 'Fiscal Positions', model: 'account.fiscal.position', view: 'list' },
           { key: 'fiscal-categories', label: 'Fiscal Categories', model: 'account.fiscal.category' },
           { key: 'tax-units', label: 'Tax Units', model: 'account.tax.unit' },
           { key: 'cash-roundings', label: 'Rounding Methods', model: 'account.cash.rounding' },

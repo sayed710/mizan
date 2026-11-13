@@ -22,18 +22,20 @@ export { actionRecords } from '../companyView.js';
 /** `rel=field:id` narrows an action to records linked to one parent (smart buttons). */
 export function parseRel(db, model, raw) {
   if (!raw) return null;
-  const [field, id] = raw.split(':');
+  const [field, rawIds] = raw.split(':');
+  const parts = (rawIds ?? '').split(',').filter(Boolean).map(Number);
+  const id = parts[0] ?? 0;
   if (model === 'account.move' && field === 'payment_id') {
-    const payment = read(db, 'account.payment', Number(id));
-    return { field, fieldLabel: 'Payment', id: Number(id), label: payment?.name ?? `#${id}` };
+    const payment = read(db, 'account.payment', id);
+    return { field, fieldLabel: 'Payment', id, label: payment?.name ?? `#${id}` };
   }
   if (model === 'account.deferral' && field === 'move_id') {
-    const move = read(db, 'account.move', Number(id));
-    return { field, fieldLabel: 'Journal Entry', id: Number(id), label: move?.name ?? `#${id}` };
+    const move = read(db, 'account.move', id);
+    return { field, fieldLabel: 'Journal Entry', id, label: move?.name ?? `#${id}` };
   }
   const f = models[model].fields[field];
   if (!f || f.type !== 'many2one') return null;
-  return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };
+  return { field, id, ...(parts.length > 1 ? { ids: parts } : {}), label: read(db, f.relation, id)?.name ?? `#${id}` };
 }
 
 const download = (name, text) => {
@@ -57,6 +59,9 @@ export function ActionView({ leaf, base, params }) {
   const optionalList = leaf.optionalList ?? def.optionalList ?? [];
   const searchFields = leaf.searchFields ?? def.searchFields ?? null;
   const listLabels = leaf.listLabels ?? def.listLabels ?? null;
+  const listFields = leaf.listFields ?? def.listFields ?? null;
+  const listDecoration = leaf.listDecoration ?? def.listDecoration ?? null;
+  const groupByLabels = leaf.groupByLabels ?? def.groupByLabels ?? null;
   // ?filter=<id> (repeatable) preselects the model's named filters, e.g. links from dashboard tiles.
   const urlFilters = params.getAll('filter').filter((id) => (filters ?? []).flat().some((f) => f.id === id));
   const [search, setSearch] = useState(() => {
@@ -75,8 +80,11 @@ export function ActionView({ leaf, base, params }) {
   const offset = page.key === pageKey ? page.offset : 0;
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
-  const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters, db, filters)
+  const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.ids ? search.rel.ids.join(',') : search.rel.id}` : '';
+  const needsArchived = Boolean(leaf.includeArchived ?? def.includeArchived)
+    || search.filters.some((id) => (filters ?? []).flat().find((f) => f.id === id)?.includeArchived);
+  const archiveMode = search.archived ? true : (needsArchived ? 'all' : false);
+  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, archiveMode), search.filters, db, filters)
     .filter((r) => matches(db, model, r, search.terms, searchFields));
   const records = def.sort ? [...filtered].sort(def.sort) : filtered;
   // The "how to start" help belongs to a truly empty list, not to a search or filter that matched nothing.
@@ -103,7 +111,7 @@ export function ActionView({ leaf, base, params }) {
     download(`${model}.csv`, toCsv([
       listCols.map((f) => colLabel(def.fields, f, listLabels)),
       ...rows.map((r) => listCols.map((f) => {
-        const field = def.fields[f];
+        const field = listFields?.[f] ? { ...def.fields[f], ...listFields[f] } : def.fields[f];
         return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f], r);
       })),
     ]));
@@ -171,10 +179,10 @@ export function ActionView({ leaf, base, params }) {
   return (
     <main className="action">
       <ControlPanel model={model} title={leaf.label} newHref={newHref} base={`${base}?${relQ.slice(1)}`.replace(/\?$/, '')}
-        view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} />
+        view={view} search={search} setSearch={setSearch} extra={extra} filters={filters} groupBys={groupBys} listLabels={listLabels} groupByLabels={groupByLabels} listFields={listFields} />
       <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} list={listCols} optionalList={optionalList} optionalStorageKey={optionalList.length ? `mizan-list-cols:${leaf.key || model}` : null} listLabels={listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
+      {view === 'list' && <List key={leaf.key || model} db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} list={listCols} optionalList={optionalList} listFields={listFields} listDecoration={listDecoration} optionalStorageKey={leaf.key ? `mizan-list-cols:${leaf.key}` : null} listLabels={listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}

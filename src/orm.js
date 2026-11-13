@@ -9,12 +9,16 @@ export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { 
 
 export const nextId = (db, model) => (db.seq[model] ?? 0) + 1;
 
+/** Next sequence number so a new record goes last in list order. */
+export const nextSequence = (db, model, step = 10) =>
+  Math.max(0, ...(db?.records?.[model] ?? []).map((r) => Number(r.sequence) || 0)) + step;
+
 // ---- multi-company: records of company-scoped models carry company_id (missing = company 1) ----
 /** Master data shared by all companies (Odoo shares these by default). */
 export const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type',
-  'account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model']);
+  'account.tax', 'account.cash.rounding', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.analytic.plan', 'account.analytic.account']);
 let activeCompany = null; // null = no filtering (server, tests)
 export const setActiveCompany = (id) => { activeCompany = Number(id) || null; };
 export const getActiveCompany = () => activeCompany;
@@ -118,12 +122,12 @@ export function create(db, model, vals, ctx = undefined) {
   const id = nextId(db, model);
   const rec = {
     ...(models[model].defaults?.(id) ?? {}),
-    ...(models[model].createDefaults?.(db, vals) ?? {}),
     ...(SHARED_MODELS.has(model) ? {} : { company_id: activeCompany ?? 1 }),
+    ...(models[model].createDefaults?.(db, vals) ?? {}),
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx);
+  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   const res = {
@@ -168,7 +172,7 @@ function writeValues(db, model, before, vals) {
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
 function prepareWrite(db, model, before, vals, ctx = undefined) {
   const result = writeValues(db, model, before, vals);
-  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx);
+  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
   return result;
@@ -198,8 +202,8 @@ export function writeManyAtomic(db, model, updates) {
     changes.set(id, { before, vals, ...writeValues(db, model, before, vals) });
   }
   let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
-  for (const { before, after } of changes.values()) {
-    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after);
+  for (const { before, after, vals } of changes.values()) {
+    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after, undefined, vals);
     if (error) throw new Error(error);
     checkDeclared(model, after);
   }
@@ -369,19 +373,40 @@ export function applyFilters(model, records, activeIds, db = null, filterGroups 
   return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r, db))));
 }
 
-/** Text search: every term must match some char/text/many2one display value. */
+/** Whether more than one active company exists (company records, else the settings list). */
+export function isMultiCompany(db) {
+  const recs = (db?.records?.['res.company'] ?? []).filter((c) => c.active !== false);
+  return (recs.length || (db?.settings?.companies?.length ?? 1)) > 1;
+}
+
+/** Text search: every term must match some searchable field value on the record. */
 export function matches(db, model, rec, terms, searchFields = null) {
   const fields = models[model].fields;
   const keys = searchFields ?? models[model].searchFields ?? Object.keys(fields);
+  const explicitSearch = Boolean(searchFields ?? models[model].searchFields);
+  const multiCompany = isMultiCompany(db);
   const haystack = keys
     .map((k) => {
       const f = fields[k];
-      if (!f) return '';
+      if (!f || (f.multiCompanyOnly && !multiCompany)) return '';
       if (f.type === 'many2one') {
-        const target = read(db, f.relation, rec[k]);
+        const target = db && rec[k] != null ? read(db, f.relation, rec[k]) : null;
         return `${target?.name ?? ''} ${target?.display_name ?? ''}`.trim();
       }
+      if (f.type === 'many2many') {
+        return (Array.isArray(rec[k]) ? rec[k] : [])
+          .map((id) => (db ? read(db, f.relation, Number(id)) : null))
+          .filter(Boolean)
+          .map((target) => `${target.name ?? ''} ${target.display_name ?? ''}`.trim())
+          .filter(Boolean)
+          .join(' ');
+      }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
+      if (explicitSearch && ['monetary', 'float', 'integer'].includes(f.type)) {
+        const val = f.compute ? f.compute(rec, db) : rec[k];
+        if (val == null || val === '') return '';
+        return f.type === 'integer' || !Number.isFinite(Number(val)) ? String(val) : `${val} ${Number(val).toFixed(2)}`;
+      }
       return ['char', 'text', 'selection'].includes(f.type) ? String(rec[k] ?? '') : '';
     })
     .join(' ')

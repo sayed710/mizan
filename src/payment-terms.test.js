@@ -194,7 +194,7 @@ test('payment terms list shows Name only and sorts by sequence in Odoo order', a
     '90 days, on the 10th',
   ];
   const def = models['account.payment.term'];
-  assert.deepEqual(def.list, ['name']);
+  assert.deepEqual(def.list, ['sequence', 'name', 'company_id']);
   const sortedNames = [...search(db, 'account.payment.term')].sort(def.sort).map((t) => t.name);
   assert.deepEqual(sortedNames, expectedOrder);
 
@@ -213,16 +213,16 @@ test('payment terms list shows Name only and sorts by sequence in Odoo order', a
     const headers = allFind(table, (n) => n.tagName === 'TH')
       .map((th) => th.textContent.trim())
       .filter(Boolean);
-    assert.deepEqual(headers, ['Name']);
+    assert.deepEqual(headers, ['Payment Terms']);
     const tbody = find(table, (n) => n.tagName === 'TBODY');
-    const rowNames = (tbody?.childNodes ?? []).map((tr) => tr.childNodes?.[1]?.textContent?.trim());
+    const rowNames = (tbody?.childNodes ?? []).map((tr) => tr.childNodes?.[2]?.textContent?.trim());
     assert.deepEqual(rowNames, expectedOrder);
   } finally {
     await ctx.done();
   }
 });
 
-test('preview text formats note, early payment discount, and numbered installments for 2/7 Net 30 and 30% Now, Balance 60 Days', () => {
+test('preview text formats early payment discount and numbered installments for 2/7 Net 30 and 30% Now, Balance 60 Days', () => {
   const db = seed();
   const computePreview = models['account.payment.term'].fields.preview.compute;
   const date = today();
@@ -234,7 +234,7 @@ test('preview text formats note, early payment discount, and numbered installmen
   );
   assert.equal(
     computePreview({ ...net, note: 'Pay early to save 2%' }),
-    `Pay early to save 2%\nEarly Payment Discount: 980.00 if paid before ${addDays(date, 7)}\n1 - Installment of 1,000.00 due on ${addDays(date, 30)}`,
+    `Early Payment Discount: 980.00 if paid before ${addDays(date, 7)}\n1 - Installment of 1,000.00 due on ${addDays(date, 30)}`,
   );
 
   const split = search(db, 'account.payment.term').find((t) => t.name === '30% Now, Balance 60 Days');
@@ -269,23 +269,25 @@ test('payment term form hides discount fields when early_discount is off, render
     assert.deepEqual(groupTitles, ['Due Terms', 'Preview']);
 
     const tabButtons = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab');
-    assert.deepEqual(tabButtons.map((b) => b.textContent.trim()), ['Note']);
+    assert.equal(tabButtons.length, 0);
     assert.ok(find(ctx.host, (n) => n.tagName === 'ASIDE' && hasClass(n, 'chatter')), 'chatter is rendered');
 
     // Due Terms table columns and readonly/blank On the cell when delay_type is days_after.
     const linesTable = find(ctx.host, (n) => n.tagName === 'TABLE' && hasClass(n, 'lines'));
     const lineHeaders = allFind(linesTable, (n) => n.tagName === 'TH' && !hasClass(n, 'o2m-cols-th')).map((th) => th.textContent.trim());
-    assert.deepEqual(lineHeaders, ['Due', 'Value Type', 'After', 'Delay Type', 'On the']);
+    assert.deepEqual(lineHeaders, ['Due', '', 'After', '', 'On the']);
     const firstRowCells = find(linesTable, (n) => n.tagName === 'TBODY').childNodes[0].childNodes;
     const onTheCell30 = firstRowCells[4];
     assert.equal(allFind(onTheCell30, (n) => n.tagName === 'INPUT').length, 0, 'On the is readonly/blank for days_after');
     assert.equal(onTheCell30.textContent.trim(), '');
 
-    // Toggle early_discount on -> reveals Discount %, Within (days), Reduced tax.
+    // Toggle early_discount on -> reveals inline discount_percent, discount_days, and Reduced tax:.
     const earlyCheckbox = find(groups[0], (n) => n.tagName === 'INPUT' && props(n)?.type === 'checkbox');
     await ctx.React.act(async () => props(earlyCheckbox).onChange({ target: { checked: true } }));
     const updatedGroups = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    assert.deepEqual(fieldLabelsOf(updatedGroups[0]), ['Early Discount', 'Discount %', 'Within (days)', 'Reduced tax']);
+    assert.deepEqual(fieldLabelsOf(updatedGroups[0]), ['Early Discount', 'Reduced tax:']);
+    assert.ok(find(updatedGroups[0], (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-discount_percent'));
+    assert.ok(find(updatedGroups[0], (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-discount_days'));
     const reducedTaxSelect = find(updatedGroups[0], (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-discount_tax_computation');
     const optionLabels = allFind(reducedTaxSelect, (n) => n.tagName === 'OPTION' && props(n)?.value)
       .map((o) => [props(o).value, o.textContent.trim()]);

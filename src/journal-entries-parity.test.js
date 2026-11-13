@@ -146,11 +146,11 @@ test('Journal Entries list shows Odoo 20 columns, signed company-currency Total,
   assert.equal(read(db, 'account.move', invId).amount_total_signed, 50);
   assert.equal(read(db, 'account.move', billId).amount_total_signed, -200);
 
-  // Invoices and bills menus must keep their original list config and model overdue filter.
+  // Invoices and bills menus preserve their Odoo 20 invoice/bill list config (distinct from Journal Entries) and overdue filter.
   const invLeaf = findLeafByKey(menusFor('accounting'), 'invoices');
   const billLeaf = findLeafByKey(menusFor('accounting'), 'bills');
-  assert.equal(invLeaf.list, undefined);
-  assert.equal(billLeaf.list, undefined);
+  assert.ok(invLeaf.list.includes('status_in_payment') && invLeaf.list.includes('invoice_user_id') && !invLeaf.list.includes('payment_reference'));
+  assert.ok(billLeaf.list.includes('status_in_payment') && billLeaf.list.includes('payment_reference') && !billLeaf.list.includes('invoice_user_id'));
   assert.ok(models['account.move'].filters.flat().some((f) => f.id === 'overdue'));
 
   const leaf = entriesLeaf();
@@ -462,22 +462,22 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
       ['Select', 'Date', 'Journal Entry', 'Account', 'Partner', 'Label', 'Debit', 'Credit', 'Matching'],
     );
 
-    // Due Date, Amount in Currency, Company and other Odoo columns live in optional column menu.
+    // Due Date, In Currency and other Odoo columns live in optional column menu (Company is multi-company only).
     const colsBtn = find(thead, (n) => hasClass(n, 'o2m-cols-toggle'));
     assert.ok(colsBtn);
     await click(ctx.React, colsBtn);
     const optLabels = allFind(thead, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'menuitemcheckbox')
       .map((b) => b.textContent.replace('✓', '').trim());
-    for (const col of ['Due Date', 'Amount in Currency', 'Company', 'Invoice Date', 'Journal', 'Reference', 'Product', 'Taxes', 'Tax Grids', 'Balance']) {
+    for (const col of ['Due Date', 'In Currency', 'Currency', 'Invoice Date', 'Journal', 'Reference', 'Product', 'Analytic Distribution', 'Taxes', 'Tax Grids', 'Discount Date', 'Discount Amount', 'Originator Tax', 'Balance', 'Residual', 'Residual in Currency']) {
       assert.ok(optLabels.includes(col), `Optional column ${col} available`);
     }
-    for (const target of ['Due Date', 'Amount in Currency', 'Company']) {
+    assert.ok(!optLabels.includes('Company'), 'Company is hidden in single-company database');
+    for (const target of ['Due Date', 'In Currency']) {
       const btn = allFind(thead, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'menuitemcheckbox' && n.textContent.includes(target))[0];
       await click(ctx.React, btn);
     }
     assert.ok(allFind(thead, (n) => n.tagName === 'TH').some((th) => th.textContent.trim() === 'Due Date'));
-    assert.ok(allFind(thead, (n) => n.tagName === 'TH').some((th) => th.textContent.trim() === 'Amount in Currency'));
-    assert.ok(allFind(thead, (n) => n.tagName === 'TH').some((th) => th.textContent.trim() === 'Company'));
+    assert.ok(allFind(thead, (n) => n.tagName === 'TH').some((th) => th.textContent.trim() === 'In Currency'));
 
     // Debit / Credit totals footer row matches visible balanced lines.
     const tfoot = find(ctx.host, (n) => n.tagName === 'TFOOT');
@@ -491,7 +491,7 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
     const filterButtons = allFind(filterGroup, (n) => n.tagName === 'BUTTON');
     assert.deepEqual(
       filterButtons.map((b) => b.textContent.trim()),
-      ['Unposted', 'Posted', 'Unreconciled', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year'],
+      ['Unposted', 'Posted', 'Not Secured', 'Unreconciled', 'With residual', 'Sales', 'Purchases', 'Bank', 'Cash', 'Credit', 'Miscellaneous', 'Payable', 'Receivable', 'P&L Accounts', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year'],
     );
     const bodyItemRows = () => allFind(find(ctx.host, (n) => n.tagName === 'TBODY'), (n) => n.tagName === 'TR' && !hasClass(n, 'group-row'));
     const clickFilter = async (labelText) => {
@@ -514,11 +514,11 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
       await clickFilter(labelText);
     }
 
-    // Group By: Journal Entry, Account, Partner, Journal, Date, Taxes.
+    // Group By: Journal Entry, Account, Partner, Journal, Date, Invoice Date, Taxes, Tax Grid, Matching.
     const groupSelect = find(ctx.host, (n) => n.tagName === 'SELECT' && props(n)?.['aria-label'] === t('Group By'));
     const optTexts = allFind(groupSelect, (n) => n.tagName === 'OPTION').map((o) => o.textContent.trim());
-    assert.deepEqual(optTexts, ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Date', 'Taxes']);
-    for (const val of ['move', 'account', 'partner', 'journal', 'date', 'taxes']) {
+    assert.deepEqual(optTexts, ['None', 'Journal Entry', 'Account', 'Partner', 'Journal', 'Date', 'Invoice Date', 'Taxes', 'Tax Grid', 'Matching']);
+    for (const val of ['move', 'account', 'partner', 'journal', 'date', 'invoice_date', 'taxes', 'tax_grids', 'matching']) {
       await ctx.React.act(async () => {
         props(groupSelect).onChange({ target: { value: val } });
       });
@@ -576,7 +576,7 @@ test('Arabic translations cover new Journal Entries and Journal Items labels', a
   globalThis.localStorage = { getItem: (k) => (k === 'mizan-lang' ? 'ar' : null), setItem: () => {}, removeItem: () => {}, clear: () => {} };
   try {
     const { t } = await import('./i18n.js?lang=ar-jent');
-    for (const key of ['Unposted', 'Bank', 'Miscellaneous', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year', 'P&L Accounts', 'Journal Entry', 'Matching', 'Due Date', 'Amount in Currency', 'Reversed', 'Manual', 'Payable', 'Receivable']) {
+    for (const key of ['Unposted', 'Bank', 'Miscellaneous', 'Date: This Month', 'Date: This Year', 'Invoice Date: This Month', 'Invoice Date: This Year', 'P&L Accounts', 'Journal Entry', 'Matching', 'Due Date', 'In Currency', 'Reversed', 'Manual', 'Payable', 'Receivable']) {
       assert.notEqual(t(key), key, `Missing Arabic translation for ${key}`);
     }
   } finally {

@@ -1,8 +1,17 @@
 // Activities (scheduled follow-ups on any record) and Discuss channels.
 import { postNote, read, write } from '../orm.js';
 import { today } from './common.js';
+import { t } from '../i18n.js';
 
 export const ACTIVITY_TYPES = [['todo', 'To-Do'], ['call', 'Call'], ['email', 'Email'], ['meeting', 'Meeting'], ['upload', 'Upload Document']];
+
+/** Comma-separated open activity labels for a record, or empty string when none are open. */
+export function openActivitiesText(db, model, resId) {
+  if (!db) return '';
+  const open = (db.records?.['mail.activity'] ?? [])
+    .filter((a) => a.active !== false && !a.done && a.res_model === model && a.res_id === resId);
+  return open.map((a) => a.summary || a.activity_type || t('Activity')).join(', ');
+}
 
 export const activityState = (r) => {
   if (r.done) return 'done';

@@ -1,5 +1,5 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
-import { read, search } from '../orm.js';
+import { nextSequence, read, search } from '../orm.js';
 import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
@@ -503,14 +503,49 @@ const repartitionField = (label) => ({
   newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
 });
 
+/**
+ * Whether a tax or fiscal position's country equals its company's country (case-insensitive, trimmed; false if either is unset).
+ */
+export function isDomesticRecord(record, db) {
+  if (!db || !record) return false;
+  const companyId = record.company_id ?? db.settings?.current_company_id ?? 1;
+  const company = read(db, 'res.company', companyId);
+  const recordCountry = String(record.country ?? '').trim().toLowerCase();
+  const companyCountry = String(company?.country ?? '').trim().toLowerCase();
+  return Boolean(recordCountry && companyCountry && recordCountry === companyCountry);
+}
+
 export const taxModels = {
   'account.tax.group': {
     label: 'Tax Groups',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      country: { type: 'char', label: 'Country', help: 'The country for which this tax group is applicable.' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, multiCompanyOnly: true },
+      preceding_subtotal: {
+        type: 'char',
+        label: 'Preceding Subtotal',
+        optional: 'hide',
+        help: "If set, this value will be used on documents as the label of a subtotal excluding this tax group before displaying it. If not set, the tax group will be displayed after the 'Untaxed amount' subtotal.",
+      },
+      pos_receipt_label: { type: 'char', label: 'Label on PoS Receipts' },
     },
-    list: ['name'],
-    form: { title: 'name', groups: [[], []], chatter: true },
+    defaults: () => ({ sequence: 10 }),
+    createDefaults: (db, vals = {}) => ({
+      company_id: vals.company_id ?? db?.settings?.current_company_id ?? 1,
+      sequence: nextSequence(db, 'account.tax.group'),
+    }),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
+    views: ['list'],
+    searchFields: ['name'],
+    list: ['sequence', 'name', 'country', 'company_id', 'preceding_subtotal'],
+    form: {
+      title: 'name',
+      hideTitle: true,
+      groups: [['name', 'country', 'company_id', 'sequence', 'pos_receipt_label'], ['preceding_subtotal']],
+      chatter: true,
+    },
   },
   'account.tax': {
     label: 'Taxes',
@@ -519,6 +554,8 @@ export const taxModels = {
       if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
         try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
       }
+      const group = after.tax_group_id ? read(db, 'account.tax.group', after.tax_group_id) : null;
+      if (group?.company_id && group.company_id !== (after.company_id ?? 1)) return 'The tax group must belong to the tax company';
       for (const row of [...(after.invoice_repartition_line_ids ?? []), ...(after.refund_repartition_line_ids ?? [])]) {
         if (row.account_id) {
           const account = read(db, 'account.account', row.account_id);
@@ -545,15 +582,15 @@ export const taxModels = {
     },
     fields: {
       name: { type: 'char', label: 'Tax Name', required: true },
-      sequence: { type: 'integer', label: 'Sequence' },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       amount_type: { type: 'selection', label: 'Tax Computation', options: [['percent', 'Percentage'], ['fixed', 'Fixed'], ['group', 'Group of Taxes']] },
       amount: { type: 'float', label: 'Amount' },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
-      description: { type: 'char', label: 'Description' },
+      description: { type: 'char', label: 'Description', optional: 'show' },
       type_tax_use: { type: 'selection', label: 'Tax Type', options: TAX_TYPES },
       tax_scope: { type: 'selection', label: 'Tax Scope', options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
-      original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces' },
+      original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces', optional: 'hide' },
       fiscal_position_mapping_ids: {
         type: 'one2many',
         label: 'Fiscal Position Mappings',
@@ -569,7 +606,8 @@ export const taxModels = {
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
-      tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
+      tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
       refund_repartition_line_ids: repartitionField('Distribution for Refunds'),
       active: { type: 'boolean', label: 'Active' },
@@ -603,10 +641,18 @@ export const taxModels = {
     },
     onchange: () => ({}),
     sort: (a, b) => (a.sequence ?? 1) - (b.sequence ?? 1) || (a.id ?? 0) - (b.id ?? 0),
-    groupBys: ['type_tax_use', 'tax_group_id'],
-    filters: [[{ id: 'sale', label: 'Sales', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchases', fn: (r) => r.type_tax_use === 'purchase' }]],
+    searchFields: ['name', 'description', 'amount', 'company_id', 'fiscal_position_ids'],
+    groupBys: ['company_id', 'type_tax_use', 'tax_scope', 'fiscal_position_ids'],
+    filters: [
+      [{ id: 'sale', label: 'Sale', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchase', fn: (r) => r.type_tax_use === 'purchase' }],
+      [{ id: 'services', label: 'Services', fn: (r) => r.tax_scope === 'service' }, { id: 'goods', label: 'Goods', fn: (r) => r.tax_scope === 'consu' }],
+      [{ id: 'active', label: 'Active', fn: (r) => r.active !== false }, { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false }],
+    ],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
-    list: ['name', 'description', 'type_tax_use', 'tax_scope', 'invoice_label', 'active'],
+    list: ['sequence', 'name', 'description', 'type_tax_use', 'original_tax_ids', 'tax_scope', 'invoice_label', 'company_id', 'active'],
+    listFields: { active: { widget: 'toggle' } },
+    editableList: ['active'],
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
     form: {
       title: 'name',
       groups: (r) => [
@@ -638,7 +684,7 @@ export const taxModels = {
     label: 'Fiscal Positions',
     fields: {
       name: { type: 'char', label: 'Fiscal Position', required: true },
-      sequence: { type: 'integer', label: 'Sequence' },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       auto_apply: { type: 'boolean', label: 'Detect Automatically' },
       vat_required: { type: 'boolean', label: 'VAT Required' },
       foreign_vat: { type: 'char', label: 'Foreign Tax ID' },
@@ -646,6 +692,8 @@ export const taxModels = {
       zip_from: { type: 'char', label: 'Zip From' },
       zip_to: { type: 'char', label: 'Zip To' },
       note: { type: 'text', label: 'Legal Notes' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      active: { type: 'boolean', label: 'Active' },
       account_ids: {
         type: 'one2many', label: 'Account Mapping',
         fields: { account_src_id: { type: 'many2one', relation: 'account.account', label: 'Product Account' }, account_dest_id: { type: 'many2one', relation: 'account.account', label: 'Account to use instead' } },
@@ -653,10 +701,13 @@ export const taxModels = {
       },
       excluded_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Excluded Taxes' },
     },
-    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, account_ids: [], excluded_tax_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, active: true, account_ids: [], excluded_tax_ids: [] }),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
+    views: ['list', 'kanban'],
+    searchFields: ['name'],
+    filters: [[{ id: 'domestic', label: 'Domestic', fn: isDomesticRecord }]],
     kanban: { title: 'name', lines: ['country'] },
-    list: ['sequence', 'name', 'country', 'auto_apply'],
+    list: ['sequence', 'name', 'company_id'],
     form: {
       title: 'name',
       groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], []],

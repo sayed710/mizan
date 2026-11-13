@@ -1,17 +1,19 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { groupRecords, write, writeMany } from '../orm.js';
+import { groupRecords, read, write, writeMany } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, FieldInput, isNumeric, money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns } from '../ui.jsx';
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
+import { today } from '../models/common.js';
 import { RateNote } from './RateNote.jsx';
 
 function sortRecords(db, fields, records, sort) {
   if (!sort) return records;
   const [f, dir] = sort;
-  const text = (r) => display(db, fields[f], r[f]);
+  const field = fields[f];
+  const text = (r) => (field?.type === 'date' ? String(r[f] ?? '') : display(db, field, r[f]));
   return [...records].sort((a, b) => {
     const x = a[f];
     const y = b[f];
@@ -33,9 +35,22 @@ export function reorderSequenceUpdates(records, fromId, toId, field = 'sequence'
 
 export const colLabel = (fields, f, listLabels) => t(listLabels?.[f] ?? fields[f].label);
 
+const resolveListFields = (fields, listFields, db = null) => {
+  const base = listFields ? { ...fields } : fields;
+  if (listFields) {
+    for (const [k, v] of Object.entries(listFields)) if (base[k]) base[k] = { ...base[k], ...v };
+  }
+  if (!db) return base;
+  const resolved = { ...base };
+  for (const [k, f] of Object.entries(resolved)) {
+    if (typeof f?.optional === 'function') resolved[k] = { ...f, optional: f.optional(db) };
+  }
+  return resolved;
+};
+
 /** Compute the ordered visible columns for a list view given company count and optional toggles. */
-export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null } = {}) {
-  const fields = def.fields;
+export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null, listFields = null } = {}) {
+  const fields = resolveListFields(def.fields, listFields, db);
   const isVisible = (f, defaultVisible) => optionalState[f] ?? defaultVisible;
   const multiCompany = companiesOf(db).length > 1;
   const baseCols = (list ?? def.list).filter((f) => !fields[f]?.multiCompanyOnly || multiCompany);
@@ -67,11 +82,11 @@ const Totals = ({ db, cols, fields, records }) =>
     );
   });
 
-export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
+export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, listFields = null, listDecoration = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
   const def = models[model];
-  const fields = def.fields;
+  const fields = resolveListFields(def.fields, listFields, db);
   const [optionalState, , toggleCol] = useOptionalColumns(optionalStorageKey ?? `mizan-list-cols:${model}`);
-  const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList });
+  const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList, listFields });
   const handleField = cols.find((f) => fields[f]?.widget === 'handle');
   const [sort, setSort] = useState(null);
   const [dragId, setDragId] = useState(null);
@@ -117,7 +132,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       onDrop={canDrag ? (e) => { e.preventDefault(); dropRow(r.id); } : undefined}
       onClick={() => open(r.id)}
       onKeyDown={(e) => { if (e.key === 'Enter' && e.target === e.currentTarget) open(r.id); }}
-      className={`${selected.has(r.id) ? 'selected' : ''} ${def.listDecoration?.(r) ?? ''}`}
+      className={`${selected.has(r.id) ? 'selected' : ''} ${(listDecoration ?? def.listDecoration)?.(r) ?? ''}`}
     >
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
@@ -132,13 +147,17 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
           );
         }
         const editable = def.editableList?.includes(f);
-        const text = editable ? null : display(db, field, r[f], r);
-        const badge = editable ? null : badgeClass(field.badge, r[f]);
+        const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
+        const text = editable || isTags ? null : display(db, field, r[f], r);
+        const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
+        // Odoo's relative-date widget shows a past date in red.
+        const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (
-          <td key={f} className={isNumeric(field) ? 'num' : ''}
+          <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : '', pastDue ? 'text-danger' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
             {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
+              : isTags ? <span className="many2many-tags">{(Array.isArray(r[f]) ? r[f] : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );

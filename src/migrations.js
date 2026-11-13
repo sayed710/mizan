@@ -1190,6 +1190,93 @@ MIGRATIONS.push({ version: 42, name: 'Statement line currency from journal', up:
   return { ...db, records: { ...db.records, 'account.bank.statement.line': next } };
 } });
 
+MIGRATIONS.push({ version: 43, name: 'currency-parity', up(db) {
+  const currencies = db.records['res.currency'] ?? [];
+  if (!currencies.length) return db;
+  const nextCurrencies = currencies.map(({ unit_name: unitName, ...c }) => ({
+    ...c,
+    currency_unit_label: c.currency_unit_label ?? unitName ?? null,
+    active: c.active === undefined ? true : c.active,
+    position: c.position ?? 'before',
+  }));
+  return { ...db, records: { ...db.records, 'res.currency': nextCurrencies } };
+} });
+
+MIGRATIONS.push({ version: 44, name: 'payment-terms-parity', up(db) {
+  const terms = db.records['account.payment.term'] ?? [];
+  if (!terms.length) return db;
+  const nextTerms = terms.map((t) => ({
+    ...t,
+    active: t.active === undefined ? true : t.active,
+    display_on_invoice: t.display_on_invoice === undefined ? true : t.display_on_invoice,
+  }));
+  return { ...db, records: { ...db.records, 'account.payment.term': nextTerms } };
+} });
+
+/** Backfill company_id (from owning taxes, else main company) and sequence on tax groups, plus sequence/active/currency_ids on cash roundings. */
+MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(db) {
+  const companies = db.records['res.company'] ?? [];
+  const mainCompanyId = companies.find((c) => !c.parent_id)?.id ?? companies[0]?.id ?? 1;
+  const taxes = db.records['account.tax'] ?? [];
+  const groups = db.records['account.tax.group'] ?? [];
+  const roundings = db.records['account.cash.rounding'] ?? [];
+
+  let nextGroupSeq = Math.max(0, ...groups.map((g) => Number(g.sequence) || 0));
+  let nextGroupId = Math.max(0, db.seq?.['account.tax.group'] ?? 0, ...groups.map((g) => g.id ?? 0));
+  // A company-less group used by several companies' taxes becomes one group per company, so each keeps seeing its own.
+  const taxGroupFor = new Map();
+  const nextGroups = groups.flatMap((g) => {
+    const sequence = g.sequence ?? (nextGroupSeq += 10);
+    if (g.company_id != null) return [{ ...g, sequence }];
+    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
+    if (owners.length <= 1) return [{ ...g, company_id: owners[0] ?? mainCompanyId, sequence }];
+    const [keep, ...rest] = owners.includes(mainCompanyId) ? [mainCompanyId, ...owners.filter((c) => c !== mainCompanyId)] : owners;
+    return [{ ...g, company_id: keep, sequence }, ...rest.map((companyId) => {
+      const id = ++nextGroupId;
+      taxGroupFor.set(`${g.id}:${companyId}`, id);
+      return { ...g, id, company_id: companyId, sequence };
+    })];
+  });
+  const nextTaxes = taxes.map((t) => {
+    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id}`);
+    return id ? { ...t, tax_group_id: id } : t;
+  });
+
+  let nextRoundingSeq = Math.max(0, ...roundings.map((r) => Number(r.sequence) || 0));
+  const nextRoundings = roundings.map((r) => ({
+    ...r,
+    active: r.active === undefined ? true : r.active,
+    sequence: r.sequence ?? (nextRoundingSeq += 10),
+    currency_ids: Array.isArray(r.currency_ids) ? r.currency_ids : [],
+  }));
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(groups.length ? { 'account.tax.group': nextGroups } : {}),
+      ...(taxGroupFor.size ? { 'account.tax': nextTaxes } : {}),
+      ...(roundings.length ? { 'account.cash.rounding': nextRoundings } : {}),
+    },
+    ...(taxGroupFor.size ? { seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId } } : {}),
+  };
+} });
+
+MIGRATIONS.push({ version: 46, name: 'analytic-plans-sequence-backfill', up(db) {
+  const plans = db.records['account.analytic.plan'] ?? [];
+  if (!plans.length) return db;
+  let nextSeq = Math.max(0, ...plans.map((p) => Number(p.sequence) || 0));
+  const nextPlans = plans.map((p) => ({
+    ...p,
+    sequence: p.sequence ?? (nextSeq += 10),
+    ...(!p.parent_id && !p.default_applicability ? { default_applicability: 'optional' } : {}),
+  }));
+  return {
+    ...db,
+    records: { ...db.records, 'account.analytic.plan': nextPlans },
+  };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

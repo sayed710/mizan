@@ -9,9 +9,9 @@ export const viewRecords = (db, model, options) => companyFilter(db, search(db, 
 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>
-  viewRecords(db, leaf.model, { includeArchived: archived })
+  viewRecords(db, leaf.model, { includeArchived: archived === true || archived === 'all' })
     .filter((r) => {
-      if (archived && r.active !== false) return false;
+      if (archived === true && r.active !== false) return false;
       if (leaf.domain && !leaf.domain(r, db)) return false;
       if (!rel) return true;
       if (rel.field === 'payment_id' && leaf.model === 'account.move') {
@@ -25,7 +25,7 @@ export const actionRecords = (db, leaf, rel, archived = false) =>
         const jId = r.journal_id ?? (r.state === 'draft' && r.move_type !== 'entry' ? resolveDocumentJournal(db, r)?.id : null);
         return jId === rel.id;
       }
-      return r[rel.field] === rel.id;
+      return rel.ids ? rel.ids.includes(r[rel.field]) : r[rel.field] === rel.id;
     });
 
 /** Allowed many2one choices plus the current value, even if foreign or archived. */

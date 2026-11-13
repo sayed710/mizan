@@ -120,7 +120,8 @@ test('Customer Payments and Vendor Payments list columns, partner headers, and s
   );
 
   assert.deepEqual(models['account.payment'].list, [
-    'date', 'name', 'journal_id', 'partner_id', 'amount_company_currency_signed', 'display_state',
+    'date', 'name', 'journal_id', 'company_id', 'partner_id',
+    'amount_signed', 'currency_id', 'activities', 'amount_company_currency_signed', 'display_state',
   ]);
   assert.ok(models['account.payment'].fields.memo);
   assert.ok(models['account.payment'].fields.payment_type);
@@ -132,17 +133,17 @@ test('Customer Payments and Vendor Payments list columns, partner headers, and s
 
   await withUi(db, async ({ host, renderAction }) => {
     await renderAction(custLeaf);
-    const custHeaders = allFind(host, (n) => n.tagName === 'TH' && !hasClass(n, 'check'))
+    const custHeaders = allFind(host, (n) => n.tagName === 'TH' && !hasClass(n, 'check') && !hasClass(n, 'o2m-cols-th'))
       .map((th) => th.textContent.replace(/[▲▼]/g, '').trim());
-    assert.deepEqual(custHeaders, ['Date', 'Number', 'Journal', 'Customer', 'Amount', 'Status']);
+    assert.deepEqual(custHeaders, ['Date', 'Number', 'Journal', 'Customer', 'Amount in Currency', 'Amount', 'Status']);
     const custRows = allFind(host, (n) => n.tagName === 'TBODY')[0].childNodes.filter((n) => n.tagName === 'TR');
     assert.ok(custRows.some((tr) => tr.textContent.includes(postedIn.name) && tr.textContent.includes('Paid')));
     assert.ok(!custRows.some((tr) => tr.textContent.includes(postedOut.name)));
 
     await renderAction(vendLeaf);
-    const vendHeaders = allFind(host, (n) => n.tagName === 'TH' && !hasClass(n, 'check'))
+    const vendHeaders = allFind(host, (n) => n.tagName === 'TH' && !hasClass(n, 'check') && !hasClass(n, 'o2m-cols-th'))
       .map((th) => th.textContent.replace(/[▲▼]/g, '').trim());
-    assert.deepEqual(vendHeaders, ['Date', 'Number', 'Journal', 'Vendor', 'Amount', 'Status']);
+    assert.deepEqual(vendHeaders, ['Date', 'Number', 'Journal', 'Vendor', 'Amount in Currency', 'Amount', 'Status']);
     const vendRows = allFind(host, (n) => n.tagName === 'TBODY')[0].childNodes.filter((n) => n.tagName === 'TR');
     assert.ok(vendRows.some((tr) => tr.textContent.includes(postedOut.name) && tr.textContent.includes('-') && tr.textContent.includes('Paid')));
     assert.ok(!vendRows.some((tr) => tr.textContent.includes(postedIn.name)));
@@ -197,18 +198,18 @@ test('Payment status labels, bank-matched Reconciled display_state, filters, and
 
   // Search filters: Outstanding = posted and not reconciled
   const all = search(db, 'account.payment').filter((r) => [d.id, c.id, p.id, m.id, rev.id].includes(r.id));
-  assert.deepEqual(applyFilters('account.payment', all, ['outstanding']).map((r) => r.id), [p.id]);
-  assert.deepEqual(applyFilters('account.payment', all, ['draft']).map((r) => r.id), [d.id]);
-  assert.deepEqual(applyFilters('account.payment', all, ['paid']).map((r) => r.id), [p.id, m.id]);
-  assert.deepEqual(applyFilters('account.payment', all, ['customer']).map((r) => r.id), [d.id, c.id, p.id, m.id]);
-  assert.deepEqual(applyFilters('account.payment', all, ['supplier']).map((r) => r.id), [rev.id]);
+  assert.deepEqual(applyFilters('account.payment', all, ['outstanding'], db).map((r) => r.id), [p.id]);
+  assert.deepEqual(applyFilters('account.payment', all, ['draft'], db).map((r) => r.id), [d.id]);
+  assert.deepEqual(applyFilters('account.payment', all, ['paid'], db).map((r) => r.id), [p.id, m.id]);
+  assert.deepEqual(applyFilters('account.payment', all, ['customer'], db).map((r) => r.id), [d.id, c.id, p.id, m.id]);
+  assert.deepEqual(applyFilters('account.payment', all, ['supplier'], db).map((r) => r.id), [rev.id]);
 
   // Unreconciling returns display_state back to 'posted' (Paid)
   const afterUnrec = unreconcile(db, read(db, 'account.bank.statement.line', stmtLine.id)).db;
   assert.equal(read(afterUnrec, 'account.payment', m.id).display_state, 'posted');
 
-  // Group bys: Partner, Journal, Status (display_state), Date
-  assert.deepEqual(models['account.payment'].groupBys, ['partner_id', 'journal_id', 'display_state', 'date']);
+  // Group bys: Partner, Journal, Status, Payment Date, Currency, Company
+  assert.deepEqual(models['account.payment'].groupBys, ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id']);
   const byStatus = groupRecords(db, 'account.payment', all, 'display_state');
   assert.equal(byStatus.find((g) => g.key === 'reconciled').records.length, 1);
   assert.equal(byStatus.find((g) => g.key === 'posted').records.length, 1);

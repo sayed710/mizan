@@ -1,12 +1,12 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useEffect, useRef, useState } from 'react';
 import { models, targetOf } from './models/index.js';
-import { read } from './orm.js';
+import { isMultiCompany, read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
-import { parseAmount } from './models/common.js';
+import { parseAmount, today } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { fieldReadonly, fieldRequired } from './field-metadata.js';
@@ -63,8 +63,25 @@ export const formatDate = (iso, opts = { month: 'short', day: 'numeric', year: '
 const localInput = (iso) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
 export const isNumeric = (field) => ['monetary', 'float', 'integer'].includes(field?.type);
 
+const utcDayMs = (iso) => {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  return Date.UTC(y, m - 1, d);
+};
+
+/** Format an ISO date relative to `refDate` (e.g. "Today", "In 5 days", "3 days ago"). */
+export function formatRelativeDate(iso, refDate = today()) {
+  if (!iso) return '';
+  const diff = Math.round((utcDayMs(iso) - utcDayMs(refDate)) / 86400000);
+  if (diff === 0) return t('Today');
+  if (diff === 1) return t('In 1 day');
+  if (diff > 1) return t('In {n} days', { n: diff });
+  if (diff === -1) return t('1 day ago');
+  return t('{n} days ago', { n: -diff });
+}
+
 /** Display text of a field value; `rec` (or its parent document) gives monetary amounts their own currency. */
 export function display(db, field, value, rec = null) {
+  if (rec && field.hideWhen?.(rec, db)) return '';
   if (value == null || value === '') return '';
   switch (field.type) {
     case 'monetary': {
@@ -79,7 +96,11 @@ export function display(db, field, value, rec = null) {
       }
       return money(value, currency?.name ?? currencyCode(db, rec), currency);
     }
-    case 'float': return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: field.digits == null ? 2 : 0, maximumFractionDigits: field.digits ?? 2 }));
+    case 'float': {
+      const min = Array.isArray(field.digits) ? field.digits[0] : (field.digits == null ? 2 : 0);
+      const max = Array.isArray(field.digits) ? field.digits[1] : (field.digits ?? 2);
+      return ltr(Number(value).toLocaleString('en-US', { minimumFractionDigits: min, maximumFractionDigits: max }));
+    }
     case 'selection': return t(field.options.find((o) => o[0] === value)?.[1] ?? value);
     case 'many2one': { const r = read(db, field.relation, Number(value)); return r?.display_name ?? r?.name ?? ''; }
     case 'many2many': return (Array.isArray(value) ? value : []).map((id) => { const r = read(db, field.relation, Number(id)); return r?.display_name ?? r?.name ?? ''; }).filter(Boolean).join(', ');
@@ -88,7 +109,7 @@ export function display(db, field, value, rec = null) {
     case 'distribution': return JSON.stringify(value);
     case 'binary': return value?.name ?? '';
     case 'html': return String(value ?? '');
-    case 'date': return formatDate(value);
+    case 'date': return field.widget === 'remaining_days' ? formatRelativeDate(value) : formatDate(value);
     case 'datetime': return new Date(value).toLocaleString(dateLocale, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
     default: return String(value);
   }
@@ -290,7 +311,8 @@ export function OptionalColsMenu({ items, optionalState, onToggle }) {
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly, record }) {
-  const allCols = (field.columnsFor?.(record, db) ?? Object.entries(field.fields)).filter(([, f]) => !f.hidden);
+  const multiCompany = isMultiCompany(db);
+  const allCols = (field.columnsFor?.(record, db) ?? Object.entries(field.fields)).filter(([, f]) => !f.hidden && (!f.multiCompanyOnly || multiCompany));
   const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
   const storageKey = o2mStorageKey(model, fieldName, field, id);
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(storageKey);
@@ -302,10 +324,14 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
   const hasSection = displayOpts.some(([v]) => v === 'line_section');
   const hasNote = displayOpts.some(([v]) => v === 'line_note');
   const hasActionCol = !readonly || optionalCols.length > 0;
+  const rows = field.sort
+    ? value.map((l, idx) => [l, idx]).sort((a, b) => field.sort(a[0], b[0]))
+    : value.map((l, idx) => [l, idx]);
 
   const set = (i, key, v) => {
-    const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
-    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db, record) : l)));
+    const isComputed = Boolean(field.fields[key]?.compute);
+    const next = value.map((l, j) => (j === i && !isComputed ? { ...l, [key]: v } : l));
+    onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(isComputed ? { ...l, [key]: v } : l, key, db, record) : l)));
   };
   const addSpecialLine = (displayType) => {
     const base = field.newLine?.(record, db) ?? {};
@@ -317,7 +343,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
       <table className="lines">
         <thead>
           <tr>
-            {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{t(f.label)}</th>)}
+            {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{f.hideHeader ? '' : t(f.label)}</th>)}
             {priced && <th className="num">{t('Subtotal')}</th>}
             {hasActionCol && (
               <th className="o2m-cols-th" aria-label={optionalCols.length > 0 ? undefined : t('Delete')}>
@@ -331,7 +357,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
           </tr>
         </thead>
         <tbody>
-          {value.map((l, i) => {
+          {rows.map(([l, i], rowIdx) => {
             const isSection = l.display_type === 'line_section';
             const isNote = l.display_type === 'line_note';
             if (isSection || isNote) {
@@ -341,7 +367,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                   <td colSpan={cols.length + (priced ? 1 : 0)}>
                     {readonly
                       ? <span className="readonly">{l.name ?? ''}</span>
-                      : <FieldInput db={db} field={nameField} value={l.name} record={l} onChange={(v) => set(i, 'name', v)} label={`${t(nameField.label)} ${i + 1}`} placeholder={isSection ? t('Add a section') : t('Add a note')} />}
+                      : <FieldInput db={db} field={nameField} value={l.name} record={l} onChange={(v) => set(i, 'name', v)} label={`${t(nameField.label)} ${rowIdx + 1}`} placeholder={isSection ? t('Add a section') : t('Add a note')} />}
                   </td>
                   {!readonly ? (
                     <td>
@@ -351,16 +377,21 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                 </tr>
               );
             }
+            const cellRec = { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id };
             return (
               <tr key={i}>
                 {cols.map(([k, f]) => {
+                  const cellVal = f.compute ? f.compute(cellRec, db, record) : l[k];
                   // A field may explain a value it has no record for (e.g. a tax rate with no tax record).
-                  const rateText = !l[k] ? f.rateOnlyText?.(l) : null;
+                  const rateText = !cellVal ? f.rateOnlyText?.(l) : null;
+                  const cellPlaceholder = k === 'product_id' ? t('Select a product…') : (f.placeholder ? t(f.placeholder) : undefined);
                   return (
                     <td key={k} className={isNumeric(f) ? 'num' : ''}>
-                      {readonly
-                        ? (rateText ?? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }))
-                        : <><FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
+                      {f.hideWhen?.(cellRec, db)
+                        ? null
+                        : readonly
+                          ? (rateText ?? display(db, f, cellVal, cellRec))
+                          : <><FieldInput db={db} field={f} value={cellVal} record={cellRec} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${rowIdx + 1}`} placeholder={cellPlaceholder} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
                     </td>
                   );
                 })}
@@ -441,7 +472,7 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
 export const isLabelable = (field, readonly, record, db) => {
   const isReadonly = readonly || fieldReadonly(field, record, db);
-  return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type) && field?.widget !== 'radio';
+  return !(isReadonly || (field?.compute && !field?.editable)) && !['one2many', 'priority'].includes(field?.type) && field?.widget !== 'radio';
 };
 
 function DistributionInput({ value, onChange, ...props }) {
@@ -489,14 +520,14 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       </div>
     );
   }
-  if (isReadonly || field.compute) {
+  if (isReadonly || (field.compute && !field.editable)) {
     if (field.type === 'html') return <SafeHtml html={value} />;
     return <span className="readonly">{display(db, field, value, record)}</span>;
   }
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': isRequired || undefined };
   const text = (type = 'text', extra = {}) => (
-    <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
+    <input {...a11y} type={type} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
     case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
@@ -508,12 +539,15 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       return <HtmlEditor id={id} label={htmlLabel} required={isRequired} value={value} placeholder={placeholder} onChange={onChange} />;
     }
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={placeholder ?? t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
-    case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
+    case 'integer': return <NumberInput {...a11y} placeholder={placeholder} value={value} onChange={onChange} integer />;
     case 'monetary':
-    case 'float': return <NumberInput {...a11y} value={value} onChange={onChange} />;
+    case 'float': return <NumberInput {...a11y} placeholder={placeholder} value={value} onChange={onChange} />;
     case 'date': return text('date');
     case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
-    case 'boolean': return <input {...a11y} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
+    case 'boolean':
+      return field.widget === 'toggle'
+        ? <input {...a11y} type="checkbox" role="switch" className="toggle-switch" checked={!!value} onChange={(e) => onChange(e.target.checked)} />
+        : <input {...a11y} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
       if (field.widget === 'radio') {
         return (
@@ -530,7 +564,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
           {!isRequired && <option value="" />}
-          {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
+          {field.options.filter(([k]) => !field.legacyOptions?.includes(k) || k === value).map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
     case 'many2one':

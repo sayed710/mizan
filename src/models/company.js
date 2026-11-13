@@ -78,9 +78,9 @@ export function setCompanies(db, { current, allowed }) {
 
 // Configuration is shared even when older ORM versions stamped it with company 1.
 // Accounting configuration belongs to its company; other configuration is readable across companies.
-const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position']);
+const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position', 'account.cash.rounding', 'account.analytic.account']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model']);
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding', 'account.analytic.plan', 'account.analytic.account']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);
@@ -189,6 +189,25 @@ export function scopeAuditChanges(model, changes, companies) {
     }
   }
   return out;
+}
+
+/** A records view that filters each model to the user's companies only when that model is first read. */
+export function lazyRestrictedRecords(db, companies) {
+  const cache = new Map();
+  const view = (model) => {
+    if (!cache.has(model)) {
+      const list = db.records[model];
+      cache.set(model, list && list.filter((r) => visibleTo(companies, model, r, db)).map((r) => scopeNestedCompanyArrays(model, r, companies)));
+    }
+    return cache.get(model);
+  };
+  return new Proxy(db.records, {
+    get: (target, model) => (typeof model === 'string' && Object.hasOwn(target, model) ? view(model) : target[model]),
+    getOwnPropertyDescriptor: (target, model) => {
+      const desc = Reflect.getOwnPropertyDescriptor(target, model);
+      return desc && typeof model === 'string' ? { configurable: true, enumerable: desc.enumerable, writable: false, value: view(model) } : desc;
+    },
+  });
 }
 
 /** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */

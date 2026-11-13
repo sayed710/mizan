@@ -945,7 +945,8 @@ test('migration preserves explicit configured tenders of the same type and repai
   assert.deepEqual(rerun.records['pos.order'], repaired.records['pos.order']);
 });
 
-test('biggest_tax strategy without taxes falls back to cash rounding line preserving document currency balance', () => {
+// Odoo 20 (account_move._recompute_cash_rounding_lines): a biggest-tax method with no tax line to adjust applies no rounding.
+test('biggest_tax strategy without taxes applies no rounding and posts a balanced document', () => {
   let db = seed();
   const currency = search(db, 'res.currency').find((c) => c.name === 'SAR');
   const rounding = create(db, 'account.cash.rounding', {
@@ -967,14 +968,11 @@ test('biggest_tax strategy without taxes falls back to cash rounding line preser
       invoice_cash_rounding_id: rounding.id,
       invoice_line_ids: [{ qty: 1, price_unit: 10.02, tax: 0 }],
     });
-    assert.equal(read(made.db, 'account.move', made.id).amount_total, 10.05);
+    assert.equal(read(made.db, 'account.move', made.id).amount_total, 10.02);
     db = postMove(made.db, made.id);
     const posted = read(db, 'account.move', made.id);
 
-    const roundingLine = posted.line_ids.find((l) => l.name === 'Cash Rounding');
-    assert.ok(roundingLine, 'Fallback rounding line must be generated when biggest_tax has no tax lines');
-    assert.equal(roundingLine.currency_id, currency.id);
-    assert.equal(roundingLine.amount_currency, move_type === 'out_invoice' ? -0.03 : 0.03);
+    assert.equal(posted.line_ids.some((l) => l.name === 'Cash Rounding'), false);
 
     assert.equal(posted.line_ids.reduce((sum, l) => sum + Math.round((l.amount_currency || 0) * 100), 0), 0);
     assert.equal(posted.line_ids.reduce((sum, l) => sum + Math.round((l.debit - l.credit) * 100), 0), 0);

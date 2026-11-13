@@ -370,10 +370,10 @@ export const closingModels = {
   'account.fiscal.year': {
     label: 'Fiscal Years',
     fields: {
-      name: { type: 'char', label: 'Fiscal Year', required: true },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
-      date_from: { type: 'date', label: 'Start Date', required: true },
-      date_to: { type: 'date', label: 'End Date', required: true },
+      name: { type: 'char', label: 'Name', required: true, placeholder: 'Fiscal Year 2018' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, multiCompanyOnly: true },
+      date_from: { type: 'date', label: 'Start Date', required: true, help: 'Start Date, included in the fiscal year.' },
+      date_to: { type: 'date', label: 'End Date', required: true, help: 'Ending Date, included in the fiscal year.' },
       state: { type: 'selection', label: 'Status', tracking: true, options: [['open', 'Open'], ['closed', 'Closed']] },
       closing_move_id: { type: 'many2one', relation: 'account.move', label: 'Closing Entry', readonly: true },
       closing_earnings_account_id: { type: 'many2one', relation: 'account.account', label: 'Current Year Earnings Account', readonly: true },
@@ -383,11 +383,13 @@ export const closingModels = {
     defaults: () => ({ state: 'open', date_from: `${today().slice(0, 4)}-01-01`, date_to: `${today().slice(0, 4)}-12-31` }),
     guard: yearGuard,
     protectDelete: (db, r) => r.closing_move_id ? 'Keep fiscal years with closing entries for the audit trail' : null,
-    list: ['name', 'date_from', 'date_to', 'state'],
+    views: ['list', 'kanban'],
+    list: ['name', 'date_from', 'date_to', 'company_id'],
+    searchFields: ['name'],
     kanban: { title: 'name', lines: ['date_from', 'date_to'], badge: 'state' },
     form: {
-      title: 'name', statusbar: 'state', lockedWhen: (r) => r.state === 'closed',
-      groups: [['company_id', 'date_from', 'date_to'], ['closing_move_id', 'opening_move_id']],
+      title: 'name', hideTitle: true, statusbar: 'state', lockedWhen: (r) => r.state === 'closed',
+      groups: [['name', 'date_from', 'date_to', 'company_id'], ['closing_move_id', 'opening_move_id']],
       buttons: [
         { label: 'Close Year', primary: true, when: (r) => r.state === 'open', run: (db, r) => ({ db: closeFiscalYear(db, r.id) }) },
         { label: 'Reopen', when: (r) => r.state === 'closed', run: (db, r) => ({ db: reopenFiscalYear(db, r.id) }) },

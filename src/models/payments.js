@@ -241,7 +241,7 @@ export function amountInWords(amount, currency) {
 export function checkAmountDisplay(db, payment, invoice, amount) {
   const currency = payment?.currency_id ? read(db, 'res.currency', payment.currency_id) : documentCurrency(db, invoice);
   if (!currency) throw new Error('Configure the payment currency before printing this check');
-  return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.unit_name) };
+  return { currency, numeric: formatCurrency(amount, currency), words: amountInWords(amount, currency.currency_unit_label ?? currency.unit_name) };
 }
 
 export const paymentModels = {

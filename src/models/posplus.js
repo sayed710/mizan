@@ -1,12 +1,12 @@
 // Restaurant bills, split tenders and POS loyalty.
-import { create, read, search, write } from '../orm.js';
+import { create, nextSequence, read, search, write } from '../orm.js';
 import { amounts } from './common.js';
 import { moreModels } from './more.js';
 import { openSession, payOrder, posOrderTotal, refundOrder, tendersOf, posPaymentMethods, resolvePosConfigAndPreset, orderCompany, resolvePosOrderCheckout } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
-import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { companyFilter } from './company.js';
-import { configuredAccount } from './configured-account.js';
+import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
 
 const baseOrder = moreModels['pos.order'];
 const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
@@ -406,27 +406,109 @@ export const posPlusModels = {
   'account.cash.rounding': {
     label: 'Cash Roundings',
     guard: (db, before, after) => {
+      const precision = Number(after.rounding);
+      if (!Number.isFinite(precision) || precision <= 0) return 'Precision must be greater than zero';
+      const company = after.company_id ?? db.settings?.current_company_id ?? 1;
+      const owner = after.name || 'the cash rounding method';
+      // Accounts become required when the method is created or its strategy/accounts change, so legacy methods stay archivable.
+      const accountsTouched = !before || ['strategy', 'profit_account_id', 'loss_account_id'].some((f) => before[f] !== after[f]);
       for (const field of ['profit_account_id', 'loss_account_id']) {
-        if (!after[field]) continue;
-        try { configuredAccount(db, after[field], after.company_id, field === 'profit_account_id' ? 'profit' : 'loss', after.name); } catch (error) { return error.message; }
+        if (!after[field] && (after.strategy !== 'add_invoice_line' || !accountsTouched)) continue;
+        try {
+          configuredAccount(db, after[field], company, field === 'profit_account_id' ? 'profit' : 'loss', owner);
+        } catch (error) {
+          return error.message;
+        }
       }
       return null;
     },
     fields: {
       name: { type: 'char', label: 'Name' },
-      rounding: { type: 'float', label: 'Rounding Precision', required: true },
-      rounding_method: { type: 'selection', label: 'Rounding Method', required: true, options: [['UP', 'UP'], ['DOWN', 'DOWN'], ['HALF-UP', 'HALF-UP']] },
-      strategy: { type: 'selection', label: 'Rounding Strategy', required: true, options: [['biggest_tax', 'Modify tax amount'], ['add_invoice_line', 'Add a rounding line']] },
-      profit_account_id: { type: 'many2one', relation: 'account.account', label: 'Profit Account' },
-      loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      active: { type: 'boolean', label: 'Active' },
+      rounding: {
+        type: 'float',
+        label: 'Precision',
+        required: true,
+        digits: [2, 6],
+        help: 'The smallest value used to round the total amount (e.g., 0.05 or 100).',
+      },
+      strategy: {
+        type: 'selection',
+        label: 'Strategy',
+        required: true,
+        help: 'Specify how the rounding difference is applied: add a rounding line or adjust the highest tax amount.',
+        options: [['biggest_tax', 'Modify tax amount'], ['add_invoice_line', 'Add a rounding line']],
+      },
+      rounding_method: {
+        type: 'selection',
+        label: 'Method',
+        required: true,
+        help: 'The computation rule used to round values (e.g., UP, DOWN, or HALF-UP).',
+        options: [['UP', 'Up'], ['DOWN', 'Down'], ['HALF-UP', 'Nearest']],
+      },
+      profit_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Profit Account',
+      },
+      loss_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Loss Account',
+      },
+      currency_ids: {
+        type: 'many2many',
+        relation: 'res.currency',
+        label: 'Currency',
+        widget: 'many2many_tags',
+        optional: 'hide',
+      },
+      company_id: {
+        type: 'many2one',
+        relation: 'res.company',
+        label: 'Company',
+        multiCompanyOnly: true,
+        placeholder: 'Visible to all',
+      },
     },
-    defaults: () => ({ name: 'Rounding', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line', company_id: 1 }),
-    list: ['name', 'rounding', 'rounding_method', 'strategy', 'company_id'],
-    form: { title: 'name', groups: [['name', 'rounding', 'rounding_method', 'strategy', 'company_id'], ['profit_account_id', 'loss_account_id']] },
+    defaults: () => ({ name: 'Rounding', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line', active: true, currency_ids: [] }),
+    createDefaults: (db) => ({ sequence: nextSequence(db, 'account.cash.rounding') }),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
+    views: ['list'],
+    searchFields: ['name'],
+    filters: [[
+      { id: 'active', label: 'Active', fn: (r) => r.active !== false },
+      { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false },
+    ]],
+    list: ['sequence', 'name', 'rounding', 'strategy', 'rounding_method', 'currency_ids'],
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
+    form: {
+      title: 'name',
+      titleLabel: 'Name',
+      groups: (r) => [
+        {
+          title: 'Rounding',
+          fields: [
+            'rounding',
+            'rounding_method',
+            'strategy',
+            ...(r?.strategy === 'add_invoice_line' ? ['profit_account_id', 'loss_account_id'] : []),
+          ],
+        },
+        {
+          title: 'Conditions',
+          fields: ['currency_ids', 'company_id'],
+        },
+      ],
+    },
   },
   'pos.config': {
     label: 'Point of Sale',
+    guard: (db, before, after) => {
+      const target = (c) => ({ id: c.rounding_method_id, companyId: c.company_id ?? 1, currencyId: findCompanyCurrencyRecord(db, c.company_id ?? 1)?.id });
+      return cashRoundingError(db, target(after), before && target(before));
+    },
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
@@ -439,7 +521,10 @@ export const posPlusModels = {
       available_preset_ids: { type: 'many2many', relation: 'pos.preset', label: 'Presets' },
       default_preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Default Preset' },
       cash_rounding: { type: 'boolean', label: 'Cash Rounding' },
-      rounding_method_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method' },
+      rounding_method_id: {
+        type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method',
+        domain: (r, config, db) => r.active !== false && cashRoundingApplies(r, config?.company_id ?? 1, findCompanyCurrencyRecord(db, config?.company_id ?? 1)?.id),
+      },
       only_round_cash_method: { type: 'boolean', label: 'Only Round Cash' },
     },
     defaults: () => ({ company_id: 1, module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, available_preset_ids: [], cash_rounding: false, only_round_cash_method: false }),

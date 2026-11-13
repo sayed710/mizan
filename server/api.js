@@ -11,7 +11,7 @@ import { cartTotals, isPurchasable, isSellable, websiteCarriers } from '../src/m
 import { applyDiff, diffDb } from '../src/sync.js';
 import { availableSlots, bookAppointment } from '../src/models/appointments.js';
 import { menuTree, resolveUrl } from '../src/models/websiteplus.js';
-import { restrictRecords, visibleTo } from '../src/models/company.js';
+import { lazyRestrictedRecords, visibleTo } from '../src/models/company.js';
 import { referFromLink } from '../src/models/skillsplus.js';
 import { companyCurrencyRecord } from '../src/money.js';
 
@@ -333,14 +333,16 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
   const visible = (r) => r && visibleTo(companies, model, r, db);
   // Search terms are matched against what this user can see, so a hidden company's names cannot be probed.
   const vals = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+  // Reads compute fields (balances, totals) over the companies this user can see only.
+  const scopedDb = () => (companies ? { ...db, records: lazyRestrictedRecords(db, companies) } : db);
 
   try {
     if (id === null && method === 'GET') {
       const limit = Math.min(MAX_LIMIT, Math.max(1, Number(query.get('limit')) || 80));
       const offset = Math.max(0, Number(query.get('offset')) || 0);
       const terms = (query.get('q') ?? '').split(/\s+/).filter(Boolean);
-      const seen = companies && terms.length ? { ...db, records: restrictRecords(db, companies).records } : db;
-      const all = search(db, model).filter((r) => visible(r) && matches(seen, model, r, terms));
+      const seen = scopedDb();
+      const all = search(seen, model).filter((r) => visible(r) && matches(seen, model, r, terms));
       return { status: 200, body: { total: all.length, offset, limit, records: all.slice(offset, offset + limit) } };
     }
     if (id === null && method === 'POST') {
@@ -352,7 +354,7 @@ export function handleApi({ method, path, query, body, db, user, allowed = null,
     }
     const rec = read(db, model, id);
     if (!visible(rec)) return { status: 404, body: { error: `${model} #${id} not found` } };
-    if (method === 'GET') return { status: 200, body: rec };
+    if (method === 'GET') return { status: 200, body: read(scopedDb(), model, id) };
     if (method === 'PATCH') {
       if (!vals) return { status: 400, body: { error: 'JSON object expected' } };
       const { id: _ignored, ...changes } = vals;

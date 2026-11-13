@@ -103,12 +103,14 @@ test('taxes menu opens as a list with the six Odoo columns, orders by sequence, 
   try {
     const table = find(ctx.host, (n) => n.tagName === 'TABLE' && hasClass(n, 'list'));
     assert.ok(table, 'opens list view by default');
-    const headers = allFind(table, (n) => n.tagName === 'TH')
+    const handleTh = find(table, (n) => n.tagName === 'TH' && hasClass(n, 'handle-col'));
+    assert.equal(props(handleTh)?.['aria-label'], 'Sequence', 'first column is sequence drag handle');
+    const headers = allFind(table, (n) => n.tagName === 'TH' && !hasClass(n, 'o2m-cols-th'))
       .map((th) => th.textContent.trim())
       .filter(Boolean);
     assert.deepEqual(headers, ['Tax Name', 'Description', 'Tax Type', 'Tax Scope', 'Label on Invoices', 'Active']);
 
-    const firstRowName = allFind(table, (n) => n.tagName === 'TBODY')[0]?.childNodes?.[0]?.childNodes?.[1]?.textContent?.trim();
+    const firstRowName = allFind(table, (n) => n.tagName === 'TBODY')[0]?.childNodes?.[0]?.childNodes?.[2]?.textContent?.trim();
     assert.equal(firstRowName, 'Early Tax', 'sequence orders the taxes list before id');
 
     const kanbanBtn = find(ctx.host, (n) => n.tagName === 'A' && props(n)?.href === '#/accounting/taxes?view=kanban');

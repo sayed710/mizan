@@ -1,7 +1,7 @@
 import { Fragment, useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { fieldReadonly, fieldRequired } from '../field-metadata.js';
-import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
+import { aggregate, create, isMultiCompany, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
 import { commit, getDb, getUser, isServer, serverAction, useDb } from '../store.js';
@@ -61,7 +61,7 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
       <div className="field-value">
-        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} />
+        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} />
         {field.help && <div className="field-help">{t(field.help)}</div>}
       </div>
     </div>
@@ -72,51 +72,61 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
 const lockFor = (def, readonly, name, record, db) => readonly
   && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
 
-function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew }) {
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew, multiCompany }) {
   if (typeof item === 'string') {
     const field = def.fields[item];
+    if (field?.multiCompanyOnly && !multiCompany) return null;
+    if (field?.hideWhen?.(current, db)) return null;
     const itemReadonly = lockFor(def, readonly, item, current, db);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
       const isReadonly = itemReadonly || fieldReadonly(field, current, db);
-      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} isNew={isNew} />;
+      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} placeholder={field.placeholder ? t(field.placeholder) : undefined} record={current} label={t(field.label)} isNew={isNew} />;
     }
     return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} />;
   }
   if (item && Array.isArray(item.fields)) {
-    const first = def.fields[item.fields[0]];
-    const firstReadonly = lockFor(def, readonly, item.fields[0], current, db) || fieldReadonly(first, current, db);
+    const visibleFields = item.fields.filter((f) => (!def.fields[f]?.multiCompanyOnly || multiCompany) && !def.fields[f]?.hideWhen?.(current, db));
+    if (!visibleFields.length) return null;
+    const first = def.fields[visibleFields[0]];
+    const firstReadonly = lockFor(def, readonly, visibleFields[0], current, db) || fieldReadonly(first, current, db);
     const labelText = t(item.label ?? first.label);
     return (
-      <div key={item.fields.join('+')} className="field">
-        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${item.fields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
-        <div className="field-value field-pair">
-          {item.fields.map((f, idx) => {
+      <div key={item.key ?? visibleFields[0]} className="field">
+        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${visibleFields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+        <div className={`field-value field-pair${item.inline ? ' field-inline' : ''}`}>
+          {visibleFields.map((f, idx) => {
             const fd = def.fields[f];
             const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
+            const sep = idx > 0 ? (item.joins ? item.joins[idx - 1] : item.join) : null;
             return (
               <Fragment key={f}>
-                {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
-                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={idx > 0 ? t(fd.label) : undefined} isNew={isNew} />
+                {sep && <span className="field-join">{t(sep)}</span>}
+                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={fd.placeholder ? t(fd.placeholder) : (idx > 0 && !item.inline ? t(fd.label) : undefined)} isNew={isNew} />
               </Fragment>
             );
           })}
+          {item.suffix && <span className="field-join">{t(item.suffix)}</span>}
         </div>
       </div>
     );
   }
+  if (def.fields[item.field]?.multiCompanyOnly && !multiCompany) return null;
+  if (def.fields[item.field]?.hideWhen?.(current, db)) return null;
   return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} isNew={isNew} />;
 }
 
 function renderGroups(groups, opts) {
+  const multiCompany = isMultiCompany(opts.db);
   return (
     <div className="groups">
       {groups.map((g, i) => {
         const title = Array.isArray(g) ? null : g.title;
+        const fullWidth = !Array.isArray(g) && g.fullWidth;
         const items = Array.isArray(g) ? g : (g.fields ?? []);
         return (
-          <div key={title ?? i} className="group">
+          <div key={title ?? i} className={fullWidth ? 'group group-full' : 'group'}>
             {title && <h3 className="group-title">{t(title)}</h3>}
-            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title) }))}
+            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title), multiCompany }))}
           </div>
         );
       })}
@@ -143,9 +153,13 @@ function SmartButtons({ db, model, rec, smart }) {
         }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];
-        const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
+        const ids = s.ids ? (rec.id == null ? [] : s.ids(db, rec)) : null;
+        const recs = ids
+          ? (ids.length ? viewRecords(db, s.model).filter((r) => ids.includes(r[s.field])) : [])
+          : (value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value));
+        const relParam = ids ? ids.join(',') : value;
         return (
-          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${value}`}>
+          <a key={s.label} className="smart" href={`#/${s.target}?view=${s.view ?? 'list'}&rel=${s.field}:${relParam}`}>
             <b>{s.sum ? (s.format === 'number' ? aggregate(recs, s.sum).toLocaleString('en-US') : money(aggregate(recs, s.sum))) : recs.length}</b>
             <span>{t(s.label)}</span>
           </a>
@@ -497,10 +511,11 @@ export function FormView({ leaf, id, base, params }) {
   const buttons = [...(def.form.buttons ?? []), ...(current.id ? def.form.ruleButtons?.(getDb(), current.id) ?? [] : [])].filter((b) => (!b.admin || !isServer() || getUser()?.isAdmin) && (!b.when || b.when(current, getDb())) && (!b.visible || b.visible(current, getDb())));
   const ribbon = current.active === false ? 'Archived' : def.form.ribbon?.(current);
   const titleField = def.fields[def.form.title];
-  const tabs = resolve(def.form.tabs);
+  const tabs = resolve(def.form.tabs)?.filter((tb) => !tb.when || tb.when(current, db));
   const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   // A non-blocking warning shown above the form, such as an exceeded credit limit.
   const warning = def.form.warning?.(current, db) ?? null;
+  const banner = def.form.banner?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
 
@@ -577,6 +592,7 @@ export function FormView({ leaf, id, base, params }) {
 
           {error && <div className="alert" role="alert">{error}</div>}
           {warning && <div className="alert alert-warning" role="status">{warning}</div>}
+          {banner && <div className="alert alert-info" role="status">{t(banner)}</div>}
           <SimulatedNote text={def.simulated} />
           {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
@@ -584,17 +600,18 @@ export function FormView({ leaf, id, base, params }) {
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
             {!isNew && def.form.smart && <SmartButtons db={db} model={model} rec={current} smart={def.form.smart} />}
             {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
-            <div className="title-field">
+            {!def.form.hideTitle && <div className="title-field">
+              {def.form.titleLabel && <label className="title-label" htmlFor={`f-${def.form.title}`}>{t(typeof def.form.titleLabel === 'string' ? def.form.titleLabel : titleField.label)}</label>}
               {Array.isArray(def.form.titleFields)
                 ? <div className="field-pair">{def.form.titleFields.map((f) => {
                     const fd = def.fields[f];
-                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.label)} />;
+                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.placeholder ?? fd.label)} />;
                   })}</div>
                 : titleField.readonly || titleField.compute
                   ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
-                  : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
+                  : <input id={`f-${def.form.title}`} aria-label={t(titleField.label)} placeholder={t(titleField.placeholder ?? titleField.label)} readOnly={locked}
                       value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
-            </div>
+            </div>}
             {renderGroups(groups, { db, model, def, current, set, readonly: locked, isNew })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits
@@ -623,13 +640,16 @@ export function FormView({ leaf, id, base, params }) {
                   {(() => {
                     const activeTab = tabs[tab] ?? tabs[0];
                     const tabReadonly = locked || activeTab.readonly;
-                    const renderTabField = (f, placeholder) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
-                      ? (
-                        <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                          placeholder={placeholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
-                      )
-                      // Plain fields in a tab get a label, like fields in the header groups.
-                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
+                    const renderTabField = (f, placeholder) => {
+                      const resolvedPlaceholder = placeholder ?? (def.fields[f].placeholder ? t(def.fields[f].placeholder) : undefined);
+                      return (['one2many', 'text', 'html'].includes(def.fields[f].type)
+                        ? (
+                          <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
+                            placeholder={resolvedPlaceholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
+                        )
+                        // Plain fields in a tab get a label, like fields in the header groups.
+                        : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
+                    };
                     return (
                       <>
                         {model === 'account.return' && activeTab.label === 'Tax Report' ? (

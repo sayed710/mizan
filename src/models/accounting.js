@@ -1,17 +1,18 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { configuredAccount } from './configured-account.js';
+import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2 } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
@@ -21,6 +22,7 @@ import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { recipientBankCompanyError } from './company.js';
+import { openActivitiesText } from './mail.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -209,6 +211,61 @@ const paymentState = (r, db) => {
   if (res == null) return 'unavailable';
   if (res === 0) return 'paid';
   return (Number(r.amount_paid) || 0) > 0 ? 'partial' : 'not_paid';
+};
+
+/** Resolve the signed-in user's linked employee id from hr.employee.user_login, or null when unlinked. */
+const currentUserId = (db) => (db ? employeeFor(db, currentActor()?.login)?.id ?? null : null);
+
+/** Compute the unsigned untaxed subtotal in the document's own currency, or null if unconfigured. */
+const untaxedAmount = (r, db) => {
+  let curr;
+  try {
+    curr = documentCurrency(db, r);
+  } catch (err) {
+    if (/configure.*currency/i.test(err?.message)) return null;
+    throw err;
+  }
+  const side = ['out_refund', 'in_refund'].includes(r.move_type) ? 'refund' : 'invoice';
+  return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id), side }).untaxed;
+};
+
+/** Sign a document-currency amount: credit notes and vendor refunds show as negative, avoiding -0. */
+const signedDocumentAmount = (r, value) => {
+  if (value == null) return null;
+  return value === 0 ? 0 : (isRefund(r) ? -1 : 1) * value;
+};
+
+/**
+ * Compute Odoo 20 `status_in_payment` for an invoice, credit note, bill, or refund:
+ * distinguishes `reversed` (settled solely by reversing credit notes), `in_payment` (settled via an outstanding
+ * payment not yet matched to a bank statement), `blocked` (three-way matching exception), and `cancel`/`draft`.
+ */
+export const statusInPayment = (r, db) => {
+  if (r.state === 'draft') return 'draft';
+  if (r.state === 'cancel') return 'cancel';
+  if (!isInvoice(r)) return r.state ?? 'draft';
+  const payState = paymentState(r, db);
+  if (payState === 'unavailable') return 'unavailable';
+  if (payState === 'paid') {
+    const active = (r.payments ?? []).filter((p) => !p.reversed);
+    if (db && active.length) {
+      const moveById = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
+      const paymentByMove = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+      const allReversals = active.every((p) => {
+        const m = moveById.get(p.move_id);
+        return m && isRefund(m) && m.reversed_entry_id === r.id;
+      });
+      if (allReversals) return 'reversed';
+      const hasOutstanding = active.some((p) => {
+        const payment = paymentByMove.get(p.payment_move_id ?? p.move_id);
+        return payment && payment.state === 'posted' && payment.outstanding_account_id && !isPaymentMatched(db, payment);
+      });
+      if (hasOutstanding) return 'in_payment';
+    }
+    return 'paid';
+  }
+  if (db && shouldBePaid(db, r) === 'exception') return 'blocked';
+  return payState;
 };
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -1522,11 +1579,9 @@ function signedCompanyTotal(r, db) {
   return rate == null ? null : sign * roundCurrency(base * rate, own);
 }
 
+/** Comma-separated open activity labels on an account move. */
 function moveActivities(r, db) {
-  if (!db) return '';
-  const open = (db.records?.['mail.activity'] ?? [])
-    .filter((a) => a.active !== false && !a.done && a.res_model === 'account.move' && a.res_id === r.id);
-  return open.map((a) => a.summary || a.activity_type || t('Activity')).join(', ');
+  return openActivitiesText(db, 'account.move', r.id);
 }
 
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
@@ -1555,6 +1610,86 @@ export const journalEntriesView = {
     monthFilters('invoice_date', 'Invoice Date'),
   ],
   groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date'],
+};
+
+const INVOICE_LIST_FIELDS = {
+  name: { bold: true },
+  journal_id: { optional: 'hide' },
+  invoice_date: { optional: 'show' },
+  date: { optional: 'hide' },
+  invoice_date_due: {
+    optional: 'show',
+    widget: 'remaining_days',
+    hideWhen: (r, db) => ['paid', 'in_payment', 'reversed', 'cancel'].includes(statusInPayment(r, db)),
+  },
+  invoice_origin: { optional: 'hide' },
+  payment_reference: { optional: 'hide' },
+  ref: { optional: 'hide' },
+  invoice_user_id: { optional: 'hide' },
+  activities: { optional: 'hide' },
+  company_id: { optional: 'hide', multiCompanyOnly: true },
+  amount_untaxed_in_currency_signed: { optional: 'show', sum: 'Total' },
+  amount_tax_in_currency_signed: { optional: 'hide', sum: 'Total' },
+  amount_total_in_currency_signed: { optional: 'show', bold: true, sum: 'Total' },
+  amount_residual_in_currency_signed: { optional: 'show', sum: 'Total' },
+  currency_id: { optional: 'hide' },
+};
+
+/** Highlight draft documents as info and cancelled documents as muted on invoice/bill lists. */
+const invoiceListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state === 'cancel' ? 'muted' : null);
+
+/** Build Odoo 20 search panel filter groups for sales or purchase invoice/refund lists. */
+const invoiceSearchFilters = ({ purchases = false } = {}) => [
+  [{ id: 'myinvoices', label: 'My Invoices', fn: (r, db) => Boolean(r.invoice_user_id && r.invoice_user_id === currentUserId(db)) }],
+  [
+    { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
+    { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' },
+    { id: 'cancel', label: 'Cancelled', fn: (r) => r.state === 'cancel' },
+  ],
+  [
+    { id: 'unpaid', label: 'To Pay', fn: (r, db) => r.state !== 'cancel' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) },
+    { id: 'in_payment', label: 'In Payment', fn: (r, db) => r.state === 'posted' && statusInPayment(r, db) === 'in_payment' },
+    { id: 'overdue', label: 'Overdue', fn: (r, db) => r.state === 'posted' && isInvoice(r) && ['not_paid', 'partial'].includes(paymentState(r, db)) && Boolean(r.invoice_date_due) && r.invoice_date_due < today() },
+  ],
+  monthFilters('invoice_date', 'Invoice Date'),
+  ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
+  monthFilters('invoice_date_due', 'Due Date'),
+];
+
+const INVOICE_GROUP_BYS = ['invoice_user_id', 'partner_id', 'status_in_payment', 'journal_id', 'company_id', 'invoice_date', 'invoice_date_due', 'date'];
+const INVOICE_GROUP_BY_LABELS = { partner_id: 'Partner', invoice_date: 'Invoice Date', date: 'Accounting Date', status_in_payment: 'Status' };
+const INVOICE_SEARCH_FIELDS = ['name', 'invoice_origin', 'ref', 'payment_reference', 'partner_id', 'journal_id', 'invoice_user_id'];
+
+export const salesInvoiceView = {
+  list: [
+    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'ref', 'invoice_user_id', 'activities', 'company_id',
+    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'currency_id', 'status_in_payment',
+  ],
+  listFields: INVOICE_LIST_FIELDS,
+  listLabels: { partner_id: 'Customer', invoice_date: 'Invoice Date', currency_id: 'Invoice Currency' },
+  groupByLabels: INVOICE_GROUP_BY_LABELS,
+  listDecoration: invoiceListDecoration,
+  searchFields: INVOICE_SEARCH_FIELDS,
+  filters: invoiceSearchFilters({ purchases: false }),
+  groupBys: INVOICE_GROUP_BYS,
+};
+
+export const purchaseInvoiceView = {
+  list: [
+    'name', 'partner_id', 'journal_id', 'invoice_date', 'date', 'invoice_date_due', 'invoice_origin',
+    'payment_reference', 'ref', 'activities', 'company_id',
+    'amount_untaxed_in_currency_signed', 'amount_tax_in_currency_signed', 'amount_total_in_currency_signed', 'amount_residual_in_currency_signed',
+    'currency_id', 'status_in_payment',
+  ],
+  listFields: INVOICE_LIST_FIELDS,
+  listLabels: { partner_id: 'Vendor', invoice_date: 'Bill Date', currency_id: 'Bill Currency' },
+  groupByLabels: INVOICE_GROUP_BY_LABELS,
+  listDecoration: invoiceListDecoration,
+  searchFields: INVOICE_SEARCH_FIELDS,
+  filters: invoiceSearchFilters({ purchases: true }),
+  groupBys: INVOICE_GROUP_BYS,
 };
 
 export const accountingModels = {
@@ -1639,15 +1774,6 @@ export const accountingModels = {
     guard: (db, before, after) => before && before.company_id !== after.company_id && (db.records['account.account'] ?? []).some((a) => a.fiscal_category_id === after.id && a.company_id && a.company_id !== after.company_id) ? 'Fiscal category must belong to the account company' : null,
     list: ['name', 'code', 'company_id'],
     form: { title: 'name', groups: [['name', 'code'], ['company_id', 'active']], tabs: [{ label: 'Accounts', fields: ['account_ids'], readonly: true }] },
-  },
-
-  'account.account.tag': {
-    label: 'Account Tags',
-    fields: {
-      name: { type: 'char', label: 'Tag Name', required: true },
-    },
-    list: ['name'],
-    form: { title: 'name', groups: [['name']] },
   },
 
   'account.journal': {
@@ -1852,6 +1978,9 @@ export const accountingModels = {
     label: 'Invoices',
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
+      const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
+      const roundingErr = cashRoundingError(db, roundingTarget(after), before && roundingTarget(before));
+      if (roundingErr) return roundingErr;
       if (after.invoice_payment_term_id) {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
         if (term?.company_id && term.company_id !== (after.company_id ?? 1)) return 'Payment terms belong to another company';
@@ -1925,6 +2054,7 @@ export const accountingModels = {
         domain: (j, r, db) => (!j.company_id || j.company_id === (r?.company_id ?? db?.settings?.current_company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
+      invoice_user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
       date: { type: 'date', label: 'Accounting Date' },
@@ -1935,7 +2065,10 @@ export const accountingModels = {
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
-      invoice_cash_rounding_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding' },
+      invoice_cash_rounding_id: {
+        type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding',
+        domain: (r, move, db) => r.active !== false && cashRoundingApplies(r, move?.company_id ?? 1, move?.currency_id ?? findCompanyCurrencyRecord(db, move?.company_id ?? 1)?.id),
+      },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       subscription_period: { type: 'date', label: 'Subscription Period', readonly: true },
@@ -1951,22 +2084,33 @@ export const accountingModels = {
       amount_untaxed: {
         type: 'monetary',
         label: 'Tax Excluded',
-        compute: (r, db) => {
-          let curr;
-          try {
-            curr = documentCurrency(db, r);
-          } catch (err) {
-            if (/configure.*currency/i.test(err?.message)) return null;
-            throw err;
-          }
-          return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed;
-        },
+        compute: untaxedAmount,
+      },
+      amount_untaxed_in_currency_signed: {
+        type: 'monetary',
+        label: 'Tax Excluded',
+        compute: (r, db) => signedDocumentAmount(r, untaxedAmount(r, db)),
       },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
+      amount_tax_in_currency_signed: {
+        type: 'monetary',
+        label: 'Tax',
+        compute: (r, db) => signedDocumentAmount(r, invoiceTaxAmount(r, db)),
+      },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
+      amount_total_in_currency_signed: {
+        type: 'monetary',
+        label: 'Total',
+        compute: (r, db) => signedDocumentAmount(r, total(r, db)),
+      },
       amount_total_signed: { type: 'monetary', label: 'Total', currency: 'company', compute: signedCompanyTotal },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },
+      amount_residual_in_currency_signed: {
+        type: 'monetary',
+        label: 'Amount Due',
+        compute: (r, db) => signedDocumentAmount(r, residual(r, db)),
+      },
       payment_state: {
         type: 'selection',
         label: 'Payment Status',
@@ -1976,23 +2120,31 @@ export const accountingModels = {
       status_in_payment: {
         type: 'selection',
         label: 'Status',
-        compute: (r, db) => (r.state === 'posted' && isInvoice(r) ? paymentState(r, db) : (r.state ?? 'draft')),
+        compute: statusInPayment,
         options: [
           ['draft', 'Draft'],
           ['posted', 'Posted'],
+          ['sent', 'Sent'],
           ['cancel', 'Cancelled'],
+          ['blocked', 'Blocked'],
           ['not_paid', 'Not Paid'],
           ['partial', 'Partially Paid'],
+          ['in_payment', 'In Payment'],
           ['paid', 'Paid'],
+          ['reversed', 'Reversed'],
           ['unavailable', 'Unavailable'],
         ],
         badge: {
           draft: 'info',
-          posted: 'success',
-          cancel: 'muted',
+          cancel: 'danger',
+          blocked: 'danger',
+          posted: 'muted',
+          sent: 'muted',
           not_paid: 'warning',
-          partial: 'warning',
+          partial: 'muted',
+          in_payment: 'success',
           paid: 'success',
+          reversed: 'success',
           unavailable: 'muted',
         },
       },
@@ -2023,7 +2175,7 @@ export const accountingModels = {
       inalterable_hash: { type: 'char', label: 'Inalterability Hash', readonly: true },
       inalterable_hash_version: { type: 'integer', label: 'Hash Version', readonly: true, hidden: true },
       secure_sequence_number: { type: 'integer', label: 'Inalterability Sequence Number', readonly: true },
-      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm', domain: (r) => r.active !== false },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       auto_post: {
@@ -2043,7 +2195,10 @@ export const accountingModels = {
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
     createDefaults: (db, vals = {}) => {
-      if ((vals.move_type ?? 'out_invoice') !== 'entry') return {};
+      if ((vals.move_type ?? 'out_invoice') !== 'entry') {
+        const salesperson = vals.invoice_user_id == null ? currentUserId(db) : null;
+        return salesperson ? { invoice_user_id: salesperson } : {};
+      }
       const date = vals.date ?? vals.invoice_date ?? today();
       const companyId = vals.company_id ?? db?.settings?.current_company_id ?? 1;
       const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
@@ -2053,18 +2208,14 @@ export const accountingModels = {
         ...(defaultJournal ? { journal_id: defaultJournal } : {}),
       };
     },
-    filters: [
-      [{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
-      [
-        { id: 'unpaid', label: 'Not Paid', fn: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' },
-        { id: 'overdue', label: 'Overdue', fn: (r) => r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' && r.invoice_date_due < today() },
-      ],
-    ],
-    groupBys: ['partner_id', 'journal_id', 'state', 'payment_state', 'invoice_date', 'invoice_date_due'],
+    searchFields: INVOICE_SEARCH_FIELDS,
+    filters: invoiceSearchFilters({ purchases: true }),
+    groupBys: INVOICE_GROUP_BYS,
+    groupByLabels: INVOICE_GROUP_BY_LABELS,
     views: ['list', 'kanban', 'graph', 'pivot', 'calendar'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_total', 'invoice_date_due'], badge: 'payment_state' },
     list: ['name', 'partner_id', 'invoice_date', 'invoice_date_due', 'amount_untaxed', 'amount_total', 'amount_residual', 'status_in_payment'],
-    listDecoration: (r) => (r.state === 'draft' ? 'info' : r.state === 'posted' && isInvoice(r) && paymentState(r) !== 'paid' && r.invoice_date_due < today() ? 'danger' : null),
+    listDecoration: invoiceListDecoration,
     graph: { groupBy: 'invoice_date', measure: 'amount_total' },
     pivot: { row: 'partner_id', col: 'payment_state', measure: 'amount_total' },
     calendar: { date: 'invoice_date_due' },
@@ -2370,16 +2521,24 @@ Object.assign(accountingModels, {
   'account.incoterm': {
     label: 'Incoterms',
     fields: {
-      name: { type: 'char', label: 'Name', required: true },
-      code: { type: 'char', label: 'Code', required: true },
-      active: { type: 'boolean', label: 'Active' },
+      name: {
+        type: 'char',
+        label: 'Name',
+        required: true,
+        help: 'Incoterms are series of sales terms. They are used to divide transaction costs and responsibilities between buyer and seller and reflect state-of-the-art transportation practices.',
+      },
+      code: { type: 'char', label: 'Code', required: true, help: 'Incoterm Standard Code' },
+      active: { type: 'boolean', label: 'Active', help: 'By unchecking the active field, you may hide an INCOTERM you will not use.' },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.code && r.name ? `${r.code} - ${r.name}` : r.code || r.name || '') },
     },
     defaults: () => ({ active: true }),
-    list: ['code', 'name', 'active'],
+    views: ['list'],
+    list: ['code', 'name'],
+    searchFields: ['name'],
     form: {
-      title: 'code',
-      groups: [['code', 'name'], ['active']],
+      title: 'name',
+      hideTitle: true,
+      groups: [['name', 'code']],
     },
   },
 
@@ -2451,17 +2610,20 @@ Object.assign(accountingModels, {
       },
       color: { type: 'integer', label: 'Color' },
       cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
-      active: { type: 'boolean', label: 'Active' },
-      country: { type: 'char', label: 'Country' },
+      active: { type: 'boolean', label: 'Active', help: 'Set active to false to hide the Account Tag without removing it.' },
+      country: { type: 'char', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
-    list: ['name', 'applicability', 'country', 'balance_negate', 'active'],
+    views: ['list'],
+    list: ['name', 'applicability', 'country', 'color'],
+    searchFields: ['name'],
     form: {
       title: 'name',
-      groups: [
-        ['name', 'applicability', 'color'],
-        ['country', 'balance_negate', 'cash_flow_activity', 'active'],
+      hideTitle: true,
+      groups: (r) => [
+        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country'] : [])],
+        ['cash_flow_activity'],
       ],
     },
   },

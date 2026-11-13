@@ -300,8 +300,8 @@ test('Qodo 37: isOutstandingCreditFor validates partner_type and recipient bank 
   assert.equal(isOutstandingCreditFor(db, postedInv, postedSuppRefund), false);
 
   // Recipient bank mismatch on vendor bills
-  const bankA = create(db, 'res.partner.bank', { partner_id: partner.id, account_number: 'BANK_AAA' });
-  const bankB = create(bankA.db, 'res.partner.bank', { partner_id: partner.id, account_number: 'BANK_BBB' });
+  const bankA = create(db, 'res.partner.bank', { partner_id: partner.id, account_number: 'BANK_AAA', allow_out_payment: true });
+  const bankB = create(bankA.db, 'res.partner.bank', { partner_id: partner.id, account_number: 'BANK_BBB', allow_out_payment: true });
   db = bankB.db;
 
   const bill = create(db, 'account.move', {

@@ -1,12 +1,13 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
-import { create, read, search, unlink, write } from '../orm.js';
+import { create, nextSequence, read, search, unlink, write } from '../orm.js';
 import { dayOf, subtotal, today } from './common.js';
-import { toCompany } from './currency.js';
+import { conversionRate, toCompany } from './currency.js';
 import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
 import { analyticEligibleAccount, invoiceLines, invoiceLineAccount, journalItems, registerAnalyticPostingHooks } from './ledger.js';
-import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { hasMultiCurrency } from './money.js';
 import { currentCompany } from './company.js';
 import { isSectionOrNote } from './taxes.js';
 import { categoryHierarchy, findAnalyticDistribution, planOf } from './analytic-distribution-models.js';
@@ -193,12 +194,45 @@ export function removeAnalytic(db, moveId) {
   return ids.length ? unlink(db, 'account.analytic.line', ids) : db;
 }
 
-/** Return positive cost debits, income credits and signed balance in an inclusive period. */
+// Raw analytic lines grouped by account, built once per records snapshot (records are replaced on every change).
+const linesByAccountCache = new WeakMap();
+const linesByAccount = (db) => {
+  let grouped = linesByAccountCache.get(db.records);
+  if (!grouped) {
+    grouped = new Map();
+    for (const line of db.records['account.analytic.line'] ?? []) {
+      const list = grouped.get(line.account_id);
+      if (list) list.push(line); else grouped.set(line.account_id, [line]);
+    }
+    linesByAccountCache.set(db.records, grouped);
+  }
+  return grouped;
+};
+
+/** The currency an analytic account reports in: its company's, or the current company's for a shared account. */
+const analyticAccountCurrency = (db, account) => findCompanyCurrencyRecord(db, account?.company_id ?? currentCompany(db));
+
+/**
+ * Return positive cost debits, income credits and signed balance in an inclusive period, in the account's
+ * currency. Lines of companies with another currency are converted at their date; all values are null when
+ * a rate is missing, rather than adding amounts of different currencies.
+ */
 export function analyticBalance(db, accountId, { from, to } = {}) {
-  const lines = search(db, 'account.analytic.line').filter((r) => r.account_id === accountId && inPeriod(r, from, to));
-  const debit = round(lines.reduce((s, r) => s + Math.max(0, -(Number(r.amount) || 0)), 0));
-  const credit = round(lines.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0));
-  return { debit, credit, balance: round(credit - debit) };
+  // The raw record: read() would compute this account's balance fields and recurse here.
+  const account = (db.records['account.analytic.account'] ?? []).find((a) => a.id === accountId);
+  const target = analyticAccountCurrency(db, account);
+  let debit = 0;
+  let credit = 0;
+  for (const line of linesByAccount(db).get(accountId) ?? []) {
+    if (!inPeriod(line, from, to)) continue;
+    const source = findCompanyCurrencyRecord(db, line.company_id ?? 1);
+    const rate = !target || !source || source.id === target.id ? 1 : conversionRate(db, source.id, target.id, line.date, line.company_id ?? null);
+    if (rate == null) return { debit: null, credit: null, balance: null };
+    const amount = (Number(line.amount) || 0) * rate;
+    if (amount < 0) debit -= amount; else credit += amount;
+  }
+  const money = (v) => (target ? roundCurrency(v, target) : round(v));
+  return { debit: money(debit), credit: money(credit), balance: money(credit - debit) };
 }
 
 const day = (date) => {
@@ -318,34 +352,85 @@ const transition = (label, from, state) => ({
   },
 });
 
+/** Return a plan's id together with all descendant subplan ids. */
+export function planSubtreeIds(db, rootId) {
+  if (!rootId) return [];
+  const plans = search(db, 'account.analytic.plan');
+  const out = [rootId];
+  const seen = new Set(out);
+  for (let i = 0; i < out.length; i += 1) {
+    const pid = out[i];
+    for (const p of plans) {
+      if (p.parent_id === pid && !seen.has(p.id)) {
+        seen.add(p.id);
+        out.push(p.id);
+      }
+    }
+  }
+  return out;
+}
+
+/** Validate that a plan does not reference itself as an ancestor. */
+export function planHierarchyError(db, plan) {
+  if (!plan?.parent_id || !plan.id) return null;
+  const seen = new Set([plan.id]);
+  let cur = plan.parent_id;
+  while (cur) {
+    if (seen.has(cur)) return 'A plan cannot be its own ancestor';
+    seen.add(cur);
+    cur = read(db, 'account.analytic.plan', cur)?.parent_id ?? null;
+  }
+  return null;
+}
+
+const analyticStat = (db, rec, key) => (db && rec?.id ? analyticBalance(db, rec.id)[key] : 0);
+
 export const analyticPlusModels = {
   'account.analytic.plan': {
     label: 'Analytic Plans',
     fields: {
-      name: { type: 'char', label: 'Plan Name', required: true },
-      parent_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Parent Plan' },
-      default_applicability: { type: 'selection', label: 'Default Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      name: { type: 'char', label: 'Name', required: true },
+      parent_id: {
+        type: 'many2one', relation: 'account.analytic.plan', label: 'Parent Plan',
+        domain: (r, rec) => !rec?.id || r.id !== rec.id,
+      },
+      default_applicability: {
+        type: 'selection', label: 'Default Applicability',
+        options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']],
+        required: (r) => !r?.parent_id,
+        hideWhen: (r) => Boolean(r?.parent_id),
+      },
       color: { type: 'integer', label: 'Color' },
       applicability_ids: {
         type: 'one2many',
         label: 'Applicability',
         fields: {
           business_domain: { type: 'selection', label: 'Domain', options: [['general', 'General'], ['invoice', 'Invoice'], ['bill', 'Bill']] },
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, placeholder: 'Visible to all' },
+          applicability: { type: 'selection', label: 'Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']], required: true },
           account_prefix: { type: 'char', label: 'Accounts Prefix' },
           product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
-          applicability: { type: 'selection', label: 'Applicability', options: [['optional', 'Optional'], ['mandatory', 'Mandatory'], ['unavailable', 'Unavailable']] },
-          company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
         },
         newLine: () => ({ business_domain: null, account_prefix: '', product_categ_id: null, applicability: 'mandatory', company_id: null }),
       },
     },
     defaults: () => ({ default_applicability: 'optional', color: 0, applicability_ids: [] }),
-    list: ['name', 'parent_id', 'default_applicability'],
+    createDefaults: (db) => ({ sequence: nextSequence(db, 'account.analytic.plan') }),
+    guard: (db, _before, after) => planHierarchyError(db, after),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    views: ['list', 'kanban'],
+    list: ['sequence', 'name', 'default_applicability', 'color'],
+    listLabels: { name: 'Analytic Plans' },
     kanban: { title: 'name', lines: ['parent_id', 'default_applicability'] },
     form: {
       title: 'name',
-      groups: [['parent_id'], ['default_applicability', 'color']],
-      tabs: [{ label: 'Applicability', fields: ['applicability_ids'] }],
+      smart: [
+        { label: 'Subplans', model: 'account.analytic.plan', field: 'parent_id', target: 'accounting/analytic-plans' },
+        { label: 'Analytic Accounts', model: 'account.analytic.account', field: 'plan_id', ids: (db, rec) => planSubtreeIds(db, rec.id), target: 'accounting/analytic' },
+      ],
+      groups: [['parent_id', 'default_applicability', 'color']],
+      tabs: [{ label: 'Applicability', when: (r) => !r?.parent_id, fields: ['applicability_ids'] }],
       chatter: true,
     },
   },
@@ -353,18 +438,33 @@ export const analyticPlusModels = {
     ...accountModel,
     fields: {
       ...accountModel.fields,
+      name: { ...accountModel.fields.name, placeholder: 'e.g. Project XYZ' },
       plan_id: { type: 'many2one', relation: 'account.analytic.plan', label: 'Analytic Plan' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Customer' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Company Currency', readonly: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, placeholder: 'Visible to all' },
+      currency_id: {
+        type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true,
+        hideWhen: (_r, db) => !hasMultiCurrency(db),
+        compute: (r, db) => (db ? findCompanyCurrencyRecord(db, r?.company_id ?? currentCompany(db))?.id ?? null : r?.currency_id ?? null),
+      },
       active: { type: 'boolean', label: 'Active' },
-      debit: { type: 'monetary', label: 'Debit', readonly: true },
-      credit: { type: 'monetary', label: 'Credit', readonly: true },
+      debit: { type: 'monetary', label: 'Debit', readonly: true, compute: (r, db) => analyticStat(db, r, 'debit') },
+      credit: { type: 'monetary', label: 'Credit', readonly: true, compute: (r, db) => analyticStat(db, r, 'credit') },
+      balance: { ...accountModel.fields.balance, compute: (r, db) => analyticStat(db, r, 'balance') },
     },
     defaults: () => ({ ...accountModel.defaults(), active: true }),
-    list: ['code', 'name', 'plan', 'plan_id', 'partner_id'],
+    views: ['list', 'kanban'],
+    list: ['name', 'code', 'partner_id', 'plan_id', 'company_id', 'balance'],
+    listLabels: { name: 'Name' },
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
+    searchFields: ['name', 'code', 'partner_id'],
+    groupBys: ['partner_id'],
+    groupByLabels: { partner_id: 'Associated Partner' },
     form: {
-      ...accountModel.form, groups: [['code', 'plan', 'plan_id'], ['partner_id', 'currency_id', 'active']],
-      smart: [{ label: 'Balance', model: 'account.analytic.line', field: 'account_id', sum: 'amount', target: 'timesheets/timesheets' }],
+      ...accountModel.form,
+      titleLabel: true,
+      groups: [['partner_id', 'code'], ['plan_id', 'company_id', 'currency_id']],
+      smart: [{ label: 'Gross Margin', valueField: 'balance', target: (r) => `accounting/analytic-items?view=list&rel=account_id:${r.id}` }],
     },
   },
   'account.analytic.line': {
