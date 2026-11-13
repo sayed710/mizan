@@ -1,9 +1,9 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
-import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
+import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
 import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
-import { rateAt, toCompany } from './currency.js';
+import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
@@ -1417,6 +1417,54 @@ const lineItem = {
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };
 
+/** Company-currency signed total: posted lines when booked, else the document total at its rate (null without one). */
+function signedCompanyTotal(r, db) {
+  if (!r || r.move_type === 'entry' || !r.move_type) return total(r, db);
+  const sign = isInbound(r) ? 1 : -1;
+  if (r.state === 'posted' && (r.line_ids ?? []).length) return sign * round2((r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0));
+  const base = total(r, db);
+  if (base == null || !db) return base == null ? null : sign * base;
+  const own = companyCurrencyRecord(db, r.company_id ?? 1);
+  const doc = documentCurrency(db, r);
+  if (!doc || doc.id === own.id) return sign * base;
+  const rate = conversionRate(db, doc.id, own.id, r.invoice_date ?? r.date ?? today(), r.company_id ?? 1);
+  return rate == null ? null : sign * roundCurrency(base * rate, own);
+}
+
+function moveActivities(r, db) {
+  if (!db) return '';
+  const open = (db.records?.['mail.activity'] ?? [])
+    .filter((a) => a.active !== false && !a.done && a.res_model === 'account.move' && a.res_id === r.id);
+  return open.map((a) => a.summary || a.activity_type || t('Activity')).join(', ');
+}
+
+const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
+
+export const journalEntriesView = {
+  list: ['accounting_date', 'name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
+  optionalList: ['invoice_date', 'activities'],
+  listLabels: { accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
+  searchFields: ['name', 'ref', 'partner_id', 'journal_id'],
+  filters: [
+    [{ id: 'unposted', label: 'Unposted', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
+    [
+      { id: 'reversed', label: 'Reversed', fn: (r, db) => Boolean(r.reversed_entry_id || r.reversal_move_id || (db?.records?.['account.move'] ?? []).some((m) => m.state !== 'cancel' && m.reversed_entry_id === r.id)) },
+      { id: 'manual', label: 'Manual', fn: (r) => !((r.auto_post && r.auto_post !== 'no') || r.auto_post_origin_id) },
+    ],
+    [
+      { id: 'sales', label: 'Sales', fn: (r, db) => moveJournalType(db, r) === 'sale' },
+      { id: 'purchases', label: 'Purchases', fn: (r, db) => moveJournalType(db, r) === 'purchase' },
+      { id: 'bank', label: 'Bank', fn: (r, db) => moveJournalType(db, r) === 'bank' },
+      { id: 'cash', label: 'Cash', fn: (r, db) => moveJournalType(db, r) === 'cash' },
+      { id: 'credit', label: 'Credit', fn: (r, db) => moveJournalType(db, r) === 'credit' },
+      { id: 'misc', label: 'Miscellaneous', fn: (r, db) => moveJournalType(db, r) === 'general' },
+    ],
+    monthFilters('accounting_date', 'Date', (r) => r.date ?? r.invoice_date),
+    monthFilters('invoice_date', 'Invoice Date'),
+  ],
+  groupBys: ['partner_id', 'journal_id', 'state', 'accounting_date', 'invoice_date'],
+};
+
 export const accountingModels = {
   'account.account': {
     label: 'Chart of Accounts',
@@ -1784,6 +1832,7 @@ export const accountingModels = {
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       ref: { type: 'char', label: 'Reference' },
       date: { type: 'date', label: 'Accounting Date' },
+      accounting_date: { type: 'date', label: 'Date', compute: (r) => r.date ?? r.invoice_date ?? null },
       invoice_date: { type: 'date', label: 'Date' },
       invoice_date_due: { type: 'date', label: 'Due Date' },
       invoice_origin: { type: 'char', label: 'Source Document', readonly: true },
@@ -1794,7 +1843,8 @@ export const accountingModels = {
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       subscription_period: { type: 'date', label: 'Subscription Period', readonly: true },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']] },
+      state: { type: 'selection', label: 'Status', tracking: true, options: [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled']], badge: { draft: 'info', posted: 'success', cancel: 'muted' } },
+      activities: { type: 'char', label: 'Activities', compute: moveActivities },
       invoice_line_ids: invoiceLineField,
       payments: {
         type: 'one2many', label: 'Payments', readonly: true,
@@ -1818,6 +1868,7 @@ export const accountingModels = {
       },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
+      amount_total_signed: { type: 'monetary', label: 'Total', currency: 'company', compute: signedCompanyTotal },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },
       payment_state: {

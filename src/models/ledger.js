@@ -778,10 +778,11 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
   const rows = search(db, 'account.move')
     .filter((m) => {
       const date = m.date ?? m.invoice_date;
-      return m.state === wantedState
+      const stateOk = reviewMode === 'all' ? (m.state === 'draft' || m.state === 'posted') : m.state === wantedState;
+      return stateOk
       && (!from || date >= from)
       && (!to || date <= to)
-      && (!targetCompany || (m.company_id ?? 1) === targetCompany)
+      && (!targetCompany || (m.company_id ?? 1) === targetCompany);
     })
     .flatMap((m) => {
       const isTaxClosing = !!m.tax_return_id && (returns.get(m.tax_return_id)?.closing_move_ids ?? []).includes(m.id);
@@ -792,6 +793,8 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
         move_id: m.id,
         move_name: m.name,
         date: m.date ?? m.invoice_date,
+        invoice_date: m.invoice_date ?? null,
+        ref: m.ref ?? '',
         move_state: m.state,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,

@@ -218,6 +218,7 @@ function o2mStorageKey(model, fieldName, field, id) {
 }
 
 export function readOptionalCols(key) {
+  if (!key) return {};
   try {
     const raw = globalThis.localStorage?.getItem(key);
     if (!raw) return {};
@@ -229,41 +230,55 @@ export function readOptionalCols(key) {
 }
 
 export function writeOptionalCols(key, state) {
+  if (!key) return;
   try {
     globalThis.localStorage?.setItem(key, JSON.stringify(state));
   } catch { /* ignore disabled or full storage */ }
 }
 
-/** Dropdown checkbox menu for toggling `optional` columns in both list and o2m tables. */
-export function OptionalColumnsMenu({ optionalCols, optionalState, onToggle }) {
-  const [open, setOpen] = useState(false);
+export function useOptionalColumns(storageKey) {
+  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
+  useEffect(() => {
+    setOptionalState(readOptionalCols(storageKey));
+  }, [storageKey]);
+  const isVisible = (key, defaultVisible = false) => optionalState[key] ?? defaultVisible;
+  const toggleCol = (key, defaultVisible = false) => {
+    const next = { ...optionalState, [key]: !(optionalState[key] ?? defaultVisible) };
+    setOptionalState(next);
+    writeOptionalCols(storageKey, next);
+  };
+  return [optionalState, isVisible, toggleCol];
+}
+
+export function OptionalColsMenu({ items, optionalState, onToggle }) {
+  const [colsOpen, setColsOpen] = useState(false);
   const menuRef = useRef(null);
-  useDismiss(open, () => setOpen(false), menuRef);
+  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
+  if (!items.length) return null;
   return (
     <div className="o2m-cols-menu" ref={menuRef}>
       <button
         type="button"
         className="o2m-cols-toggle"
         aria-label={t('Optional columns')}
-        aria-expanded={open}
+        aria-expanded={colsOpen}
         aria-haspopup="menu"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => setColsOpen((o) => !o)}
       >⋯</button>
-      {open && (
+      {colsOpen && (
         <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
-          {optionalCols.map(([k, f]) => {
-            const defaultVisible = f.optional !== 'hide';
-            const checked = optionalState[k] ?? defaultVisible;
+          {items.map(({ key, label, defaultVisible = false }) => {
+            const checked = optionalState[key] ?? defaultVisible;
             return (
               <button
-                key={k}
+                key={key}
                 type="button"
                 role="menuitemcheckbox"
                 aria-checked={checked}
-                onClick={() => onToggle(k, defaultVisible)}
+                onClick={() => onToggle(key, defaultVisible)}
               >
                 <span aria-hidden="true">{checked ? '✓' : ''}</span>
-                <span>{t(f.label)}</span>
+                <span>{t(label)}</span>
               </button>
             );
           })}
@@ -278,23 +293,15 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
   const allCols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
   const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
   const storageKey = o2mStorageKey(model, fieldName, field, id);
-  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
-  useEffect(() => {
-    setOptionalState(readOptionalCols(storageKey));
-  }, [storageKey]);
+  const [optionalState, isVisible, toggleCol] = useOptionalColumns(storageKey);
 
-  const cols = allCols.filter(([k, f]) => !f.optional || (optionalState[k] ?? f.optional !== 'hide'));
+  const cols = allCols.filter(([k, f]) => !f.optional || isVisible(k, f.optional !== 'hide'));
   const priced = 'price_unit' in field.fields;
   const displayOpts = field.fields?.display_type?.options || [];
   const hasSection = displayOpts.some(([v]) => v === 'line_section');
   const hasNote = displayOpts.some(([v]) => v === 'line_note');
   const hasActionCol = !readonly || optionalCols.length > 0;
 
-  const toggleCol = (k, defaultVisible) => {
-    const next = { ...optionalState, [k]: !(optionalState[k] ?? defaultVisible) };
-    setOptionalState(next);
-    writeOptionalCols(storageKey, next);
-  };
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
     onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db, record) : l)));
@@ -313,9 +320,11 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             {priced && <th className="num">{t('Subtotal')}</th>}
             {hasActionCol && (
               <th className="o2m-cols-th" aria-label={optionalCols.length > 0 ? undefined : t('Delete')}>
-                {optionalCols.length > 0 && (
-                  <OptionalColumnsMenu optionalCols={optionalCols} optionalState={optionalState} onToggle={toggleCol} />
-                )}
+                <OptionalColsMenu
+                  items={optionalCols.map(([k, f]) => ({ key: k, label: f.label, defaultVisible: f.optional !== 'hide' }))}
+                  optionalState={optionalState}
+                  onToggle={toggleCol}
+                />
               </th>
             )}
           </tr>

@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { models } from '../models/index.js';
 import { groupRecords, write, writeMany } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, FieldInput, isNumeric, money, OptionalColumnsMenu, readOptionalCols, writeOptionalCols } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
@@ -34,14 +34,21 @@ export function reorderSequenceUpdates(records, fromId, toId, field = 'sequence'
 export const colLabel = (fields, f, listLabels) => t(listLabels?.[f] ?? fields[f].label);
 
 /** Compute the ordered visible columns for a list view given company count and optional toggles. */
-export function visibleListColumns(def, db, optionalState = {}) {
+export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null } = {}) {
   const fields = def.fields;
+  const isVisible = (f, defaultVisible) => optionalState[f] ?? defaultVisible;
   const multiCompany = companiesOf(db).length > 1;
-  const baseCols = def.list.filter((f) => !fields[f]?.multiCompanyOnly || multiCompany);
-  const cols = baseCols.filter((f) => !fields[f]?.optional || (optionalState[f] ?? fields[f].optional !== 'hide'));
-  const optionalCols = baseCols
-    .filter((f) => fields[f]?.optional === 'show' || fields[f]?.optional === 'hide')
-    .map((f) => [f, fields[f]]);
+  const baseCols = (list ?? def.list).filter((f) => !fields[f]?.multiCompanyOnly || multiCompany);
+  // A screen may add its own optional columns (hidden by default) beside the model's optional fields.
+  const extra = (optionalList ?? def.optionalList ?? []).filter((f) => !baseCols.includes(f)).map((f) => [f, { ...fields[f], optional: 'hide' }]);
+  const optionalCols = [
+    ...baseCols.filter((f) => fields[f]?.optional === 'show' || fields[f]?.optional === 'hide').map((f) => [f, fields[f]]),
+    ...extra,
+  ];
+  const cols = [
+    ...baseCols.filter((f) => !fields[f]?.optional || isVisible(f, fields[f].optional !== 'hide')),
+    ...extra.filter(([f]) => isVisible(f, false)).map(([f]) => f),
+  ];
   return { cols, optionalCols };
 }
 
@@ -60,23 +67,16 @@ const Totals = ({ db, cols, fields, records }) =>
     );
   });
 
-export function List({ db, model, records, open, selected, setSelected, groupBy, page, listLabels = null, emptyHelp = null }) {
+export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
   const def = models[model];
   const fields = def.fields;
-  const storageKey = `mizan-list-cols:${model}`;
-  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
-  useEffect(() => { setOptionalState(readOptionalCols(storageKey)); }, [storageKey]);
-  const { cols, optionalCols } = visibleListColumns(def, db, optionalState);
+  const [optionalState, , toggleCol] = useOptionalColumns(optionalStorageKey ?? `mizan-list-cols:${model}`);
+  const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList });
   const handleField = cols.find((f) => fields[f]?.widget === 'handle');
   const [sort, setSort] = useState(null);
   const [dragId, setDragId] = useState(null);
   const [expanded, setExpanded] = useState(() => new Set());
   const [shown, setShown] = useState(() => ({}));
-  const toggleCol = (k, defaultVisible) => {
-    const next = { ...optionalState, [k]: !(optionalState[k] ?? defaultVisible) };
-    setOptionalState(next);
-    writeOptionalCols(storageKey, next);
-  };
   const canDrag = Boolean(handleField) && !sort && !groupBy.length;
   const totalCols = cols.length + 1 + (optionalCols.length > 0 ? 1 : 0);
   // Ungrouped lists render one page (sorted across all records first); grouped lists cap each open group.
@@ -200,7 +200,11 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
             ))}
             {optionalCols.length > 0 && (
               <th className="o2m-cols-th">
-                <OptionalColumnsMenu optionalCols={optionalCols} optionalState={optionalState} onToggle={toggleCol} />
+                <OptionalColsMenu
+                  items={optionalCols.map(([k, f]) => ({ key: k, label: listLabels?.[k] ?? f.label, defaultVisible: f.optional !== 'hide' }))}
+                  optionalState={optionalState}
+                  onToggle={toggleCol}
+                />
               </th>
             )}
           </tr>

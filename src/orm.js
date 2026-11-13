@@ -332,7 +332,7 @@ export function groupRecords(db, model, records, name, context = {}) {
         : [],
   );
   for (const r of records) {
-    let k = groupKey(field, r[name]);
+    let k = groupKey(field, field.compute ? field.compute(r, db) : r[name]);
     if (isStageRel && typeof k === 'string') {
       const match = stageList.find((s) => s.name.toLowerCase() === k.toLowerCase() || (k === 'won' && s.is_won));
       if (match) k = match.id;
@@ -350,19 +350,25 @@ export const aggregate = (records, measure) =>
   measure === '__count' ? records.length : records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
 
 /** Filters in the same group are OR-ed, groups are AND-ed (search-panel semantics). */
-export function applyFilters(model, records, activeIds) {
-  const groups = (models[model].filters ?? [])
+export function applyFilters(model, records, activeIds, db = null, filterGroups = null) {
+  const groups = (filterGroups ?? models[model].filters ?? [])
     .map((g) => g.filter((f) => activeIds.includes(f.id)))
     .filter((g) => g.length);
-  return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r))));
+  return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r, db))));
 }
 
 /** Text search: every term must match some char/text/many2one display value. */
-export function matches(db, model, rec, terms) {
+export function matches(db, model, rec, terms, searchFields = null) {
   const fields = models[model].fields;
-  const haystack = Object.entries(fields)
-    .map(([k, f]) => {
-      if (f.type === 'many2one') return read(db, f.relation, rec[k])?.name ?? '';
+  const keys = searchFields ?? models[model].searchFields ?? Object.keys(fields);
+  const haystack = keys
+    .map((k) => {
+      const f = fields[k];
+      if (!f) return '';
+      if (f.type === 'many2one') {
+        const target = read(db, f.relation, rec[k]);
+        return `${target?.name ?? ''} ${target?.display_name ?? ''}`.trim();
+      }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
       return ['char', 'text', 'selection'].includes(f.type) ? String(rec[k] ?? '') : '';
     })

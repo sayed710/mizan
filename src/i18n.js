@@ -1418,6 +1418,13 @@ const ar = {
   'Account used to register the private part of mixed expenses.': 'الحساب المستخدم لتسجيل الجزء الخاص من المصروفات المختلطة.',
   'Bank account number is only valid for bank journals': 'رقم الحساب البنكي صالح فقط ليوميات البنك',
   'Select an active bank account belonging to this journal company': 'اختر حساباً بنكياً نشطاً يتبع شركة هذه اليومية',
+  'Unposted': 'غير مرحّل',
+  'Date: This Month': 'التاريخ: هذا الشهر',
+  'Date: This Year': 'التاريخ: هذه السنة',
+  'Invoice Date: This Month': 'تاريخ الفاتورة: هذا الشهر',
+  'Invoice Date: This Year': 'تاريخ الفاتورة: هذه السنة',
+  'Activity': 'نشاط',
+  'P&L Accounts': 'حسابات الأرباح والخسائر',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

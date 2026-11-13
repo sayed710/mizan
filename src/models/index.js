@@ -3,7 +3,7 @@ import { read } from '../orm.js';
 import { registerModels } from '../registry.js';
 import { crmModels } from './crm.js';
 import { salesModels } from './sales.js';
-import { accountingModels } from './accounting.js';
+import { accountingModels, journalEntriesView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
 import { payModels } from './pay.js';
@@ -233,7 +233,7 @@ const allApps = [
       ] },
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
-          { key: 'entries', label: 'Journal Entries', model: 'account.move' },
+          { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
           { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
