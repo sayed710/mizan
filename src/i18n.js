@@ -1571,7 +1571,7 @@ const ar = {
   'Holder Name': 'اسم صاحب الحساب',
   'Account holder name in case it is different than the name of the partner.': 'اسم صاحب الحساب في حال كان مختلفاً عن اسم الشريك.',
   'e.g. Bank of America': 'مثال: البنك الأهلي',
-  'BIC/SWIFT': 'BIC/SWIFT',
+  'BIC/SWIFT': 'رمز BIC/SWIFT',
   'Bank Identifier Code for international wires in the format Bank Code (4 letters) + Country Code (2 letters) + Location Code (2 letters/numbers) + Optional Branch Code (3 letters/numbers).': 'رمز تعريف البنك للتحويلات الدولية بصيغة رمز البنك (4 أحرف) + رمز الدولة (حرفان) + رمز الموقع (حرفان أو رقمان) + رمز الفرع الاختياري (3 أحرف أو أرقام).',
   'Trust Bank Account': 'الوثوق بالحساب البنكي',
   'Sending fake invoices with a fraudulent account number is a common phishing practice. To protect yourself, always verify new bank account numbers, preferably by calling the vendor, as phishing usually happens when their emails are compromised. Once verified, you can activate the ability to send money.': 'يعد إرسال فواتير مزيفة برقم حساب احتيالي ممارسة تصيد شائعة. لحماية نفسك، تحقق دائماً من أرقام الحسابات البنكية الجديدة، ويفضل عبر الاتصال بالمورد، إذ يحدث التصيد غالباً عند اختراق بريده الإلكتروني. بعد التحقق، يمكنك تفعيل إمكانية إرسال الأموال.',
