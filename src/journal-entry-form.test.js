@@ -712,3 +712,18 @@ test('Lock refuses while an earlier numbered draft of the journal could rejoin t
   assert.ok(read(db, 'account.move', first).name, 'the reset entry keeps its number');
   assert.throws(() => secureEntries(db, { throughMoveId: second }), /earlier draft entries/);
 });
+
+test('posting refuses a number that sorts inside the journal secured chain', async () => {
+  const { secureEntries } = await import('./models/hash_chain.js');
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', misc.id, { restrict_mode_hash_table: true });
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const [acc1, acc2] = [accounts.find((a) => a.account_type === 'expense'), accounts.find((a) => a.account_type === 'asset_current')];
+  const draft = (vals) => create(db, 'account.move', { move_type: 'entry', journal_id: misc.id, date: '2026-03-01', line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }], ...vals });
+  const custom = draft({ name: 'ZZZ/0001' });
+  db = postMove(custom.db, custom.id);
+  db = secureEntries(db, { throughMoveId: custom.id });
+  const later = draft({});
+  assert.throws(() => postMove(later.db, later.id), /numbered before the secured entries/);
+});

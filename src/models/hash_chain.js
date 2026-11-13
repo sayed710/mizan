@@ -238,9 +238,18 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
  * - last secured entry
  * - OK or the first corrupted entry
  */
+/** A newly posted entry whose number sorts inside the journal's secured chain could never be hashed. */
+export const SECURED_ORDER_ERROR = 'This entry would be numbered before the secured entries of its journal';
+export function postedBeforeSecuredChain(db, after, before) {
+  if (after.state !== 'posted' || before?.state === 'posted') return false;
+  const company = after.company_id ?? 1;
+  return (db.records['account.move'] ?? []).some((m) => m.id !== after.id && m.inalterable_hash && m.journal_id === after.journal_id
+    && (m.company_id ?? 1) === company && (m.name ?? '').localeCompare(after.name ?? '') >= 0);
+}
+
 /** Validate a newly secured move against the complete staged chain, including concurrent server diffs. */
 export function secureMoveInvariant(db, after, before) {
-  if (!after.inalterable_hash && !after.secure_sequence_number) return null;
+  if (!after.inalterable_hash && !after.secure_sequence_number) return postedBeforeSecuredChain(db, after, before) ? SECURED_ORDER_ERROR : null;
   if (before?.inalterable_hash) return null;
   if (!after.inalterable_hash || !Number.isInteger(after.secure_sequence_number) || after.secure_sequence_number < 1) return 'Invalid secure entry hash chain';
   const journal = (db.records['account.journal'] ?? []).find((j) => j.id === after.journal_id);

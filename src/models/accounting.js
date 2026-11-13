@@ -13,7 +13,7 @@ import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, fi
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
-import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
+import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
 import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
@@ -545,6 +545,7 @@ export function postMove(db, id) {
   if (!journalRecord.code?.trim()) throw new Error('Set a short code on the journal');
     const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
     const name = enteredName ?? nextName(db, 'account.move', `${journalRecord.code}/${year}/`);
+    if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
     if ((r.line_ids ?? []).some((line) => {
       const account = read(db, 'account.account', line.account_id);
       return account?.company_id && account.company_id !== (r.company_id ?? 1);
@@ -609,6 +610,7 @@ export function postMove(db, id) {
   const matchWarnings = checkBillMatch(db, r);
   const sequence = journalInvoiceSequence(journalRecord, r);
   const name = enteredName ?? sequence.name;
+  if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const counterpart = intercompanyBill(db, r);
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
