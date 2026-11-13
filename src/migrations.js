@@ -15,7 +15,7 @@ import { today, validDate } from './models/common.js';
 import { CHART, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
-import { returnTaxLock } from './models/finance.js';
+import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
 
@@ -1274,6 +1274,30 @@ MIGRATIONS.push({ version: 46, name: 'analytic-plans-sequence-backfill', up(db) 
   return {
     ...db,
     records: { ...db.records, 'account.analytic.plan': nextPlans },
+  };
+} });
+
+MIGRATIONS.push({ version: 47, name: 'followup-levels-parity', up(db) {
+  const levels = db.records['account.followup.level'] ?? [];
+  if (!levels.length) return db;
+  const nextLevels = levels.map((l) => {
+    const rawDelay = Number(l.delay) || 0;
+    const displayDelay = l.display_delay != null ? Math.max(0, Math.trunc(Number(l.display_delay) || 0)) : Math.abs(Math.trunc(rawDelay));
+    const timing = l.reminder_timing ?? (rawDelay < 0 ? 'before' : 'after');
+    return {
+      ...l,
+      display_delay: displayDelay,
+      reminder_timing: timing,
+      delay: l.delay != null ? Math.trunc(rawDelay) : followUpSignedDelay(displayDelay, timing),
+      send_email: l.send_email ?? (l.channel === 'email'),
+      send_sms: l.send_sms ?? false,
+      create_activity: l.create_activity ?? false,
+      activity_default_responsible_type: l.activity_default_responsible_type ?? 'followup',
+    };
+  });
+  return {
+    ...db,
+    records: { ...db.records, 'account.followup.level': nextLevels },
   };
 } });
 

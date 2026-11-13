@@ -1590,6 +1590,25 @@ const ar = {
   'Associated Partner': 'الشريك المرتبط',
   'e.g. Project XYZ': 'مثال: مشروع XYZ',
   'A plan cannot be its own ancestor': 'لا يمكن أن تكون الخطة سلفاً لنفسها',
+  // Multi-Ledger & Invoice Reminders (Odoo 20 parity)
+  'Ledger group': 'مجموعة الدفتر',
+  'e.g. CONSO, IFRS, ...': 'مثال: CONSO, IFRS, ...',
+  'Ledger group allows managing multiple accounting standards.': 'تتيح مجموعة الدفتر إدارة معايير محاسبية متعددة.',
+  'Due Days': 'أيام الاستحقاق',
+  'Reminder Timing': 'توقيت التذكير',
+  before: 'قبل',
+  after: 'بعد',
+  Remind: 'تذكير',
+  Notification: 'الإشعار',
+  'Reminder Responsible': 'مسؤول التذكير',
+  'Account Manager': 'مدير الحساب',
+  'Follow-up Responsible': 'مسؤول المتابعة',
+  'Activity Notes': 'ملاحظات النشاط',
+  'The number of days after or before the due date of the invoice to wait before sending the reminder.': 'عدد الأيام بعد أو قبل تاريخ استحقاق الفاتورة للانتظار قبل إرسال التذكير.',
+  'Indicates whether the reminder should be sent before or after the invoice due date.': 'يوضح ما إذا كان يجب إرسال التذكير قبل تاريخ استحقاق الفاتورة أو بعده.',
+  'Determine who will be assigned to the activity:\n- Follow-up Responsible (default)\n- Salesperson: Sales Person defined on the invoice\n- Account Manager: Sales Person defined on the customer': 'تحديد من سيتم تعيين النشاط له:\n- مسؤول المتابعة (افتراضي)\n- مندوب المبيعات: مندوب المبيعات المحدد في الفاتورة\n- مدير الحساب: مندوب المبيعات المحدد في العميل',
+  'Due Days must be a non-negative integer': 'يجب أن تكون أيام الاستحقاق عدداً صحيحاً غير سالب',
+  'Activity Type and Summary are required when Schedule Activity is enabled': 'نوع النشاط والملخص مطلوبان عند تفعيل جدولة النشاط',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

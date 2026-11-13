@@ -1,8 +1,10 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
 import { models } from '../registry.js';
-import { postNote, read, search, write } from '../orm.js';
+import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
+import { ACTIVITY_TYPES } from './mail.js';
+import { currentActor, employeeFor } from './authority.js';
 import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
@@ -1104,10 +1106,59 @@ function followUpSummary(invoices) {
 }
 
 
+/**
+ * Derive the signed day offset (`delay`) from non-negative `display_delay`
+ * and `reminder_timing` (`'before'` -> negative, `'after'` -> positive, `0` -> `0`).
+ */
+export function followUpSignedDelay(displayDelay, reminderTiming = 'after') {
+  const days = Math.max(0, Math.trunc(Number(displayDelay) || 0));
+  if (days === 0) return 0;
+  return reminderTiming === 'before' ? -days : days;
+}
+
+/**
+ * Compute the Odoo display name (`"<display_delay> days <before|after>"`) for a follow-up level.
+ */
+export function followUpLevelName(level) {
+  if (!level) return '';
+  const hasDisplayDelay = level.display_delay != null && level.display_delay !== '';
+  const days = Math.max(0, Math.trunc(hasDisplayDelay ? Number(level.display_delay) : Math.abs(Number(level.delay) || 0)));
+  const timing = level.reminder_timing === 'before' || (!level.reminder_timing && Number(level.delay) < 0)
+    ? 'before'
+    : 'after';
+  return `${days} days ${timing}`;
+}
+
+function levelChannel(level) {
+  if (!level) return null;
+  if (level.send_email) return 'email';
+  if (level.channel && level.channel !== 'email') return level.channel;
+  if (level.send_sms) return 'sms';
+  return null;
+}
+
+function resolveFollowUpActivityUser(db, partner, companyId, part, responsibleType = 'followup') {
+  const fallbackUserId = employeeFor(db, currentActor()?.login)?.id ?? null;
+  if (responsibleType === 'salesperson') {
+    const invoiceUser = part.invoices
+      .map((inv) => inv.invoice_user_id ?? read(db, 'account.move', inv.id)?.invoice_user_id)
+      .find(Boolean);
+    return invoiceUser ?? fallbackUserId;
+  }
+  if (responsibleType === 'account_manager') {
+    return partner?.user_id ?? fallbackUserId;
+  }
+  return partnerFollowUp(partner, companyId)?.followup_responsible_id ?? partner?.followup_responsible_id ?? fallbackUserId;
+}
+
 const oldestOverdueDate = (invoices) => invoices.filter((m) => Number(m.amount_residual) > 0).map((m) => m.invoice_date_due).sort()[0];
 
-/** Partners with overdue invoices (netted by open receivable credits), for payment reminders. */
+/** Partners with overdue invoices (or upcoming invoices matching a "before" reminder), netted by open receivable credits. */
 export function followUps(db, at = today(), { ignoreNextActionDate = false, companyId = null } = {}) {
+  const minNegativeDelay = search(db, 'account.followup.level').reduce((min, l) => Math.min(min, Number(l.delay) || 0), 0);
+  const beforeCutoff = minNegativeDelay < 0 ? addDays(at, -minNegativeDelay) : null;
+  const dueForReminder = (dueDate) => Boolean(dueDate && (beforeCutoff ? dueDate <= beforeCutoff : dueDate < at));
+
   const overdue = search(db, 'account.move').filter((m) => (companyId == null || (m.company_id ?? 1) === companyId) && m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
     if (m.exclude_from_followup) return [];
     const partner = read(db, 'res.partner', m.partner_id);
@@ -1116,8 +1167,8 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
     if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') return [];
     if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) return [];
 
-    if (!m.invoice_date || !(m.line_ids ?? []).length) return m.amount_residual > 0 && m.invoice_date_due < at ? [{ row: m, companyAmount: Number(m.amount_residual) }] : [];
-    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false }).filter((due) => due.date < at);
+    if (!m.invoice_date || !(m.line_ids ?? []).length) return m.amount_residual > 0 && dueForReminder(m.invoice_date_due) ? [{ row: m, companyAmount: Number(m.amount_residual) }] : [];
+    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false }).filter((due) => dueForReminder(due.date));
     if (!dues.length) return [];
     const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
     const companyAmount = dues.reduce((sum, due) => sum + due.amount, 0);
@@ -1207,6 +1258,7 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_delivery_state: vals.followup_delivery_state !== undefined ? vals.followup_delivery_state : current?.followup_delivery_state ?? null,
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
     followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
+    followup_responsible_id: vals.followup_responsible_id !== undefined ? vals.followup_responsible_id : current?.followup_responsible_id ?? null,
     no_followup: vals.no_followup !== undefined ? vals.no_followup : current?.no_followup ?? false,
   };
   if (idx >= 0) existing[idx] = updated;
@@ -1222,6 +1274,65 @@ function reminderDetails(levels, level, date, channel, oldest = null) {
   const delay = Number(level?.delay) || 0;
   const next = levels.filter((candidate) => Number(candidate.delay) > delay).sort((a, b) => Number(a.delay) - Number(b.delay))[0];
   return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? (oldest ? addDays(oldest, Number(next.delay)) : addDays(date, Number(next.delay) - delay)) : null };
+}
+
+function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate) {
+  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
+  let nextDb = db;
+  let partner = read(nextDb, 'res.partner', partnerId);
+
+  for (const part of groups) {
+    const cId = part.company_id;
+    const level = followUpLevel(scope, part, at);
+    const levelName = level ? followUpLevelName(level) : 'Payment reminder';
+
+    const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
+    const overdue = part.total == null ? 'Amounts' : round(part.total);
+    const detail = `${levelName}: ${overdue} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
+    const channelText = channel ? `sent by ${channel}` : 'processed';
+    const noteBody = `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
+    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
+
+    if (level?.create_activity) {
+      const assignedUserId = resolveFollowUpActivityUser(nextDb, partner, cId, part, level.activity_default_responsible_type);
+      // Avoid mutating partner inside the loop; create(mail.activity) does not modify res.partner.
+      nextDb = create(nextDb, 'mail.activity', {
+        res_model: 'res.partner',
+        res_id: partnerId,
+        res_name: partner.name ?? '',
+        activity_type: level.activity_type_id || 'todo',
+        summary: level.activity_summary ?? '',
+        note: level.activity_note ?? '',
+        date_deadline: at,
+        company_id: cId,
+        user_id: assignedUserId,
+      }).db;
+    }
+
+    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
+    if (level && (previous == null || Number(level.delay) > Number(previous))) {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_level_delay: Number(level.delay),
+        followup_date: at,
+        followup_oldest_date: part.oldest ?? null,
+        followup_level: level.id,
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+      });
+    } else {
+      partner = updatePartnerFollowUp(partner, cId, {
+        followup_date: at,
+        followup_oldest_date: part.oldest ?? null,
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+      });
+    }
+  }
+
+  return write(nextDb, 'res.partner', partnerId, {
+    followup_lines: partner.followup_lines,
+  });
 }
 
 /**
@@ -1267,18 +1378,19 @@ export function runFollowUps(db, at = today(), deliver = null) {
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
-    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
+    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -Infinity;
 
     if (currentDelay >= Number(level.delay)) return nextDb;
-    const channel = level.channel;
+    const channel = levelChannel(level);
+    const levelName = followUpLevelName(level);
     const canDeliverEmail = channel === 'email' && Boolean(partner.email?.trim()) && Boolean(deliver);
-    if (!canDeliverEmail && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    if (!canDeliverEmail && !(level.create_activity && !channel) && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
 
     const recordFailure = (reason) => {
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(nextDb, 'res.partner', partner.id,
-        `${level.name}: ${formatFollowUpTotals(f)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+        `${levelName}: ${formatFollowUpTotals(f)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
       const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
@@ -1290,9 +1402,9 @@ export function runFollowUps(db, at = today(), deliver = null) {
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: level.name, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
       // Validate the bookkeeping before attempting an irreversible delivery.
-      const sent = logManualFollowUp(nextDb, partner.id, at, { scope: nextDb, reminder: f, companyId, channel, nextLevelBaseDate: f.oldest });
+      const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       try {
         const result = deliver(message);
         if (result && typeof result.then === 'function') return result.then(() => sent, (error) => recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`));
@@ -1300,6 +1412,9 @@ export function runFollowUps(db, at = today(), deliver = null) {
       } catch (error) {
         return recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`);
       }
+    }
+    if (!channel && level.create_activity) {
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, null, f.oldest);
     }
     const reason = !channel
       ? 'No delivery action is configured for this follow-up level.'
@@ -1354,45 +1469,7 @@ export function logManualFollowUp(db, partnerId, at = today(), { scope = db, rem
     throw new Error('A customer email address is required to send an email reminder');
   }
   const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
-  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
-
-  let nextDb = db;
-  let partner = read(db, 'res.partner', partnerId);
-
-  for (const part of groups) {
-    const cId = part.company_id;
-    const level = followUpLevel(scope, part, at);
-
-    const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
-    const overdue = part.total == null ? 'Amounts' : round(part.total);
-    const detail = `${level?.name ?? 'Payment reminder'}: ${overdue} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
-    const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
-    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
-
-    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
-    if (level && (previous == null || Number(level.delay) > Number(previous))) {
-      partner = updatePartnerFollowUp(partner, cId, {
-        followup_level_delay: Number(level.delay),
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_level: level.id,
-        followup_delivery_state: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
-      });
-    } else {
-      partner = updatePartnerFollowUp(partner, cId, {
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_delivery_state: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
-      });
-    }
-  }
-
-  return write(nextDb, 'res.partner', partnerId, {
-    followup_lines: partner.followup_lines,
-  });
+  return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
 
 
@@ -1426,10 +1503,12 @@ export function analyticActuals(db, period = {}) {
 export const financeModels = {
   'account.journal.group': {
     label: 'Multi-Ledger',
+    emptyHelp: { title: 'Ledger group allows managing multiple accounting standards.' },
+    views: ['list'],
     fields: {
-      name: { type: 'char', label: 'Name', required: true },
-      sequence: { type: 'integer', label: 'Sequence' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      name: { type: 'char', label: 'Ledger group', placeholder: 'e.g. CONSO, IFRS, ...', required: true },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle', hidden: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, hidden: true },
       journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
     },
     defaults: () => ({ sequence: 10, journal_ids: [] }),
@@ -1438,21 +1517,161 @@ export const financeModels = {
       const journal = read(db, 'account.journal', id);
       return !journal || (journal.company_id && journal.company_id !== record.company_id);
     }) ? 'Select journals belonging to this company or shared journals' : null,
-    list: ['name', 'sequence', 'company_id', 'journal_ids'],
-    form: { title: 'name', groups: [['sequence', 'company_id'], ['journal_ids']] },
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    list: ['sequence', 'name', 'journal_ids'],
+    listFields: {
+      sequence: { widget: 'handle', label: '' },
+      journal_ids: { widget: 'many2many_tags', optional: 'show' },
+    },
+    searchFields: ['name'],
+    form: { title: 'name', hideTitle: true, groups: [['name', 'journal_ids']] },
   },
   'account.followup.level': {
     label: 'Follow-up Levels',
+    views: ['list', 'kanban'],
     fields: {
-      name: { type: 'char', label: 'Level', required: true },
-      delay: { type: 'integer', label: 'Days Overdue' },
-      channel: { type: 'selection', label: 'Automatic Delivery', options: [['email', 'Email'], ['phone', 'Phone'], ['letter', 'Letter']] },
-      message: { type: 'text', label: 'Message' },
+      display_name: { type: 'char', label: 'Level', hidden: true, compute: (r) => followUpLevelName(r) },
+      display_delay: {
+        type: 'integer',
+        label: 'Due Days',
+        required: true,
+        help: 'The number of days after or before the due date of the invoice to wait before sending the reminder.',
+      },
+      reminder_timing: {
+        type: 'selection',
+        label: 'Reminder Timing',
+        required: true,
+        options: [['before', 'before'], ['after', 'after']],
+        help: 'Indicates whether the reminder should be sent before or after the invoice due date.',
+      },
+      delay: { type: 'integer', label: 'Days Overdue', hidden: true },
+      send_email: { type: 'boolean', label: 'Email' },
+      send_sms: { type: 'boolean', label: 'SMS' },
+      create_activity: { type: 'boolean', label: 'Schedule Activity' },
+      activity_default_responsible_type: {
+        type: 'selection',
+        label: 'Responsible',
+        required: true,
+        options: [
+          ['followup', 'Reminder Responsible'],
+          ['salesperson', 'Salesperson'],
+          ['account_manager', 'Account Manager'],
+        ],
+        hideWhen: (r) => !r?.create_activity,
+        help: 'Determine who will be assigned to the activity:\n- Follow-up Responsible (default)\n- Salesperson: Sales Person defined on the invoice\n- Account Manager: Sales Person defined on the customer',
+      },
+      activity_type_id: {
+        type: 'selection',
+        label: 'Activity Type',
+        options: ACTIVITY_TYPES,
+        required: (r) => Boolean(r?.create_activity),
+        hideWhen: (r) => !r?.create_activity,
+      },
+      activity_summary: {
+        type: 'char',
+        label: 'Summary',
+        required: (r) => Boolean(r?.create_activity),
+        hideWhen: (r) => !r?.create_activity,
+      },
+      activity_note: {
+        type: 'text',
+        label: 'Note',
+        placeholder: 'Activity Notes',
+        hideWhen: (r) => !r?.create_activity,
+      },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      // Legacy stored fields kept for compatibility with existing records and follow-up channel/body readers.
+      name: { type: 'char', label: 'Level', hidden: true, readonly: true },
+      channel: { type: 'selection', label: 'Automatic Delivery', options: [['email', 'Email'], ['phone', 'Phone'], ['letter', 'Letter']], hidden: true },
+      message: { type: 'text', label: 'Message', hidden: true },
     },
-    defaults: () => ({ delay: 15 }),
-    kanban: { title: 'name', lines: ['delay'] },
-    list: ['delay', 'name', 'channel'],
-    form: { title: 'name', groups: [['delay', 'channel'], []], tabs: [{ label: 'Message', fields: ['message'] }] },
+    defaults: () => ({
+      display_delay: 15,
+      reminder_timing: 'after',
+      delay: 15,
+      send_email: true,
+      send_sms: false,
+      create_activity: false,
+      activity_default_responsible_type: 'followup',
+    }),
+    createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
+    prepareCreate(db, vals) {
+      const next = { ...vals };
+      if (next.display_delay === undefined && next.delay != null) {
+        const raw = Number(next.delay) || 0;
+        next.display_delay = Math.abs(Math.trunc(raw));
+        if (next.reminder_timing === undefined) next.reminder_timing = raw < 0 ? 'before' : 'after';
+      }
+      if (next.send_email === undefined && next.channel !== undefined) {
+        next.send_email = next.channel === 'email';
+      }
+      const effectiveSendEmail = next.send_email !== undefined ? next.send_email : true;
+      if (next.channel === undefined && effectiveSendEmail) next.channel = 'email';
+      const effDays = next.display_delay !== undefined ? next.display_delay : 15;
+      const effTiming = next.reminder_timing ?? 'after';
+      if (next.delay === undefined || 'display_delay' in vals || 'reminder_timing' in vals) {
+        next.delay = followUpSignedDelay(effDays, effTiming);
+      }
+      return { db, vals: next };
+    },
+    onchange(rec, field) {
+      if (field === 'display_delay' || field === 'reminder_timing') {
+        return { delay: followUpSignedDelay(rec.display_delay, rec.reminder_timing) };
+      }
+      if (field === 'delay') {
+        const raw = Number(rec.delay) || 0;
+        return {
+          display_delay: Math.abs(Math.trunc(raw)),
+          reminder_timing: raw < 0 ? 'before' : 'after',
+        };
+      }
+      if (field === 'send_email') {
+        return { channel: rec.send_email ? 'email' : (rec.channel === 'email' ? null : rec.channel) };
+      }
+      return null;
+    },
+    guard: (db, before, record) => {
+      if (record.display_delay == null || Number(record.display_delay) < 0 || !Number.isInteger(Number(record.display_delay))) {
+        return 'Due Days must be a non-negative integer';
+      }
+      if (record.create_activity && (!record.activity_type_id || !String(record.activity_summary ?? '').trim())) {
+        return 'Activity Type and Summary are required when Schedule Activity is enabled';
+      }
+      return null;
+    },
+    sort: (a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0) || a.id - b.id,
+    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'create_activity'] },
+    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'activity_type_id', 'company_id'],
+    listLabels: { activity_type_id: 'Activity' },
+    searchFields: ['display_name', 'activity_summary', 'activity_note'],
+    filters: [[
+      { id: 'email', label: 'Email', fn: (r) => Boolean(r.send_email) },
+      { id: 'sms', label: 'SMS', fn: (r) => Boolean(r.send_sms) },
+      { id: 'activity', label: 'Schedule Activity', fn: (r) => Boolean(r.create_activity) },
+    ]],
+    groupBys: ['reminder_timing', 'company_id'],
+    form: {
+      title: 'display_name',
+      hideTitle: true,
+      groups: [
+        [{ label: 'Remind', fields: ['display_delay', 'reminder_timing'], joins: ['days'], inline: true }],
+        ['company_id'],
+      ],
+      tabs: [
+        {
+          label: 'Notification',
+          groups: [{ title: 'Actions', fields: ['send_email', 'send_sms'] }],
+        },
+        {
+          label: 'Activity',
+          groups: [
+            ['create_activity', 'activity_default_responsible_type'],
+            ['activity_type_id', 'activity_summary'],
+            { fullWidth: true, fields: ['activity_note'] },
+          ],
+        },
+      ],
+    },
   },
 
   'account.analytic.account': {

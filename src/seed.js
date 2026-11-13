@@ -521,8 +521,8 @@ export function seed() {
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
-  add('account.followup.level', { name: 'First reminder', delay: 15, channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
-  add('account.followup.level', { name: 'Second reminder', delay: 30, channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
+  add('account.followup.level', { display_delay: 15, reminder_timing: 'after', delay: 15, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
+  add('account.followup.level', { display_delay: 30, reminder_timing: 'after', delay: 30, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
   (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });

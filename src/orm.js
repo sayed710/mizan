@@ -312,7 +312,10 @@ export function groupLabel(db, field, key) {
   switch (field.type) {
     case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
-    case 'many2one': return read(db, field.relation, key)?.name ?? 'None';
+    case 'many2one': {
+      const rec = read(db, field.relation, key);
+      return rec?.display_name ?? rec?.name ?? 'None';
+    }
     case 'many2many': {
       const names = String(key).split(',').map((id) => read(db, field.relation, Number(id))?.name).filter(Boolean);
       return names.length ? names.join(', ') : 'None';
