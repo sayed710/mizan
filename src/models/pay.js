@@ -843,6 +843,7 @@ export const payModels = {
     groupByLabels: PAYMENT_GROUP_BY_LABELS,
     searchFields: PAYMENT_SEARCH_FIELDS,
     filters: PAYMENT_FILTERS,
+    views: ['list', 'kanban', 'graph'],
     kanban: { title: 'name', lines: ['partner_id', 'amount_company_currency_signed', 'date'], badge: 'display_state' },
     list: PAYMENT_LIST,
     listFields: PAYMENT_LIST_FIELDS,
