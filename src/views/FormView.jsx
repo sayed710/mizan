@@ -634,13 +634,16 @@ export function FormView({ leaf, id, base, params }) {
                   {(() => {
                     const activeTab = tabs[tab] ?? tabs[0];
                     const tabReadonly = locked || activeTab.readonly;
-                    const renderTabField = (f, placeholder) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
-                      ? (
-                        <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                          placeholder={placeholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
-                      )
-                      // Plain fields in a tab get a label, like fields in the header groups.
-                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
+                    const renderTabField = (f, placeholder) => {
+                      const resolvedPlaceholder = placeholder ?? (def.fields[f].placeholder ? t(def.fields[f].placeholder) : undefined);
+                      return (['one2many', 'text', 'html'].includes(def.fields[f].type)
+                        ? (
+                          <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
+                            placeholder={resolvedPlaceholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
+                        )
+                        // Plain fields in a tab get a label, like fields in the header groups.
+                        : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
+                    };
                     return (
                       <>
                         {model === 'account.return' && activeTab.label === 'Tax Report' ? (

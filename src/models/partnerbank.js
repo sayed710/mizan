@@ -5,10 +5,31 @@ export function sanitizeAccountNumber(val) {
   return String(val ?? '').replace(/\s+/g, '').toUpperCase();
 }
 
-/** Validate partner bank account: required fields and per-partner uniqueness across all accounts (including archived). */
+const BIC_RE = /^(?:[A-Za-z0-9]{8}|[A-Za-z0-9]{11})$/;
+
+/**
+ * Check whether a BIC/SWIFT string is empty or matches 8/11 alphanumeric characters.
+ * @param {string|null|undefined} bic
+ * @returns {boolean}
+ */
+export function isValidBankBic(bic) {
+  if (bic == null) return true;
+  const trimmed = String(bic).trim();
+  return trimmed === '' || BIC_RE.test(trimmed);
+}
+
+/**
+ * Validate a partner bank account before create or write: required fields, BIC format and per-partner
+ * uniqueness across all accounts (including archived).
+ * @param {object} db
+ * @param {object|null} before
+ * @param {object} r
+ * @returns {string|null}
+ */
 export function bankAccountGuard(db, before, r) {
   if (!r.partner_id) return 'Select a partner for the bank account';
   if (!r.account_number || !String(r.account_number).trim()) return 'Bank account number is required';
+  if (!isValidBankBic(r.bank_bic)) return 'BIC/SWIFT must be 8 or 11 alphanumeric characters';
 
   const sanitized = sanitizeAccountNumber(r.account_number);
   const allBanks = db?.records?.['res.partner.bank'] ?? [];
@@ -101,38 +122,97 @@ export function resolveAndValidateRecipientBank(db, partnerId, requestedBankId, 
 export const partnerBankModels = {
   'res.partner.bank': {
     label: 'Bank Accounts',
+    views: ['list'],
     fields: {
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner', required: true },
       account_number: { type: 'char', label: 'Account Number', required: true },
-      legacy_account_numbers: { type: 'tags', label: 'Legacy Account Numbers', readonly: true },
+      legacy_account_numbers: { type: 'tags', label: 'Legacy Account Numbers', readonly: true, hidden: true },
       sanitized_account_number: {
         type: 'char',
         label: 'Sanitized Account Number',
         readonly: true,
+        hidden: true,
         compute: (r) => sanitizeAccountNumber(r.account_number),
       },
-      holder_name: { type: 'char', label: 'Account Holder' },
-      bank_name: { type: 'char', label: 'Bank Name' },
-      bank_bic: { type: 'char', label: 'Bank Identifier Code' },
-      allow_out_payment: { type: 'boolean', label: 'Send Money' },
-      currency: { type: 'char', label: 'Currency' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
+      holder_name: {
+        type: 'char',
+        label: 'Holder Name',
+        help: 'Account holder name in case it is different than the name of the partner.',
+      },
+      bank_name: { type: 'char', label: 'Bank Name', placeholder: 'e.g. Bank of America' },
+      bank_bic: {
+        type: 'char',
+        label: 'BIC/SWIFT',
+        help: 'Bank Identifier Code for international wires in the format Bank Code (4 letters) + Country Code (2 letters) + Location Code (2 letters/numbers) + Optional Branch Code (3 letters/numbers).',
+      },
+      allow_out_payment: {
+        type: 'boolean',
+        label: 'Trust Bank Account',
+        widget: 'toggle',
+        help: 'Sending fake invoices with a fraudulent account number is a common phishing practice. To protect yourself, always verify new bank account numbers, preferably by calling the vendor, as phishing usually happens when their emails are compromised. Once verified, you can activate the ability to send money.',
+      },
+      clearing_number: {
+        type: 'char',
+        label: 'Clearing Number',
+        help: 'A clearing number (or routing number) refers to a bank, branch, or location and is used by domestic money transfer protocols (from/to bank accounts in the same country).',
+      },
+      note: { type: 'text', label: 'Notes', placeholder: 'Internal notes...' },
+      street: { type: 'char', label: 'Street' },
+      street2: { type: 'char', label: 'Street 2' },
+      city: { type: 'char', label: 'City' },
+      state: { type: 'char', label: 'State' },
+      zip: { type: 'char', label: 'ZIP' },
+      country: { type: 'char', label: 'Country' },
+      currency: { type: 'char', label: 'Currency', hidden: true },
+      company_id: {
+        type: 'many2one',
+        relation: 'res.company',
+        label: 'Company',
+        multiCompanyOnly: true,
+        placeholder: 'Visible to all',
+      },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
-      allow_out_payment: true,
+      sequence: 10,
+      allow_out_payment: false,
       active: true,
     }),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     guard: bankAccountGuard,
     onchange: (r, key) => (key === 'account_number' ? { sanitized_account_number: sanitizeAccountNumber(r.account_number) } : {}),
-    groupBys: ['partner_id', 'bank_name'],
-    list: ['account_number', 'partner_id', 'bank_name', 'bank_bic', 'allow_out_payment', 'active'],
-    kanban: { title: 'account_number', lines: ['partner_id', 'bank_name'] },
+    searchFields: ['bank_name', 'account_number', 'company_id', 'partner_id'],
+    list: ['sequence', 'account_number', 'partner_id', 'holder_name', 'bank_name', 'bank_bic', 'clearing_number', 'company_id', 'allow_out_payment', 'active'],
+    listLabels: { bank_name: 'Bank' },
+    listFields: {
+      partner_id: { optional: 'hide' },
+      holder_name: { optional: 'hide' },
+      bank_name: { optional: 'hide' },
+      bank_bic: { optional: 'show' },
+      clearing_number: { optional: 'hide' },
+      company_id: { optional: 'hide', multiCompanyOnly: true },
+      allow_out_payment: { optional: 'show', widget: 'toggle' },
+      active: { optional: 'hide', widget: 'toggle' },
+    },
+    editableList: ['allow_out_payment', 'active'],
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
     form: {
       title: 'account_number',
+      hideTitle: true,
       groups: [
-        ['partner_id', 'account_number', 'sanitized_account_number', 'holder_name', 'legacy_account_numbers'],
-        ['bank_name', 'bank_bic', 'allow_out_payment', 'currency', 'company_id', 'active'],
+        ['account_number', 'clearing_number', 'bank_bic', 'partner_id', 'holder_name'],
+        ['allow_out_payment', 'company_id'],
+      ],
+      tabs: [
+        { label: 'Note', fields: ['note'] },
+        {
+          label: 'Bank Information',
+          groups: [
+            ['bank_name'],
+            { title: 'Bank Address', fields: ['street', 'street2', 'city', 'state', 'zip', 'country'] },
+          ],
+        },
       ],
       chatter: true,
     },

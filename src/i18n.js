@@ -1567,6 +1567,21 @@ const ar = {
   'Ending Date, included in the fiscal year.': 'تاريخ الانتهاء، مشمول في السنة المالية.',
   'Set active to false to hide the Account Tag without removing it.': 'اضبط النشاط على غير نشط لإخفاء وسم الحساب دون حذفه.',
   'Country for which this tag is available, when applied on taxes.': 'الدولة التي يتاح لها هذا الوسم عند تطبيقه على الضرائب.',
+  'BIC/SWIFT must be 8 or 11 alphanumeric characters': 'يجب أن يتكون رمز BIC/SWIFT من 8 أو 11 حرفاً أو رقماً',
+  'Holder Name': 'اسم صاحب الحساب',
+  'Account holder name in case it is different than the name of the partner.': 'اسم صاحب الحساب في حال كان مختلفاً عن اسم الشريك.',
+  'e.g. Bank of America': 'مثال: البنك الأهلي',
+  'BIC/SWIFT': 'BIC/SWIFT',
+  'Bank Identifier Code for international wires in the format Bank Code (4 letters) + Country Code (2 letters) + Location Code (2 letters/numbers) + Optional Branch Code (3 letters/numbers).': 'رمز تعريف البنك للتحويلات الدولية بصيغة رمز البنك (4 أحرف) + رمز الدولة (حرفان) + رمز الموقع (حرفان أو رقمان) + رمز الفرع الاختياري (3 أحرف أو أرقام).',
+  'Trust Bank Account': 'الوثوق بالحساب البنكي',
+  'Sending fake invoices with a fraudulent account number is a common phishing practice. To protect yourself, always verify new bank account numbers, preferably by calling the vendor, as phishing usually happens when their emails are compromised. Once verified, you can activate the ability to send money.': 'يعد إرسال فواتير مزيفة برقم حساب احتيالي ممارسة تصيد شائعة. لحماية نفسك، تحقق دائماً من أرقام الحسابات البنكية الجديدة، ويفضل عبر الاتصال بالمورد، إذ يحدث التصيد غالباً عند اختراق بريده الإلكتروني. بعد التحقق، يمكنك تفعيل إمكانية إرسال الأموال.',
+  'Clearing Number': 'رقم المقاصة',
+  'A clearing number (or routing number) refers to a bank, branch, or location and is used by domestic money transfer protocols (from/to bank accounts in the same country).': 'يشير رقم المقاصة (أو رقم التوجيه) إلى بنك أو فرع أو موقع ويُستخدم في بروتوكولات التحويل المالي المحلية (من/إلى حسابات بنكية في نفس الدولة).',
+  'Internal notes...': 'ملاحظات داخلية...',
+  'Street 2': 'الشارع 2',
+  'ZIP': 'الرمز البريدي',
+  'Bank Information': 'معلومات البنك',
+  'Bank Address': 'عنوان البنك',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
