@@ -8,7 +8,7 @@ import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
 import { Kanban } from './Kanban.jsx';
-import { List } from './List.jsx';
+import { colLabel, List } from './List.jsx';
 import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
@@ -83,10 +83,13 @@ export function ActionView({ leaf, base, params }) {
   };
   const exportCsv = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => {
-      const field = def.fields[f];
-      return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
-    }))]));
+    download(`${model}.csv`, toCsv([
+      def.list.map((f) => colLabel(def.fields, f, leaf.listLabels)),
+      ...rows.map((r) => def.list.map((f) => {
+        const field = def.fields[f];
+        return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
+      })),
+    ]));
   };
   const importCsv = (file) => importModelFile(model, importDefaults, file);
   const groupBy = search.groupBy;
@@ -154,7 +157,7 @@ export function ActionView({ leaf, base, params }) {
         view={view} search={search} setSearch={setSearch} extra={extra} />
       <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
+      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} listLabels={leaf.listLabels} emptyHelp={leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}

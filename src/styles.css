@@ -133,6 +133,11 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .card-tags { display: flex; gap: 4px; flex-wrap: wrap; }
 .card-foot { display: flex; align-items: center; margin-top: 2px; }
 .badge { font-size: 12px; background: #eef0f4; padding: 1px 8px; border-radius: 999px; }
+.badge-info { background: #dbeafe; color: #1d4ed8; }
+.badge-success { background: #dcfce7; color: var(--success); }
+.badge-warning { background: #fef3c7; color: var(--warn); }
+.badge-danger { background: #fee2e2; color: var(--danger); }
+.badge-muted { background: #eef0f4; color: var(--muted); }
 .kanban-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; padding: 0 16px 24px; }
 .quick-create { cursor: default; gap: 8px; }
 .quick-create input { padding: 6px 8px; border: 1px solid var(--border-input); border-radius: 6px; }
@@ -156,6 +161,9 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .list .check { width: 36px; }
 .list tfoot td { font-weight: 700; border-bottom: 0; }
 .empty { text-align: center; color: var(--muted); padding: 32px !important; }
+.empty-help { white-space: normal; max-width: 480px; margin: 0 auto; }
+.empty-title { margin: 0 0 6px; font-size: 16px; font-weight: 600; color: var(--text); }
+.empty-text { margin: 0; }
 
 /* Form */
 .breadcrumb { display: flex; flex-direction: column; line-height: 1.2; }

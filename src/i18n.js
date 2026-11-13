@@ -1350,6 +1350,12 @@ const ar = {
   'Select a valid tax periodicity': 'اختر دورية ضريبة صالحة',
   'Select a valid payment QR format': 'اختر تنسيق رمز QR دفع صالحاً',
   'Enter a valid date': 'أدخل تاريخاً صالحاً',
+  'Bill Date': 'تاريخ فاتورة المورد',
+  'In Payment': 'قيد الدفع',
+  'Create a customer invoice': 'إنشاء فاتورة عميل',
+  'Create a vendor bill': 'إنشاء فاتورة مورد',
+  'Create invoices, register payments and keep track of the discussions with your customers.': 'أنشئ الفواتير وسجّل المدفوعات وتابع المناقشات مع عملائك.',
+  'Create invoices, register payments and keep track of the discussions with your vendors.': 'أنشئ الفواتير وسجّل المدفوعات وتابع المناقشات مع مورديك.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
