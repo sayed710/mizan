@@ -1029,6 +1029,14 @@ MIGRATIONS.push({ version: 37, name: 'Move fiscal position tax mappings onto tax
   );
 } });
 
+MIGRATIONS.push({ version: 38, name: 'Mark stored accounts without an active flag as active', up: (db) => ({
+  ...db,
+  records: {
+    ...db.records,
+    'account.account': (db.records['account.account'] ?? []).map((a) => (a.active === undefined ? { ...a, active: true } : a)),
+  },
+}) });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

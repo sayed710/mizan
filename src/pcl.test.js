@@ -287,7 +287,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 37);
+  assert.equal(migrated.schema_version, 38);
 
   // Company 1 has migrated values
   const comp1 = read(migrated, 'res.company', 1);
@@ -325,7 +325,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   // Migration is idempotent
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 37);
+  assert.equal(twice.schema_version, 38);
   assert.equal(read(twice, 'res.company', 1).lock_date, '2025-06-30');
   assert.equal(read(twice, 'res.company', 1).tax_lock_date, '2025-02-28');
 });

@@ -5,6 +5,7 @@ import { setupDom, find } from './test-support/dom.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
+import { migrate } from './migrations.js';
 import { accountBalance, journalItems, postEntry } from './models/ledger.js';
 import { postMove } from './models/accounting.js';
 
@@ -194,6 +195,12 @@ test('archived accounts are hidden by default, shown with archived filter, and r
   const cash = search(db, 'account.account').find((a) => a.code === '101401');
   const archived = create(db, 'account.account', { code: '699900', name: 'Archived Expense', account_type: 'expense', active: false, company_id: 1 });
   db = archived.db;
+
+  // Stored accounts from before the Active field read as active after migration 38.
+  const legacy = { ...db, schema_version: 37, records: { ...db.records, 'account.account': db.records['account.account'].map(({ active: _drop, ...a }) => (a.id === archived.id ? { ...a, active: false } : a)) } };
+  const migrated = migrate(legacy);
+  assert.equal(read(migrated, 'account.account', expense.id).active, true);
+  assert.equal(migrated.records['account.account'].find((a) => a.id === archived.id).active, false);
 
   // List hides archived by default, reveals with Archived filter toggle.
   const { ActionView } = await import('./views/ActionView.jsx');
