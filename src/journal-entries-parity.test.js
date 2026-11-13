@@ -195,7 +195,7 @@ test('Journal Entries filters, group-bys and search fields cover all Odoo 20 opt
   const cashJ = search(db, 'account.journal').find((j) => j.type === 'cash');
   const genJ = search(db, 'account.journal').find((j) => j.type === 'general');
   // Intentionally name a credit journal like a bank one to prove type never infers from name/code.
-  const creditJ = create(db, 'account.journal', { name: 'Bank Named Credit', code: 'BNKCR', type: 'credit' });
+  const creditJ = create(db, 'account.journal', { name: 'Bank Named Credit', code: 'BNKCR', type: 'credit', suspense_account_id: db.records['account.account'].find((a) => a.code === '101404').id });
   db = creditJ.db;
   const income = search(db, 'account.account').find((a) => a.account_type === 'income');
   const expense = search(db, 'account.account').find((a) => a.account_type === 'expense');
@@ -372,7 +372,7 @@ test('Journal Items shows default/optional columns, all filters on seed data, gr
   const purchJ = search(db, 'account.journal').find((j) => j.type === 'purchase');
   const bankJ = search(db, 'account.journal').find((j) => j.type === 'bank');
   const cashJ = search(db, 'account.journal').find((j) => j.type === 'cash');
-  const creditJ = create(db, 'account.journal', { name: 'Corporate Card', code: 'CRD1', type: 'credit' }).db;
+  const creditJ = create(db, 'account.journal', { name: 'Corporate Card', code: 'CRD1', type: 'credit', suspense_account_id: db.records['account.account'].find((a) => a.code === '101404').id }).db;
   db = creditJ;
   const cardJ = search(db, 'account.journal').find((j) => j.type === 'credit');
   const ar = search(db, 'account.account').find((a) => a.account_type === 'asset_receivable');

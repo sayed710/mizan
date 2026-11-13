@@ -612,7 +612,7 @@ export function FormView({ leaf, id, base, params }) {
                 }}
               />
             )}
-            {tabs && (
+            {tabs?.length > 0 && (
               <>
                 <div className="tabs" role="tablist">
                   {tabs.map((tb, i) => (

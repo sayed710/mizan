@@ -17,6 +17,7 @@ import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
+import { normalizeReconcileRule } from './models/reconcile.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1160,6 +1161,18 @@ MIGRATIONS.push({ version: 40, name: 'journal-parity', up(db) {
     };
   });
   return { ...db, records: { ...db.records, 'account.journal': nextJournals } };
+} });
+
+MIGRATIONS.push({ version: 41, name: 'Reconciliation model Odoo 20 parity', up: (db) => {
+  const existing = db.records['account.reconcile.model'];
+  if (!existing?.length) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.reconcile.model': existing.map(normalizeReconcileRule),
+    },
+  };
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

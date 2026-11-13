@@ -292,6 +292,7 @@ export const updateSettings = (db, vals) => {
 const groupKey = (field, v) => {
   if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;
   if (field.type === 'boolean') return !!v;
+  if (field.type === 'many2many') return Array.isArray(v) && v.length ? [...v].sort((a, b) => a - b).join(',') : false;
   return v ?? false;
 };
 
@@ -301,6 +302,10 @@ export function groupLabel(db, field, key) {
     case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
     case 'many2one': return read(db, field.relation, key)?.name ?? 'None';
+    case 'many2many': {
+      const names = String(key).split(',').map((id) => read(db, field.relation, Number(id))?.name).filter(Boolean);
+      return names.length ? names.join(', ') : 'None';
+    }
     case 'boolean': return 'Yes';
     default: return String(key);
   }

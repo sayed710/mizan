@@ -5,16 +5,15 @@ import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
-import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
+import { applyRule, sameCommercialPartner, suggestRule } from './reconcile.js';
 import { importStatement } from './statements.js';
 import { datedLockDelete, datedLockGuard, moveDate, recordLockDate } from './finance.js';
 import { exchangeAccount } from './exchange-account.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency } from '../money.js';
 import { shouldBePaid } from './billcontrol.js';
 
-/** The suggested reconciliation model for a line, else the first matching button model. */
-const modelFor = (db, line) => suggestRule(db, line)
-  ?? search(db, 'account.reconcile.model').filter((m) => m.active !== false && m.rule_type === 'writeoff_button' && ruleMatches(m, line)).sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))[0] ?? null;
+/** The first active matching reconciliation model (by sequence), or null. */
+const modelFor = (db, line) => suggestRule(db, line);
 
 const inboundTypes = ['out_invoice', 'in_refund'];
 const outboundTypes = ['in_invoice', 'out_refund'];

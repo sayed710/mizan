@@ -1,14 +1,104 @@
 // Reconciliation models: rules that match bank statement lines and either match invoices or book a write-off.
 import { read, search, write } from '../orm.js';
-import { ensureBankSuspense, paymentJournal, postEntry } from './ledger.js';
+import { ensureBankSuspense, isLiquidityJournal, paymentJournal, postEntry } from './ledger.js';
 import { bookBankMovement, candidates, reconcileWith, statementCompanyAmount, bookedStatementAmount } from './bank.js';
 import { allocateCents, roundCurrency, companyCurrencyRecord } from '../money.js';
 import { toCompany } from './currency.js';
 import { computeLineTaxes, expandTaxIds, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 
-const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || a.id - b.id;
-
 export { sameCommercialPartner } from './common.js';
+
+const bySequence = (a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0) || (a.id ?? 0) - (b.id ?? 0);
+const isBlank = (v) => v == null || String(v).trim() === '';
+const parseStrictNumber = (raw) => {
+  const s = String(raw ?? '').trim();
+  if (!s) return NaN;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+/** Compile a regular expression case-insensitively, returning null if invalid or empty. */
+function compileRegex(pattern) {
+  const text = String(pattern ?? '');
+  if (!text) return null;
+  try {
+    return new RegExp(text, 'i');
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the rule operates as an invoice/bill matching rule (supports legacy invoice_matching). */
+export const isMatchingRule = (rule) => rule?.rule_type === 'matching_rule' || rule?.rule_type === 'invoice_matching';
+
+/** Whether the rule runs automatically during batch auto-reconciliation. */
+export const isAutoRule = (rule) => (rule?.trigger != null ? rule.trigger === 'auto_reconcile' : Boolean(rule?.auto_reconcile));
+
+/** Keep numeric float `amount` synchronized with `amount_string` for non-regex line types. */
+function syncLineAmount(line, index = 0) {
+  if (!line || typeof line !== 'object') return line;
+  const type = line.amount_type || 'percentage';
+  const sequence = line.sequence ?? (index + 1) * 10;
+  let amountString = line.amount_string;
+  if (amountString == null) {
+    if (line.amount != null && type !== 'regex') amountString = String(line.amount);
+    else if (type === 'regex') amountString = '';
+    else if (!line.account_id && line.partner_id) amountString = '100';
+    else amountString = '';
+  } else {
+    amountString = String(amountString);
+  }
+  if (type === 'regex') {
+    return { ...line, sequence, amount_type: type, amount_string: amountString, amount: 0 };
+  }
+  const parsed = parseStrictNumber(amountString);
+  const amount = Number.isFinite(parsed) ? parsed : (Number(line.amount) || 0);
+  return { ...line, sequence, amount_type: type, amount_string: amountString, amount };
+}
+
+/**
+ * Normalize a reconciliation model record (or create payload) to the Odoo 20 schema.
+ * Reused by `prepareCreate` and database migration so legacy fields map through one code path.
+ */
+export function normalizeReconcileRule(rule) {
+  if (!rule || typeof rule !== 'object') return rule;
+  const {
+    auto_reconcile,
+    partner_id,
+    match_nature,
+    match_partner,
+    ...rest
+  } = rule;
+  const rule_type = isMatchingRule(rule) ? 'matching_rule' : 'reco_model';
+  const trigger = rule.trigger != null ? rule.trigger : (auto_reconcile ? 'auto_reconcile' : 'manual');
+  const match_partner_ids = Array.isArray(rule.match_partner_ids)
+    ? rule.match_partner_ids
+    : (partner_id ? [partner_id] : []);
+  const match_journal_ids = Array.isArray(rule.match_journal_ids) ? rule.match_journal_ids : [];
+  // Legacy fixed amounts were shares on the counterpart side; Odoo 20 reads them as credit (+) or debit (-).
+  // A rule limited to paid (outgoing) transactions books its counterpart as a debit, so its legacy amount turns negative.
+  // ponytail: a legacy rule for both directions keeps its sign, which is right for received money only.
+  const legacyDebit = match_nature === 'amount_paid';
+  const line_ids = (rule.line_ids ?? []).map((l, i) => syncLineAmount(
+    legacyDebit && l.amount_string == null && l.amount_type === 'fixed' && l.amount != null ? { ...l, amount: -Number(l.amount) } : l,
+    i,
+  ));
+  return {
+    ...rest,
+    rule_type,
+    trigger,
+    match_journal_ids,
+    match_partner_ids,
+    match_amount: rule.match_amount || null,
+    match_label: rule.match_label || null,
+    payment_tolerance: rule.payment_tolerance != null ? rule.payment_tolerance : 0,
+    payment_tolerance_type: rule.payment_tolerance_type || 'percentage',
+    matching_order: rule.matching_order || 'old_first',
+    ...(match_nature === 'amount_received' || match_nature === 'amount_paid' ? { match_nature } : {}),
+    ...(match_partner === true ? { match_partner: true } : {}),
+    line_ids,
+  };
+}
 
 function labelMatches(rule, label) {
   const text = String(label ?? '');
@@ -16,7 +106,8 @@ function labelMatches(rule, label) {
   if (rule.match_label === 'contains') return text.toLowerCase().includes(param.toLowerCase());
   if (rule.match_label === 'not_contains') return !text.toLowerCase().includes(param.toLowerCase());
   if (rule.match_label === 'match_regex') {
-    try { return new RegExp(param, 'i').test(text); } catch { return false; }
+    const re = compileRegex(param);
+    return re ? re.test(text) : false;
   }
   return true;
 }
@@ -25,41 +116,96 @@ function amountMatches(rule, amount) {
   const value = Math.abs(Number(amount) || 0);
   const min = Number(rule.match_amount_min) || 0;
   const max = Number(rule.match_amount_max) || 0;
-  if (rule.match_amount === 'lower') return value < max;
-  if (rule.match_amount === 'greater') return value > min;
+  if (rule.match_amount === 'lower') return value <= max;
+  if (rule.match_amount === 'greater') return value >= min;
   if (rule.match_amount === 'between') return value >= min && value <= max;
   return true;
 }
 
-/** Whether a statement line meets the rule's nature, amount, label and partner conditions. */
+/** Whether a statement line meets the rule's journal, partner, amount, label and legacy nature conditions. */
 export function ruleMatches(rule, line) {
+  if (rule.active === false) return false;
   if (rule.company_id && rule.company_id !== (line?.company_id ?? 1)) return false;
+  if (Array.isArray(rule.match_journal_ids) && rule.match_journal_ids.length > 0 && !rule.match_journal_ids.includes(line?.journal_id)) {
+    return false;
+  }
   const amount = Number(line?.amount) || 0;
   if (rule.match_nature === 'amount_received' && !(amount > 0)) return false;
   if (rule.match_nature === 'amount_paid' && !(amount < 0)) return false;
-  if ((rule.match_partner || rule.partner_id) && !line?.partner_id) return false;
-  if (rule.partner_id && line?.partner_id !== rule.partner_id) return false;
+  const partnerIds = Array.isArray(rule.match_partner_ids) && rule.match_partner_ids.length > 0
+    ? rule.match_partner_ids
+    : (rule.partner_id ? [rule.partner_id] : null);
+  if ((rule.match_partner || partnerIds) && !line?.partner_id) return false;
+  if (partnerIds && !partnerIds.includes(line?.partner_id)) return false;
   return amountMatches(rule, amount) && labelMatches(rule, line?.payment_ref);
 }
 
-/** Split a balance over counterpart lines: fixed amounts first, then each percentage line its percentage
- * of the rest (the whole rest when the percentages total 100). A partial rule books only its own share,
- * so the caller can leave the remainder open on the statement line; the split never exceeds the balance. */
-function splitCounterparts(lines, balance, currency) {
-  const amountOf = (l) => Number(l.amount) || 0;
-  const fixed = lines.filter((l) => l.amount_type === 'fixed');
-  const fixedTotal = roundCurrency(fixed.reduce((s, l) => s + roundCurrency(amountOf(l), currency), 0), currency);
-  const rest = roundCurrency(balance - fixedTotal, currency);
-  // A fixed amount above the balance can only be balanced by a negative percentage share, which would post
-  // a tax computed on the oversized amount beside a counterpart with the opposite sign. Reject it here,
-  // before the shares are computed, so the full-coverage adjustment stays a currency-rounding correction.
+/**
+ * Parse a numeric amount from `text` using `pattern`:
+ * supports 0 capture groups (full match), 1 capture group (whole/decimal number),
+ * or 2 capture groups (integer part + decimal part). Returns null when invalid or unmatched.
+ */
+function extractRegexAmount(pattern, text) {
+  const re = compileRegex(pattern);
+  if (!re) return null;
+  const match = re.exec(String(text ?? ''));
+  if (!match) return null;
+  let numeric = NaN;
+  if (match.length > 2 && match[1] !== undefined && match[2] !== undefined) {
+    const intPart = String(match[1]).replace(/[\s,_]/g, '') || '0';
+    const decPart = String(match[2]).replace(/[\s,_]/g, '');
+    if (/^[+-]?\d+$/.test(intPart) && /^\d+$/.test(decPart)) {
+      numeric = Number(`${intPart}.${decPart}`);
+    }
+  } else {
+    let raw = String(match.length > 1 && match[1] !== undefined ? match[1] : match[0]).trim().replace(/\s+/g, '');
+    if (/^[+-]?\d+(,\d{1,2})$/.test(raw)) raw = raw.replace(',', '.');
+    else raw = raw.replace(/,/g, '');
+    numeric = Number(raw);
+  }
+  if (!Number.isFinite(numeric) || numeric === 0) return null;
+  return Math.abs(numeric);
+}
+
+function splitCounterparts(lines, balance, currency, paymentRef = '', incoming = true, stLineTotal = balance) {
+  const ordered = [...lines].sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0));
+  const rawOf = (l) => (l.amount_string != null && l.amount_string !== '' ? Number(l.amount_string) : Number(l.amount)) || 0;
+  const fixedValueOf = (l) => {
+    const raw = roundCurrency(rawOf(l), currency);
+    // In Odoo 20 fixed lines follow accounting polarity (negative=debit, positive=credit);
+    // express value relative to the counterpart direction (credit when incoming, debit when outgoing).
+    return incoming ? raw : -raw;
+  };
+
+  const preComputed = ordered.map((l) => {
+    if (l.amount_type === 'fixed') return { type: 'fixed', value: fixedValueOf(l) };
+    if (l.amount_type === 'percentage_st_line') return { type: 'fixed', value: roundCurrency(stLineTotal * rawOf(l) / 100, currency) };
+    if (l.amount_type === 'regex') {
+      const extracted = extractRegexAmount(l.amount_string ?? l.amount, paymentRef);
+      return { type: 'regex', value: extracted == null ? 0 : roundCurrency(extracted, currency) };
+    }
+    return { type: 'percentage', pct: rawOf(l) };
+  });
+
+  const nonPctTotal = roundCurrency(preComputed.reduce((s, item) => s + (item.type === 'percentage' ? 0 : item.value), 0), currency);
+  const rest = roundCurrency(balance - nonPctTotal, currency);
+  // A fixed/st-line/regex amount above the balance can only be balanced by a negative percentage share,
+  // which would post a tax computed on the oversized amount beside a counterpart with the opposite sign.
   if (rest < 0) throw new Error('The fixed counterpart lines exceed the amount to reconcile');
-  const variable = lines.filter((l) => l.amount_type !== 'fixed');
-  const pct = variable.reduce((s, l) => s + amountOf(l), 0);
-  const shares = pct === 100 && variable.length && rest > 0 ? allocateCents(rest, variable.map(amountOf), currency) : variable.map((l) => roundCurrency(rest * amountOf(l) / 100, currency));
-  let index = 0;
-  const split = lines.map((l) => ({ ...l, value: l.amount_type === 'fixed' ? roundCurrency(amountOf(l), currency) : shares[index++] }));
-  if (roundCurrency(split.reduce((sum, l) => sum + l.value, 0) - balance, currency) > 0) throw new Error('The counterpart lines exceed the amount to reconcile');
+
+  const pctItems = preComputed.filter((item) => item.type === 'percentage');
+  const pctSum = pctItems.reduce((s, item) => s + item.pct, 0);
+  const shares = pctSum === 100 && pctItems.length && rest > 0
+    ? allocateCents(rest, pctItems.map((item) => item.pct), currency)
+    : pctItems.map((item) => roundCurrency(rest * item.pct / 100, currency));
+  let pctIndex = 0;
+  const split = ordered.map((l, i) => ({
+    ...l,
+    value: preComputed[i].type === 'percentage' ? shares[pctIndex++] : preComputed[i].value,
+  }));
+  if (roundCurrency(split.reduce((sum, l) => sum + l.value, 0) - balance, currency) > 0) {
+    throw new Error('The counterpart lines exceed the amount to reconcile');
+  }
   return split;
 }
 
@@ -69,11 +215,19 @@ function writeOff(db, rule, line) {
   const journalCurrency = read(db, 'account.journal', line.journal_id)?.currency_id ?? companyCurrencyRecord(db, company)?.id;
   const foreign = journalCurrency && journalCurrency !== companyCurrencyRecord(db, company)?.id;
   const currency = read(db, 'res.currency', journalCurrency);
-  const balance = line.open_amount != null ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency) : roundCurrency(Math.abs(line.amount), currency);
+  const balance = line.open_amount != null
+    ? roundCurrency(line.open_amount * (foreign ? Math.abs(line.amount) / bookedStatementAmount(db, line) : 1), currency)
+    : roundCurrency(Math.abs(line.amount), currency);
   if (!(balance > 0)) throw new Error('This bank transaction has no open amount');
-  const split = splitCounterparts(rule.line_ids ?? [], balance, currency);
+  const ruleLines = rule.line_ids ?? [];
+  const stLineTotal = roundCurrency(Math.abs(line.amount), currency);
+  const split = splitCounterparts(ruleLines, balance, currency, line.payment_ref, incoming, stLineTotal);
   const counterparts = split.filter((l) => l.value);
-  if (!counterparts.length) throw new Error('The counterpart lines do not cover any amount');
+  if (!counterparts.length) {
+    // Regex lines that do not match the transaction label are skipped without failing the line.
+    if (ruleLines.some((l) => l.amount_type === 'regex')) return db;
+    throw new Error('The counterpart lines do not cover any amount');
+  }
   for (const counterpart of counterparts) {
     const account = read(db, 'account.account', counterpart.account_id);
     if (!counterpart.account_id) throw new Error(`Configure the counterpart account on reconciliation model ${rule.name}`);
@@ -84,8 +238,14 @@ function writeOff(db, rule, line) {
   const companyValue = line.open_amount ?? statementCompanyAmount(db, line);
   const companyCurrency = companyCurrencyRecord(db, company);
   const via = paymentJournal(db, line.journal_id, company);
-  const side = (value, debit, extra = {}) => ({ ...extra, [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency), ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}) });
+  const side = (value, debit, extra = {}) => ({
+    ...extra,
+    [debit ? 'debit' : 'credit']: roundCurrency(companyValue * value / balance, companyCurrency),
+    ...(foreign ? { currency_id: journalCurrency, amount_currency: (debit ? 1 : -1) * value } : {}),
+  });
   const items = counterparts.flatMap((l) => {
+    const absValue = Math.abs(l.value);
+    const sameAsCounterpart = l.value > 0;
     const taxRecs = expandTaxIds(db, l.tax_ids ?? []);
     for (const tax of taxRecs) {
       const repart = taxRepartitionLines(tax, 'invoice');
@@ -113,7 +273,7 @@ function writeOff(db, rule, line) {
 
     const computed = computeLineTaxes({
       qty: 1,
-      price_unit: l.value,
+      price_unit: absValue,
       tax_breakdown: taxSpecs,
     }, { currency, roundingMethod: 'round_per_line' });
 
@@ -125,13 +285,14 @@ function writeOff(db, rule, line) {
       const taxRec = taxRecs.find((rec) => rec.id === t.tax_id);
       if (!taxRec) continue;
       for (const { row, amount, base } of taxRepartitionSplits(t, {}, 'invoice', currency).splits) {
-        taxLines.push(side(Math.abs(amount), amount < 0 ? incoming : !incoming, {
+        const taxDebit = sameAsCounterpart ? (amount < 0 ? incoming : !incoming) : (amount < 0 ? !incoming : incoming);
+        taxLines.push(side(Math.abs(amount), taxDebit, {
           account: row.account_id ?? l.account_id,
           partner_id: partner,
           name: taxRec.name,
           tax_id: taxRec.id,
           tax_name: taxRec.name,
-          tax_side: incoming ? 'sale' : 'purchase',
+          tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
           tax_base: toCompany(db, journalCurrency, base, line.date, company),
           tax_tag_ids: row.tag_ids ?? [],
         }));
@@ -140,12 +301,12 @@ function writeOff(db, rule, line) {
 
     const net = computed.untaxed;
     return [
-      side(net, !incoming, {
+      side(net, sameAsCounterpart ? !incoming : incoming, {
         account: l.account_id,
         partner_id: partner,
         name: l.label || line.payment_ref,
         ...(taxRecs.length ? {
-          tax_side: incoming ? 'sale' : 'purchase',
+          tax_side: (sameAsCounterpart ? incoming : !incoming) ? 'sale' : 'purchase',
           tax_grid_base: true,
           tax_tag_ids: allBaseTags,
         } : {}),
@@ -202,7 +363,14 @@ function writeOff(db, rule, line) {
   });
 }
 
-/** Apply a rule to a statement line: match an unambiguous invoice/bill, or post its write-off entry. */
+const byMatchingOrder = (order) => (a, b) => {
+  const da = a.invoice_date || a.date || '';
+  const dbDate = b.invoice_date || b.date || '';
+  const cmp = da.localeCompare(dbDate) || ((a.id ?? 0) - (b.id ?? 0));
+  return order === 'new_first' ? -cmp : cmp;
+};
+
+/** Apply a rule to a statement line: match an eligible invoice/bill per matching_order/tolerance, or post its write-off entry. */
 export function applyRule(db, rule, line) {
   if (line.state === 'reconciled') throw new Error('This bank transaction is already reconciled');
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
@@ -212,14 +380,55 @@ export function applyRule(db, rule, line) {
     if (new Set(mappings.map((l) => l.partner_id)).size !== 1 || !read(db, 'res.partner', mappings[0].partner_id)) throw new Error('Select one valid partner for the mapping');
     return write(db, 'account.bank.statement.line', line.id, { partner_id: mappings[0].partner_id });
   }
-  if (rule.rule_type === 'invoice_matching') {
-    const exact = candidates(db, line).filter((m) => toCompany(db, m.currency_id, m.amount_residual, line.date, m.company_id) === roundCurrency(line.open_amount ?? statementCompanyAmount(db, line), companyCurrencyRecord(db, line.company_id)));
+  if (isMatchingRule(rule)) {
+    const companyCurrency = companyCurrencyRecord(db, line.company_id);
+    const target = roundCurrency(line.open_amount ?? statementCompanyAmount(db, line), companyCurrency);
+    const residual = (m) => toCompany(db, m.currency_id, m.amount_residual, line.date, m.company_id);
+    const ordered = [...candidates(db, line)].sort(byMatchingOrder(rule.matching_order || 'old_first'));
+    const exact = ordered.filter((m) => residual(m) === target);
     if (!line.partner_id) {
       if (exact.length) throw new Error('Select the statement partner, then review and confirm a matching invoice');
       return db;
     }
-    if (exact.length > 1) throw new Error('Multiple invoices match. Review and select one in "Match with".');
-    return exact.length ? reconcileWith(db, line, exact[0].id) : db;
+    if (exact.length > 1) {
+      const dateOf = (m) => m.invoice_date || m.date || '';
+      if (dateOf(exact[0]) === dateOf(exact[1])) {
+        throw new Error('Multiple invoices match. Review and select one in "Match with".');
+      }
+    }
+    if (exact.length) return reconcileWith(db, line, exact[0].id);
+    const tolerance = Number(rule.payment_tolerance) || 0;
+    if (tolerance > 0) {
+      const tolType = rule.payment_tolerance_type || 'percentage';
+      const match = ordered.find((m) => {
+        const res = residual(m);
+        const limit = tolType === 'amount' ? tolerance : roundCurrency(res * tolerance / 100, companyCurrency);
+        return Math.abs(res - target) <= limit;
+      });
+      if (match) {
+        const res = residual(match);
+        if (target < res) {
+          const wo = (rule.line_ids ?? []).find((l) => l.account_id);
+          if (wo) {
+            const diff = roundCurrency(res - target, companyCurrency);
+            const signedWo = line.amount >= 0 ? -diff : diff;
+            const withWo = write(db, 'account.bank.statement.line', line.id, {
+              writeoff_account_id: wo.account_id,
+              writeoff_label: wo.label || rule.name || 'Payment Tolerance',
+              writeoff_amount: signedWo,
+            });
+            return reconcileWith(withWo, read(withWo, 'account.bank.statement.line', line.id), match.id);
+          }
+        }
+        const afterRec = reconcileWith(db, line, match.id);
+        const updatedLine = read(afterRec, 'account.bank.statement.line', line.id);
+        if (target > res && (rule.line_ids ?? []).length && updatedLine.state !== 'reconciled' && (updatedLine.open_amount ?? 0) > 0) {
+          return writeOff(afterRec, rule, updatedLine);
+        }
+        return afterRec;
+      }
+    }
+    return db;
   }
   return writeOff(db, rule, line);
 }
@@ -234,7 +443,7 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
  * rules and manual matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => r.auto_reconcile && r.match_label !== 'match_regex');
+  const rules = activeRules(db).filter((r) => isAutoRule(r) && r.match_label !== 'match_regex');
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const line = read(acc, 'account.bank.statement.line', l.id);
     const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
@@ -247,9 +456,52 @@ export function autoReconcile(db) {
   }, db);
 }
 
-/** The first active matching suggestion or invoice-matching rule (by sequence), or null. */
+/** The first active matching rule (by sequence), or null. */
 export function suggestRule(db, line) {
-  return activeRules(db).find((r) => ['writeoff_suggestion', 'invoice_matching'].includes(r.rule_type) && ruleMatches(r, line)) ?? null;
+  return activeRules(db).find((r) => ruleMatches(r, line)) ?? null;
+}
+
+function guardReconcileModel(db, _before, rule) {
+  if (['greater', 'between'].includes(rule.match_amount) && isBlank(rule.match_amount_min)) {
+    return 'Minimum amount is required for the selected amount condition';
+  }
+  if (rule.match_amount === 'between' && isBlank(rule.match_amount_max)) {
+    return 'Maximum amount is required when matching between two amounts';
+  }
+  if (rule.match_label) {
+    if (isBlank(rule.match_label_param)) return 'Label parameter is required for the selected label condition';
+    if (rule.match_label === 'match_regex' && !compileRegex(rule.match_label_param)) {
+      return 'Invalid regular expression in label parameter';
+    }
+  }
+  if (rule.payment_tolerance != null && Number(rule.payment_tolerance) < 0) {
+    return 'Payment tolerance cannot be negative';
+  }
+  for (const line of rule.line_ids ?? []) {
+    if (!line.account_id && !line.partner_id && !line.account_code) {
+      return 'Each counterpart item requires an account unless a partner is set';
+    }
+    if (line.account_id) {
+      const account = read(db, 'account.account', line.account_id);
+      if (!account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1))) {
+        return 'Reconciliation accounts must be active and belong to the model company';
+      }
+    }
+    const isPartnerMappingOnly = !line.account_id && !line.account_code && Boolean(line.partner_id) && line.amount_string == null && line.amount == null;
+    if (isPartnerMappingOnly) continue;
+    const type = line.amount_type || 'percentage';
+    if (type === 'regex') {
+      if (!compileRegex(line.amount_string)) return 'Invalid regular expression in counterpart line amount';
+      continue;
+    }
+    const raw = line.amount_string != null ? line.amount_string : (line.amount != null ? String(line.amount) : '');
+    const numeric = parseStrictNumber(raw);
+    if (!Number.isFinite(numeric)) return 'Counterpart line amount must be numeric';
+    if ((type === 'percentage' || type === 'percentage_st_line') && (numeric < 0 || numeric > 100)) {
+      return 'Percentage amount must be between 0 and 100';
+    }
+  }
+  return null;
 }
 
 export const reconcileModels = {
@@ -258,46 +510,169 @@ export const reconcileModels = {
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
-      sequence: { type: 'integer', label: 'Sequence' },
-      rule_type: { type: 'selection', label: 'Type', options: [['writeoff_button', 'Button to generate counterpart entry'], ['writeoff_suggestion', 'Rule to suggest counterpart entry'], ['invoice_matching', 'Rule to match invoices/bills']] },
-      auto_reconcile: { type: 'boolean', label: 'Auto-validate' },
-      match_nature: { type: 'selection', label: 'Amount Type', options: [['amount_received', 'Received'], ['amount_paid', 'Paid'], ['both', 'Paid/Received']] },
-      match_amount: { type: 'selection', label: 'Amount', options: [['', 'Any'], ['lower', 'Is Lower Than'], ['greater', 'Is Greater Than'], ['between', 'Is Between']] },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      trigger: {
+        type: 'selection',
+        label: 'Trigger',
+        help: 'Validate the transaction automatically (reconciliation based on your rule).',
+        options: [['manual', 'Manual'], ['auto_reconcile', 'Automated']],
+      },
+      rule_type: {
+        type: 'selection',
+        label: 'Type',
+        readonly: true,
+        hidden: true,
+        options: [['matching_rule', 'Matching rule'], ['reco_model', 'Reconciliation model']],
+      },
+      match_journal_ids: {
+        type: 'many2many',
+        relation: 'account.journal',
+        label: 'Journals',
+        optional: 'hide',
+        help: 'The reconciliation model will only be available from the selected journals.',
+        domain: (j, r) => (!r?.company_id || !j.company_id || j.company_id === r.company_id) && isLiquidityJournal(j),
+      },
+      match_partner_ids: {
+        type: 'many2many',
+        relation: 'res.partner',
+        label: 'Partners',
+        help: 'The reconciliation model will only be applied to the selected customers/vendors.',
+      },
+      match_amount: {
+        type: 'selection',
+        label: 'Amount Condition',
+        options: [['lower', 'Is lower than or equal to'], ['greater', 'Is greater than or equal to'], ['between', 'Is between']],
+      },
       match_amount_min: { type: 'monetary', label: 'Amount Min' },
       match_amount_max: { type: 'monetary', label: 'Amount Max' },
-      match_label: { type: 'selection', label: 'Label', options: [['', 'None'], ['contains', 'Contains'], ['not_contains', 'Not Contains'], ['match_regex', 'Match Regex']] },
+      match_label: {
+        type: 'selection',
+        label: 'Label',
+        options: [['contains', 'Contains'], ['not_contains', 'Not Contains'], ['match_regex', 'Match Regex']],
+      },
       match_label_param: { type: 'char', label: 'Label Parameter' },
-      match_partner: { type: 'boolean', label: 'Partner is Set' },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Matching Partner' },
+      payment_tolerance: { type: 'float', label: 'Payment Tolerance' },
+      payment_tolerance_type: {
+        type: 'selection',
+        label: 'Payment Tolerance Type',
+        options: [['amount', 'In amount'], ['percentage', 'In percentage']],
+      },
+      matching_order: {
+        type: 'selection',
+        label: 'Matching Order',
+        options: [['new_first', 'Newest first'], ['old_first', 'Oldest first']],
+      },
+      // Legacy matching fields retained hidden so rules preserving non-default match_nature/match_partner continue working.
+      match_nature: { type: 'selection', label: 'Amount Type', hidden: true, options: [['amount_received', 'Received'], ['amount_paid', 'Paid'], ['both', 'Paid/Received']] },
+      match_partner: { type: 'boolean', label: 'Partner is Set', hidden: true },
+      created_automatically: { type: 'boolean', label: 'Created Automatically', hidden: true },
       line_ids: {
         type: 'one2many',
-        label: 'Counterpart Entries',
+        label: 'Counterpart Items',
         fields: {
-          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
-          label: { type: 'char', label: 'Label' },
+          sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
           partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-          tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes' },
-          amount_type: { type: 'selection', label: 'Amount Type', options: [['percentage', 'Percentage of balance'], ['fixed', 'Fixed']] },
-          amount: { type: 'float', label: 'Amount' },
+          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
+          amount_type: {
+            type: 'selection',
+            label: 'Amount Type',
+            options: [
+              ['fixed', 'Fixed'],
+              ['percentage', 'Percentage of balance'],
+              ['percentage_st_line', 'Percentage of transaction'],
+              ['regex', 'From label'],
+            ],
+          },
+          amount_string: { type: 'char', label: 'Amount' },
+          amount: { type: 'float', label: 'Numeric Amount', hidden: true },
+          tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Taxes', optional: 'hide' },
+          label: { type: 'char', label: 'Label' },
         },
-        newLine: () => ({ label: '', amount_type: 'percentage', amount: 100 }),
+        newLine: () => ({ sequence: 10, partner_id: null, account_id: null, amount_type: 'percentage', amount_string: '100', amount: 100, tax_ids: [], label: '' }),
+        onchange: (line, key) => {
+          if (key === 'amount_string' || key === 'amount_type') return syncLineAmount(line);
+          if (key === 'amount' && line.amount != null && line.amount_type !== 'regex') {
+            return { ...line, amount_string: String(line.amount), amount: Number(line.amount) || 0 };
+          }
+          return line;
+        },
       },
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
-      sequence: 10, rule_type: 'writeoff_button', match_nature: 'both', match_amount: '', match_label: '', active: true,
-      line_ids: [{ label: '', amount_type: 'percentage', amount: 100 }],
+      sequence: 10,
+      trigger: 'manual',
+      rule_type: 'reco_model',
+      match_journal_ids: [],
+      match_partner_ids: [],
+      match_amount: null,
+      match_label: null,
+      payment_tolerance: 0,
+      payment_tolerance_type: 'percentage',
+      matching_order: 'old_first',
+      created_automatically: false,
+      active: true,
+      line_ids: [],
     }),
-    guard: (db, _before, rule) => (rule.line_ids ?? []).some((line) => {
-      if (!line.account_id) return false;
-      const account = read(db, 'account.account', line.account_id);
-      return !account || account.active === false || (account.company_id && account.company_id !== (rule.company_id ?? 1));
-    }) ? 'Reconciliation accounts must be active and belong to the model company' : null,
-    list: ['sequence', 'name', 'rule_type', 'auto_reconcile'],
+    prepareCreate: (db, vals) => ({ db, vals: normalizeReconcileRule(vals) }),
+    guard: guardReconcileModel,
+    onWrite: (db, after) => {
+      const synced = (after.line_ids ?? []).map((l, i) => syncLineAmount(l, i));
+      if (JSON.stringify(synced) === JSON.stringify(after.line_ids ?? [])) return db;
+      return {
+        ...db,
+        records: {
+          ...db.records,
+          'account.reconcile.model': (db.records['account.reconcile.model'] ?? []).map((r) => (r.id === after.id ? { ...r, line_ids: synced } : r)),
+        },
+      };
+    },
+    list: ['sequence', 'name', 'trigger', 'match_journal_ids'],
+    filters: [
+      [
+        { id: 'created_by_user', label: 'Created by User', fn: (r) => !r.created_automatically },
+        { id: 'created_automatically', label: 'Created Automatically', fn: (r) => Boolean(r.created_automatically) },
+      ],
+      [
+        { id: 'automated', label: 'Automated', fn: (r) => r.trigger === 'auto_reconcile' },
+      ],
+      [
+        { id: 'with_tax', label: 'With tax', fn: (r) => (r.line_ids ?? []).some((l) => (l.tax_ids ?? []).length > 0) },
+      ],
+    ],
+    groupBys: ['match_journal_ids', 'trigger'],
+    groupByLabels: { match_journal_ids: 'Journals Availability', trigger: 'Automation' },
     form: {
       title: 'name',
-      groups: [['rule_type', 'sequence', 'auto_reconcile', 'active'], ['match_nature', 'match_amount', 'match_amount_min', 'match_amount_max'], ['match_label', 'match_label_param', 'match_partner', 'partner_id']],
-      tabs: [{ label: 'Counterpart Entries', fields: ['line_ids'] }],
+      statusbar: 'trigger',
+      statusbarClickable: false,
+      buttons: [
+        { label: 'Automate', primary: true, when: (r) => r.trigger !== 'auto_reconcile', vals: { trigger: 'auto_reconcile' } },
+        { label: 'Set Manual', when: (r) => r.trigger === 'auto_reconcile', vals: { trigger: 'manual' } },
+      ],
+      groups: (r) => [
+        [
+          'match_journal_ids',
+          'match_partner_ids',
+          'sequence',
+          'active',
+        ],
+        [
+          'match_amount',
+          ...(r?.match_amount === 'greater' || r?.match_amount === 'between' ? ['match_amount_min'] : []),
+          ...(r?.match_amount === 'lower' || r?.match_amount === 'between' ? ['match_amount_max'] : []),
+          'match_label',
+          ...(r?.match_label ? ['match_label_param'] : []),
+        ],
+        ...(isMatchingRule(r) ? [[
+          'matching_order',
+          'payment_tolerance',
+          'payment_tolerance_type',
+        ]] : []),
+      ],
+      tabs: (r) => (isMatchingRule(r) && !(Number(r?.payment_tolerance) > 0)
+        ? []
+        : [{ label: 'Counterpart Items', fields: ['line_ids'] }]),
     },
   },
 };

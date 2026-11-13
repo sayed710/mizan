@@ -345,7 +345,7 @@ const allApps = [
           { key: 'account-tags', label: 'Account Tags', model: 'account.account.tag' },
           { key: 'return-types', label: 'Return Types', model: 'account.return.type' },
           { key: 'budgets', label: 'Financial Budgets', model: 'account.budget' },
-          { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model' },
+          { key: 'reconcile-models', label: 'Reconciliation Models', model: 'account.reconcile.model', listLabels: { match_journal_ids: 'Journals' } },
           { key: 'followup-levels', label: 'Invoice Reminders', model: 'account.followup.level' },
           { key: 'bank-accounts', label: 'Bank Accounts', model: 'res.partner.bank' },
         ] },
