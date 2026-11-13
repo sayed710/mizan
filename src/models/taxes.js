@@ -108,10 +108,11 @@ export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_includ
 /** Whether a tax replacement rule on `tax` maps `taxId` under `fpId`. */
 function taxReplaces(tax, fpId, taxId) {
   const mappings = tax.fiscal_position_mapping_ids ?? [];
+  // Both editors on the form take effect: per-position rows, and the Fiscal Position x Replaces pair.
   if (mappings.some((m) => m.fiscal_position_id === fpId && (m.original_tax_ids ?? []).includes(taxId))) {
     return true;
   }
-  return !mappings.length && (tax.fiscal_position_ids ?? []).includes(fpId) && (tax.original_tax_ids ?? []).includes(taxId);
+  return (tax.fiscal_position_ids ?? []).includes(fpId) && (tax.original_tax_ids ?? []).includes(taxId);
 }
 
 /** The taxes a fiscal position substitutes for `taxId` (a list of mapped tax IDs; `[taxId]` when unmapped/kept; `[]` when dropped). */
@@ -610,6 +611,7 @@ export const taxModels = {
       title: 'name',
       groups: (r) => [
         ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
+        // Odoo 20 configures substitutions with Fiscal Position x Replaces; per-position rows exist only on upgraded taxes.
         ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids', ...(r?.fiscal_position_mapping_ids?.length ? ['fiscal_position_mapping_ids'] : [])],
       ],
       tabs: [

@@ -43,7 +43,10 @@ export function JournalItems({ leaf = {} } = {}) {
   const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
   // The account form's Balance button opens this report scoped to that account (#/...?account=ID).
   const accountFilter = Number(new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').get('account')) || null;
-  const rows = journalItems(db, { from, to, reviewMode: mode }).filter((line) => !accountFilter || line.account_id === accountFilter).map((line) => ({
+  // Same company scope as accountBalance: the account's company, else the current one.
+  const filterAccount = accountFilter ? read(db, 'account.account', accountFilter) : null;
+  const filterCompany = filterAccount ? (filterAccount.company_id ?? db.settings?.current_company_id ?? 1) : null;
+  const rows = journalItems(db, { from, to, reviewMode: mode, ...(filterCompany ? { company_id: filterCompany } : {}) }).filter((line) => !accountFilter || line.account_id === accountFilter).map((line) => ({
     ...line,
     account: name('account.account', line.account_id),
     partner: name('res.partner', line.partner_id),

@@ -453,3 +453,19 @@ test('the fiscal position form shows the two tabs and no tax mapping', async () 
     await listCtx.done();
   }
 });
+
+test('a tax with per-position rows still applies its visible Fiscal Position and Replaces fields, and its form shows both editors', () => {
+  let db = seed();
+  const [fpA, fpB] = search(db, 'account.fiscal.position');
+  const src = create(db, 'account.tax', { name: 'Src 10', type_tax_use: 'sale', amount: 10, company_id: 1 });
+  const other = create(src.db, 'account.tax', { name: 'Other 7', type_tax_use: 'sale', amount: 7, company_id: 1 });
+  const dest = create(other.db, 'account.tax', {
+    name: 'Dest 0', type_tax_use: 'sale', amount: 0, company_id: 1,
+    fiscal_position_mapping_ids: [{ fiscal_position_id: fpA.id, original_tax_ids: [src.id] }],
+  });
+  db = write(dest.db, 'account.tax', dest.id, { fiscal_position_ids: [fpB.id], original_tax_ids: [other.id] });
+  assert.deepEqual(mapTax(db, fpA.id, src.id), [dest.id]);
+  assert.deepEqual(mapTax(db, fpB.id, other.id), [dest.id]);
+  const groups = models['account.tax'].form.groups(read(db, 'account.tax', dest.id)).flat();
+  assert.ok(groups.includes('fiscal_position_mapping_ids') && groups.includes('fiscal_position_ids'));
+});

@@ -132,6 +132,11 @@ test('Finding 1: archived receivable/income accounts do not block system posting
   const dnSynced = applyDiff(db, diffDb(db, dnPosted));
   assert.equal(move(dnSynced, dnDraft.id).state, 'posted');
 
+  // 5b) A client cannot unlock an archived account by naming an unrelated posted origin on a manual entry.
+  const forged = postEntry(db, { journal: 'MISC', date: '2026-02-15', ref: 'Forged', company: 1, archivedOriginIds: [invForDebit.id], lines: [{ account: cashAccId, debit: 30 }, { account: legacyIncId, credit: 30 }] });
+  const forgedDb = write(forged.db, 'account.move', forged.id, { reversed_entry_id: invForDebit.id });
+  assert.throws(() => applyDiff(db, diffDb(db, forgedDb)), /Archived accounts cannot be selected/);
+
   // 6) Manual entry / direct invoice / adding new line choosing archived account still fails.
   assert.throws(
     () => postEntry(db, {
