@@ -1,5 +1,5 @@
 // Shared widgets: field display/input, icons, avatar, tags.
-import { Component, useEffect, useState } from 'react';
+import { Component, useEffect, useRef, useState } from 'react';
 import { models, targetOf } from './models/index.js';
 import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
@@ -133,7 +133,7 @@ export function useDismiss(open, close, ref) {
 
 /** Arrow-key movement between the items of a role="menu". */
 export function menuKeys(e) {
-  const items = [...e.currentTarget.querySelectorAll('[role=menuitem]')];
+  const items = [...e.currentTarget.querySelectorAll('[role=menuitem],[role=menuitemcheckbox]')];
   const i = items.indexOf(document.activeElement);
   const to = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
   if (to === undefined || !items.length) return;
@@ -207,14 +207,67 @@ function FileInput({ id, value, onChange }) {
 
 import { subtotal as lineSubtotal, pickedInstant } from './models/common.js';
 
+function o2mStorageKey(model, fieldName, field, id) {
+  if (model && fieldName) return `mizan-o2m-cols:${model}.${fieldName}`;
+  for (const [mName, mDef] of Object.entries(models)) {
+    const match = Object.entries(mDef.fields || {}).find(([, f]) => f === field);
+    if (match) return `mizan-o2m-cols:${mName}.${match[0]}`;
+  }
+  return `mizan-o2m-cols:${fieldName || id || field?.label || 'lines'}`;
+}
+
+function readOptionalCols(key) {
+  try {
+    const raw = globalThis.localStorage?.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeOptionalCols(key, state) {
+  try {
+    globalThis.localStorage?.setItem(key, JSON.stringify(state));
+  } catch { /* ignore disabled or full storage */ }
+}
+
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
-function Lines({ db, field, value = [], onChange, readonly, record }) {
-  const cols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
+function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly, record }) {
+  const allCols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
+  const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
+  const storageKey = o2mStorageKey(model, fieldName, field, id);
+  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
+  const [colsOpen, setColsOpen] = useState(false);
+  const menuRef = useRef(null);
+  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
+  useEffect(() => {
+    setOptionalState(readOptionalCols(storageKey));
+    setColsOpen(false);
+  }, [storageKey]);
+
+  const cols = allCols.filter(([k, f]) => !f.optional || (optionalState[k] ?? f.optional !== 'hide'));
   const priced = 'price_unit' in field.fields;
+  const displayOpts = field.fields?.display_type?.options || [];
+  const hasSection = displayOpts.some(([v]) => v === 'line_section');
+  const hasNote = displayOpts.some(([v]) => v === 'line_note');
+  const hasActionCol = !readonly || optionalCols.length > 0;
+
+  const toggleCol = (k, defaultVisible) => {
+    const next = { ...optionalState, [k]: !(optionalState[k] ?? defaultVisible) };
+    setOptionalState(next);
+    writeOptionalCols(storageKey, next);
+  };
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
     onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db, record) : l)));
   };
+  const addSpecialLine = (displayType) => {
+    const base = field.newLine?.(record, db) ?? {};
+    onChange([...value, { ...base, display_type: displayType, name: '', qty: 0, price_unit: 0, tax: 0, tax_id: [] }]);
+  };
+
   return (
     <div className="lines-wrap">
       <table className="lines">
@@ -222,31 +275,95 @@ function Lines({ db, field, value = [], onChange, readonly, record }) {
           <tr>
             {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{t(f.label)}</th>)}
             {priced && <th className="num">{t('Subtotal')}</th>}
-            {!readonly && <th aria-label={t('Delete')} />}
+            {hasActionCol && (
+              <th className="o2m-cols-th" aria-label={optionalCols.length > 0 ? undefined : t('Delete')}>
+                {optionalCols.length > 0 && (
+                  <div className="o2m-cols-menu" ref={menuRef}>
+                    <button
+                      type="button"
+                      className="o2m-cols-toggle"
+                      aria-label={t('Optional columns')}
+                      aria-expanded={colsOpen}
+                      aria-haspopup="menu"
+                      onClick={() => setColsOpen((o) => !o)}
+                    >⋯</button>
+                    {colsOpen && (
+                      <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
+                        {optionalCols.map(([k, f]) => {
+                          const defaultVisible = f.optional !== 'hide';
+                          const checked = optionalState[k] ?? defaultVisible;
+                          return (
+                            <button
+                              key={k}
+                              type="button"
+                              role="menuitemcheckbox"
+                              aria-checked={checked}
+                              onClick={() => toggleCol(k, defaultVisible)}
+                            >
+                              <span aria-hidden="true">{checked ? '✓' : ''}</span>
+                              <span>{t(f.label)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </th>
+            )}
           </tr>
         </thead>
         <tbody>
-          {value.map((l, i) => (
-            <tr key={i}>
-              {cols.map(([k, f]) => (
-                <td key={k} className={isNumeric(f) ? 'num' : ''}>
-                  {readonly
-                    ? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id })
-                    : <FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
-                </td>
-              ))}
-              {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record), documentCurrency(db, record))}</td>}
-              {!readonly && (
-                <td>
-                  <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
-                </td>
-              )}
-            </tr>
-          ))}
+          {value.map((l, i) => {
+            const isSection = l.display_type === 'line_section';
+            const isNote = l.display_type === 'line_note';
+            if (isSection || isNote) {
+              const nameField = field.fields.name || { type: 'char', label: 'Label' };
+              return (
+                <tr key={i} className={isSection ? 'o2m-section' : 'o2m-note'}>
+                  <td colSpan={cols.length + (priced ? 1 : 0)}>
+                    {readonly
+                      ? <span className="readonly">{l.name ?? ''}</span>
+                      : <FieldInput db={db} field={nameField} value={l.name} record={l} onChange={(v) => set(i, 'name', v)} label={`${t(nameField.label)} ${i + 1}`} placeholder={isSection ? t('Add a section') : t('Add a note')} />}
+                  </td>
+                  {!readonly ? (
+                    <td>
+                      <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
+                    </td>
+                  ) : optionalCols.length > 0 && <td />}
+                </tr>
+              );
+            }
+            return (
+              <tr key={i}>
+                {cols.map(([k, f]) => (
+                  <td key={k} className={isNumeric(f) ? 'num' : ''}>
+                    {readonly
+                      ? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id })
+                      : <FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
+                  </td>
+                ))}
+                {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record), documentCurrency(db, record))}</td>}
+                {!readonly ? (
+                  <td>
+                    <button type="button" className="link danger" aria-label={t('Delete')} onClick={() => onChange(value.filter((_, j) => j !== i))}>✕</button>
+                  </td>
+                ) : optionalCols.length > 0 && <td />}
+              </tr>
+            );
+          })}
           {!readonly && (
             <tr>
-              <td colSpan={cols.length + 2}>
-                <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.(record, db) ?? {}])}>{t('Add a line')}</button>
+              <td colSpan={cols.length + (priced ? 1 : 0) + 1}>
+                <div className="o2m-add-actions">
+                  <button type="button" className="link" onClick={() => onChange([...value, field.newLine?.(record, db) ?? {}])}>{t('Add a line')}</button>
+                  {hasSection && (
+                    <button type="button" className="link" onClick={() => addSpecialLine('line_section')}>{t('Add a section')}</button>
+                  )}
+                  {hasNote && (
+                    <button type="button" className="link" onClick={() => addSpecialLine('line_note')}>{t('Add a note')}</button>
+                  )}
+                </div>
               </td>
             </tr>
           )}
@@ -300,9 +417,9 @@ function DistributionInput({ value, onChange, ...props }) {
   }} />;
 }
 
-export function FieldInput({ db, field, value, onChange, id, readonly, placeholder, record, label }) {
+export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, placeholder, record, label }) {
   const isReadonly = readonly || fieldReadonly(field, record, db);
-  if (field.type === 'one2many') return <Lines db={db} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
+  if (field.type === 'one2many') return <Lines db={db} model={model} fieldName={fieldName} id={id} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
       const related = read(db, field.relation, valId);
@@ -352,7 +469,7 @@ export function FieldInput({ db, field, value, onChange, id, readonly, placehold
       }
       return <HtmlEditor id={id} label={htmlLabel} required={field.required} value={value} placeholder={placeholder} onChange={onChange} />;
     }
-    case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
+    case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={placeholder ?? t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
     case 'monetary':
     case 'float': return <NumberInput {...a11y} value={value} onChange={onChange} />;

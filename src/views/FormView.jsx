@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { fieldReadonly } from '../field-metadata.js';
 import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
@@ -50,16 +50,62 @@ function withComputed(model, vals, db) {
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
-function Field({ db, model, name, value, onChange, readonly, record }) {
+function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
-  const label = field.custom ? field.label : t(field.label);
+  const label = labelOverride ? t(labelOverride) : (field.custom ? field.label : t(field.label));
   const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
   const isReadonly = readonly || fieldReadonly(field, record, db);
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
+      <div className="field-value"><FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
+    </div>
+  );
+}
+
+function renderGroupItem(item, { db, model, def, current, set, readonly }) {
+  if (typeof item === 'string') {
+    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={readonly} record={current} />;
+  }
+  if (item && Array.isArray(item.fields)) {
+    const first = def.fields[item.fields[0]];
+    const firstReadonly = readonly || fieldReadonly(first, current, db);
+    const labelText = t(item.label ?? first.label);
+    return (
+      <div key={item.fields.join('+')} className="field">
+        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${item.fields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+        <div className="field-value field-pair">
+          {item.fields.map((f, idx) => {
+            const fd = def.fields[f];
+            const isRo = readonly || fieldReadonly(fd, current, db);
+            return (
+              <Fragment key={f}>
+                {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
+                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={idx > 0 ? t(fd.label) : undefined} />
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={readonly} record={current} />;
+}
+
+function renderGroups(groups, opts) {
+  return (
+    <div className="groups">
+      {groups.map((g, i) => {
+        const title = Array.isArray(g) ? null : g.title;
+        const items = Array.isArray(g) ? g : (g.fields ?? []);
+        return (
+          <div key={title ?? i} className="group">
+            {title && <h3 className="group-title">{t(title)}</h3>}
+            {items.map((item) => renderGroupItem(item, opts))}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -517,13 +563,7 @@ export function FormView({ leaf, id, base, params }) {
                 : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
                     value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
-            <div className="groups">
-              {groups.map((g, i) => (
-                <div key={i} className="group">
-                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
-                </div>
-              ))}
-            </div>
+            {renderGroups(groups, { db, model, def, current, set, readonly: locked })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits
                 db={db}
@@ -548,35 +588,58 @@ export function FormView({ leaf, id, base, params }) {
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
-                    <TaxReportTable
-                      db={db}
-                      period={{
-                        from: current.date_from,
-                        to: current.date_to,
-                        company_id: current.company_id,
-                        tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
-                          ? current.tax_unit_id
-                          : null,
-                      }}
-                    />
-                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
-                    ? (
-                      <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
-                    )
-                    // Plain fields in a tab get a label, like fields in the header groups.
-                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}
-                  {footer.length > 0 && tab === 0 && (
-                    <dl className="totals">
-                      {footer.map((f) => (
-                        <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
-                          <dt>{t(def.fields[f].label)}</dt>
-                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
+                  {(() => {
+                    const activeTab = tabs[tab] ?? tabs[0];
+                    const tabReadonly = locked || activeTab.readonly;
+                    const renderTabField = (f, placeholder) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
+                      ? (
+                        <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
+                          placeholder={placeholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
+                      )
+                      // Plain fields in a tab get a label, like fields in the header groups.
+                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} />);
+                    return (
+                      <>
+                        {model === 'account.return' && activeTab.label === 'Tax Report' ? (
+                          <TaxReportTable
+                            db={db}
+                            period={{
+                              from: current.date_from,
+                              to: current.date_to,
+                              company_id: current.company_id,
+                              tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
+                                ? current.tax_unit_id
+                                : null,
+                            }}
+                          />
+                        ) : (
+                          <>
+                            {(activeTab.fields ?? []).map((f) => renderTabField(f))}
+                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly })}
+                          </>
+                        )}
+                        {(activeTab.aside?.length > 0 || (footer.length > 0 && tab === 0)) && (
+                          <div className="tab-footer">
+                            {activeTab.aside?.length > 0 && (
+                              <div className="tab-aside">
+                                {activeTab.aside.map((f) => renderTabField(f, t(def.fields[f].label)))}
+                              </div>
+                            )}
+                            {footer.length > 0 && tab === 0 && (
+                              <dl className="totals">
+                                {footer.map((f) => (
+                                  <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
+                                    <dt>{t(def.fields[f].label)}</dt>
+                                    <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </>
             )}

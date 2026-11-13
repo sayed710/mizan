@@ -1313,6 +1313,10 @@ const ar = {
   'Create your first invoice.': 'أنشئ أول فاتورة لك.',
   'Create your first bill.': 'أنشئ أول فاتورة مورد لك.',
   'No transactions yet.': 'لا توجد معاملات بعد.',
+  'Bill Reference': 'مرجع الفاتورة',
+  'Add a section': 'إضافة قسم',
+  'Add a note': 'إضافة ملاحظة',
+  'Optional columns': 'أعمدة اختيارية',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

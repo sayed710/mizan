@@ -336,8 +336,24 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .totals dt { color: var(--muted); }
 .totals dd { margin: 0; font-weight: 600; }
 .totals .grand { border-top: 1px solid var(--border); padding-top: 6px; font-size: 17px; }
+.tab-footer { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; margin-top: 16px; }
+.tab-aside { flex: 1 1 320px; min-width: 0; }
+.tab-aside .field { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
+.tab-aside textarea { min-height: 90px; }
+.tab-footer .totals { margin-top: 0; }
 .lines-wrap { overflow-x: auto; }
 .lines td .readonly { color: var(--text); }
+.o2m-cols-th { width: 32px; text-align: end; }
+.o2m-cols-menu { position: relative; display: inline-block; }
+.o2m-cols-toggle { border: 0; background: none; cursor: pointer; padding: 2px 6px; color: var(--muted); border-radius: 4px; }
+.o2m-cols-toggle:hover { background: rgba(0, 0, 0, .05); color: var(--text); }
+.o2m-cols-dropdown { position: absolute; right: 0; top: 100%; z-index: 20; min-width: 190px; background: var(--surface, #fff); border: 1px solid var(--border); border-radius: 6px; padding: 4px; box-shadow: 0 4px 12px rgba(0, 0, 0, .12); display: flex; flex-direction: column; text-align: start; }
+.o2m-cols-dropdown button { display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 6px 8px; cursor: pointer; font-weight: 400; text-align: start; border-radius: 4px; }
+.o2m-cols-dropdown button:hover { background: rgba(0, 0, 0, .05); }
+.o2m-cols-dropdown button span:first-child { width: 14px; text-align: center; }
+.o2m-add-actions { display: flex; flex-wrap: wrap; gap: 16px; }
+.o2m-section input { font-weight: 700; }
+.o2m-note input { font-style: italic; }
 .card-counter { font-size: 13px; color: var(--muted); }
 .card-counter b { color: var(--brand); }
 .statusbar button:disabled { cursor: default; }

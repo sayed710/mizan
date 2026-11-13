@@ -1158,6 +1158,17 @@ const termDue = (db, r, { clear = false } = {}) => {
 
 const invoiceLineBase = productLines('Invoice Lines', 'list_price');
 const billLineBase = productLines('Invoice Lines', 'cost');
+const {
+  product_id: invoiceLineProduct,
+  uom_id: invoiceLineUom,
+  qty: invoiceLineQty,
+  price_unit: invoiceLinePrice,
+  discount: invoiceLineDiscount,
+  tax_id: invoiceLineTaxId,
+  tax: invoiceLineTaxPct,
+  analytic_account_id: invoiceLineAnalytic,
+  ...invoiceLineExtraBase
+} = invoiceLineBase.fields;
 const invoiceLineField = {
   ...invoiceLineBase,
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
@@ -1169,7 +1180,30 @@ const invoiceLineField = {
       ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
       : updated;
   },
-  fields: { line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true }, source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true }, name: { type: 'char', label: 'Label' }, ...invoiceLineBase.fields, account_id: { type: 'many2one', relation: 'account.account', label: 'Account' }, display_type: { type: 'selection', label: 'Display Type', options: [['line_section', 'Section'], ['line_note', 'Note']] }, deferred_start_date: { type: 'date', label: 'Deferred Start Date' }, deferred_end_date: { type: 'date', label: 'Deferred End Date' }, sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true }, down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true }, rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true }, rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true } } };
+  fields: {
+    line_id: { type: 'char', label: 'Reference', readonly: true, hidden: true },
+    source_line_id: { type: 'char', label: 'Source Document', readonly: true, hidden: true },
+    product_id: invoiceLineProduct,
+    name: { type: 'char', label: 'Label' },
+    account_id: { type: 'many2one', relation: 'account.account', label: 'Account', optional: 'hide' },
+    analytic_account_id: { ...invoiceLineAnalytic, optional: 'hide' },
+    deferred_start_date: { type: 'date', label: 'Deferred Start Date', optional: 'hide' },
+    deferred_end_date: { type: 'date', label: 'Deferred End Date', optional: 'hide' },
+    qty: invoiceLineQty,
+    uom_id: { ...invoiceLineUom, optional: 'hide' },
+    price_unit: invoiceLinePrice,
+    discount: { ...invoiceLineDiscount, optional: 'hide' },
+    tax_id: invoiceLineTaxId,
+    tax: { ...invoiceLineTaxPct, hidden: true },
+    ...invoiceLineExtraBase,
+    display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
+    sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    purchase_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
+    down_payment_key: { type: 'char', label: 'Down Payment', readonly: true, hidden: true },
+    rental_id: { type: 'many2one', relation: 'sale.rental', label: 'Rental', readonly: true, hidden: true },
+    rental_charge: { type: 'char', label: 'Type', readonly: true, hidden: true },
+  },
+};
 
 const lineItem = {
   type: 'one2many',
@@ -1639,9 +1673,59 @@ export const accountingModels = {
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
       warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : ''),
-      groups: [['partner_id', 'ref', 'invoice_origin', 'intercompany_move_id', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until', 'auto_reverse', 'reverse_date', 'reverse_journal_id'], ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number']],
+      groups: (r) => (isInvoice(r)
+        ? [
+          [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }],
+          [
+            { field: 'invoice_date', label: 'Invoice Date' },
+            { label: 'Due Date', fields: ['invoice_date_due', 'invoice_payment_term_id'], join: 'or' },
+            'journal_id',
+            'currency_id',
+          ],
+        ]
+        : [
+          ['partner_id', 'ref', 'invoice_origin', 'intercompany_move_id', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until', 'auto_reverse', 'reverse_date', 'reverse_journal_id'],
+          ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number'],
+        ]),
       tabs: (r) => (isInvoice(r)
-        ? [{ label: 'Invoice Lines', fields: ['invoice_line_ids'] }, { label: 'Journal Items', fields: ['line_ids'], readonly: true }, { label: 'Payments', fields: ['payments'], readonly: true }, { label: 'Other Info', fields: ['narration', 'incoterm_id', 'incoterm_location'] }]
+        ? [
+          { label: 'Invoice Lines', fields: ['invoice_line_ids'], aside: ['narration'] },
+          { label: 'Journal Items', fields: ['line_ids'], readonly: true },
+          { label: 'Payments', fields: ['payments'], readonly: true },
+          {
+            label: 'Other Info',
+            groups: [
+              {
+                title: 'Invoice',
+                fields: [
+                  { field: 'ref', label: isPurchase(r) ? 'Bill Reference' : 'Customer Reference' },
+                  'partner_bank_id',
+                  'payment_reference',
+                ],
+              },
+              {
+                title: 'Accounting',
+                fields: [
+                  'incoterm_id',
+                  'incoterm_location',
+                  'fiscal_position_id',
+                  'auto_post',
+                  'auto_post_until',
+                  'invoice_origin',
+                  'intercompany_move_id',
+                  'auto_reverse',
+                  'reverse_date',
+                  'reverse_journal_id',
+                  'invoice_cash_rounding_id',
+                  'payment_date',
+                  'should_be_paid',
+                  'inalterable_hash',
+                  'secure_sequence_number',
+                ],
+              },
+            ],
+          },
+        ]
         : [{ label: 'Journal Items', fields: ['line_ids'] }]),
       footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
       // The outstanding-credits widget lists the posted payments with unapplied credit and applies a chosen one in full.

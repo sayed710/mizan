@@ -94,6 +94,12 @@ test('invoice line account selection refreshes analytics without running pricing
   await React.act(async () => root.render(React.createElement(FieldInput, {
     db, field: models['account.move'].fields.invoice_line_ids, value: [line], record: move, onChange: (value) => { changed = value; },
   })));
+  const colsToggle = find(rootEl, (node) => node.tagName === 'BUTTON' && props(node)?.['aria-label'] === 'Optional columns');
+  assert.ok(colsToggle, 'invoice lines table has an optional columns toggle');
+  await React.act(async () => props(colsToggle).onClick());
+  const accountToggle = find(rootEl, (node) => props(node)?.role === 'menuitemcheckbox' && node.textContent.includes('Account'));
+  assert.ok(accountToggle, 'optional columns menu lists Account');
+  await React.act(async () => props(accountToggle).onClick());
   const accountSelect = find(rootEl, (node) => node.tagName === 'SELECT' && props(node)?.['aria-label'] === 'Account 1');
   assert.ok(accountSelect, 'invoice line has an account selector');
   await React.act(async () => props(accountSelect).onChange({ target: { value: String(account.id) } }));

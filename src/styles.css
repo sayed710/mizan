@@ -171,8 +171,12 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .title-field input, .title-field h2 { width: 100%; font-size: 28px; font-weight: 600; border: 0; border-bottom: 1px solid transparent; padding: 2px 0; margin: 0 0 16px; outline: 0; background: none; }
 .title-field input:hover, .title-field input:focus { border-bottom-color: var(--brand); }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 40px; }
+.group-title { margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .field { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 10px; min-height: 36px; }
 .field label, .field .field-label { font-weight: 600; }
+.field-pair { display: flex; align-items: center; gap: 8px; }
+.field-pair > :first-child, .field-pair > :last-child { flex: 1; min-width: 0; }
+.field-join { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .req { color: var(--danger); margin-inline-start: 2px; }
 .field-value input:not([type='checkbox']), .field-value select, .tab-panel textarea, .lines input, .lines select {
   width: 100%; border: 0; border-bottom: 1px solid var(--border-input); padding: 4px 2px; background: none; outline: 0;
