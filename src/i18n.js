@@ -1383,6 +1383,9 @@ const ar = {
   'Select an existing default tax': 'اختر ضريبة افتراضية موجودة',
   'Tax belongs to another company': 'الضريبة تتبع شركة أخرى',
   'Archived accounts cannot be selected on journal items or invoice lines': 'لا يمكن اختيار حسابات مؤرشفة في بنود اليومية أو بنود الفواتير',
+  'Fiscal Position Mappings': 'تعيينات الأوضاع المالية',
+  'Excluded Taxes': 'الضرائب المستبعدة',
+  'Tax Invoice Label': 'اسم الضريبة على الفاتورة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

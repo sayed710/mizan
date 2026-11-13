@@ -8,7 +8,7 @@ import { menusFor, models } from './models/index.js';
 import { amounts } from './models/common.js';
 import { postMove } from './models/accounting.js';
 import { isBalanced } from './models/ledger.js';
-import { fiscalPositionFor, expandTaxIds } from './models/taxes.js';
+import { fiscalPositionFor, expandTaxIds, mapTax } from './models/taxes.js';
 import { priceLines, startSession } from './models/pos.js';
 import { migrate } from './migrations.js';
 
@@ -321,6 +321,71 @@ test('zip range detection', () => {
   assert.equal(fiscalPositionFor(db, pOtherZip.id, 1), fpFallback.id);
   assert.equal(fiscalPositionFor(db, pNoZip.id, 1), fpFallback.id);
 
+});
+
+test('numeric zip ranges compare numerically while keeping alphanumeric ranges working', () => {
+  let db = seed();
+  const fpSmall = create(db, 'account.fiscal.position', {
+    name: 'Small Numeric', country: 'Testland', auto_apply: true, sequence: 1, zip_from: '1', zip_to: '20',
+  }); db = fpSmall.db;
+  const fpMid = create(db, 'account.fiscal.position', {
+    name: 'Mid Numeric', country: 'Testland', auto_apply: true, sequence: 2, zip_from: '900', zip_to: '1200',
+  }); db = fpMid.db;
+  const fpHigh = create(db, 'account.fiscal.position', {
+    name: 'High Numeric', country: 'Testland', auto_apply: true, sequence: 3, zip_from: '1000', zip_to: '2000',
+  }); db = fpHigh.db;
+  const fpAlpha = create(db, 'account.fiscal.position', {
+    name: 'Alpha Range', country: 'Testland', auto_apply: true, sequence: 4, zip_from: 'A10', zip_to: 'A90',
+  }); db = fpAlpha.db;
+
+  const p9 = create(db, 'res.partner', { name: 'Zip 9', country: 'Testland', zip: '9' }); db = p9.db;
+  const p1000 = create(db, 'res.partner', { name: 'Zip 1000', country: 'Testland', zip: '1000' }); db = p1000.db;
+  const p15000 = create(db, 'res.partner', { name: 'Zip 15000', country: 'Testland', zip: '15000' }); db = p15000.db;
+  const pAlpha = create(db, 'res.partner', { name: 'Zip A50', country: 'Testland', zip: 'A50' }); db = pAlpha.db;
+  const pBeta = create(db, 'res.partner', { name: 'Zip B50', country: 'Testland', zip: 'B50' }); db = pBeta.db;
+
+  assert.equal(fiscalPositionFor(db, p9.id, 1), fpSmall.id, '1-20 contains 9');
+  assert.equal(fiscalPositionFor(db, p1000.id, 1), fpMid.id, '900-1200 contains 1000');
+  assert.equal(fiscalPositionFor(db, p15000.id, 1), null, '1000-2000 excludes 15000');
+  assert.equal(fiscalPositionFor(db, pAlpha.id, 1), fpAlpha.id, 'A10-A90 contains A50');
+  assert.equal(fiscalPositionFor(db, pBeta.id, 1), null, 'A10-A90 excludes B50');
+});
+
+test('per-position mappings, direct-use destination taxes, and explicit exclusions work independently', () => {
+  let db = seed();
+  const fpA = create(db, 'account.fiscal.position', { name: 'Pos A' }); db = fpA.db;
+  const fpB = create(db, 'account.fiscal.position', { name: 'Pos B' }); db = fpB.db;
+  const fpC = create(db, 'account.fiscal.position', { name: 'Pos C' }); db = fpC.db;
+
+  const taxP = create(db, 'account.tax', { name: 'Tax P 14%', type_tax_use: 'sale', amount: 14 }); db = taxP.db;
+  const taxQ = create(db, 'account.tax', { name: 'Tax Q 10%', type_tax_use: 'sale', amount: 10 }); db = taxQ.db;
+  const taxS = create(db, 'account.tax', { name: 'Tax S 5%', type_tax_use: 'sale', amount: 5 }); db = taxS.db;
+  const taxX = create(db, 'account.tax', {
+    name: 'Tax X 0%',
+    type_tax_use: 'sale',
+    amount: 0,
+    fiscal_position_mapping_ids: [
+      { fiscal_position_id: fpA.id, original_tax_ids: [taxP.id] },
+      { fiscal_position_id: fpB.id, original_tax_ids: [taxQ.id] },
+    ],
+  }); db = taxX.db;
+  db = write(db, 'account.fiscal.position', fpA.id, { excluded_tax_ids: [taxS.id] });
+
+  // Exact (position, source) pairs only: no cross-contamination between A and B
+  assert.deepEqual(mapTax(db, fpA.id, taxP.id), [taxX.id]);
+  assert.deepEqual(mapTax(db, fpA.id, taxQ.id), [taxQ.id]);
+  assert.deepEqual(mapTax(db, fpB.id, taxQ.id), [taxX.id]);
+  assert.deepEqual(mapTax(db, fpB.id, taxP.id), [taxP.id]);
+
+  // Tax X stays directly usable under other positions (e.g. Pos C)
+  const directProd = create(db, 'product', { name: 'Direct X Item', type: 'service', list_price: 100, tax_id: taxX.id }); db = directProd.db;
+  const lineField = models['account.move'].fields.invoice_line_ids;
+  const lineUnderC = lineField.onchange({ product_id: directProd.id, qty: 1 }, 'product_id', db, { move_type: 'out_invoice', fiscal_position_id: fpC.id, company_id: 1 });
+  assert.equal(lineUnderC.tax_id, taxX.id);
+
+  // Excluded tax S is removed under Pos A and kept under Pos B
+  assert.deepEqual(mapTax(db, fpA.id, taxS.id), []);
+  assert.deepEqual(mapTax(db, fpB.id, taxS.id), [taxS.id]);
 });
 
 test('the fiscal position form shows the two tabs and no tax mapping', async () => {

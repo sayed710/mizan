@@ -203,6 +203,7 @@ export const productLines = (label, priceField, extraFields = {}) => ({
     invoice_repartition_line_ids: { type: 'json', label: 'Distribution for Invoices', hidden: true, refs: REPARTITION_REFS },
     refund_repartition_line_ids: { type: 'json', label: 'Distribution for Refunds', hidden: true, refs: REPARTITION_REFS },
     tax_name: { type: 'char', label: 'Tax Name', hidden: true },
+    tax_invoice_label: { type: 'char', label: 'Tax Invoice Label', hidden: true },
     analytic_account_id: { type: 'many2one', relation: 'account.analytic.account', label: 'Analytic' },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
     ...extraFields,

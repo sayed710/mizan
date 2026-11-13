@@ -78,6 +78,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
   if (!tax) return { tax_id: null, tax: 0, tax_type: 'percent', tax_include: false, tax_cash_basis: false, tax_name: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [] };
   const invRepart = (tax.invoice_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
   const refRepart = (tax.refund_repartition_line_ids ?? []).map((l) => ({ ...l, tag_ids: [...(l.tag_ids ?? [])] }));
+  const invoiceLabel = String(tax.invoice_label ?? '').trim();
   const base = {
     tax_id: tax.id,
     tax: Number(tax.amount) || 0,
@@ -87,6 +88,7 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
     tax_name: tax.name,
     invoice_repartition_line_ids: invRepart,
     refund_repartition_line_ids: refRepart,
+    ...(invoiceLabel ? { tax_invoice_label: invoiceLabel } : {}),
     ...(tax.include_base_amount ? { tax_include_base_amount: true } : {}),
     ...(tax.is_base_affected === false ? { tax_is_base_affected: false } : {}),
     ...(tax.sequence != null && Number(tax.sequence) !== 1 ? { tax_sequence: Number(tax.sequence) } : {}),
@@ -101,14 +103,25 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
 };
 
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
-export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, tax_invoice_label: '', invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
+
+/** Whether a tax replacement rule on `tax` maps `taxId` under `fpId`. */
+function taxReplaces(tax, fpId, taxId) {
+  const mappings = tax.fiscal_position_mapping_ids ?? [];
+  if (mappings.some((m) => m.fiscal_position_id === fpId && (m.original_tax_ids ?? []).includes(taxId))) {
+    return true;
+  }
+  return !mappings.length && (tax.fiscal_position_ids ?? []).includes(fpId) && (tax.original_tax_ids ?? []).includes(taxId);
+}
 
 /** The taxes a fiscal position substitutes for `taxId` (a list of mapped tax IDs; `[taxId]` when unmapped/kept; `[]` when dropped). */
 export function mapTax(db, fpId, taxId) {
   if (!taxId) return [];
   if (!fpId || !db) return [taxId];
+  const fp = read(db, 'account.fiscal.position', fpId);
+  if ((fp?.excluded_tax_ids ?? []).includes(taxId)) return [];
   const replacements = search(db, 'account.tax')
-    .filter((t) => (t.fiscal_position_ids ?? []).includes(fpId) && (t.original_tax_ids ?? []).includes(taxId))
+    .filter((t) => taxReplaces(t, fpId, taxId))
     .sort((a, b) => (Number(a.sequence ?? 1) - Number(b.sequence ?? 1)) || ((a.id ?? 0) - (b.id ?? 0)));
   if (replacements.length) return [...new Set(replacements.map((t) => t.id))];
   const src = read(db, 'account.tax', taxId);
@@ -164,6 +177,7 @@ export function resolveLineTaxes(l) {
       tax_include: !!l.tax_include,
       tax_cash_basis: !!l.tax_cash_basis,
       tax_name: l.tax_name || '',
+      ...(l.tax_invoice_label ? { tax_invoice_label: l.tax_invoice_label } : {}),
       tax_include_base_amount: !!l.tax_include_base_amount,
       tax_is_base_affected: l.tax_is_base_affected !== false,
       tax_sequence: Number(l.tax_sequence ?? 1),
@@ -204,11 +218,17 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
   }
   const country = (p.country ?? '').trim().toLowerCase();
   const pZip = String(p.zip ?? '').trim();
+  const isNumericZip = (s) => /^\d+$/.test(s);
   const zipMatches = (fp) => {
     const from = String(fp.zip_from ?? '').trim();
     const to = String(fp.zip_to ?? '').trim();
     if (!from && !to) return true;
     if (!pZip) return false;
+    if (isNumericZip(pZip) && (!from || isNumericZip(from)) && (!to || isNumericZip(to))) {
+      const width = Math.max(pZip.length, from.length, to.length);
+      const norm = (s) => s.padStart(width, '0');
+      return (!from || norm(pZip) >= norm(from)) && (!to || norm(pZip) <= norm(to));
+    }
     return (!from || pZip >= from) && (!to || pZip <= to);
   };
   const matches = search(db, 'account.fiscal.position').filter((fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()) && zipMatches(fp));
@@ -259,6 +279,9 @@ export function accountTax(db, account, side, fpId, companyId = null) {
 
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
 export const taxLabel = (l) => l.tax_name || `${Number(l.tax) || 0}%`;
+
+/** Invoice-facing label for a tax or snapshot: its invoice label when set, else its tax label. */
+export const taxInvoiceLabel = (l) => (l ? String(l.tax_invoice_label ?? l.invoice_label ?? '').trim() || l.name || taxLabel(l) : '');
 
 /** Display-only lines must not contribute to accounting amounts. */
 export const isSectionOrNote = (line) => Boolean(line && ['line_section', 'line_note'].includes(line.display_type));
@@ -345,10 +368,11 @@ export function taxGroups(lines, accountOf, rate = 1, documentCurrency = null, c
       for (const { row, amount, base } of taxRepartitionSplits(t, l, side, documentCurrency).splits) {
         const account_id = accountOf({ ...l, ...t, repartition_line: row });
         const tax_name = taxLabel(t);
+        const invoice_label = taxInvoiceLabel(t);
         const tax_id = t.tax_id ?? null;
         const tax_tag_ids = [...(row.tag_ids ?? [])].sort((a, b) => a - b);
         const key = `${account_id}|${tax_id ?? ''}|${tax_tag_ids.join(',')}`;
-        const g = by.get(key) ?? { account_id, tax_id, tax_name, tax_tag_ids, document_base: 0, document_amount: 0 };
+        const g = by.get(key) ?? { account_id, tax_id, tax_name, invoice_label, tax_tag_ids, document_base: 0, document_amount: 0 };
         by.set(key, { ...g, document_base: g.document_base + base, document_amount: g.document_amount + amount });
       }
     }
@@ -529,6 +553,15 @@ export const taxModels = {
       tax_scope: { type: 'selection', label: 'Tax Scope', options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces' },
+      fiscal_position_mapping_ids: {
+        type: 'one2many',
+        label: 'Fiscal Position Mappings',
+        fields: {
+          fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+          original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces' },
+        },
+        newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
+      },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
       price_include: { type: 'boolean', label: 'Included in Price' },
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
@@ -547,6 +580,7 @@ export const taxModels = {
       children_tax_ids: [],
       fiscal_position_ids: [],
       original_tax_ids: [],
+      fiscal_position_mapping_ids: [],
       type_tax_use: 'sale',
       tax_exigibility: 'on_invoice',
       price_include: false,
@@ -576,7 +610,7 @@ export const taxModels = {
       title: 'name',
       groups: (r) => [
         ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
-        ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids'],
+        ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids', ...(r?.fiscal_position_mapping_ids?.length ? ['fiscal_position_mapping_ids'] : [])],
       ],
       tabs: [
         {
@@ -615,15 +649,17 @@ export const taxModels = {
         fields: { account_src_id: { type: 'many2one', relation: 'account.account', label: 'Product Account' }, account_dest_id: { type: 'many2one', relation: 'account.account', label: 'Account to use instead' } },
         newLine: () => ({ account_src_id: null, account_dest_id: null }),
       },
+      excluded_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Excluded Taxes' },
     },
-    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, account_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, account_ids: [], excluded_tax_ids: [] }),
     sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     kanban: { title: 'name', lines: ['country'] },
     list: ['sequence', 'name', 'country', 'auto_apply'],
     form: {
       title: 'name',
       groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], []],
-      tabs: [{ label: 'Account Mapping', fields: ['account_ids'] }, { label: 'Legal Notes', fields: ['note'] }],
+      // Odoo 20 has no removal rules; only positions upgraded with one show their excluded taxes.
+      tabs: (r) => [{ label: 'Account Mapping', fields: ['account_ids'] }, ...(r?.excluded_tax_ids?.length ? [{ label: 'Excluded Taxes', fields: ['excluded_tax_ids'] }] : []), { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,
     },
   },

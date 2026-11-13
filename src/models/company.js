@@ -65,7 +65,7 @@ export function addressLines(record, taxIdLabel = 'Tax ID') {
 export function documentTaxBreakdown(db, record, lines = []) {
   const currency = documentCurrency(db, record);
   return taxGroups(lines, () => null, 1, currency, currency, { roundingMethod: companyRoundingMethod(db, record?.company_id) })
-    .map(({ tax_name: label, base, amount }) => ({ label, base, amount }));
+    .map(({ invoice_label, tax_name, base, amount }) => ({ label: invoice_label || tax_name, base, amount }));
 }
 
 /** Select active companies without changing the caller's database or selection. */

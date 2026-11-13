@@ -7,7 +7,8 @@ import { create, groupRecords, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { postMove } from './models/accounting.js';
-import { taxSnapshot } from './models/taxes.js';
+import { taxGroups, taxSnapshot } from './models/taxes.js';
+import { documentTaxBreakdown } from './models/company.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -257,7 +258,7 @@ test('a legacy tax record carrying only tax_group char loads, opens in form view
   }
 });
 
-test('invoice tax line labels and print breakdown stay unchanged with separate description and invoice_label fields', async () => {
+test('invoice tax line labels and print breakdown use invoice_label when set while keeping internal tax_name', async () => {
   const base = seed();
   const madeTax = create(base, 'account.tax', {
     name: 'Special VAT 14%',
@@ -270,6 +271,7 @@ test('invoice tax line labels and print breakdown stay unchanged with separate d
   const taxRec = read(madeTax.db, 'account.tax', madeTax.id);
   const snap = taxSnapshot(taxRec);
   assert.equal(snap.tax_name, 'Special VAT 14%');
+  assert.equal(snap.tax_invoice_label, '14% VAT');
 
   const inv = create(madeTax.db, 'account.move', {
     move_type: 'out_invoice',
@@ -277,6 +279,7 @@ test('invoice tax line labels and print breakdown stay unchanged with separate d
     invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, ...snap }],
   });
   const posted = postMove(inv.db, inv.id);
+  assert.ok(read(posted, 'account.move', inv.id).line_ids.some((l) => l.tax_id === madeTax.id && l.tax_name === 'Special VAT 14%'));
   const { PrintDoc } = await import('./views/PrintDoc.jsx');
   const ctx = await mountView(
     (React) => React.createElement(PrintDoc, { model: 'account.move', id: inv.id }),
@@ -284,11 +287,72 @@ test('invoice tax line labels and print breakdown stay unchanged with separate d
   );
   try {
     const html = ctx.host.textContent;
-    assert.match(html, /Special VAT 14%/);
+    assert.match(html, /14% VAT/);
+    assert.doesNotMatch(html, /Special VAT 14%/);
     assert.doesNotMatch(html, /Internal tax note/);
   } finally {
     await ctx.done();
   }
+});
+
+test('taxSnapshot carries invoice_label for invoice presentation while keeping tax_name and grouping by tax_id', async () => {
+  const base = seed();
+  const taxA = create(base, 'account.tax', {
+    name: 'Internal VAT A',
+    invoice_label: 'VAT (Invoice)',
+    type_tax_use: 'sale',
+    amount: 14,
+  });
+  const taxB = create(taxA.db, 'account.tax', {
+    name: 'Internal VAT B',
+    invoice_label: 'VAT (Invoice)',
+    type_tax_use: 'sale',
+    amount: 10,
+  });
+  const taxPlain = create(taxB.db, 'account.tax', {
+    name: 'Plain Tax 5%',
+    invoice_label: '',
+    type_tax_use: 'sale',
+    amount: 5,
+  });
+  const snapA = taxSnapshot(read(taxPlain.db, 'account.tax', taxA.id));
+  const snapB = taxSnapshot(read(taxPlain.db, 'account.tax', taxB.id));
+  const snapPlain = taxSnapshot(read(taxPlain.db, 'account.tax', taxPlain.id));
+
+  assert.equal(snapA.tax_name, 'Internal VAT A');
+  assert.equal(snapA.tax_invoice_label, 'VAT (Invoice)');
+  assert.equal(snapPlain.tax_name, 'Plain Tax 5%');
+  assert.equal(snapPlain.tax_invoice_label, undefined);
+
+  const lines = [
+    { product_id: 1, qty: 1, price_unit: 100, ...snapA },
+    { product_id: 1, qty: 1, price_unit: 50, ...snapA },
+    { product_id: 1, qty: 1, price_unit: 200, ...snapB },
+    { product_id: 1, qty: 1, price_unit: 100, ...snapPlain },
+  ];
+  const inv = create(taxPlain.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: 1,
+    invoice_line_ids: lines,
+  });
+  const posted = postMove(inv.db, inv.id);
+  const postedMove = read(posted, 'account.move', inv.id);
+
+  // Accounting journal items keep internal tax_name and tax_id
+  assert.ok(postedMove.line_ids.some((l) => l.tax_id === taxA.id && l.tax_name === 'Internal VAT A'));
+  assert.ok(postedMove.line_ids.some((l) => l.tax_id === taxB.id && l.tax_name === 'Internal VAT B'));
+
+  // Grouping stays by tax_id even when two taxes share the same invoice_label
+  const groups = taxGroups(postedMove.invoice_line_ids, () => null);
+  assert.equal(groups.length, 3);
+  assert.deepEqual(
+    documentTaxBreakdown(posted, postedMove, postedMove.invoice_line_ids),
+    [
+      { label: 'VAT (Invoice)', base: 150, amount: 21 },
+      { label: 'VAT (Invoice)', base: 200, amount: 20 },
+      { label: 'Plain Tax 5%', base: 100, amount: 5 },
+    ],
+  );
 });
 
 test('Arabic translations cover every account.tax label, tab, and selection option', async () => {
