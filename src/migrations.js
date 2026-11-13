@@ -1175,6 +1175,21 @@ MIGRATIONS.push({ version: 41, name: 'Reconciliation model Odoo 20 parity', up: 
   };
 } });
 
+// Statement lines show amounts and running balances in their journal's currency; older lines stored none.
+MIGRATIONS.push({ version: 42, name: 'Statement line currency from journal', up: (db) => {
+  const lines = db.records['account.bank.statement.line'];
+  if (!lines?.length) return db;
+  const journals = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
+  const companies = new Map((db.records['res.company'] ?? []).map((c) => [c.id, c]));
+  const next = lines.map((line) => {
+    if (line.currency_id != null || !line.journal_id) return line;
+    const journal = journals.get(line.journal_id);
+    const currencyId = journal?.currency_id ?? companies.get(journal?.company_id ?? line.company_id ?? 1)?.currency_id ?? null;
+    return currencyId == null ? line : { ...line, currency_id: currencyId };
+  });
+  return { ...db, records: { ...db.records, 'account.bank.statement.line': next } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

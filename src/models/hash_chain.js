@@ -163,11 +163,17 @@ export function analyzeJournalChains(db, { companyId = null, hashDate = null } =
 /**
  * Secures posted entries in journals with restrict_mode_hash_table up to hashDate.
  * Computes hashes and sequence numbers in sequence order, and sets the company's hard lock date.
+ * With `throughMoveId` (the entry form's Lock button) only that entry's journal is hashed, up to and including it,
+ * and no company lock date changes.
  */
-export function secureEntries(db, { companyId = null, hashDate = null } = {}) {
-  const company = companyId ?? currentCompany(db);
-  const restrictedJournals = search(db, 'account.journal', { includeArchived: true }).filter((j) => Boolean(j.restrict_mode_hash_table));
+export function secureEntries(db, { companyId = null, hashDate = null, throughMoveId = null } = {}) {
+  const through = throughMoveId ? read(db, 'account.move', throughMoveId) : null;
+  if (throughMoveId && !through) throw new Error('Select an existing entry');
+  const company = through ? (through.company_id ?? 1) : (companyId ?? currentCompany(db));
+  const restrictedJournals = search(db, 'account.journal', { includeArchived: true })
+    .filter((j) => Boolean(j.restrict_mode_hash_table) && (!through || j.id === through.journal_id));
   const targetDate = hashDate || today();
+  const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : (m.invoice_date ?? m.date ?? '') <= targetDate);
 
   let next = db;
   let securedThrough = '';
@@ -175,7 +181,7 @@ export function secureEntries(db, { companyId = null, hashDate = null } = {}) {
     const journalMoves = (next.records['account.move'] ?? [])
       .filter((m) => (m.company_id ?? 1) === company && m.journal_id === journal.id && m.state === 'posted')
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-    const moves = journalMoves.filter((m) => (m.invoice_date ?? m.date ?? '') <= targetDate);
+    const moves = journalMoves.filter(inScope);
     const securedMoves = journalMoves.filter((m) => m.inalterable_hash);
     if ((securedMoves.length || (journal.secure_chain_heads ?? []).some((h) => h.company_id === company)) && checkInalterability(next, { journalId: journal.id, companyId: company }).some((r) => r.status === 'corrupted')) throw new Error('Cannot extend a corrupted secure entry chain');
     const lastSecured = securedMoves.at(-1);
@@ -208,6 +214,7 @@ export function secureEntries(db, { companyId = null, hashDate = null } = {}) {
 
   const currentComp = read(next, 'res.company', company);
   if (!currentComp) throw new Error('Select an existing company');
+  if (through) return next;
   if (securedThrough) {
     const drafts = (db.records['account.move'] ?? []).filter((m) => (m.company_id ?? 1) === company && m.state === 'draft' && (m.invoice_date ?? m.date ?? '') <= securedThrough);
     if (drafts.length) throw new Error('Cannot secure entries while draft entries exist on or before the secured date');

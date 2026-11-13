@@ -294,3 +294,38 @@ test('all new bank transactions labels and filter captions have Arabic i18n tran
     );
   }
 });
+
+test('bank transactions reorder only within the same date and journal, and older lines get their journal currency', async () => {
+  const { migrate } = await import('./migrations.js');
+  const def = models['account.bank.statement.line'];
+  assert.equal(def.dropAllowed({ date: '2026-01-02', journal_id: 3 }, { date: '2026-01-02', journal_id: 3 }), true);
+  assert.equal(def.dropAllowed({ date: '2026-02-02', journal_id: 3 }, { date: '2026-01-02', journal_id: 3 }), false);
+  assert.equal(def.dropAllowed({ date: '2026-01-02', journal_id: 3 }, { date: '2026-01-02', journal_id: 4 }), false);
+
+  const base = seed();
+  const bank = search(base, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const eur = search(base, 'res.currency').find((c) => c.name === 'EUR');
+  const legacy = {
+    ...base,
+    schema_version: 41,
+    records: {
+      ...base.records,
+      'account.journal': base.records['account.journal'].map((j) => (j.id === bank.id ? { ...j, currency_id: eur.id } : j)),
+      'account.bank.statement.line': [{ id: 9001, journal_id: bank.id, date: '2026-01-02', payment_ref: 'old', amount: 5, state: 'to_check' }],
+    },
+  };
+  assert.equal(read(migrate(legacy), 'account.bank.statement.line', 9001).currency_id, eur.id);
+});
+
+test('a CAMT batch entry keeps only entry-level details on its single imported line', () => {
+  const tx = (iban, e2e, info) => `<TxDtls><Refs><EndToEndId>${e2e}</EndToEndId></Refs><RltdPties><DbtrAcct><Id><IBAN>${iban}</IBAN></Id></DbtrAcct></RltdPties><AddtlTxInf>${info}</AddtlTxInf></TxDtls>`;
+  const entry = (txs) => `<Ntry><NtryRef>BATCH-7</NtryRef><Amt Ccy="EUR">300.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-03-04</Dt></BookgDt><AcctSvcrRef>X1</AcctSvcrRef><AddtlNtryInf>Collection</AddtlNtryInf><NtryDtls>${txs}</NtryDtls></Ntry>`;
+  const [batch] = parseCamt(`<Document><BkToCstmrStmt><Stmt>${entry(tx('DE1', 'E2E-A', 'First') + tx('DE2', 'E2E-B', 'Second'))}</Stmt></BkToCstmrStmt></Document>`, { details: true });
+  assert.equal(batch.amount, 300);
+  assert.equal(batch.account_number, undefined, 'no single counterparty account for a batch');
+  assert.equal(batch.ref, 'BATCH-7');
+  assert.equal(batch.narration, 'Collection');
+  const [one] = parseCamt(`<Document><BkToCstmrStmt><Stmt>${entry(tx('DE1', 'E2E-A', 'First'))}</Stmt></BkToCstmrStmt></Document>`, { details: true });
+  assert.equal(one.account_number, 'DE1');
+  assert.equal(one.narration, 'First');
+});

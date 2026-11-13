@@ -90,11 +90,18 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
   };
   const dropRow = (targetId) => {
     if (!canDrag || dragId == null || dragId === targetId) return;
-    // Renumber the whole stored list, not just the filtered rows, so hidden records keep their place.
+    // Renumber the whole stored list in its displayed order, not just the filtered rows, so hidden records keep their place.
     const current = getDb();
-    const all = [...(current.records[model] ?? [])].sort((a, b) => (Number(a[handleField]) || 0) - (Number(b[handleField]) || 0) || a.id - b.id);
-    const updates = reorderSequenceUpdates(all, dragId, targetId, handleField);
+    const bySequence = (a, b) => (Number(a[handleField]) || 0) - (Number(b[handleField]) || 0) || a.id - b.id;
+    const all = [...(current.records[model] ?? [])].sort(models[model].sort ?? bySequence);
     setDragId(null);
+    const dragged = all.find((r) => r.id === dragId);
+    const target = all.find((r) => r.id === targetId);
+    if (models[model].dropAllowed && !models[model].dropAllowed(dragged, target)) {
+      alert(t(models[model].dropRefusal ?? 'This row cannot be moved there'));
+      return;
+    }
+    const updates = reorderSequenceUpdates(all, dragId, targetId, handleField);
     if (!updates.size) return;
     try { commit(writeMany(current, model, updates)); } catch (e) { alert(t(e.message)); }
   };

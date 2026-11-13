@@ -594,6 +594,9 @@ export const bankModels = {
       return { currency_id: journal?.currency_id ?? companyCurrencyRecord(db, journal?.company_id ?? r.company_id)?.id ?? null };
     },
     sort: statementLineOrder,
+    // The handle orders transactions of the same day; the date always comes first.
+    dropAllowed: (dragged, target) => Boolean(dragged && target) && dragged.date === target.date && dragged.journal_id === target.journal_id,
+    dropRefusal: 'Transactions can only be reordered within the same date and journal',
     searchFields: ['payment_ref', 'partner_id', 'ref', 'account_number', 'narration', 'transaction_type', 'journal_id', 'bank_move_id', 'move_id'],
     defaultFilters: ['open'],
     filters: [

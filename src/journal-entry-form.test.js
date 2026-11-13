@@ -143,9 +143,9 @@ test('manual journal entry form (Accounting > Accounting > Journal Entries): mai
     assert.ok(optToggle, 'optional columns menu present on Journal Items lines');
     await ctx.React.act(async () => props(optToggle).onClick());
     const optItems = allFind(ctx.host, (n) => props(n)?.role === 'menuitemcheckbox');
-    assert.deepEqual(optItems.map((n) => n.textContent.trim()), ['Tax Grids', 'Discount Date']);
-    assert.deepEqual(optItems.map((n) => props(n)?.['aria-checked']), [false, false]);
-    await ctx.React.act(async () => props(optItems[0]).onClick());
+    assert.deepEqual(optItems.map((n) => n.textContent.trim()), ['Currency', 'Amount in Currency', 'Tax Grids', 'Discount Date']);
+    assert.deepEqual(optItems.map((n) => props(n)?.['aria-checked']), [false, false, false, false]);
+    await ctx.React.act(async () => props(optItems[2]).onClick());
     assert.deepEqual(ths(), ['Account', 'Partner', 'Label', 'Due Date', 'Taxes', 'Debit', 'Credit', 'Tax Grids']);
 
     // Journal Items editable in draft.
@@ -255,7 +255,7 @@ test('header buttons per state, Lock hashing, Reset to Draft locks, Reverse Entr
       ['quarterly', 'Quarterly'],
       ['yearly', 'Yearly'],
     ]);
-    assert.deepEqual(fieldLabelsOf(otherPanel()), ['Auto-post', 'Fiscal Position', 'Terms and Conditions']);
+    assert.deepEqual(fieldLabelsOf(otherPanel()), ['Auto-post', 'Reverse Automatically', 'Fiscal Position', 'Currency', 'Terms and Conditions']);
 
     // Switching Auto-post to monthly reveals Auto-post until, and hides it again for quarterly -> at_date -> monthly order.
     await ctx.React.act(async () => props(autoPostSel).onChange({ target: { value: 'monthly' } }));
@@ -652,4 +652,44 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
   } finally {
     await billCtx.done();
   }
+});
+
+test('Lock secures only the entry journal up to that entry and leaves the company lock date alone', async () => {
+  const { secureEntries } = await import('./models/hash_chain.js');
+  let db = seed();
+  const journals = search(db, 'account.journal');
+  const misc = journals.find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  const sale = journals.find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  for (const j of [misc, sale]) db = write(db, 'account.journal', j.id, { restrict_mode_hash_table: true });
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const [acc1, acc2] = [accounts.find((a) => a.account_type === 'expense'), accounts.find((a) => a.account_type === 'asset_current')];
+  const entry = (date) => {
+    const res = create(db, 'account.move', { move_type: 'entry', journal_id: misc.id, date, line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }] });
+    db = postMove(res.db, res.id);
+    return res.id;
+  };
+  const first = entry('2026-03-01');
+  const second = entry('2026-03-02');
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-02-01', invoice_line_ids: [{ qty: 1, price_unit: 50, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  const before = read(db, 'res.company', 1).hard_lock_date ?? null;
+
+  const locked = secureEntries(db, { throughMoveId: first });
+  assert.ok(read(locked, 'account.move', first).inalterable_hash);
+  assert.ok(!read(locked, 'account.move', second).inalterable_hash, 'later entries of the journal stay open');
+  assert.ok(!read(locked, 'account.move', inv.id).inalterable_hash, 'other journals are untouched');
+  assert.equal(read(locked, 'res.company', 1).hard_lock_date ?? null, before);
+});
+
+test('manual entries keep automatic reversal and foreign currency inputs', () => {
+  const def = models['account.move'];
+  const otherInfo = (r) => def.form.tabs(r).find((tab) => tab.label === 'Other Info').groups.flat().map((g) => (typeof g === 'string' ? g : g.field));
+  assert.ok(otherInfo({ move_type: 'entry' }).includes('auto_reverse'));
+  assert.ok(otherInfo({ move_type: 'entry' }).includes('currency_id'));
+  assert.ok(!otherInfo({ move_type: 'entry' }).includes('reverse_date'));
+  assert.ok(otherInfo({ move_type: 'entry', auto_reverse: true }).includes('reverse_date'));
+  assert.ok(otherInfo({ move_type: 'entry', auto_reverse: true }).includes('reverse_journal_id'));
+  const cols = Object.fromEntries(def.fields.line_ids.columnsFor({ move_type: 'entry' }));
+  assert.equal(cols.currency_id.optional, 'hide');
+  assert.equal(cols.amount_currency.optional, 'hide');
 });

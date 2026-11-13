@@ -57,14 +57,13 @@ export function parseCamt(text, { details = false } = {}) {
     const amountTag = b.match(/<(?:\w+:)?Amt\b[^>]*>/)?.[0] ?? '';
     const ref = xmlTag(b, ['Ustrd']) || xmlTag(b, ['AddtlNtryInf']) || xmlTag(b, ['Nm']);
     const isDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
-    const account_number = details ? camtAccount(b, isDebit) : '';
-    const narration = details ? unescapeXml(xmlTag(b, ['AddtlTxInf']) || xmlTag(b, ['AddtlNtryInf'])) : '';
+    // A batch entry (several TxDtls) books one total: transaction-level details would describe only one of them.
+    const single = (b.match(/<(?:\w+:)?TxDtls\b/g) ?? []).length <= 1;
+    const account_number = details && single ? camtAccount(b, isDebit) : '';
+    const narration = details ? unescapeXml((single ? xmlTag(b, ['AddtlTxInf']) : '') || xmlTag(b, ['AddtlNtryInf'])) : '';
     const lineRef = details ? unescapeXml([
       xmlTag(b, ['NtryRef']),
-      xmlTag(b, ['EndToEndId']),
-      xmlTag(b, ['TxId']),
-      xmlTag(b, ['InstrId']),
-      xmlTag(b, ['CdtrRefInf', 'Ref']),
+      ...(single ? [xmlTag(b, ['EndToEndId']), xmlTag(b, ['TxId']), xmlTag(b, ['InstrId']), xmlTag(b, ['CdtrRefInf', 'Ref'])] : []),
     ].find((v) => v && v.toUpperCase() !== 'NOTPROVIDED') ?? '') : '';
     const transaction_type = details ? camtTxType(b) : '';
     return {
