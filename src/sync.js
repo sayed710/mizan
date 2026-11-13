@@ -701,12 +701,37 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const id of requestedGeneratedMoves) {
     if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');
   }
+  const settlementOrigins = new Map();
+  for (const [model, record] of changed) {
+    if (model !== 'account.move') continue;
+    const oldRows = oldMoves.get(record.id)?.payments ?? [];
+    for (const row of (record.payments ?? []).slice(oldRows.length)) {
+      for (const moveId of [row.move_id, row.payment_fx_move_id, row.cash_basis_move_id]) {
+        if (!moveId || oldMoves.has(moveId)) continue;
+        const ids = settlementOrigins.get(moveId) ?? [];
+        if (!ids.includes(record.id)) ids.push(record.id);
+        settlementOrigins.set(moveId, ids);
+      }
+    }
+  }
   const seen = { ...db, records };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
+    const archivedOriginIds = model === 'account.move' ? [
+      rec.reversed_entry_id,
+      rec.cash_basis_origin_move_id,
+      rec.debit_origin_id,
+      rec.correction_of_id,
+      rec.fx_invoice_id,
+      rec.fx_payment_move_id,
+      rec.deferred_adjustment_of_id,
+      ...(settlementOrigins.get(rec.id) ?? []),
+      ...((seen.records['account.fiscal.year'] ?? []).filter((y) => y.opening_move_id === rec.id).map((y) => y.closing_move_id)),
+    ].filter(Number.isInteger) : [];
+    const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets });
     if (err) throw new Error(err);
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);

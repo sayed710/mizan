@@ -104,7 +104,7 @@ const message = (model, resId, body, kind, record, source) => ({
   ...(source ? { source_model: source.model, source_id: source.id, company_id: source.company_id ?? 1 } : record && !SHARED_MODELS.has(model) ? { company_id: record.company_id || 1 } : {}),
 });
 
-export function create(db, model, vals) {
+export function create(db, model, vals, ctx = undefined) {
   const prepared = models[model].prepareCreate?.(db, vals);
   if (prepared) ({ db, vals } = prepared);
   const id = nextId(db, model);
@@ -115,7 +115,7 @@ export function create(db, model, vals) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec);
+  const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   const res = {
@@ -158,18 +158,18 @@ function writeValues(db, model, before, vals) {
 }
 
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
-function prepareWrite(db, model, before, vals) {
+function prepareWrite(db, model, before, vals, ctx = undefined) {
   const result = writeValues(db, model, before, vals);
-  const err = validate(model, result.after, db) ?? models[model].guard?.(db, before, result.after);
+  const err = validate(model, result.after, db) ?? models[model].guard?.(db, before, result.after, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
   return result;
 }
 
-export function write(db, model, id, vals) {
+export function write(db, model, id, vals, ctx = undefined) {
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
-  const { after, clean } = prepareWrite(db, model, before, vals);
+  const { after, clean } = prepareWrite(db, model, before, vals, ctx);
   const next = {
     ...db,
     records: { ...db.records, [model]: db.records[model].map((r) => (r.id === id ? after : r)) },

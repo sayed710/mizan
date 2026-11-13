@@ -11,16 +11,16 @@ export const isLegacyCashBasisRelease = (move) => Boolean(move && !move.cash_bas
 export const isNonZeroBaseGridLine = (line) => Boolean(line?.tax_grid_base && !line.tax_zero);
 
 /** Cash basis uses the originating tax's explicit transition setting. */
-export function cashBasisTransitionAccount(db, taxId, company) {
+export function cashBasisTransitionAccount(db, taxId, company, { allowArchived = false } = {}) {
   const tax = read(db, 'account.tax', taxId);
   if (tax?.company_id && tax.company_id !== (company ?? 1)) throw new Error('The cash basis tax belongs to another company');
-  return configuredAccount(db, tax?.cash_basis_transition_account_id, company, 'cash basis transition', tax?.name ?? 'the tax');
+  return configuredAccount(db, tax?.cash_basis_transition_account_id, company, 'cash basis transition', tax?.name ?? 'the tax', { allowArchived });
 }
 
 export function cashBasisTransitionAccounts(db, company) {
   // Only configured taxes can have booked a transition line; an incomplete tax must not block reports and locks.
   return search(db, 'account.tax').filter((tax) => tax.tax_exigibility === 'on_payment' && tax.cash_basis_transition_account_id && (!company || !tax.company_id || tax.company_id === company))
-    .map((tax) => cashBasisTransitionAccount(db, tax.id, company ?? tax.company_id));
+    .map((tax) => cashBasisTransitionAccount(db, tax.id, company ?? tax.company_id, { allowArchived: true }));
 }
 
 /** Repartition lines of a tax or line snapshot for the requested side ('invoice' or 'refund'). */
