@@ -37,7 +37,9 @@ function selectedItems(db, selections) {
     const account = read(db, 'account.account', line.account_id);
     const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
     if (!account || !(account.reconcile === true || counterpart)) throw new Error('Select items on a reconcilable account');
-    if ((move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id).length !== 1) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
+    // Multi-installment invoices and bills legitimately split one receivable/payable total across dated counterpart lines.
+    const sameCounterpart = (move.line_ids ?? []).filter((item) => item.account_id === line.account_id && item.partner_id === line.partner_id);
+    if (sameCounterpart.length !== 1 && !(isInvoice(move) && counterpart)) throw new Error('This entry has multiple counterpart items; settle it from its document workflow');
     return { move, line, counterpart };
   });
 }
