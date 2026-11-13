@@ -4,7 +4,7 @@ import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
 import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
-import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
+import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
 import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
@@ -16,6 +16,8 @@ import { findAnalyticDistribution } from './analytic-distribution-models.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+/** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
+export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
 let analyticPostingHooks = null;
 
 export function registerAnalyticPostingHooks(hooks) {
@@ -739,28 +741,90 @@ function reconcileIndex(db) {
   return index;
 }
 
-/** Derive reconciliation from settlement links, never from labels or a second stored flag. */
+const cleanSignedZero = (value) => (value == null ? null : Math.abs(value) < 1e-12 ? 0 : value);
+
+/** Compute per-line residual amounts in company currency and line currency for reconcilable items. */
+export function journalItemResidual(db, move, line, { reconciled = false, ownCurrency = findCompanyCurrencyRecord(db, move?.company_id ?? 1) } = {}) {
+  const account = read(db, 'account.account', line?.account_id);
+  if (!isReconcilableAccount(account)) return { amount_residual: null, amount_residual_currency: null };
+  const roundOwn = (value) => cleanSignedZero(ownCurrency ? roundCurrency(value, ownCurrency) : round(value));
+  const lineBalance = roundOwn((Number(line.debit) || 0) - (Number(line.credit) || 0));
+  const foreign = Boolean(line.currency_id && ownCurrency && line.currency_id !== ownCurrency.id);
+  const foreignCurr = foreign ? read(db, 'res.currency', line.currency_id) : null;
+  const roundLine = (value) => cleanSignedZero(foreignCurr ? roundCurrency(value, foreignCurr) : roundOwn(value));
+  const lineAmountCurr = foreign ? roundLine(Number(line.amount_currency) || 0) : lineBalance;
+  if (move?.state === 'cancel' || reconciled) return { amount_residual: 0, amount_residual_currency: 0 };
+  return { amount_residual: lineBalance, amount_residual_currency: foreign ? lineAmountCurr : 0 };
+}
+
+/** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
 export function reconciledJournalItems(db, move) {
   const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = reconcileIndex(db);
   const applications = byMove.get(move.id) ?? [];
   const payment = payments.get(move.id);
   const posted = move.state === 'posted';
   const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type);
-  return (move.line_ids ?? []).map((line) => {
-    if (!posted) return { ...line, reconciled: false };
+  const ownCurrency = findCompanyCurrencyRecord(db, move.company_id ?? 1);
+  const rawLines = move.line_ids ?? [];
+  const docResidual = document ? models['account.move'].fields.amount_residual.compute(move, db) : null;
+  const docLineTotal = (l) => {
+    const bal = (Number(l.debit) || 0) - (Number(l.credit) || 0);
+    const foreign = Boolean(l.currency_id && ownCurrency && l.currency_id !== ownCurrency.id);
+    return Math.abs(foreign ? (Number(l.amount_currency) || 0) : bal);
+  };
+  const isCounterpart = (l) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type);
+  // The paid part of a document settles its installments earliest due date first.
+  const remainingByIndex = new Map();
+  if (document && docResidual != null) {
+    const counterparts = rawLines.map((l, index) => ({ l, index })).filter(({ l }) => isCounterpart(l))
+      .sort((a, b) => String(a.l.date_maturity ?? move.invoice_date_due ?? move.date ?? '').localeCompare(String(b.l.date_maturity ?? move.invoice_date_due ?? move.date ?? '')));
+    let paidLeft = Math.max(0, counterparts.reduce((sum, { l }) => sum + docLineTotal(l), 0) - docResidual);
+    for (const { l, index } of counterparts) {
+      const applied = Math.min(docLineTotal(l), paidLeft);
+      paidLeft -= applied;
+      remainingByIndex.set(index, docLineTotal(l) - applied);
+    }
+  }
+  const roundOwn = (v) => cleanSignedZero(ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
+  /** Scale a line's residuals by the share still open, rounded in each amount's own currency. */
+  const scaleResidual = (line, residual, residualCurrency, ratio) => {
+    const foreign = Boolean(line.currency_id && ownCurrency && line.currency_id !== ownCurrency.id);
+    const foreignCurr = foreign ? read(db, 'res.currency', line.currency_id) : null;
+    return {
+      amount_residual: roundOwn(residual * ratio),
+      amount_residual_currency: foreign
+        ? cleanSignedZero(foreignCurr ? roundCurrency(residualCurrency * ratio, foreignCurr) : roundOwn(residualCurrency * ratio))
+        : 0,
+    };
+  };
+  return rawLines.map((line, index) => {
     const account = read(db, 'account.account', line.account_id);
     let reconciled = false;
-    if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
-      reconciled = document
-        ? models['account.move'].fields.amount_residual.compute(move, db) === 0
-        : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
-          && (invoice.company_id ?? 1) === (move.company_id ?? 1)
-          && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
-          && (row.reversed || !payment?.unapplied));
+    if (posted) {
+      if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
+        reconciled = document
+          ? docResidual === 0
+          : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
+            && (invoice.company_id ?? 1) === (move.company_id ?? 1)
+            && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
+            && (row.reversed || !payment?.unapplied));
+      }
+      if (payment?.outstanding_account_id === line.account_id) reconciled = matchedPaymentMoves.has(move.id);
+      if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
     }
-    if (payment?.outstanding_account_id === line.account_id) reconciled = matchedPaymentMoves.has(move.id);
-    if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
-    return { ...line, reconciled };
+    const base = journalItemResidual(db, move, line, { reconciled, ownCurrency });
+    let { amount_residual, amount_residual_currency } = base;
+    if (amount_residual != null && move.state !== 'cancel' && !reconciled) {
+      const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
+      if (document && counterpart && remainingByIndex.has(index)) {
+        const lineDoc = docLineTotal(line);
+        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, lineDoc > 1e-9 ? remainingByIndex.get(index) / lineDoc : 0));
+      } else if (posted && !document && payment?.unapplied != null && counterpart && Math.abs(amount_residual) > 1e-9) {
+        const ratio = Math.min(1, Math.max(0, Number(payment.unapplied) || 0) / Math.abs(amount_residual));
+        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, ratio));
+      }
+    }
+    return { ...line, reconciled, amount_residual, amount_residual_currency };
   });
 }
 
@@ -813,8 +877,8 @@ export function matchedMoveIds(db, moveId) {
   return matched;
 }
 
-/** Identity of an embedded journal line, independent of its position and derived matching state. */
-export function journalItemIdentity({ reconciled: _reconciled, ...line }) {
+/** Identity of an embedded journal line, independent of its position and derived matching or residual state. */
+export function journalItemIdentity({ reconciled: _reconciled, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
   return JSON.stringify(line);
 }
 
@@ -845,6 +909,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
         invoice_date: m.invoice_date ?? null,
         ref: m.ref ?? '',
         move_state: m.state,
+        inalterable_hash: m.inalterable_hash ?? null,
         company_id: m.company_id ?? 1,
         journal_id: m.journal_id,
         is_closing: !!m.is_closing,
@@ -853,11 +918,7 @@ export function journalItems(db, { from, to, company_id, company, reviewMode = '
       }));
     });
   if (reviewMode !== 'unreconciled') return rows;
-  return rows.filter((line) => {
-    const account = read(db, 'account.account', line.account_id);
-    const reconcilable = account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type);
-    return reconcilable && line.reconciled !== true;
-  });
+  return rows.filter((line) => isReconcilableAccount(read(db, 'account.account', line.account_id)) && line.reconciled !== true);
 }
 
 /** Balance per account (debit − credit) over the given items. */

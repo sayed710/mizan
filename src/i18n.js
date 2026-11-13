@@ -1509,6 +1509,20 @@ const ar = {
   'Payment Date': 'تاريخ الدفع',
   'Payment Date: This Month': 'تاريخ الدفع: هذا الشهر',
   'Payment Date: This Year': 'تاريخ الدفع: هذه السنة',
+  // Journal Items list/search parity (Odoo 20)
+  'In Currency': 'بالعملة',
+  'Discount Amount': 'مبلغ الخصم',
+  'Originator Tax': 'الضريبة المنشئة',
+  'Residual': 'المتبقي',
+  'Residual in Currency': 'المتبقي بالعملة',
+  'Total Debit': 'إجمالي المدين',
+  'Total Credit': 'إجمالي الدائن',
+  'Total Balance': 'إجمالي الرصيد',
+  'Total Residual': 'إجمالي المتبقي',
+  'Not Secured': 'غير مؤمّن',
+  'With residual': 'ذات متبقٍ',
+  'Tax Grid': 'الشبكة الضريبية',
+  'Journal Item': 'بند قيد',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
