@@ -53,6 +53,15 @@ export function withSelectedStatementJournal(defaults = {}, selectedJournalId = 
   return Number.isSafeInteger(journalId) && journalId > 0 ? { ...defaults, journal_id: journalId } : defaults;
 }
 
+/** Import defaults for one journal: its lines belong to the journal's own company, never to the active one. */
+export function statementImportDefaults(journal, defaults = {}) {
+  return {
+    ...defaults,
+    ...(journal?.id ? { journal_id: journal.id } : {}),
+    ...(journal?.company_id != null ? { company_id: journal.company_id } : {}),
+  };
+}
+
 /** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);

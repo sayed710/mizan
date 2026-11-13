@@ -6,6 +6,7 @@ import { CURRENCIES } from '../ui.jsx';
 import { createCompany, ensureCurrencyRecord, renameCompany, setCompanyCurrency } from '../models/company.js';
 import { models } from '../models/index.js';
 import { migrate } from '../migrations.js';
+import { appOpen } from '../access.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
 
@@ -307,7 +308,7 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
                 </select>
               )}
             <p className="muted setting-links">
-              <a href="#/accounting/currencies">{t('Currencies')}</a>
+              {appOpen(db, getUser(), 'accounting') ? <a href="#/accounting/currencies">{t('Currencies')}</a> : <span>{t('Currencies')}</span>}
               {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
             </p>
           </SettingRow>

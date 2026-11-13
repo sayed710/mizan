@@ -65,6 +65,8 @@ export function ActionView({ leaf, base, params }) {
   const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
     .filter((r) => matches(db, model, r, search.terms));
   const records = def.sort ? [...filtered].sort(def.sort) : filtered;
+  // The "how to start" help belongs to a truly empty list, not to a search or filter that matched nothing.
+  const narrowed = search.terms.length > 0 || search.filters.length > 0 || search.archived;
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
   const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
@@ -92,7 +94,7 @@ export function ActionView({ leaf, base, params }) {
       })),
     ]));
   };
-  const importCsv = (file) => importModelFile(model, importDefaults, file);
+  const importCsv = (file) => importModelFile(model, importDefaults, file, leaf.listLabels);
   const groupBy = search.groupBy;
   const kanbanGroup = groupBy[0] ?? def.kanban?.groupBy;
   const win = pageWindow(records.length, offset);
@@ -158,7 +160,7 @@ export function ActionView({ leaf, base, params }) {
         view={view} search={search} setSearch={setSearch} extra={extra} />
       <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} listLabels={leaf.listLabels} emptyHelp={leaf.emptyHelp ?? def.emptyHelp} />}
+      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} listLabels={leaf.listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}

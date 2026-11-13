@@ -1000,7 +1000,7 @@ export function journalCards(db, at = today()) {
   const months = lastMonths(at);
   // Draft invoices count against the journal explicitly configured for their company.
   const draftJournal = (m) => (m.move_type === 'entry' ? null : resolveDocumentJournal(db, m)?.id ?? null);
-  return journals.map((j) => {
+  const cardOf = (j) => {
     const own = moves.filter((m) => m.journal_id === j.id || (m.state === 'draft' && !m.journal_id && draftJournal(m) === j.id));
     if (['sale', 'purchase'].includes(j.type)) {
       const documents = own.filter((m) => m.move_type === (j.type === 'sale' ? 'out_invoice' : 'in_invoice'));
@@ -1079,6 +1079,15 @@ export function journalCards(db, at = today()) {
       };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };
+  };
+  // One misconfigured journal must not hide the others: its card carries the configuration error to show.
+  return journals.map((j) => {
+    try {
+      return cardOf(j);
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      return { journal: j, kind: 'error', error: error.message };
+    }
   });
 }
 

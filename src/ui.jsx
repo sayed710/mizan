@@ -337,13 +337,17 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             }
             return (
               <tr key={i}>
-                {cols.map(([k, f]) => (
-                  <td key={k} className={isNumeric(f) ? 'num' : ''}>
-                    {readonly
-                      ? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id })
-                      : <FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />}
-                  </td>
-                ))}
+                {cols.map(([k, f]) => {
+                  // A field may explain a value it has no record for (e.g. a tax rate with no tax record).
+                  const rateText = !l[k] ? f.rateOnlyText?.(l) : null;
+                  return (
+                    <td key={k} className={isNumeric(f) ? 'num' : ''}>
+                      {readonly
+                        ? (rateText ?? display(db, f, l[k], { ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }))
+                        : <><FieldInput db={db} field={f} value={l[k]} record={{ ...l, company_id: l.company_id ?? record?.company_id, currency_id: l.currency_id ?? record?.currency_id }} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${i + 1}`} placeholder={k === 'product_id' ? t('Select a product…') : undefined} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
+                    </td>
+                  );
+                })}
                 {priced && <td className="num">{money(lineSubtotal(l), currencyCode(db, record), documentCurrency(db, record))}</td>}
                 {!readonly ? (
                   <td>

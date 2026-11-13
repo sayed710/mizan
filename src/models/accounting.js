@@ -738,8 +738,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   if (liquidityAccountId && (!statement?.bank_move_id || directBank)) throw new Error('A bank suspense settlement requires a posted statement entry');
   let recipientBankId = null;
   if (isPurchase(r) && !isInbound(r) && !statement) {
+    // The bank is only read for the payment record; the posted bill's own (locked) bank field is never written here.
     recipientBankId = resolveAndValidateRecipientBank(db, r.partner_id, payRec?.partner_bank_id, { invoiceBankId: r.partner_bank_id, companyId: r.company_id ?? 1 });
-    if (recipientBankId && !r.partner_bank_id) db = write(db, 'account.move', r.id, { partner_bank_id: recipientBankId });
   }
   // Anything paid above the amount due stays on the partner's account as an outstanding credit.
   const excess = docRound(amount - value);
@@ -1271,7 +1271,8 @@ const invoiceLineField = {
     uom_id: { ...invoiceLineUom, optional: 'hide' },
     price_unit: invoiceLinePrice,
     discount: { ...invoiceLineDiscount, optional: 'hide' },
-    tax_id: invoiceLineTaxId,
+    // A numeric rate without a tax record (e.g. a digitized bill) still taxes the line: show it rather than an empty selector.
+    tax_id: { ...invoiceLineTaxId, rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null) },
     tax: { ...invoiceLineTaxPct, hidden: true },
     ...invoiceLineExtraBase,
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },

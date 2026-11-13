@@ -2,6 +2,7 @@
 import { models } from './models/index.js';
 import { create, search } from './orm.js';
 import { fieldReadonly } from './field-metadata.js';
+import { t } from './i18n.js';
 
 const sanitizeFormula = (s) => {
   const trimmed = s.trimStart();
@@ -49,9 +50,11 @@ export function fromCsv(text) {
 }
 
 /** Import rows whose headers match field labels (or technical names); many2one cells hold explicit record IDs. */
-export function importCsvRows(db, model, defaults, rows) {
+export function importCsvRows(db, model, defaults, rows, listLabels = null) {
   const fields = models[model].fields;
-  const keyOf = (header) => Object.keys(fields).find((key) => key === header || fields[key].label.toLowerCase() === header.trim().toLowerCase());
+  // A menu's own column labels (what export writes, e.g. Customer / Invoice Date) are accepted next to the model labels.
+  const labelsOf = (key) => [fields[key].label, listLabels?.[key]].filter(Boolean).flatMap((label) => [label, t(label)]).map((label) => label.toLowerCase());
+  const keyOf = (header) => Object.keys(fields).find((key) => key === header || labelsOf(key).includes(header.trim().toLowerCase()));
   const [header, ...body] = rows;
   const keys = header.map(keyOf);
   let next = db;

@@ -487,7 +487,7 @@ test('shared bank journal cards resolve company-level outstanding accounts per p
   assert.equal(card.outstandingBalance, 400);
 });
 
-test('journalCards surfaces misconfigured outstanding account errors instead of swallowing them', async () => {
+test('journalCards surfaces misconfigured outstanding account errors on that journal card instead of swallowing them', async () => {
   const { createCompany } = await import('./models/company.js');
   let db = seed();
   const baseCurrencyId = db.records['res.company'][0].currency_id;
@@ -501,6 +501,10 @@ test('journalCards surfaces misconfigured outstanding account errors instead of 
     default_account_id: bankAcc.id, outstanding_receipts_account_id: c2OutRec.id,
   });
   db = { ...sharedBank.db, settings: { ...sharedBank.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] } };
-  assert.throws(() => journalCards(db), /Outstanding account must belong to the payment company/);
+  const cards = journalCards(db);
+  const broken = cards.find((c) => c.journal.id === sharedBank.id);
+  assert.equal(broken.kind, 'error');
+  assert.match(broken.error, /Outstanding account must belong to the payment company/);
+  assert.ok(cards.some((c) => c.journal.id !== sharedBank.id && c.kind !== 'error'), 'other journals keep their cards');
 });
 

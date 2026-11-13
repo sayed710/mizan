@@ -308,7 +308,7 @@ test('rendered dashboard shows empty states for journals with no posted entries 
 
   const cashCard = journalCardHtml(html, 'Empty Cash');
   assert.match(cashCard, /Record your cash transactions\./);
-  assert.match(cashCard, /href="#\/accounting\/entries">Cash Transactions<\/a>/);
+  assert.match(cashCard, new RegExp(`href="#/accounting/entries\\?view=list&amp;rel=journal_id:${emptyCash.id}">Cash Transactions</a>`));
   assert.doesNotMatch(cashCard, /No transactions yet\./);
 
   assert.doesNotMatch(html, new RegExp(`rel=journal_id:${emptyBank.id}[^>]*>.*Reconcile`));

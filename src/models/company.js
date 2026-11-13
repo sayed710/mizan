@@ -313,7 +313,8 @@ function companyGuard(db, before, r, ctx) {
     ['account_sale_tax_id', 'sale', 'Default Sales Tax'],
     ['account_purchase_tax_id', 'purchase', 'Default Purchase Tax'],
   ]) {
-    if (!r[field]) continue;
+    // Only a default being set in this write is validated; one already stored may have aged (archived, retyped) without blocking other edits.
+    if (!r[field] || (before && (before[field] ?? null) === (r[field] ?? null))) continue;
     const tax = record(db, 'account.tax', r[field]);
     if (!tax || tax.active === false || tax.type_tax_use !== use || (!shared(tax.company_id) && tax.company_id !== r.id)) {
       return `${label} must be an active ${use} tax shared with or belonging to this company`;

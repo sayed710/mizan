@@ -44,6 +44,15 @@ function OnboardingStep({ href, icon, label }) {
 
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
 function JournalCard({ card, companyId }) {
+  // A journal whose card cannot be computed keeps its title and shows why, so the rest of the dashboard still renders.
+  if (card.kind === 'error') {
+    return (
+      <section className="panel journal-card journal-card-error">
+        <h2>{card.journal.name}</h2>
+        <p className="journal-error" role="alert">{t(card.error)}</p>
+      </section>
+    );
+  }
   const list = journalCardListUrl(card);
   if (card.kind === 'sale' || card.kind === 'purchase') {
     const sale = card.kind === 'sale';

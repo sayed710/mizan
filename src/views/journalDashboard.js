@@ -6,10 +6,7 @@ const JOURNAL_LISTS = {
   general: 'entries',
 };
 
-/** Build the list action opened from a journal card. */
+/** Build the list action opened from a journal card: always narrowed to that card's journal. */
 export function journalCardListUrl(card) {
-  const route = `#/accounting/${JOURNAL_LISTS[card.kind]}`;
-  return ['sale', 'purchase', 'bank'].includes(card.kind)
-    ? `${route}?view=list&rel=journal_id:${card.journal.id}`
-    : route;
+  return `#/accounting/${JOURNAL_LISTS[card.kind]}?view=list&rel=journal_id:${card.journal.id}`;
 }
