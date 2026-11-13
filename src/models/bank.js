@@ -44,6 +44,24 @@ export function candidates(db, line) {
       || Math.abs(a.amount_residual - Math.abs(line.amount)) - Math.abs(b.amount_residual - Math.abs(line.amount)));
 }
 
+/** Book the statement line's bank movement once into the bank suspense account and record it on the line
+ * (bank_move_id, open_amount); each later allocation then clears part of that suspense. An already booked
+ * line keeps its bank entry, so repeated matches or write-offs never post the bank movement twice. */
+export function bookBankMovement(db, line, company, { date, openAmount }) {
+  const ensured = ensureBankSuspense(db, company, line.journal_id);
+  const bankMoveId = line.bank_move_id;
+  if (bankMoveId) return { db: ensured.db, bankMoveId, suspense: ensured.id };
+  const via = paymentJournal(db, line.journal_id, company);
+  const incoming = line.amount > 0;
+  const amount = statementCompanyAmount(db, line);
+  const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
+  const foreign = currency && currency !== companyCurrencyRecord(db, company)?.id;
+  const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * Math.abs(line.amount) } : {};
+  const booked = postEntry(db, { journal: via.code, journal_id: line.journal_id, date, ref: line.payment_ref, company,
+    lines: incoming ? [{ account: via.accountId, debit: amount, ...fx(1) }, { account: ensured.id, credit: amount, ...fx(-1) }] : [{ account: ensured.id, debit: amount, ...fx(1) }, { account: via.accountId, credit: amount, ...fx(-1) }] });
+  return { db: write(booked.db, 'account.bank.statement.line', line.id, { bank_move_id: booked.id, open_amount: openAmount }), bankMoveId: booked.id, suspense: ensured.id };
+}
+
 /** Apply the available statement balance to an invoice; an excess is held in bank suspense. */
 export function reconcileWith(db, line, moveId) {
   const move = read(db, 'account.move', moveId);
@@ -88,21 +106,10 @@ export function reconcileWith(db, line, moveId) {
   let suspense = null;
   const bankCurrency = read(db, 'account.journal', line.journal_id)?.currency_id;
   if (bankMoveId || remaining > 0 || (bankCurrency && bankCurrency !== companyCurrencyRecord(db, company)?.id)) {
-    const ensured = ensureBankSuspense(current, company, line.journal_id);
-    current = ensured.db;
-    suspense = ensured.id;
-    if (!bankMoveId) {
-      const via = paymentJournal(db, line.journal_id, company);
-      const incoming = line.amount > 0;
-      const amount = statementCompanyAmount(db, line);
-      const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
-      const foreign = currency && currency !== companyCurrencyRecord(db, company)?.id;
-      const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * Math.abs(line.amount) } : {};
-      const booked = postEntry(current, { journal: via.code, journal_id: line.journal_id, date, ref: line.payment_ref, company,
-        lines: incoming ? [{ account: via.accountId, debit: amount, ...fx(1) }, { account: suspense, credit: amount, ...fx(-1) }] : [{ account: suspense, debit: amount, ...fx(1) }, { account: via.accountId, credit: amount, ...fx(-1) }] });
-      bankMoveId = booked.id;
-      current = write(booked.db, 'account.bank.statement.line', line.id, { bank_move_id: bankMoveId, open_amount: available });
-    }
+    const bookedBank = bookBankMovement(db, line, company, { date, openAmount: available });
+    current = bookedBank.db;
+    bankMoveId = bookedBank.bankMoveId;
+    suspense = bookedBank.suspense;
   }
   const paid = payMove(current, moveId, value, date, { journalId: line.journal_id, statementLineId: line.id, ...(suspense ? { liquidityAccountId: suspense } : { directBank: true }) });
   const paymentMove = read(paid, 'account.move', moveId).payments.at(-1).move_id;
@@ -521,6 +528,7 @@ export const bankModels = {
         invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
         payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' },
         writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry' },
+        reconcile_model_id: { type: 'many2one', relation: 'account.reconcile.model', label: 'Reconciliation Model' },
         amount: { type: 'monetary', label: 'Amount' },
       } },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },

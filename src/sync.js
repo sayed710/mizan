@@ -547,6 +547,34 @@ export function rebaseDiff(d, remapped) {
 const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /**
+ * Whether every line of `rec` on an archived account copies a line of the posted origin move on that account:
+ * opposite side (reversal, credit note, correction) or same side (debit note), never for a larger amount.
+ */
+function mirrorsOriginOnArchived(db, rec, originId, opposite) {
+  if (!Number.isInteger(originId)) return false;
+  const origin = (db.records['account.move'] ?? []).find((m) => m.id === originId);
+  if (origin?.state !== 'posted') return false;
+  const archived = (id) => (db.records['account.account'] ?? []).find((a) => a.id === id)?.active === false;
+  // Totals per archived account: the new move may not post more on an account than the origin booked on the matching side.
+  const totals = (lines, keep) => {
+    const out = new Map();
+    for (const l of lines ?? []) {
+      if (!keep(l.account_id)) continue;
+      const [d, c] = out.get(l.account_id) ?? [0, 0];
+      out.set(l.account_id, [d + (Number(l.debit) || 0), c + (Number(l.credit) || 0)]);
+    }
+    return out;
+  };
+  const originTotals = totals(origin.line_ids, () => true);
+  const journalOk = [...totals(rec.line_ids, archived)].every(([accountId, [debit, credit]]) => {
+    const [od, oc] = originTotals.get(accountId) ?? [0, 0];
+    return opposite ? debit <= oc + 1e-9 && credit <= od + 1e-9 : debit <= od + 1e-9 && credit <= oc + 1e-9;
+  });
+  const originInvoiceAccounts = new Set((origin.invoice_line_ids ?? []).map((l) => l.account_id));
+  return journalOk && (rec.invoice_line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => originInvoiceAccounts.has(l.account_id));
+}
+
+/**
  * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
  * `author` (their name) by the approval rules in authority.js.
  * @param {object} db
@@ -701,12 +729,40 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   for (const id of requestedGeneratedMoves) {
     if (!generatedMoves.has(id)) throw new Error('System-generated status can only come from a generated accounting workflow');
   }
+  const settlementOrigins = new Map();
+  for (const [model, record] of changed) {
+    if (model !== 'account.move') continue;
+    const oldRows = oldMoves.get(record.id)?.payments ?? [];
+    for (const row of (record.payments ?? []).slice(oldRows.length)) {
+      for (const moveId of [row.move_id, row.payment_fx_move_id, row.cash_basis_move_id]) {
+        if (!moveId || oldMoves.has(moveId)) continue;
+        const ids = settlementOrigins.get(moveId) ?? [];
+        if (!ids.includes(record.id)) ids.push(record.id);
+        settlementOrigins.set(moveId, ids);
+      }
+    }
+  }
   const seen = { ...db, records };
   for (const [model, rec] of changed) {
     const before = stored(model, rec.id);
+    // An origin link only unlocks archived accounts for verified workflows: generated moves, server-rebuilt exchange
+    // provenance, settlements recorded in this diff, and notes/reversals whose archived-account lines mirror the origin.
+    const verifiedGenerated = generatedMoves.has(rec.id);
+    const archivedOriginIds = model === 'account.move' ? [
+      // Exchange provenance on new moves is rebuilt by the server above, never taken from the client.
+      rec.fx_invoice_id,
+      rec.fx_payment_move_id,
+      ...(verifiedGenerated ? [rec.reversed_entry_id, rec.cash_basis_origin_move_id, rec.deferred_adjustment_of_id] : []),
+      ...(mirrorsOriginOnArchived(seen, rec, rec.reversed_entry_id, true) ? [rec.reversed_entry_id] : []),
+      ...(mirrorsOriginOnArchived(seen, rec, rec.correction_of_id, true) ? [rec.correction_of_id] : []),
+      ...(mirrorsOriginOnArchived(seen, rec, rec.debit_origin_id, false) ? [rec.debit_origin_id] : []),
+      ...(settlementOrigins.get(rec.id) ?? []),
+      ...((seen.records['account.fiscal.year'] ?? []).filter((y) => y.opening_move_id === rec.id).map((y) => y.closing_move_id)),
+    ].filter(Number.isInteger) : [];
+    const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
     const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
-      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null });
+      ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets });
     if (err) throw new Error(err);
     if (model === 'account.move') {
       const generated = generatedMoves.has(rec.id);

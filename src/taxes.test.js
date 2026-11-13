@@ -53,8 +53,8 @@ test('the export fiscal position zero-rates product taxes and remaps accounts', 
   const db0 = seed();
   const exportFp = search(db0, 'account.fiscal.position').find((f) => f.name === 'Export');
   const vat = taxNamed(db0, 'VAT 14%');
-  assert.equal(mapTax(db0, exportFp.id, vat.id), taxNamed(db0, '0% Exports').id);
-  assert.equal(mapTax(db0, exportFp.id, taxNamed(db0, 'Stamp Duty').id), taxNamed(db0, 'Stamp Duty').id);
+  assert.deepEqual(mapTax(db0, exportFp.id, vat.id), [taxNamed(db0, '0% Exports').id]);
+  assert.deepEqual(mapTax(db0, exportFp.id, taxNamed(db0, 'Stamp Duty').id), [taxNamed(db0, 'Stamp Duty').id]);
   // A product carrying only a 14% rate resolves to the VAT 14% record, then the fiscal position applies.
   const product = read(db0, 'product', 1);
   assert.equal(productTax(db0, product, 'sale', null).tax_id, vat.id);

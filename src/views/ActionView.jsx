@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
 import { display, SimulatedNote } from '../ui.jsx';
-import { fromCsv, importCsvRows, toCsv } from '../csv.js';
+import { toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
+import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
 import { Kanban } from './Kanban.jsx';
-import { List } from './List.jsx';
+import { colLabel, List } from './List.jsx';
 import { Graph } from './Graph.jsx';
 import { Pivot } from './Pivot.jsx';
 import { CalendarView } from './CalendarView.jsx';
@@ -22,6 +23,10 @@ export { actionRecords } from '../companyView.js';
 export function parseRel(db, model, raw) {
   if (!raw) return null;
   const [field, id] = raw.split(':');
+  if (model === 'account.move' && field === 'payment_id') {
+    const payment = read(db, 'account.payment', Number(id));
+    return { field, fieldLabel: 'Payment', id: Number(id), label: payment?.name ?? `#${id}` };
+  }
   const f = models[model].fields[field];
   if (!f || f.type !== 'many2one') return null;
   return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };
@@ -61,11 +66,14 @@ export function ActionView({ leaf, base, params }) {
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
+  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
     .filter((r) => matches(db, model, r, search.terms));
+  const records = def.sort ? [...filtered].sort(def.sort) : filtered;
+  // The "how to start" help belongs to a truly empty list, not to a search or filter that matched nothing.
+  const narrowed = search.terms.length > 0 || search.filters.length > 0 || search.archived;
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
-  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
+  const defaults = { ...leaf.defaults, ...(search.rel && models[model].fields[search.rel.field] ? { [search.rel.field]: search.rel.id } : {}) };
   const statementImport = model === 'account.bank.statement.line' && !!def.importFile;
   const importJournals = statementImport && !defaults.journal_id
     ? statementImportJournalChoices(db, defaults.company_id ?? null)
@@ -82,21 +90,15 @@ export function ActionView({ leaf, base, params }) {
   };
   const exportCsv = () => {
     const rows = selected.size ? records.filter((r) => selected.has(r.id)) : records;
-    download(`${model}.csv`, toCsv([def.list.map((f) => t(def.fields[f].label)), ...rows.map((r) => def.list.map((f) => {
-      const field = def.fields[f];
-      return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
-    }))]));
+    download(`${model}.csv`, toCsv([
+      def.list.map((f) => colLabel(def.fields, f, leaf.listLabels)),
+      ...rows.map((r) => def.list.map((f) => {
+        const field = def.fields[f];
+        return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
+      })),
+    ]));
   };
-  const importCsv = async (file) => {
-    try {
-      const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, importDefaults) : importCsvRows(getDb(), model, importDefaults, fromCsv(text));
-      // Report the import only once the server has accepted it (a refusal shows its own message).
-      if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
-    } catch (e) {
-      alert(e instanceof Error ? e.message : t('Import failed'));
-    }
-  };
+  const importCsv = (file) => importModelFile(model, importDefaults, file, leaf.listLabels);
   const groupBy = search.groupBy;
   const kanbanGroup = groupBy[0] ?? def.kanban?.groupBy;
   const win = pageWindow(records.length, offset);
@@ -151,7 +153,7 @@ export function ActionView({ leaf, base, params }) {
           {importJournals.map((journal) => <option key={journal.id} value={journal.id}>{journal.name}</option>)}
         </select>
       </label>}
-      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
+      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={importAccept(model)} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       {pager}
     </>
@@ -162,7 +164,7 @@ export function ActionView({ leaf, base, params }) {
         view={view} search={search} setSearch={setSearch} extra={extra} />
       <SimulatedNote text={def.simulated} />
       {view === 'kanban' && <Kanban db={db} model={model} records={kanbanGroup ? records : records.slice(win.start, win.end)} open={open} groupBy={kanbanGroup} defaults={defaults} />}
-      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} />}
+      {view === 'list' && <List db={db} model={model} records={records} open={open} selected={selected} setSelected={setSelected} groupBy={groupBy} page={win} listLabels={leaf.listLabels} emptyHelp={narrowed ? null : leaf.emptyHelp ?? def.emptyHelp} />}
       {view === 'graph' && <Graph db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'pivot' && <Pivot key={groupBy.join()} db={db} model={model} records={records} groupBy={groupBy} />}
       {view === 'calendar' && <CalendarView db={db} model={model} records={records} open={open} newHref={newHref} />}

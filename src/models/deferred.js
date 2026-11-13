@@ -250,6 +250,7 @@ function postRecognitionCorrection(db, schedule, sourceMove, amount, date, note,
     ref: `Deferred recognition adjustment for ${note.name}`,
     lines: recognitionCorrectionLines(schedule, value, reverse),
     deferred_adjustment_of_id: sourceMove.id,
+    archivedOriginIds: [sourceMove.id],
   });
   return { db: postAnalytic(posted.db, posted.id), id: posted.id };
 }
@@ -580,6 +581,7 @@ export function reverseInvoiceDeferrals(db, source) {
         journal: move.journal_id, company: move.company_id, date: correctionDate(db, move),
         ref: `Grouped deferral adjustment ${move.name}`,
         lines: lines.map((line) => reverse ? { ...line, debit: line.credit, credit: line.debit } : line),
+        archivedOriginIds: [move.id],
       });
       next = postAnalytic(correction.db, correction.id);
     }
@@ -589,7 +591,7 @@ export function reverseInvoiceDeferrals(db, source) {
     for (const line of schedule.board ?? []) {
       if (!line.move_id || line.reversal_move_id) { board.push(line); continue; }
       const original = read(next, 'account.move', line.move_id);
-      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
+      const reversal = postEntry(next, { journal: original.journal_id, company: schedule.company_id, date: correctionDate(db, original), ref: `Reversal of ${original.name}`, archivedOriginIds: [original.id], lines: original.line_ids.map((l) => ({ account: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id, analytic_distribution: l.analytic_distribution })) });
       next = postAnalytic(write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id }), reversal.id);
       board.push({ ...line, reversal_move_id: reversal.id });
     }

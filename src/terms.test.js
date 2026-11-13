@@ -57,7 +57,7 @@ test('the unregistered model defaults to one 100% due line', () => {
 
 test('preview lists the example and dated installment', () => {
   const preview = termModels['account.payment.term'].fields.preview.compute({ line_ids: [line(100, 'percent', 30)] });
-  assert.match(preview, /^Example: 1,000\.00 on \d{4}-\d{2}-\d{2}\n1,000\.00 on \d{4}-\d{2}-\d{2}$/);
+  assert.match(preview, /^1 - Installment of 1,000\.00 due on \d{4}-\d{2}-\d{2}$/);
 });
 
 test('an invoice takes the partner term, gets its due date and books the early-payment discount', async () => {

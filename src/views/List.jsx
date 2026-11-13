@@ -21,15 +21,23 @@ function sortRecords(db, fields, records, sort) {
   });
 }
 
-// Footer sums use the active company's reporting currency.
-const Totals = ({ db, cols, fields, records }) =>
-  cols.map((f) => (
-    <td key={f} className="num" title={fields[f].type === 'monetary' && unratedCount(db, records) ? t('Excludes {n} documents in a currency with no exchange rate', { n: unratedCount(db, records) }) : undefined}>
-      {fields[f].type === 'monetary' ? <>{money(companySum(db, records, f))} <RateNote count={unratedCount(db, records)} /></> : ''}
-    </td>
-  ));
+export const colLabel = (fields, f, listLabels) => t(listLabels?.[f] ?? fields[f].label);
+const badgeClass = (map, value) => (map ? (map[value] ? `badge badge-${map[value]}` : 'badge') : null);
 
-export function List({ db, model, records, open, selected, setSelected, groupBy, page }) {
+// Footer sums use the active company's reporting currency for monetary fields.
+const Totals = ({ db, cols, fields, records }) =>
+  cols.map((f) => {
+    const monetary = fields[f].type === 'monetary';
+    const companyBooked = fields[f].currency === 'company';
+    const unrated = monetary ? unratedCount(db, records, undefined, { field: f, companyBooked }) : 0;
+    return (
+      <td key={f} className="num" title={unrated ? t('Excludes {n} documents in a currency with no exchange rate', { n: unrated }) : undefined}>
+        {monetary ? <>{money(companySum(db, records, f, undefined, { companyBooked }))} <RateNote count={unrated} /></> : ''}
+      </td>
+    );
+  });
+
+export function List({ db, model, records, open, selected, setSelected, groupBy, page, listLabels = null, emptyHelp = null }) {
   const def = models[model];
   const cols = def.list;
   const fields = def.fields;
@@ -51,12 +59,20 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
       <td className="check" onClick={(e) => e.stopPropagation()} style={{ paddingInlineStart: 10 + depth * 18 }}>
         <input type="checkbox" aria-label={r.name} checked={selected.has(r.id)} onChange={() => toggleRow(r.id)} />
       </td>
-      {cols.map((f) => <td key={f} className={isNumeric(fields[f]) ? 'num' : ''}
-        onClick={def.editableList?.includes(f) ? (e) => e.stopPropagation() : undefined}>
-        {def.editableList?.includes(f) ? <FieldInput db={db} field={fields[f]} value={r[f]} label={t(fields[f].label)}
-          onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
-          : display(db, fields[f], r[f], r)}
-      </td>)}
+      {cols.map((f) => {
+        const field = fields[f];
+        const editable = def.editableList?.includes(f);
+        const text = editable ? null : display(db, field, r[f], r);
+        const badge = editable ? null : badgeClass(field.badge, r[f]);
+        return (
+          <td key={f} className={isNumeric(field) ? 'num' : ''}
+            onClick={editable ? (e) => e.stopPropagation() : undefined}>
+            {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
+              onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
+              : badge && text ? <span className={badge}>{text}</span> : text}
+          </td>
+        );
+      })}
     </tr>
   );
 
@@ -114,7 +130,7 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
             {cols.map((f) => (
               <th key={f} className={isNumeric(fields[f]) ? 'num' : ''} aria-sort={sort?.[0] === f ? (sort[1] > 0 ? 'ascending' : 'descending') : 'none'}>
                 <button type="button" onClick={() => setSort(sort?.[0] === f ? [f, -sort[1]] : [f, 1])}>
-                  {t(fields[f].label)} {sort?.[0] === f ? (sort[1] > 0 ? '▲' : '▼') : ''}
+                  {colLabel(fields, f, listLabels)} {sort?.[0] === f ? (sort[1] > 0 ? '▲' : '▼') : ''}
                 </button>
               </th>
             ))}
@@ -122,14 +138,27 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         </thead>
         <tbody>
           {pageRecords ? pageRecords.map((r) => row(r, 0)) : groupRows(records, groupBy, '', 0)}
-          {!records.length && <tr><td colSpan={cols.length + 1} className="empty">{t('No record found. Create one with “New”.')}</td></tr>}
+          {!records.length && (
+            <tr>
+              <td colSpan={cols.length + 1} className="empty">
+                {emptyHelp ? (
+                  <div className="empty-help">
+                    <p className="empty-title">{t(emptyHelp.title)}</p>
+                    {emptyHelp.text && <p className="empty-text">{t(emptyHelp.text)}</p>}
+                  </div>
+                ) : t('No record found. Create one with “New”.')}
+              </td>
+            </tr>
+          )}
         </tbody>
-        <tfoot>
-          <tr>
-            <td />
-            <Totals db={db} cols={cols} fields={fields} records={records} />
-          </tr>
-        </tfoot>
+        {records.length > 0 && (
+          <tfoot>
+            <tr>
+              <td />
+              <Totals db={db} cols={cols} fields={fields} records={records} />
+            </tr>
+          </tfoot>
+        )}
       </table>
     </div>
   );

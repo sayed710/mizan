@@ -2,12 +2,28 @@
 // For non-admin users, the editable fields of a locked record cannot change; workflow fields (status, links and
 // amounts that buttons set, which the form shows read-only or not at all) still can.
 
+const groupFields = (items = []) => items.flatMap((item) => {
+  if (typeof item === 'string') return [item];
+  if (item && Array.isArray(item.fields)) return item.fields;
+  if (item && typeof item.field === 'string') return [item.field];
+  return [];
+});
+
 /** Fields a user can type into on the form: its title, groups and tabs, minus read-only, computed and hidden ones. */
 export function editableFields(model, record = {}, db) {
   const list = (v) => (Array.isArray(v) ? v : []);
   const groups = typeof model.form?.groups === 'function' ? model.form.groups(record, db) : model.form?.groups;
   const tabs = typeof model.form?.tabs === 'function' ? model.form.tabs(record, db) : model.form?.tabs;
-  const listed = [model.form?.title, ...list(groups).flat(), ...list(tabs).flatMap((t) => list(t?.fields))].filter((f) => typeof f === 'string');
+  const tabFields = (t) => [
+    ...groupFields(list(t?.fields)),
+    ...list(t?.groups).flatMap((g) => groupFields(Array.isArray(g) ? g : list(g?.fields))),
+    ...groupFields(list(t?.aside)),
+  ];
+  const listed = [
+    model.form?.title,
+    ...list(groups).flatMap((g) => groupFields(Array.isArray(g) ? g : list(g?.fields))),
+    ...list(tabs).flatMap(tabFields),
+  ].filter((f) => typeof f === 'string');
   return [...new Set(listed)].filter((name) => {
     const f = model.fields?.[name];
     return f && typed(f, record, db) && !['state', 'stage', 'stage_id'].includes(name) && name !== model.form.statusbar;
@@ -32,6 +48,7 @@ const MAINTAINED = {
   'documents.document': ['locked_by'], // Lock / Unlock
   'mailing.mailing': ['ab_testing_winner_selection'], // the A/B winner is chosen after sending
   'account.move': ['ref'], // the reference stays editable on posted entries
+  'account.payment': ['memo'], // memo stays editable on posted payments
   'account.bank.statement.line': ['move_id', 'payment_id'], // validated unreconciliation clears the matched links
 };
 

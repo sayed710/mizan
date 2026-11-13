@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { models } from '../models/index.js';
 import { fieldReadonly } from '../field-metadata.js';
 import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
@@ -50,24 +50,93 @@ function withComputed(model, vals, db) {
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
-function Field({ db, model, name, value, onChange, readonly, record }) {
+function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
-  const label = field.custom ? field.label : t(field.label);
+  const label = labelOverride ? t(labelOverride) : (field.custom ? field.label : t(field.label));
   const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
   const isReadonly = readonly || fieldReadonly(field, record, db);
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
+      <div className="field-value"><FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} label={typeof label === 'string' ? label : undefined} /></div>
     </div>
   );
 }
 
-function SmartButtons({ db, rec, smart }) {
+// `unlockedFields` may depend on the record (e.g. a posted payment's memo outside a locked period).
+const lockFor = (def, readonly, name, record, db) => readonly
+  && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
+
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled }) {
+  if (typeof item === 'string') {
+    const field = def.fields[item];
+    const itemReadonly = lockFor(def, readonly, item, current, db);
+    if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
+      const isReadonly = itemReadonly || fieldReadonly(field, current, db);
+      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} />;
+    }
+    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} />;
+  }
+  if (item && Array.isArray(item.fields)) {
+    const first = def.fields[item.fields[0]];
+    const firstReadonly = lockFor(def, readonly, item.fields[0], current, db) || fieldReadonly(first, current, db);
+    const labelText = t(item.label ?? first.label);
+    return (
+      <div key={item.fields.join('+')} className="field">
+        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${item.fields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+        <div className="field-value field-pair">
+          {item.fields.map((f, idx) => {
+            const fd = def.fields[f];
+            const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
+            return (
+              <Fragment key={f}>
+                {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
+                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={idx > 0 ? t(fd.label) : undefined} />
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} />;
+}
+
+function renderGroups(groups, opts) {
+  return (
+    <div className="groups">
+      {groups.map((g, i) => {
+        const title = Array.isArray(g) ? null : g.title;
+        const items = Array.isArray(g) ? g : (g.fields ?? []);
+        return (
+          <div key={title ?? i} className="group">
+            {title && <h3 className="group-title">{t(title)}</h3>}
+            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title) }))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
+        if (s.when && !s.when(rec, db)) return null;
+        if (s.valueField || s.value) {
+          const field = s.valueField && model ? models[model]?.fields?.[s.valueField] : null;
+          const value = s.value ? s.value(db, rec) : rec[s.valueField];
+          const text = field ? display(db, field, value ?? 0, rec) : String(value ?? '');
+          const rawLabel = typeof s.label === 'function' ? s.label(rec, db) : s.label;
+          const label = t(rawLabel ?? field?.label);
+          const target = typeof s.target === 'function' ? s.target(rec, db) : s.target;
+          const inner = <>{text !== '' && <b>{text}</b>}<span>{label}</span></>;
+          return target
+            ? <a key={rawLabel ?? s.valueField} className="smart" href={`#/${target}`}>{inner}</a>
+            : <div key={rawLabel ?? s.valueField} className="smart">{inner}</div>;
+        }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];
         const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
@@ -96,7 +165,7 @@ function OutstandingCredits({ db, spec, current, onApply }) {
         </tr></thead>
         <tbody>
           {rows.map((row) => {
-            const currency = spec.fields.some((f) => f.money) ? companyCurrencyRecord(db, row.company_id ?? 1) : null;
+            const currency = spec.fields.some((f) => f.money) ? (read(db, 'res.currency', row.display_currency_id) ?? companyCurrencyRecord(db, row.company_id ?? 1)) : null;
             return (
               <tr key={row.id}>
                 {spec.fields.map((f) => (
@@ -509,21 +578,20 @@ export function FormView({ leaf, id, base, params }) {
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
-            {!isNew && def.form.smart && <SmartButtons db={db} rec={current} smart={def.form.smart} />}
+            {!isNew && def.form.smart && <SmartButtons db={db} model={model} rec={current} smart={def.form.smart} />}
             {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
             <div className="title-field">
-              {titleField.readonly || titleField.compute
-                ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
-                : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
-                    value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
+              {Array.isArray(def.form.titleFields)
+                ? <div className="field-pair">{def.form.titleFields.map((f) => {
+                    const fd = def.fields[f];
+                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.label)} />;
+                  })}</div>
+                : titleField.readonly || titleField.compute
+                  ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
+                  : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
+                      value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
-            <div className="groups">
-              {groups.map((g, i) => (
-                <div key={i} className="group">
-                  {g.map((f) => <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked} record={current} />)}
-                </div>
-              ))}
-            </div>
+            {renderGroups(groups, { db, model, def, current, set, readonly: locked })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits
                 db={db}
@@ -548,35 +616,58 @@ export function FormView({ leaf, id, base, params }) {
                   ))}
                 </div>
                 <div className="tab-panel" role="tabpanel">
-                  {model === 'account.return' && (tabs[tab] ?? tabs[0]).label === 'Tax Report' ? (
-                    <TaxReportTable
-                      db={db}
-                      period={{
-                        from: current.date_from,
-                        to: current.date_to,
-                        company_id: current.company_id,
-                        tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
-                          ? current.tax_unit_id
-                          : null,
-                      }}
-                    />
-                  ) : (tabs[tab] ?? tabs[0]).fields.map((f) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
-                    ? (
-                      <FieldInput key={f} db={db} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
-                        readonly={(tabs[tab] ?? tabs[0]).readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
-                    )
-                    // Plain fields in a tab get a label, like fields in the header groups.
-                    : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={locked || (tabs[tab] ?? tabs[0]).readonly} record={current} />))}
-                  {footer.length > 0 && tab === 0 && (
-                    <dl className="totals">
-                      {footer.map((f) => (
-                        <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
-                          <dt>{t(def.fields[f].label)}</dt>
-                          <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
+                  {(() => {
+                    const activeTab = tabs[tab] ?? tabs[0];
+                    const tabReadonly = locked || activeTab.readonly;
+                    const renderTabField = (f, placeholder) => (['one2many', 'text', 'html'].includes(def.fields[f].type)
+                      ? (
+                        <FieldInput key={f} db={db} model={model} fieldName={f} field={def.fields[f]} value={current[f]} onChange={set(f)} id={`f-${f}`} record={current} label={t(def.fields[f].label)}
+                          placeholder={placeholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
+                      )
+                      // Plain fields in a tab get a label, like fields in the header groups.
+                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} />);
+                    return (
+                      <>
+                        {model === 'account.return' && activeTab.label === 'Tax Report' ? (
+                          <TaxReportTable
+                            db={db}
+                            period={{
+                              from: current.date_from,
+                              to: current.date_to,
+                              company_id: current.company_id,
+                              tax_unit_id: current.tax_unit_id && (read(db, 'account.tax.unit', current.tax_unit_id)?.company_ids ?? []).includes(current.company_id ?? 1)
+                                ? current.tax_unit_id
+                                : null,
+                            }}
+                          />
+                        ) : (
+                          <>
+                            {(activeTab.fields ?? []).map((f) => renderTabField(f))}
+                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly })}
+                          </>
+                        )}
+                        {(activeTab.aside?.length > 0 || (footer.length > 0 && tab === 0)) && (
+                          <div className="tab-footer">
+                            {activeTab.aside?.length > 0 && (
+                              <div className="tab-aside">
+                                {activeTab.aside.map((f) => renderTabField(f, t(def.fields[f].label)))}
+                              </div>
+                            )}
+                            {footer.length > 0 && tab === 0 && (
+                              <dl className="totals">
+                                {footer.map((f) => (
+                                  <div key={f} className={f === 'amount_total' ? 'grand' : ''}>
+                                    <dt>{t(def.fields[f].label)}</dt>
+                                    <dd>{display(db, def.fields[f], current[f], current) || money(0, currencyCode(db, current))}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </>
             )}

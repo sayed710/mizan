@@ -48,9 +48,9 @@ test('product tax selection rejects a foreign tax', () => {
 test('mapped product tax retains its source for posting validation', () => {
   const company = setup();
   const source = create(company.db, 'account.tax', { name: 'Source', amount: 10, company_id: null });
-  const dest = create(source.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null });
-  const fp = create(dest.db, 'account.fiscal.position', { name: 'Mapping', company_id: 1, tax_ids: [{ tax_src_id: source.id, tax_dest_id: dest.id }] });
-  const product = create(fp.db, 'product', { name: 'Taxed product', list_price: 100, tax_id: source.id });
+  const fp = create(source.db, 'account.fiscal.position', { name: 'Mapping', company_id: 1 });
+  const dest = create(fp.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null, fiscal_position_ids: [fp.id], original_tax_ids: [source.id] });
+  const product = create(dest.db, 'product', { name: 'Taxed product', list_price: 100, tax_id: source.id });
   const field = accountingModels['account.move'].fields.invoice_line_ids;
   const line = field.onchange({ product_id: product.id, qty: 1 }, 'product_id', product.db, { company_id: 1, move_type: 'out_invoice', fiscal_position_id: fp.id });
   assert.equal(line.tax_id, dest.id);
@@ -66,10 +66,10 @@ test('changing invoice company recomputes fiscal position and remaps product tax
   const company = setup();
   const partner = create(company.db, 'res.partner', { name: 'Customer', country: 'ZZ' });
   const source = create(partner.db, 'account.tax', { name: 'Source', amount: 10, company_id: null });
-  const dest = create(source.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null });
-  const fp1 = create(dest.db, 'account.fiscal.position', { name: 'First', auto_apply: true, country: 'ZZ', company_id: 1 });
-  const fp2 = create(fp1.db, 'account.fiscal.position', { name: 'Second', auto_apply: true, country: 'ZZ', company_id: company.id, tax_ids: [{ tax_src_id: source.id, tax_dest_id: dest.id }] });
-  const product = create(fp2.db, 'product', { name: 'Product', list_price: 100, tax_id: source.id });
+  const fp1 = create(source.db, 'account.fiscal.position', { name: 'First', auto_apply: true, country: 'ZZ', company_id: 1 });
+  const fp2 = create(fp1.db, 'account.fiscal.position', { name: 'Second', auto_apply: true, country: 'ZZ', company_id: company.id });
+  const dest = create(fp2.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null, fiscal_position_ids: [fp2.id], original_tax_ids: [source.id] });
+  const product = create(dest.db, 'product', { name: 'Product', list_price: 100, tax_id: source.id });
   const result = accountingModels['account.move'].onchange({ partner_id: partner.id, company_id: company.id, move_type: 'out_invoice', fiscal_position_id: fp1.id, invoice_line_ids: [{ product_id: product.id, qty: 2, price_unit: 77, discount: 3 }] }, 'company_id', product.db);
   assert.equal(result.fiscal_position_id, fp2.id);
   assert.equal(result.invoice_line_ids[0].tax_id, dest.id);
@@ -90,9 +90,9 @@ test('changing sales order company selects its position and remaps taxes', () =>
   const company = setup();
   const partner = create(company.db, 'res.partner', { name: 'Customer', country: 'ZZ' });
   const source = create(partner.db, 'account.tax', { name: 'Source', amount: 10, company_id: null });
-  const dest = create(source.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null });
-  const fp = create(dest.db, 'account.fiscal.position', { name: 'Second', auto_apply: true, country: 'ZZ', company_id: company.id, tax_ids: [{ tax_src_id: source.id, tax_dest_id: dest.id }] });
-  const product = create(fp.db, 'product', { name: 'Product', list_price: 100, tax_id: source.id });
+  const fp = create(source.db, 'account.fiscal.position', { name: 'Second', auto_apply: true, country: 'ZZ', company_id: company.id });
+  const dest = create(fp.db, 'account.tax', { name: 'Destination', amount: 5, company_id: null, fiscal_position_ids: [fp.id], original_tax_ids: [source.id] });
+  const product = create(dest.db, 'product', { name: 'Product', list_price: 100, tax_id: source.id });
   const result = salesModels['sale.order'].onchange({ partner_id: partner.id, company_id: company.id, order_line: [{ product_id: product.id, qty: 1, price_unit: 77 }] }, 'company_id', product.db);
   assert.equal(result.fiscal_position_id, fp.id);
   assert.equal(result.order_line[0].tax_id, dest.id);

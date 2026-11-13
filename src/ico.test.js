@@ -90,16 +90,15 @@ test('intercompany bill maps lines through buyer expense accounts, taxes, and fi
 
   // Buyer taxes
   const taxSrc = create(accDest.db, 'account.tax', { name: 'Buyer 14%', amount: 14, type_tax_use: 'purchase', company_id: buyer.id });
-  const taxDest = create(taxSrc.db, 'account.tax', { name: 'Buyer Exempt', amount: 0, type_tax_use: 'purchase', company_id: buyer.id });
 
   // Buyer fiscal position for the seller partner
-  const fp = create(taxDest.db, 'account.fiscal.position', {
+  const fp = create(taxSrc.db, 'account.fiscal.position', {
     name: 'Intercompany Position',
     company_id: buyer.id,
     account_ids: [{ account_src_id: accSrc.id, account_dest_id: accDest.id }],
-    tax_ids: [{ tax_src_id: taxSrc.id, tax_dest_id: taxDest.id }],
   });
-  const partnerConfigured = write(fp.db, 'res.partner', sellerPartnerId, { property_account_position_id: fp.id });
+  const taxDest = create(fp.db, 'account.tax', { name: 'Buyer Exempt', amount: 0, type_tax_use: 'purchase', company_id: buyer.id, fiscal_position_ids: [fp.id], original_tax_ids: [taxSrc.id] });
+  const partnerConfigured = write(taxDest.db, 'res.partner', sellerPartnerId, { property_account_position_id: fp.id });
 
   // Buyer purchase journal (without default account to verify no fallback is used)
   const journal = create(partnerConfigured, 'account.journal', { name: 'Buyer Purchases', code: 'BP', type: 'purchase', company_id: buyer.id });

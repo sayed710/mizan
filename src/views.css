@@ -336,8 +336,24 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .totals dt { color: var(--muted); }
 .totals dd { margin: 0; font-weight: 600; }
 .totals .grand { border-top: 1px solid var(--border); padding-top: 6px; font-size: 17px; }
+.tab-footer { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; margin-top: 16px; }
+.tab-aside { flex: 1 1 320px; min-width: 0; }
+.tab-aside .field { grid-template-columns: 1fr; gap: 4px; align-items: stretch; }
+.tab-aside textarea { min-height: 90px; }
+.tab-footer .totals { margin-top: 0; }
 .lines-wrap { overflow-x: auto; }
 .lines td .readonly { color: var(--text); }
+.o2m-cols-th { width: 32px; text-align: end; }
+.o2m-cols-menu { position: relative; display: inline-block; }
+.o2m-cols-toggle { border: 0; background: none; cursor: pointer; padding: 2px 6px; color: var(--muted); border-radius: 4px; }
+.o2m-cols-toggle:hover { background: rgba(0, 0, 0, .05); color: var(--text); }
+.o2m-cols-dropdown { position: absolute; right: 0; top: 100%; z-index: 20; min-width: 190px; background: var(--surface, #fff); border: 1px solid var(--border); border-radius: 6px; padding: 4px; box-shadow: 0 4px 12px rgba(0, 0, 0, .12); display: flex; flex-direction: column; text-align: start; }
+.o2m-cols-dropdown button { display: flex; align-items: center; gap: 8px; border: 0; background: none; padding: 6px 8px; cursor: pointer; font-weight: 400; text-align: start; border-radius: 4px; }
+.o2m-cols-dropdown button:hover { background: rgba(0, 0, 0, .05); }
+.o2m-cols-dropdown button span:first-child { width: 14px; text-align: center; }
+.o2m-add-actions { display: flex; flex-wrap: wrap; gap: 16px; }
+.o2m-section input { font-weight: 700; }
+.o2m-note input { font-style: italic; }
 .card-counter { font-size: 13px; color: var(--muted); }
 .card-counter b { color: var(--brand); }
 .statusbar button:disabled { cursor: default; }
@@ -345,13 +361,26 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 
 .journal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 0 16px 16px; }
 .journal-card { display: flex; flex-direction: column; gap: 8px; }
+.panel.journal-card { padding-inline: 16px; }
+.panel.journal-card h2 { margin: 0 0 4px; }
 .journal-card h2 { margin: 0; font-size: 16px; }
 .journal-card h2 a { color: inherit; text-decoration: none; }
 .journal-card dl { margin: 0; display: grid; gap: 4px; }
 .journal-card dl div { display: flex; justify-content: space-between; gap: 8px; }
 .journal-card dt { color: var(--muted); }
 .journal-card dd { margin: 0; font-variant-numeric: tabular-nums; }
+.journal-card dl a { color: inherit; text-decoration: none; }
+.journal-card dl a:hover { color: var(--brand); text-decoration: underline; }
+.journal-card .chart-box { margin: 4px 0 0; padding: 0; border: 0; }
+.journal-empty { margin: 0; }
 .journal-card .btn { align-self: flex-start; }
+.journal-card label.btn { cursor: pointer; }
+.journal-onboarding { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: start; gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.journal-onboarding-single { grid-template-columns: auto auto; justify-content: center; align-items: center; gap: 12px; }
+.journal-onboarding-step { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; font-size: 12px; color: var(--brand); text-decoration: none; }
+.journal-onboarding-step:hover { text-decoration: underline; }
+.journal-onboarding-icon { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: var(--brand-soft); color: var(--brand); }
+.journal-onboarding-sep { align-self: center; justify-self: center; text-align: center; font-size: 12px; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; padding: 0 16px 16px; }
 .kpi {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
@@ -369,6 +398,10 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .ranking li b { float: inline-end; }
 .settings-sheet { max-width: 720px; margin: 0 16px; }
 .settings-sheet h3 { margin: 24px 0 4px; }
+.settings-accounting { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+.settings-accounting h2 { margin: 0 0 8px; font-size: 18px; }
+.settings-block { margin-bottom: 16px; }
+.settings-block .setting-desc, .settings-block .setting-links { margin: 4px 0 0; font-size: 12px; }
 .settings-sheet label.btn { cursor: pointer; }
 
 @media (max-width: 960px) {

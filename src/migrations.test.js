@@ -4,7 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { seed } from './seed.js';
 import { applyDiff } from './sync.js';
 import { cleanRecord } from './validate.js';
-import { search } from './orm.js';
+import { create, search } from './orm.js';
+import { mapTax } from './models/taxes.js';
 import { migrate, MIGRATIONS, SCHEMA_VERSION } from './migrations.js';
 import { openStorage } from '../server/storage.js';
 
@@ -110,4 +111,157 @@ test('the migrated data and its version are persisted', () => {
   assert.equal(again.schema_version, SCHEMA_VERSION);
   assert.equal(migrate(again), again, 'nothing left to run after a restart');
   assert.deepEqual(again.records['documents.document'][0].tag_ids, db.records['documents.document'][0].tag_ids);
+});
+
+test('migration 37 moves fiscal position tax_ids onto destination taxes and notes empty-destination removals', () => {
+  const base = seed();
+  const vatSale = base.records['account.tax'].find((t) => t.name === 'VAT 14%' && t.type_tax_use === 'sale');
+  const zeroExport = base.records['account.tax'].find((t) => t.name === '0% Exports');
+  const stamp = base.records['account.tax'].find((t) => t.name === 'Stamp Duty');
+  const exportFp = base.records['account.fiscal.position'].find((f) => f.name === 'Export');
+  const legacy = {
+    ...base,
+    schema_version: 36,
+    records: {
+      ...base.records,
+      'account.tax': base.records['account.tax'].map((t) => ({ ...t, fiscal_position_ids: [], original_tax_ids: [] })),
+      'account.fiscal.position': base.records['account.fiscal.position'].map((fp) => (
+        fp.id === exportFp.id
+          ? {
+              ...fp,
+              tax_ids: [
+                { tax_src_id: vatSale.id, tax_dest_id: zeroExport.id },
+                { tax_src_id: stamp.id, tax_dest_id: null },
+              ],
+            }
+          : { ...fp, tax_ids: [] }
+      )),
+    },
+  };
+  const beforeNotes = (legacy.messages ?? []).filter((m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id).length;
+  const migrated = migrate(legacy);
+  const migratedZero = migrated.records['account.tax'].find((t) => t.id === zeroExport.id);
+  assert.deepEqual(migratedZero.fiscal_position_ids, [exportFp.id]);
+  assert.deepEqual(migratedZero.original_tax_ids, [vatSale.id]);
+  for (const fp of migrated.records['account.fiscal.position']) {
+    assert.equal('tax_ids' in fp, false);
+  }
+  const removalNotes = (migrated.messages ?? []).filter(
+    (m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id && m.body.includes('Stamp Duty'),
+  );
+  assert.equal(removalNotes.length, 1);
+  assert.equal(
+    (migrated.messages ?? []).filter((m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id).length - beforeNotes,
+    1,
+  );
+});
+
+test('migration 39 recovers removal rules from migration 37 notes for already-upgraded and legacy databases', () => {
+  const base = seed();
+  const stamp = base.records['account.tax'].find((t) => t.name === 'Stamp Duty');
+  const exportFp = base.records['account.fiscal.position'].find((f) => f.name === 'Export');
+  const domesticFp = base.records['account.fiscal.position'].find((f) => f.name === 'Domestic');
+
+  // Case 1: database already at schema_version 38 (post-migration-37 chatter note)
+  const post37 = {
+    ...base,
+    schema_version: 38,
+    messages: [
+      ...(base.messages ?? []),
+      {
+        id: 9001,
+        model: 'account.fiscal.position',
+        res_id: exportFp.id,
+        kind: 'note',
+        body: 'Upgrade: tax removal rule for "Stamp Duty" cannot be expressed in the new model; please redo it on the tax records.',
+      },
+    ],
+  };
+  const upgradedFrom38 = migrate(post37);
+  assert.deepEqual(mapTax(upgradedFrom38, exportFp.id, stamp.id), []);
+  assert.deepEqual(mapTax(upgradedFrom38, domesticFp.id, stamp.id), [stamp.id]);
+
+  // Case 2: legacy schema_version 36 database with empty-destination tax_ids row
+  const legacy36 = {
+    ...base,
+    schema_version: 36,
+    records: {
+      ...base.records,
+      'account.tax': base.records['account.tax'].map((t) => ({ ...t, fiscal_position_ids: [], original_tax_ids: [] })),
+      'account.fiscal.position': base.records['account.fiscal.position'].map((fp) => (
+        fp.id === exportFp.id ? { ...fp, tax_ids: [{ tax_src_id: stamp.id, tax_dest_id: null }] } : { ...fp, tax_ids: [] }
+      )),
+    },
+  };
+  const upgradedFrom36 = migrate(legacy36);
+  assert.deepEqual(mapTax(upgradedFrom36, exportFp.id, stamp.id), []);
+  assert.deepEqual(mapTax(upgradedFrom36, domesticFp.id, stamp.id), [stamp.id]);
+});
+
+test('migration 39 keeps destination taxes usable directly when referenced by a product, company, or group', () => {
+  let db = seed();
+  const fpA = create(db, 'account.fiscal.position', { name: 'FP A' }); db = fpA.db;
+  const fpB = create(db, 'account.fiscal.position', { name: 'FP B' }); db = fpB.db;
+  const srcTax = create(db, 'account.tax', { name: 'Src 14%', type_tax_use: 'sale', amount: 14 }); db = srcTax.db;
+  const destProdTax = create(db, 'account.tax', {
+    name: 'Zero Prod Dest', type_tax_use: 'sale', amount: 0, fiscal_position_ids: [fpA.id], original_tax_ids: [srcTax.id],
+  }); db = destProdTax.db;
+  const destCompanyTax = create(db, 'account.tax', {
+    name: 'Zero Company Dest', type_tax_use: 'sale', amount: 0, fiscal_position_ids: [fpA.id], original_tax_ids: [srcTax.id],
+  }); db = destCompanyTax.db;
+  const destChildTax = create(db, 'account.tax', {
+    name: 'Zero Group Child Dest', type_tax_use: 'sale', amount: 0, fiscal_position_ids: [fpA.id], original_tax_ids: [srcTax.id],
+  }); db = destChildTax.db;
+  const groupTax = create(db, 'account.tax', {
+    name: 'Composite Group', type_tax_use: 'sale', amount_type: 'group', children_tax_ids: [destChildTax.id],
+  }); db = groupTax.db;
+  const prod = create(db, 'product', { name: 'Direct Product', type: 'service', list_price: 100, tax_id: destProdTax.id }); db = prod.db;
+  db = {
+    ...db,
+    schema_version: 38,
+    records: {
+      ...db.records,
+      'res.company': db.records['res.company'].map((c) => (c.id === 1 ? { ...c, account_sale_tax_id: destCompanyTax.id } : c)),
+    },
+  };
+
+  const migrated = migrate(db);
+  assert.deepEqual(mapTax(migrated, fpB.id, destProdTax.id), [destProdTax.id]);
+  assert.deepEqual(mapTax(migrated, fpB.id, destCompanyTax.id), [destCompanyTax.id]);
+  assert.deepEqual(mapTax(migrated, fpB.id, destChildTax.id), [destChildTax.id]);
+  assert.ok(mapTax(migrated, fpA.id, srcTax.id).includes(destProdTax.id));
+});
+
+test('migration 39 separates cross-company position mappings sharing one destination tax', () => {
+  let db = seed();
+  const comp2 = create(db, 'res.company', { name: 'Second Co', currency_id: 1 }); db = comp2.db;
+  const fpA = create(db, 'account.fiscal.position', { name: 'Co1 Pos', company_id: 1 }); db = fpA.db;
+  const fpB = create(db, 'account.fiscal.position', { name: 'Co2 Pos', company_id: comp2.id }); db = fpB.db;
+  const taxP = create(db, 'account.tax', { name: 'Co1 Source', type_tax_use: 'sale', amount: 14, company_id: 1 }); db = taxP.db;
+  const taxQ = create(db, 'account.tax', { name: 'Co2 Source', type_tax_use: 'sale', amount: 10, company_id: comp2.id }); db = taxQ.db;
+  const taxX = create(db, 'account.tax', {
+    name: 'Shared Dest', type_tax_use: 'sale', amount: 0, company_id: null, fiscal_position_ids: [fpA.id, fpB.id], original_tax_ids: [taxP.id, taxQ.id],
+  }); db = taxX.db;
+  const post37 = { ...db, schema_version: 38 };
+
+  const migrated = migrate(post37);
+  assert.deepEqual(mapTax(migrated, fpA.id, taxP.id), [taxX.id]);
+  assert.deepEqual(mapTax(migrated, fpA.id, taxQ.id), [taxQ.id]);
+  assert.deepEqual(mapTax(migrated, fpB.id, taxQ.id), [taxX.id]);
+  assert.deepEqual(mapTax(migrated, fpB.id, taxP.id), [taxP.id]);
+});
+
+test('migration 39 leaves a removal note for follow-up when its tax name matches several taxes', () => {
+  const base = seed();
+  const stamp = base.records['account.tax'].find((t) => t.name === 'Stamp Duty');
+  const exportFp = base.records['account.fiscal.position'].find((f) => f.name === 'Export');
+  const twin = { ...stamp, id: Math.max(...base.records['account.tax'].map((t) => t.id)) + 1 };
+  const db = migrate({
+    ...base,
+    schema_version: 38,
+    records: { ...base.records, 'account.tax': [...base.records['account.tax'], twin] },
+    messages: [...(base.messages ?? []), { id: 9002, model: 'account.fiscal.position', res_id: exportFp.id, kind: 'note', body: 'Upgrade: tax removal rule for "Stamp Duty" cannot be expressed in the new model; please redo it on the tax records.' }],
+  });
+  assert.deepEqual(db.records['account.fiscal.position'].find((f) => f.id === exportFp.id).excluded_tax_ids, []);
+  assert.deepEqual(mapTax(db, exportFp.id, stamp.id), [stamp.id]);
 });

@@ -70,8 +70,9 @@ test('tender assertions exclude unrelated entries with the same order reference'
 
 test('the customer\'s fiscal position maps the tax', () => {
   const { db: db0, tax } = withIncludedTax();
-  const fp = create(db0, 'account.fiscal.position', { name: 'Export', tax_ids: [{ tax_src_id: tax, tax_dest_id: null }] });
-  const db = write(fp.db, 'res.partner', 3, { property_account_position_id: fp.id });
+  const fp = create(db0, 'account.fiscal.position', { name: 'Export' });
+  const zero = create(fp.db, 'account.tax', { name: '0% POS Export', type_tax_use: 'sale', amount: 0, fiscal_position_ids: [fp.id], original_tax_ids: [tax] });
+  const db = write(zero.db, 'res.partner', 3, { property_account_position_id: fp.id });
   const lines = priceLines(db, [{ product_id: 1, qty: 1 }], 3);
   assert.equal(amounts(lines).tax, 0);
 });

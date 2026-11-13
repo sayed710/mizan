@@ -8,6 +8,7 @@ import { checkAmountDisplay } from '../models/payments.js';
 import { subtotal } from '../models/common.js';
 import { invoiceQrPayload, invoiceQrSettingsForCompany, qrMatrix } from '../models/qr.js';
 import { documentCompany, addressLines, documentTaxBreakdown } from '../models/company.js';
+import { taxInvoiceLabel } from '../models/taxes.js';
 import { documentCurrency } from '../money.js';
 
 /** Payment QR (settings decide the standard); a misconfiguration shows a note instead of breaking the print. */
@@ -75,6 +76,17 @@ function Checks({ db, batch }) {
   );
 }
 
+function printCell(db, model, k, f, l, rec) {
+  if (model === 'account.move' && k === 'tax_id') {
+    if (Array.isArray(l.tax_ids) && l.tax_ids.length > 1 && Array.isArray(l.tax_breakdown) && l.tax_breakdown.length) {
+      return l.tax_breakdown.map((t) => taxInvoiceLabel(t)).join(', ');
+    }
+    if (l.tax_invoice_label) return l.tax_invoice_label;
+    if (l.tax_name) return l.tax_name;
+  }
+  return display(db, f, l[k], { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
+}
+
 /** Paper-style document rendered from the record, then the browser print dialog (Save as PDF). */
 export function PrintDoc({ model, id }) {
   const db = useDb();
@@ -135,7 +147,7 @@ export function PrintDoc({ model, id }) {
           <tbody>
             {(rec[layout.lines] ?? []).map((l, i) => (
               <tr key={i}>
-                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{display(db, f, l[k], { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id })}</td>)}
+                {cols.map(([k, f]) => <td key={k} className={['monetary', 'float'].includes(f.type) ? 'num' : ''}>{printCell(db, model, k, f, l, rec)}</td>)}
                 {priced && <td className="num">{display(db, { type: 'monetary' }, subtotal(l), rec)}</td>}
               </tr>
             ))}

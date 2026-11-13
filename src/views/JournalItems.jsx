@@ -41,7 +41,12 @@ export function JournalItems({ leaf = {} } = {}) {
   const name = (model, id) => read(db, model, id)?.name ?? '';
   const mode = leaf.reviewMode ?? 'posted';
   const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
-  const rows = journalItems(db, { from, to, reviewMode: mode }).map((line) => ({
+  // The account form's Balance button opens this report scoped to that account (#/...?account=ID).
+  const accountFilter = Number(new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').get('account')) || null;
+  // Same company scope as accountBalance: the account's company, else the current one.
+  const filterAccount = accountFilter ? read(db, 'account.account', accountFilter) : null;
+  const filterCompany = filterAccount ? (filterAccount.company_id ?? db.settings?.current_company_id ?? 1) : null;
+  const rows = journalItems(db, { from, to, reviewMode: mode, ...(filterCompany ? { company_id: filterCompany } : {}) }).filter((line) => !accountFilter || line.account_id === accountFilter).map((line) => ({
     ...line,
     account: name('account.account', line.account_id),
     partner: name('res.partner', line.partner_id),
@@ -56,6 +61,7 @@ export function JournalItems({ leaf = {} } = {}) {
   }
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
+      {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
       <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
       <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
       <label>{t('Search')} <input aria-label={t('Search')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
@@ -74,7 +80,7 @@ export function JournalItems({ leaf = {} } = {}) {
       {action !== 'Unreconcile' && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
       {action === 'Write Off' && <>
         <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => ['bank', 'cash'].includes(j.type)).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
-        <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
+        <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
         <label>{t('Write-off Label')} <input required value={label} onChange={(e) => setLabel(e.target.value)} /></label>
       </>}
       <button className="btn primary" disabled={busy}>{t('Confirm')}</button><button type="button" className="btn" disabled={busy} onClick={() => setAction('')}>{t('Cancel')}</button>

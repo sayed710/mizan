@@ -65,7 +65,7 @@ export function addressLines(record, taxIdLabel = 'Tax ID') {
 export function documentTaxBreakdown(db, record, lines = []) {
   const currency = documentCurrency(db, record);
   return taxGroups(lines, () => null, 1, currency, currency, { roundingMethod: companyRoundingMethod(db, record?.company_id) })
-    .map(({ tax_name: label, base, amount }) => ({ label, base, amount }));
+    .map(({ invoice_label, tax_name, base, amount }) => ({ label: invoice_label || tax_name, base, amount }));
 }
 
 /** Select active companies without changing the caller's database or selection. */
@@ -213,6 +213,15 @@ export function companyFilter(db, records, model = null) {
   return records.filter((r) => shared(r.company_id) || allowed.includes(r.company_id));
 }
 
+const RECIPIENT_BANK_FIELDS = {
+  partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
+};
+
+export function recipientBankCompanyError(db, record, company = record?.company_id ?? 1) {
+  if (!record?.partner_bank_id) return null;
+  return checkCompany(db, RECIPIENT_BANK_FIELDS, record, company);
+}
+
 function checkCompany(db, fields, r, company) {
   if (shared(company)) return null;
   for (const [key, field] of Object.entries(fields)) {
@@ -222,7 +231,7 @@ function checkCompany(db, fields, r, company) {
         if (error) return error;
       }
     }
-    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal'].includes(field.relation)) continue;
+    if (field.type !== 'many2one' || !['res.partner', 'product', 'account.journal', 'res.partner.bank'].includes(field.relation)) continue;
     const linked = record(db, field.relation, r[key]);
     if (linked && !shared(linked.company_id) && linked.company_id !== company) return `${field.label}: select a record shared with or belonging to this company`;
   }
@@ -248,6 +257,7 @@ export function withCompany(models) {
 const CONTROL_FIELDS = [
   'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date',
   'audit_trail', 'three_way_matching', 'invoice_qr', 'vat', 'company_iban', 'tax_periodicity', 'tax_start_date',
+  'account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method',
 ];
 const LOCK_DATE_FIELDS = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date'];
 
@@ -266,6 +276,10 @@ function companyGuard(db, before, r, ctx) {
   for (const field of LOCK_DATE_FIELDS) {
     if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
   }
+  if (r.tax_start_date != null && r.tax_start_date !== '' && !validDate(r.tax_start_date)) return 'Tax Period Start must be a valid date';
+  if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
+  if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
+  if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
@@ -293,6 +307,17 @@ function companyGuard(db, before, r, ctx) {
     const journal = record(db, 'account.journal', r[field]);
     if (!journal || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
       return `${label} must be a ${type} journal shared with or belonging to this company`;
+    }
+  }
+  for (const [field, use, label] of [
+    ['account_sale_tax_id', 'sale', 'Default Sales Tax'],
+    ['account_purchase_tax_id', 'purchase', 'Default Purchase Tax'],
+  ]) {
+    // Only a default being set in this write is validated; one already stored may have aged (archived, retyped) without blocking other edits.
+    if (!r[field] || (before && (before[field] ?? null) === (r[field] ?? null))) continue;
+    const tax = record(db, 'account.tax', r[field]);
+    if (!tax || tax.active === false || tax.type_tax_use !== use || (!shared(tax.company_id) && tax.company_id !== r.id)) {
+      return `${label} must be an active ${use} tax shared with or belonging to this company`;
     }
   }
   for (const [field, type, label] of [['account_default_receivable_id', 'asset_receivable', 'receivable'], ['account_default_payable_id', 'liability_payable', 'payable']]) {

@@ -13,7 +13,7 @@ const filterLabel = (model, id) => t((models[model].filters ?? []).flat().find((
 function Facets({ model, search, setSearch }) {
   const fields = models[model].fields;
   const facets = [
-    ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
+    ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(search.rel.fieldLabel ?? fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
     ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
     ...(search.archived ? [{ key: 'a', icon: <Icon name="filter" size={11} />, label: t('Archived'), clear: { archived: false } }] : []),
     ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => t(fields[g].label)).join(' › '), clear: { groupBy: [] } }] : []),

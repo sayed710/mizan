@@ -409,7 +409,8 @@ test('product form exposes POS categories and category writes reject cycles', ()
 
 test('invoice form exposes rounding and draft totals reflect it', () => {
   let db = seed();
-  assert.ok(models['account.move'].form.groups.flat().includes('invoice_cash_rounding_id'));
+  const otherInfo = models['account.move'].form.tabs({ move_type: 'out_invoice' }).find((t) => t.label === 'Other Info');
+  assert.ok(otherInfo.groups.some((g) => (Array.isArray(g) ? g : g.fields).includes('invoice_cash_rounding_id')));
   const rounding = create(db, 'account.cash.rounding', { profit_account_id: accountId(db, '450000'), loss_account_id: accountId(db, '690000'), name: 'Up', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line' });
   const inv = create(rounding.db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_cash_rounding_id: rounding.id, invoice_line_ids: [{ qty: 1, price_unit: 10.02, tax: 0 }] });
   assert.equal(read(inv.db, 'account.move', inv.id).amount_total, 10.05);

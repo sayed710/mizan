@@ -238,6 +238,28 @@ test('pcl: sync security - non-admin cannot alter lock dates or audit trail on r
   );
 });
 
+test('pcl: sync security - non-admin cannot alter default taxes or tax rounding method on res.company', () => {
+  const db = seed();
+  const comp = read(db, 'res.company', 1);
+  const saleTax = create(db, 'account.tax', { name: 'Custom Sale Tax', type_tax_use: 'sale', amount: 10, company_id: 1 });
+  const purchTax = create(saleTax.db, 'account.tax', { name: 'Custom Purchase Tax', type_tax_use: 'purchase', amount: 5, company_id: 1 });
+  const dbWithTaxes = purchTax.db;
+
+  for (const [field, val] of [
+    ['account_sale_tax_id', saleTax.id],
+    ['account_purchase_tax_id', purchTax.id],
+    ['tax_calculation_rounding_method', 'round_globally'],
+  ]) {
+    assert.throws(
+      () => applyDiff(dbWithTaxes, { upserts: { 'res.company': [{ ...comp, [field]: val }] } }, { isAdmin: false }),
+      /Only administrators can change lock dates or the audit trail or other company accounting settings/,
+      `Expected non-admin sync to be rejected for ${field}`,
+    );
+    const adminSynced = applyDiff(dbWithTaxes, { upserts: { 'res.company': [{ ...comp, [field]: val }] } }, { isAdmin: true });
+    assert.equal(read(adminSynced, 'res.company', 1)[field], val);
+  }
+});
+
 test('pcl: migration 35 migrates legacy global settings to res.company with unplaced preservation', () => {
   const db = seed();
   const c2 = createCompany(db, { name: 'Migrated Co 2' });
@@ -265,7 +287,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 36);
+  assert.equal(migrated.schema_version, 39);
 
   // Company 1 has migrated values
   const comp1 = read(migrated, 'res.company', 1);
@@ -303,7 +325,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   // Migration is idempotent
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 36);
+  assert.equal(twice.schema_version, 39);
   assert.equal(read(twice, 'res.company', 1).lock_date, '2025-06-30');
   assert.equal(read(twice, 'res.company', 1).tax_lock_date, '2025-02-28');
 });

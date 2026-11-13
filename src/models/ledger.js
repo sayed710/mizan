@@ -3,10 +3,10 @@ import { roundingAccount } from './configured-account.js';
 import { create, read, search } from '../orm.js';
 import { amounts, companyRoundingMethod, nextName, shiftMonth, today, addDays } from './common.js';
 import { companyCurrency, rateAt, toCompany } from './currency.js';
-import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxLabel, taxRepartitionLine, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
+import { cashBasisTransitionAccount, computeLineTaxes, isSectionOrNote, mapAccount, taxBaseTags, taxLabel, taxRepartitionLines, taxRepartitionSplits } from './taxes.js';
 import { cashRound, companyCurrencyRecord, currencyUnits, documentCurrency, round, roundCurrency } from '../money.js';
 import { productProperty } from './productconfig-helpers.js';
-import { earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
+import { discountTaxComputation, earlyDiscount, installments, mixedDiscountFactor } from './terms.js';
 import { reportingBookedAmount } from './money.js';
 import { configuredEarningsAccount } from './earnings.js';
 import { stockAccount } from './stock-accounts.js';
@@ -103,6 +103,45 @@ export const isBalanced = (lines = [], currency = null) =>
     const value = Number(l[key] ?? 0);
     return Number.isFinite(value) && Math.abs(value - roundCurrency(value, currency)) < 1e-9;
   })) && lines.reduce((s, l) => s + currencyUnits(l.debit, currency) - currencyUnits(l.credit, currency), 0) === 0;
+
+/** Accounts legitimately carried by linked posted documents (used when system workflows settle, copy, or reverse them). */
+export function historicalOriginAccounts(db, originIds, { includeCashBasisTargets = false } = {}) {
+  const allowed = new Set();
+  const ids = Array.isArray(originIds) ? originIds : originIds ? [originIds] : [];
+  const addId = (id) => { if (Number.isInteger(id)) allowed.add(id); };
+  for (const originId of ids) {
+    if (!Number.isInteger(originId)) continue;
+    const origin = read(db, 'account.move', originId);
+    if (!origin || origin.state !== 'posted') continue;
+    for (const line of origin.line_ids ?? []) addId(line.account_id);
+    for (const line of origin.invoice_line_ids ?? []) {
+      addId(line.account_id);
+      addId(line.income_account_id);
+      addId(line.original_account_id);
+      if (!includeCashBasisTargets) continue;
+      for (const snap of [line, ...(line.tax_breakdown ?? [])]) {
+        for (const row of [...(snap.invoice_repartition_line_ids ?? []), ...(snap.refund_repartition_line_ids ?? [])]) {
+          if (row?.account_id) {
+            addId(row.account_id);
+            addId(mapAccount(db, origin.fiscal_position_id, row.account_id));
+          }
+        }
+      }
+      for (const taxId of [line.tax_id, ...(line.tax_ids ?? [])]) {
+        const tax = taxId ? read(db, 'account.tax', taxId) : null;
+        if (!tax) continue;
+        addId(tax.cash_basis_transition_account_id);
+        for (const row of [...taxRepartitionLines(tax, 'invoice'), ...taxRepartitionLines(tax, 'refund')]) {
+          if (row?.account_id) {
+            addId(row.account_id);
+            addId(mapAccount(db, origin.fiscal_position_id, row.account_id));
+          }
+        }
+      }
+    }
+  }
+  return allowed;
+}
 
 /** A partner's receivable or payable account for a company: its valid property, else the company default. */
 export function partnerAccount(db, partnerId, companyId, kind) {
@@ -210,10 +249,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
     const distribution = l.analytic_distribution ?? (l.analytic_account_id ? { [l.analytic_account_id]: 100 } : {});
     const distributionKey = JSON.stringify(Object.entries(distribution).sort(([a], [b]) => a.localeCompare(b)));
     const isRefund = ['out_refund', 'in_refund'].includes(move.move_type);
-    const baseTagsOf = (taxObj) => {
-      const baseRow = taxRepartitionLine(taxObj ?? l, isRefund ? 'refund' : 'invoice', 'base');
-      return baseRow?.tag_ids ?? [];
-    };
+    const side = isRefund ? 'refund' : 'invoice';
 
     if (!computed.taxes.some((tax) => tax.amount) && !cashBasis) {
       const zeroTaxes = computed.taxes.length
@@ -222,7 +258,7 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       for (const [compIndex, t] of zeroTaxes.entries()) {
         const zero = taxLabel(t);
         const zeroTaxId = t.tax_id ?? null;
-        const tags = [...new Set(baseTagsOf(t))].sort((a, b) => a - b);
+        const tags = [...new Set(taxBaseTags(t, side, l))].sort((a, b) => a - b);
         const key = JSON.stringify([account, zero, zeroTaxId, tags, false, distributionKey]);
         const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis: false, distribution, amount: 0, base: 0, lines: [] };
         if (compIndex === 0) {
@@ -236,8 +272,8 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       const zero = '';
       const zeroTaxId = null;
       const tags = [...new Set(computed.taxes.length
-        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => baseTagsOf(t))
-        : cashBasis ? [] : baseTagsOf(null))].sort((a, b) => a - b);
+        ? computed.taxes.filter((t) => !t.tax_cash_basis).flatMap((t) => taxBaseTags(t, side, l))
+        : cashBasis ? [] : taxBaseTags(null, side, l))].sort((a, b) => a - b);
       const key = JSON.stringify([account, zero, zeroTaxId, tags, cashBasis, distributionKey]);
       const group = byAccount.get(key) ?? { account, zero, zeroTaxId, tags, cashBasis, distribution, amount: 0, base: 0, lines: [] };
       group.amount += computed.untaxed;
@@ -329,7 +365,7 @@ export function invoiceTaxGroups(db, move, roundingMethod = companyRoundingMetho
     const tax = docRound(document_amount);
     const base = docRound(document_base);
     return { ...group, document_amount: tax, amount: companyRound(tax / rate), base: companyRound(base / rate) };
-  });
+  }).filter((g) => g.amount || g.base || g.document_amount || g.document_base);
 
   const term = move.invoice_payment_term_id && read(db, 'account.payment.term', move.invoice_payment_term_id);
   const discountFactor = mixedDiscountFactor(term);
@@ -351,7 +387,25 @@ export function invoiceLines(db, move) {
   const ownCurrency = companyCurrencyRecord(db, move.company_id);
   const docRound = (n) => roundCurrency(n, docCurrency);
   const companyRound = (n) => roundCurrency(n, ownCurrency);
-  const counterpart = partnerAccount(db, move.partner_id, move.company_id, sale ? 'receivable' : 'payable');
+  const kind = sale ? 'receivable' : 'payable';
+  const type = sale ? 'asset_receivable' : 'liability_payable';
+  const originId = move.reversed_entry_id ?? move.debit_origin_id ?? move.correction_of_id ?? null;
+  const origin = originId ? read(db, 'account.move', originId) : null;
+  const originCounterpart = origin?.state === 'posted' && ['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(origin.move_type)
+    && (origin.company_id ?? 1) === (move.company_id ?? 1)
+    ? invoiceCounterpartAccount(db, origin)
+    : null;
+  const company = read(db, 'res.company', move.company_id ?? 1);
+  const partnerProp = read(db, 'res.partner', move.partner_id)?.[`property_account_${kind}_id`];
+  const validActive = (id) => {
+    const account = read(db, 'account.account', id);
+    return account?.company_id === company?.id && account?.account_type === type && account?.active !== false;
+  };
+  const counterpart = move.reversed_entry_id && originCounterpart
+    ? originCounterpart
+    : (validActive(partnerProp) || validActive(company?.[`account_default_${kind}_id`]) || !originCounterpart)
+      ? partnerAccount(db, move.partner_id, move.company_id, kind)
+      : originCounterpart;
   const roundingMethod = companyRoundingMethod(db, move.company_id);
   // Each group keeps its amount in the document currency beside its company-currency amount: the foreign amount of a
   // journal item is the invoiced one, never reconstructed from the rounded conversion.
@@ -430,7 +484,7 @@ export function invoiceLines(db, move) {
     const amount = companyRound(targetCompany - allocated);
     allocated = companyRound(allocated + amount);
     const discountDoc = term?.early_discount && index === 0
-      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(term.discount_tax_computation) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
+      ? docRound(earlyDiscount(term, ['excluded', 'mixed'].includes(discountTaxComputation(term)) ? bases.reduce((s, [, , a]) => s + a, 0) : totalDoc, move.invoice_date ?? today(), move.invoice_date ?? today(), docCurrency))
       : 0;
     const discountCompany = discountDoc ? companyRound(discountDoc / rate) : 0;
     return {
@@ -471,7 +525,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, system_generated = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -479,6 +533,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
   const j = read(db, 'account.journal', jId);
   if (!j) throw new Error(`Journal not found: ${journal}`);
   if (j.company_id && company && j.company_id !== company) throw new Error(`Journal ${j.name || j.code} belongs to another company`);
+  const allowedArchived = historicalOriginAccounts(db, archivedOriginIds, { includeCashBasisTargets });
 
   const moveContext = {
     move_type: 'entry',
@@ -504,6 +559,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     if (!accId) throw new Error(`Account not found: ${l.account}`);
     const acc = read(db, 'account.account', accId);
     if (!acc) throw new Error(`Account not found: ${accId}`);
+    if (acc.active === false && !allowedArchived.has(acc.id)) throw new Error('Archived accounts cannot be selected on journal items or invoice lines');
     if (acc.company_id && company && acc.company_id !== company) throw new Error(`Account ${acc.code || acc.name} belongs to another company`);
 
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
@@ -525,7 +581,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
       }
     }
     const analyticDistribution = distribution == null ? null : normalizeDistribution(distribution, db);
-    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...(l.tax_name ? { tax_id: l.tax_id ?? null, tax_name: l.tax_name, tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
+    return { account_id: accId, ...(l.product_id ? { product_id: l.product_id } : {}), ...(analyticDistribution != null ? { analytic_distribution: analyticDistribution } : {}), partner_id: l.partner_id ?? null, name: l.name ?? ref, debit: Math.max(0, net), credit: Math.max(0, -net), ...(foreignCurrency ? { currency_id: l.currency_id, amount_currency: roundCurrency(l.amount_currency, foreignCurrency) } : {}), ...((l.tax_name || l.tax_grid_base) ? { ...(l.tax_id != null ? { tax_id: l.tax_id } : {}), ...(l.tax_name ? { tax_name: l.tax_name } : {}), tax_base: roundCurrency(l.tax_base ?? 0, ownCurrency), ...(l.tax_base_signed ? { tax_base_signed: true } : {}), ...(l.tax_zero ? { tax_zero: true } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}) } : {}), ...(l.tax_side ? { tax_side: l.tax_side } : {}), ...(l.type_tax_use ? { type_tax_use: l.type_tax_use } : {}), ...(l.tax_tag_ids?.length ? { tax_tag_ids: [...l.tax_tag_ids] } : {}), ...(l.tax_grid_base ? { tax_grid_base: true, tax_side: l.tax_side } : {}), ...(l.tax_grid_release ? { tax_grid_release: true } : {}) };
   });
   if (!isBalanced(line_ids, companyCurrencyRecord(db, company))) throw new Error('Journal entry is not balanced');
   if (analyticPostingHooks?.checkMandatoryPlans) {
@@ -542,7 +598,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
     ...(system_generated ? { system_generated: true } : {}),
-  });
+  }, { archivedOriginIds, includeCashBasisTargets });
   if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
   if (line_ids.some((line) => Object.keys(line.analytic_distribution ?? {}).length)) throw new Error('Analytic posting support is not loaded');
   return made;
@@ -744,6 +800,14 @@ export function balances(db, items) {
   const map = new Map();
   for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + reportingBookedAmount(db, l, (Number(l.debit) || 0) - (Number(l.credit) || 0)));
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
+}
+
+/** Posted balance of `account` in its company currency (or the active company when shared). */
+export function accountBalance(db, account) {
+  if (!db || !account?.id) return 0;
+  const companyId = account.company_id ?? db.settings?.current_company_id ?? 1;
+  const scoped = (db.settings?.current_company_id ?? 1) === companyId ? db : { ...db, settings: { ...db.settings, current_company_id: companyId } };
+  return balances(scoped, journalItems(scoped, { company_id: companyId })).find((b) => b.account.id === account.id)?.balance ?? 0;
 }
 
 const lineNet = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);

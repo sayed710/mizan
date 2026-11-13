@@ -6,11 +6,12 @@ import { companyCurrency, conversionRate } from './currency.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 export const currencyCode = (db, rec) => (rec?.currency_id ? read(db, 'res.currency', rec.currency_id)?.name ?? null : null);
 
-export function reportingValue(db, rec, amount, at = today()) {
+export function reportingValue(db, rec, amount, at = today(), { companyBooked = false } = {}) {
+  if (amount == null) return null;
   const own = companyCurrency(db, rec?.company_id);
   const target = companyCurrency(db, db.settings?.current_company_id);
   let booked = amount;
-  if (rec.currency_id && rec.currency_id !== own) {
+  if (!companyBooked && rec.currency_id && rec.currency_id !== own) {
     const rate = conversionRate(db, rec.currency_id, own, docDate(rec), rec.company_id ?? 1);
     if (rate == null) return null;
     booked = roundCurrency(amount * rate, companyCurrencyRecord(db, rec.company_id));
@@ -20,7 +21,8 @@ export function reportingValue(db, rec, amount, at = today()) {
   return rate == null ? null : roundCurrency(booked * rate, companyCurrencyRecord(db, db.settings?.current_company_id));
 }
 
-export const unrated = (db, rec, at = today()) => reportingValue(db, rec, 1, at) == null;
+export const unrated = (db, rec, at = today(), { companyBooked = false, field = null } = {}) =>
+  (companyBooked && field && rec?.[field] == null) || reportingValue(db, rec, 1, at, { companyBooked }) == null;
 /** Translate an amount already booked in its company's currency at its accounting date. */
 export function reportingBookedAmount(db, rec, amount) {
   const date = rec?.date ?? rec?.invoice_date;
@@ -36,6 +38,10 @@ export function reportingBookedAmount(db, rec, amount) {
   if (rate == null) throw new Error(`Configure an exchange rate for ${own.name} and ${target.name} on or before ${date}`);
   return roundCurrency((Number(amount) || 0) * rate, target);
 }
-export const companyAmount = (db, rec, field, at = today()) => reportingValue(db, rec, Number(rec?.[field]) || 0, at) ?? 0;
-export const companySum = (db, recs, field, at = today()) => roundCurrency(recs.reduce((s, r) => s + companyAmount(db, r, field, at), 0), companyCurrencyRecord(db, db.settings?.current_company_id));
-export const unratedCount = (db, recs, at = today()) => recs.filter((r) => unrated(db, r, at)).length;
+export const companyAmount = (db, rec, field, at = today(), { companyBooked = false } = {}) => {
+  const raw = rec?.[field];
+  if (companyBooked && raw == null) return 0;
+  return reportingValue(db, rec, Number(raw) || 0, at, { companyBooked }) ?? 0;
+};
+export const companySum = (db, recs, field, at = today(), opts = {}) => roundCurrency(recs.reduce((s, r) => s + companyAmount(db, r, field, at, opts), 0), companyCurrencyRecord(db, db.settings?.current_company_id));
+export const unratedCount = (db, recs, at = today(), opts = {}) => recs.filter((r) => unrated(db, r, at, opts)).length;

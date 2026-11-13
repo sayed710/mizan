@@ -1,14 +1,25 @@
-import { addDays, today } from './common.js';
+import { addDays, isoDate, today } from './common.js';
 import { currencyUnits, roundCurrency } from '../money.js';
 
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
 function lineDate(line, invoiceDate) {
   const days = Number(line.nb_days) || 0;
-  if (line.delay_type !== 'days_end_of_month') return addDays(invoiceDate, days);
-  const [year, month] = invoiceDate.split('-').map(Number);
-  const lastDay = new Date(year, month, 0).getDate();
-  return addDays(`${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`, days);
+  if (line.delay_type === 'days_end_of_month') {
+    const [year, month] = invoiceDate.split('-').map(Number);
+    return addDays(isoDate(new Date(year, month, 0)), days);
+  }
+  if (line.delay_type === 'days_after_end_of_next_month') {
+    const [year, month] = invoiceDate.split('-').map(Number);
+    return addDays(isoDate(new Date(year, month + 1, 0)), days);
+  }
+  if (line.delay_type === 'days_end_of_month_on_the') {
+    const [y, m] = addDays(invoiceDate, days).split('-').map(Number);
+    const nextEnd = new Date(y, m + 1, 0);
+    nextEnd.setDate(Math.min(Math.max(1, Math.trunc(Number(line.days_next_month) || 1)), nextEnd.getDate()));
+    return isoDate(nextEnd);
+  }
+  return addDays(invoiceDate, days);
 }
 
 /** Split an invoice total into dated installments according to a payment term. */
@@ -63,10 +74,18 @@ export function earlyDiscount(term, total, invoiceDate, paymentDate, currency = 
   return roundCurrency(roundCurrency(total, currency) * (Number(term.discount_percent) || 0) / 100, currency);
 }
 
+export const DISCOUNT_TAX_COMPUTATIONS = new Set(['excluded', 'included', 'mixed']);
+
+/** Resolve the canonical discount tax computation mode for a payment term (defaults to 'included' when unset). */
+export function discountTaxComputation(term) {
+  if (!term) return null;
+  return DISCOUNT_TAX_COMPUTATIONS.has(term.discount_tax_computation) ? term.discount_tax_computation : 'included';
+}
+
 /** Share of the invoice's tax kept when the term reduces tax for its early-payment discount (1 when it does not). */
 export function mixedDiscountFactor(term) {
   const percent = Number(term?.discount_percent) || 0;
-  return term?.early_discount && term.discount_tax_computation === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
+  return term?.early_discount && discountTaxComputation(term) === 'mixed' && percent > 0 ? 1 - percent / 100 : 1;
 }
 
 const newLine = () => ({ value: 100, value_type: 'percent', nb_days: 0, delay_type: 'days_after' });
@@ -76,20 +95,48 @@ export const termModels = {
     label: 'Payment Terms',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence' },
       early_discount: { type: 'boolean', label: 'Early Discount' },
       discount_percent: { type: 'float', label: 'Discount %' },
-      discount_days: { type: 'integer', label: 'Discount Days' },
-      discount_tax_computation: { type: 'selection', label: 'Discount Tax Computation', options: [['excluded', 'Discount before tax'], ['included', 'Discount including tax'], ['mixed', 'Always (tax reduction on invoice)']] },
+      discount_days: { type: 'integer', label: 'Within (days)' },
+      discount_tax_computation: {
+        type: 'selection',
+        label: 'Reduced tax',
+        options: [
+          ['included', 'On early payment'],
+          ['excluded', 'Never'],
+          ['mixed', 'Always (upon invoice)'],
+        ],
+      },
       line_ids: {
         type: 'one2many',
         label: 'Due Terms',
         fields: {
-          value: { type: 'float', label: 'Value' },
+          value: { type: 'float', label: 'Due' },
           value_type: { type: 'selection', label: 'Value Type', options: [['percent', 'Percent'], ['fixed', 'Fixed'], ['balance', 'Balance']] },
-          nb_days: { type: 'integer', label: 'Days' },
-          delay_type: { type: 'selection', label: 'Delay Type', options: [['days_after', 'Days after invoice date'], ['days_end_of_month', 'Days after end of month']] },
+          nb_days: { type: 'integer', label: 'After' },
+          delay_type: {
+            type: 'selection',
+            label: 'Delay Type',
+            options: [
+              ['days_after', 'Days after invoice date'],
+              ['days_end_of_month', 'Days after end of month'],
+              ['days_after_end_of_next_month', 'Days after end of next month'],
+              ['days_end_of_month_on_the', 'Days end of month on the'],
+            ],
+          },
+          days_next_month: {
+            type: 'integer',
+            label: 'On the',
+            readonly: (l) => l?.delay_type !== 'days_end_of_month_on_the',
+          },
         },
         newLine,
+        onchange: (l, key) => (key === 'delay_type'
+          ? (l.delay_type === 'days_end_of_month_on_the'
+            ? { ...l, days_next_month: l.days_next_month || 10 }
+            : (() => { const { days_next_month: _, ...rest } = l; return rest; })())
+          : l),
       },
       preview: {
         type: 'text',
@@ -97,8 +144,19 @@ export const termModels = {
         readonly: true,
         compute: (r) => {
           try {
-            const rows = installments(r, 1000, today());
-            return [`Example: ${money(1000)} on ${today()}`, ...rows.map((row) => `${money(row.amount)} on ${row.date}`)].join('\n');
+            const date = today();
+            const rows = installments(r, 1000, date);
+            const lines = [];
+            if (r?.note) lines.push(r.note);
+            if (r?.early_discount) {
+              const discountDate = addDays(date, Number(r.discount_days) || 0);
+              const discount = earlyDiscount(r, 1000, date, discountDate);
+              lines.push(`Early Payment Discount: ${money(1000 - discount)} if paid before ${discountDate}`);
+            }
+            rows.forEach((row, i) => {
+              lines.push(`${i + 1} - Installment of ${money(row.amount)} due on ${row.date}`);
+            });
+            return lines.join('\n');
           } catch (e) {
             return e.message;
           }
@@ -106,13 +164,36 @@ export const termModels = {
       },
       note: { type: 'text', label: 'Note' },
     },
-    defaults: () => ({ early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
+    defaults: () => ({ sequence: 10, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
+    createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
+    onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
+    guard: (_db, before, after) => {
+      // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
+      const legacyUnset = after.discount_tax_computation == null && before?.early_discount && before.discount_tax_computation == null;
+      if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
+        return 'Select a discount tax computation mode';
+      }
+      for (const l of after.line_ids ?? []) {
+        if (l.delay_type === 'days_end_of_month_on_the') {
+          const d = l.days_next_month;
+          if (!Number.isInteger(d) || d < 1 || d > 31) {
+            return 'Enter the day of the next month (1-31) for Days end of month on the';
+          }
+        }
+      }
+      return null;
+    },
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     kanban: { title: 'name', lines: ['early_discount'] },
-    list: ['name', 'early_discount'],
+    list: ['name'],
     form: {
       title: 'name',
-      groups: [['name'], ['early_discount', 'discount_percent', 'discount_days', 'discount_tax_computation'], ['preview']],
-      tabs: [{ label: 'Due Terms', fields: ['line_ids'] }, { label: 'Note', fields: ['note'] }],
+      groups: (r) => [
+        ['early_discount', ...(r?.early_discount ? ['discount_percent', 'discount_days', 'discount_tax_computation'] : [])],
+        { title: 'Due Terms', fields: ['line_ids'] },
+        { title: 'Preview', fields: ['preview'] },
+      ],
+      tabs: [{ label: 'Note', fields: ['note'] }],
       chatter: true,
     },
   },

@@ -36,8 +36,11 @@ test('posted invoice lines and payment details stay locked while payment workflo
   const saved = applyDiff(base, diffDb(base, paid), user);
   assert.equal(read(saved, 'account.move', draft.id).amount_paid, 40);
   const payment = saved.records['account.payment'].at(-1);
-  const altered = write(saved, 'account.payment', payment.id, { memo: 'Changed' });
+  const altered = write(saved, 'account.payment', payment.id, { amount: 999 });
   assert.throws(() => applyDiff(saved, diffDb(saved, altered), user), /locked/);
+  const memoEdit = write(saved, 'account.payment', payment.id, { memo: 'Changed' });
+  const savedMemo = applyDiff(saved, diffDb(saved, memoEdit), user);
+  assert.equal(read(savedMemo, 'account.payment', payment.id).memo, 'Changed');
 });
 
 test('legacy partial updates preserve locked record state and still enforce locks', () => {

@@ -668,7 +668,7 @@ export const salesModels = {
         if (!line.product_id || isSectionOrNote(line)) return line;
         const product = read(db, 'product', line.product_id);
         if (!product) throw new Error('Cannot update taxes: a line product no longer exists');
-        return { ...line, tax_source_id: null, ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id, r.company_id ?? 1) ?? taxSnapshot(null)), tax_ids: [] };
+        return { ...line, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(productTax(db, product, 'sale', fiscal_position_id, r.company_id ?? 1) ?? taxSnapshot(null)) };
       });
       return { ...(key === 'partner_id' && p ? { pricelist_id: p.pricelist_id ?? null, payment_term_id: p.property_payment_term_id ?? null, partner_invoice_id: p.id, partner_shipping_id: p.id } : {}), ...(p || key === 'company_id' ? { fiscal_position_id } : {}), ...(r.order_line ? { order_line } : {}) };
     },

@@ -991,6 +991,146 @@ MIGRATIONS.push({ version: 36, name: 'Explicit company currency from legacy sett
   { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
 } });
 
+MIGRATIONS.push({ version: 37, name: 'Move fiscal position tax mappings onto taxes', up: (db) => {
+  const taxesById = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, {
+    ...t,
+    fiscal_position_ids: [...(t.fiscal_position_ids ?? [])],
+    original_tax_ids: [...(t.original_tax_ids ?? [])],
+  }]));
+  const removed = [];
+  const positions = (db.records['account.fiscal.position'] ?? []).map((fp) => {
+    for (const row of fp.tax_ids ?? []) {
+      if (row?.tax_dest_id) {
+        const dest = taxesById.get(row.tax_dest_id);
+        if (dest) {
+          if (!dest.fiscal_position_ids.includes(fp.id)) dest.fiscal_position_ids.push(fp.id);
+          if (row.tax_src_id && !dest.original_tax_ids.includes(row.tax_src_id)) dest.original_tax_ids.push(row.tax_src_id);
+        }
+      } else if (row?.tax_src_id) {
+        const src = taxesById.get(row.tax_src_id);
+        removed.push([fp.id, src?.name || `#${row.tax_src_id}`]);
+      }
+    }
+    const { tax_ids, ...rest } = fp;
+    return rest;
+  });
+  const next = {
+    ...db,
+    messages: db.messages ?? [],
+    records: {
+      ...db.records,
+      'account.tax': [...taxesById.values()],
+      'account.fiscal.position': positions,
+    },
+  };
+  return removed.reduce(
+    (acc, [fpId, srcName]) => postNote(acc, 'account.fiscal.position', fpId, `Upgrade: tax removal rule for "${srcName}" cannot be expressed in the new model; please redo it on the tax records.`),
+    next,
+  );
+} });
+
+MIGRATIONS.push({ version: 38, name: 'Mark stored accounts without an active flag as active', up: (db) => ({
+  ...db,
+  records: {
+    ...db.records,
+    'account.account': (db.records['account.account'] ?? []).map((a) => (a.active === undefined ? { ...a, active: true } : a)),
+  },
+}) });
+
+const M37_REMOVAL_NOTE_RE = /^Upgrade: tax removal rule for "(.+)" cannot be expressed in the new model; please redo it on the tax records\.$/;
+
+MIGRATIONS.push({ version: 39, name: 'Recover fiscal position exclusions, keep direct destination taxes usable, and store per-position tax mappings', up: (db) => {
+  const taxes = db.records['account.tax'] ?? [];
+  const taxById = new Map(taxes.map((t) => [t.id, t]));
+  const fps = db.records['account.fiscal.position'] ?? [];
+  const fpById = new Map(fps.map((fp) => [fp.id, fp]));
+
+  // 1. Recover tax removal rules from migration 37 chatter notes into explicit fp.excluded_tax_ids.
+  const excludedByFp = new Map(fps.map((fp) => [fp.id, new Set(fp.excluded_tax_ids ?? [])]));
+  for (const msg of db.messages ?? []) {
+    if (msg?.model !== 'account.fiscal.position' || msg?.kind !== 'note') continue;
+    const match = M37_REMOVAL_NOTE_RE.exec(msg.body ?? '');
+    if (!match) continue;
+    const fp = fpById.get(msg.res_id);
+    if (!fp) continue;
+    const srcName = match[1];
+    const compatible = taxes.filter((t) => !fp.company_id || !t.company_id || t.company_id === fp.company_id);
+    let matches = compatible.filter((t) => t.name === srcName);
+    if (!matches.length && /^#(\d+)$/.test(srcName)) {
+      const id = Number(srcName.slice(1));
+      matches = compatible.filter((t) => t.id === id);
+    }
+    // The note names the tax; recover it only when that name identifies exactly one tax, otherwise the note stays for manual follow-up.
+    if (matches.length === 1) excludedByFp.get(fp.id).add(matches[0].id);
+  }
+  const nextPositions = fps.map((fp) => ({
+    ...fp,
+    excluded_tax_ids: [...(excludedByFp.get(fp.id) ?? [])],
+  }));
+
+  // 2. Collect taxes referenced directly so mapping destinations remain directly usable.
+  const directlyUsedTaxIds = new Set();
+  for (const p of db.records.product ?? []) {
+    if (p.tax_id) directlyUsedTaxIds.add(p.tax_id);
+    if (p.supplier_tax_id) directlyUsedTaxIds.add(p.supplier_tax_id);
+  }
+  for (const c of db.records['res.company'] ?? []) {
+    if (c.account_sale_tax_id) directlyUsedTaxIds.add(c.account_sale_tax_id);
+    if (c.account_purchase_tax_id) directlyUsedTaxIds.add(c.account_purchase_tax_id);
+  }
+  for (const t of taxes) {
+    for (const childId of t.children_tax_ids ?? []) directlyUsedTaxIds.add(childId);
+  }
+  for (const a of db.records['account.account'] ?? []) {
+    for (const taxId of a.tax_ids ?? []) directlyUsedTaxIds.add(taxId);
+  }
+
+  // 3. Move directly-used or multi-position replacement mappings onto per-position fiscal_position_mapping_ids.
+  const nextTaxes = taxes.map((t) => {
+    const posIds = t.fiscal_position_ids ?? [];
+    const origIds = t.original_tax_ids ?? [];
+    const existing = t.fiscal_position_mapping_ids ?? [];
+    if (!origIds.length || !posIds.length) {
+      return existing.length ? t : { ...t, fiscal_position_mapping_ids: [] };
+    }
+    const needsPerPosition = directlyUsedTaxIds.has(t.id) || posIds.length > 1 || existing.length > 0;
+    if (!needsPerPosition) {
+      return { ...t, fiscal_position_mapping_ids: [...existing] };
+    }
+    const byFp = new Map(existing.map((m) => [m.fiscal_position_id, new Set(m.original_tax_ids ?? [])]));
+    for (const fpId of posIds) {
+      const fp = fpById.get(fpId);
+      const compatibleOrigs = origIds.filter((id) => {
+        const src = taxById.get(id);
+        return !fp?.company_id || !src?.company_id || src.company_id === fp.company_id;
+      });
+      if (!compatibleOrigs.length) continue;
+      const set = byFp.get(fpId) ?? new Set();
+      for (const id of compatibleOrigs) set.add(id);
+      byFp.set(fpId, set);
+    }
+    const fiscal_position_mapping_ids = [...byFp.entries()].map(([fiscal_position_id, set]) => ({
+      fiscal_position_id,
+      original_tax_ids: [...set],
+    }));
+    return {
+      ...t,
+      fiscal_position_ids: [],
+      original_tax_ids: [],
+      fiscal_position_mapping_ids,
+    };
+  });
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.tax': nextTaxes,
+      'account.fiscal.position': nextPositions,
+    },
+  };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

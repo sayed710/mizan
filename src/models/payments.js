@@ -7,6 +7,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { paymentJournal } from './ledger.js';
 import { nextCheckNumber } from './pay.js';
 import { isPaymentMatched } from './bank.js';
+import { recipientBankCompanyError } from './company.js';
 
 const MOVE_TYPE = { inbound: 'out_invoice', outbound: 'in_invoice' };
 const TYPE_LABEL = { out_invoice: 'customer invoice', in_invoice: 'vendor bill' };
@@ -159,7 +160,14 @@ export function postBatch(db, batch) {
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
   paymentJournal(db, journal.id, company);
   for (const line of lines) {
+    if (line.payment_id) {
+      const payment = read(db, 'account.payment', line.payment_id);
+      const payError = recipientBankCompanyError(db, payment, payment?.company_id ?? company);
+      if (payError) throw new Error(payError);
+    }
     const move = read(db, 'account.move', line.move_id);
+    const moveError = recipientBankCompanyError(db, move, move?.company_id ?? company);
+    if (moveError) throw new Error(moveError);
     if (batch.batch_type === 'outbound' && move?.partner_id) {
       resolveAndValidateRecipientBank(db, move.partner_id, move.partner_bank_id, { companyId: company });
     }

@@ -140,6 +140,8 @@ export function seed() {
     }
   });
   if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
+  const vatGroupId = add('account.tax.group', { name: 'VAT' });
+  const stampGroupId = add('account.tax.group', { name: 'Stamp' });
   const tax = (name, type_tax_use, amount, account, vals = {}) => {
     const accId = account ? accountId(db, account) : null;
     return add('account.tax', {
@@ -150,7 +152,7 @@ export function seed() {
       tax_exigibility: 'on_invoice',
       price_include: false,
       active: true,
-      tax_group: 'VAT',
+      tax_group_id: vatGroupId,
       invoice_repartition_line_ids: [
         { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
         { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
@@ -162,18 +164,17 @@ export function seed() {
       ...vals,
     });
   };
+  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', account_ids: [] });
+  const exportFp = add('account.fiscal.position', {
+    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.', account_ids: [],
+  });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
-  const zeroExport = tax('0% Exports', 'sale', 0, null);
-  const zeroImport = tax('0% Imports', 'purchase', 0, null);
+  tax('0% Exports', 'sale', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatSale] });
+  tax('0% Imports', 'purchase', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatPurchase] });
   tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
   tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment', cash_basis_transition_account_id: installedByCode['251100'] });
-  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group: 'Stamp' });
-  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', tax_ids: [], account_ids: [] });
-  add('account.fiscal.position', {
-    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.',
-    tax_ids: [{ tax_src_id: vatSale, tax_dest_id: zeroExport }, { tax_src_id: vatPurchase, tax_dest_id: zeroImport }], account_ids: [],
-  });
+  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group_id: stampGroupId });
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',
@@ -517,11 +518,17 @@ export function seed() {
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });
   add('helpdesk.sla', { name: 'Urgent: same day', team_id: support, priority: '3', days: 0 });
   (db.records['helpdesk.ticket'] ?? []).forEach((t) => set('helpdesk.ticket', t.id, { team_id: support }));
-  const line = (value, nb_days, value_type = 'percent') => ({ value, value_type, nb_days, delay_type: 'days_after' });
-  add('account.payment.term', { name: 'Immediate Payment', line_ids: [line(100, 0)] });
-  const t30 = add('account.payment.term', { name: '30 Days', line_ids: [line(100, 30)] });
-  add('account.payment.term', { name: '30% Now, Balance 60 Days', line_ids: [line(30, 0), line(70, 60)] });
-  add('account.payment.term', { name: '2/7 Net 30', early_discount: true, discount_percent: 2, discount_days: 7, line_ids: [line(100, 30)] });
+  const line = (value, nb_days, value_type = 'percent', delay_type = 'days_after', extra = {}) => ({ value, value_type, nb_days, delay_type, ...extra });
+  add('account.payment.term', { name: 'Immediate Payment', sequence: 1, line_ids: [line(100, 0)] });
+  const t30 = add('account.payment.term', { name: '30 Days', sequence: 4, line_ids: [line(100, 30)] });
+  add('account.payment.term', { name: '30% Now, Balance 60 Days', sequence: 8, line_ids: [line(30, 0), line(70, 60)] });
+  add('account.payment.term', { name: '2/7 Net 30', sequence: 9, early_discount: true, discount_percent: 2, discount_days: 7, discount_tax_computation: 'included', line_ids: [line(100, 30)] });
+  add('account.payment.term', { name: '15 Days', sequence: 2, line_ids: [line(100, 15)] });
+  add('account.payment.term', { name: '21 Days', sequence: 3, line_ids: [line(100, 21)] });
+  add('account.payment.term', { name: '45 Days', sequence: 5, line_ids: [line(100, 45)] });
+  add('account.payment.term', { name: 'End of Following Month', sequence: 6, line_ids: [line(100, 0, 'percent', 'days_after_end_of_next_month')] });
+  add('account.payment.term', { name: '10 Days after End of Next Month', sequence: 7, line_ids: [line(100, 10, 'percent', 'days_after_end_of_next_month')] });
+  add('account.payment.term', { name: '90 days, on the 10th', sequence: 10, line_ids: [line(100, 90, 'percent', 'days_end_of_month_on_the', { days_next_month: 10 })] });
   set('res.partner', 3, { property_payment_term_id: t30 });
   add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
   add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });

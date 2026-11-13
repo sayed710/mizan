@@ -101,6 +101,7 @@ export function reopenFiscalYear(db, yearId) {
     journal: 'MISC', date: year.date_to, ref: `Reopen fiscal year: ${year.name}`, company: year.company_id,
     lines: closing.line_ids.map((l) => ({ account_id: l.account_id, debit: l.credit, credit: l.debit, partner_id: l.partner_id })),
     system_generated: true,
+    archivedOriginIds: [closing.id],
   });
   return write(write(entry.db, 'account.fiscal.year', yearId, { opening_move_id: entry.id }), 'account.move', entry.id, { is_closing: true });
 }
@@ -313,6 +314,7 @@ export function revalueForeignBalances(db, date, { companyScoped = false, compan
       journal: journalId, journal_id: journalId, date: addDays(date, 1), ref: `Reversal of ${read(entry.db, 'account.move', entry.id).name}`, company,
       lines: expected.map((l) => ({ ...l, debit: l.credit ?? 0, credit: l.debit ?? 0 })),
       system_generated: true,
+      archivedOriginIds: [entry.id],
     });
     next = write(write(reversal.db, 'account.move', entry.id, { revaluation_date: date, reversal_move_id: reversal.id }), 'account.move', reversal.id, { reversed_entry_id: entry.id });
   }
