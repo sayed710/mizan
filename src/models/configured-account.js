@@ -13,3 +13,10 @@ export function roundingAccount(db, rounding, profit, company) {
   const role = profit ? 'profit' : 'loss';
   return configuredAccount(db, rounding?.[`${role}_account_id`], company, role, rounding?.name ?? 'the cash rounding method');
 }
+
+/** Reject selecting an archived or missing cash rounding method when creating or changing a document or POS config. */
+export function activeCashRoundingError(db, id, priorId = null) {
+  if (!id || id === priorId) return null;
+  const rounding = read(db, 'account.cash.rounding', id);
+  return !rounding || rounding.active === false ? 'Select an active cash rounding method' : null;
+}

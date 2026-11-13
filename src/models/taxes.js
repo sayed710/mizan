@@ -1,5 +1,5 @@
 // Taxes (percent/fixed, price-included, cash basis) and fiscal positions that remap taxes and accounts per partner.
-import { read, search } from '../orm.js';
+import { nextSequence, read, search } from '../orm.js';
 import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
@@ -520,9 +520,32 @@ export const taxModels = {
     label: 'Tax Groups',
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      country: { type: 'char', label: 'Country', help: 'The country for which this tax group is applicable.' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, multiCompanyOnly: true },
+      preceding_subtotal: {
+        type: 'char',
+        label: 'Preceding Subtotal',
+        optional: 'hide',
+        help: "If set, this value will be used on documents as the label of a subtotal excluding this tax group before displaying it. If not set, the tax group will be displayed after the 'Untaxed amount' subtotal.",
+      },
+      pos_receipt_label: { type: 'char', label: 'Label on PoS Receipts' },
     },
-    list: ['name'],
-    form: { title: 'name', groups: [[], []], chatter: true },
+    defaults: () => ({ sequence: 10 }),
+    createDefaults: (db, vals = {}) => ({
+      company_id: vals.company_id ?? db?.settings?.current_company_id ?? 1,
+      sequence: nextSequence(db, 'account.tax.group'),
+    }),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
+    views: ['list'],
+    searchFields: ['name'],
+    list: ['sequence', 'name', 'country', 'company_id', 'preceding_subtotal'],
+    form: {
+      title: 'name',
+      hideTitle: true,
+      groups: [['name', 'country', 'company_id', 'sequence', 'pos_receipt_label'], ['preceding_subtotal']],
+      chatter: true,
+    },
   },
   'account.tax': {
     label: 'Taxes',

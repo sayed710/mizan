@@ -78,9 +78,9 @@ export function setCompanies(db, { current, allowed }) {
 
 // Configuration is shared even when older ORM versions stamped it with company 1.
 // Accounting configuration belongs to its company; other configuration is readable across companies.
-const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position']);
+const COMPANY_CONFIG = new Set(['account.tax', 'account.payment.term', 'account.fiscal.position', 'account.cash.rounding']);
 const CONFIG_MODELS = new Set(['account.tax', 'uom.category', 'uom.uom', 'product.packaging', 'account.payment.term', 'account.fiscal.position', 'delivery.carrier', 'crm.team', 'hr.payroll.structure', 'hr.payslip.input.type', 'product.public.category',
-  'account.incoterm', 'account.account.tag', 'account.asset.model']);
+  'account.incoterm', 'account.account.tag', 'account.asset.model', 'account.cash.rounding']);
 // Mirrors the ORM's shared master data (see orm.js SHARED_MODELS): only these may have no company.
 const SHARED_MODELS = new Set(['res.partner', 'product', 'account.account', 'account.journal', 'res.currency', 'product.pricelist', 'discuss.channel',
   'mail.activity', 'hr.department', 'website.page', 'mailing.list', 'mailing.contact', 'lunch.product', 'room.room', 'appointment.type', ...CONFIG_MODELS]);

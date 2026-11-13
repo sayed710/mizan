@@ -72,8 +72,7 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
 const lockFor = (def, readonly, name, record, db) => readonly
   && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
 
-function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew }) {
-  const multiCompany = isMultiCompany(db);
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew, multiCompany }) {
   if (typeof item === 'string') {
     const field = def.fields[item];
     if (field?.multiCompanyOnly && !multiCompany) return null;
@@ -85,14 +84,16 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
     return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} />;
   }
   if (item && Array.isArray(item.fields)) {
-    const first = def.fields[item.fields[0]];
-    const firstReadonly = lockFor(def, readonly, item.fields[0], current, db) || fieldReadonly(first, current, db);
+    const visibleFields = item.fields.filter((f) => !def.fields[f]?.multiCompanyOnly || multiCompany);
+    if (!visibleFields.length) return null;
+    const first = def.fields[visibleFields[0]];
+    const firstReadonly = lockFor(def, readonly, visibleFields[0], current, db) || fieldReadonly(first, current, db);
     const labelText = t(item.label ?? first.label);
     return (
-      <div key={item.key ?? item.fields[0]} className="field">
-        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${item.fields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
+      <div key={item.key ?? visibleFields[0]} className="field">
+        {isLabelable(first, firstReadonly, current, db) ? <label htmlFor={`f-${visibleFields[0]}`}>{labelText}</label> : <span className="field-label">{labelText}</span>}
         <div className={`field-value field-pair${item.inline ? ' field-inline' : ''}`}>
-          {item.fields.map((f, idx) => {
+          {visibleFields.map((f, idx) => {
             const fd = def.fields[f];
             const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
             const sep = idx > 0 ? (item.joins ? item.joins[idx - 1] : item.join) : null;
@@ -113,6 +114,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled,
 }
 
 function renderGroups(groups, opts) {
+  const multiCompany = isMultiCompany(opts.db);
   return (
     <div className="groups">
       {groups.map((g, i) => {
@@ -122,7 +124,7 @@ function renderGroups(groups, opts) {
         return (
           <div key={title ?? i} className={fullWidth ? 'group group-full' : 'group'}>
             {title && <h3 className="group-title">{t(title)}</h3>}
-            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title) }))}
+            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title), multiCompany }))}
           </div>
         );
       })}

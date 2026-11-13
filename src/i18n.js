@@ -1542,6 +1542,22 @@ const ar = {
   'Fixed amounts exceed the total': 'المبالغ الثابتة تتجاوز الإجمالي',
   'The balance due term must be the last one': 'يجب أن يكون شرط الرصيد المتبقي هو الأخير',
   'Payment terms must allocate 100% of the total': 'يجب أن توزع شروط الدفع 100% من الإجمالي',
+  // Tax Groups & Rounding Methods (Odoo 20 parity)
+  'The country for which this tax group is applicable.': 'البلد الذي تنطبق عليه مجموعة الضرائب هذه.',
+  'Preceding Subtotal': 'المجموع الفرعي السابق',
+  "If set, this value will be used on documents as the label of a subtotal excluding this tax group before displaying it. If not set, the tax group will be displayed after the 'Untaxed amount' subtotal.": 'عند التعيين، ستُستخدم هذه القيمة في المستندات كتسمية لمجموع فرعي يستبعد هذه المجموعة الضريبية قبل عرضها. وإذا لم تُعيَّن، فستُعرض المجموعة الضريبية بعد المجموع الفرعي «المبلغ غير الخاضع للضريبة».',
+  'Label on PoS Receipts': 'التسمية على إيصالات نقطة البيع',
+  Precision: 'الدقة',
+  'The smallest value used to round the total amount (e.g., 0.05 or 100).': 'أصغر قيمة تُستخدم لتقريب المبلغ الإجمالي (مثل 0.05 أو 100).',
+  Strategy: 'الاستراتيجية',
+  'Specify how the rounding difference is applied: add a rounding line or adjust the highest tax amount.': 'حدد كيفية تطبيق فرق التقريب: إضافة سطر تقريب أو تعديل أعلى مبلغ ضريبة.',
+  'The computation rule used to round values (e.g., UP, DOWN, or HALF-UP).': 'قاعدة الحساب المستخدمة لتقريب القيم (مثل للأعلى أو للأسفل أو للأقرب).',
+  Up: 'للأعلى',
+  Down: 'للأسفل',
+  Nearest: 'للأقرب',
+  Conditions: 'الشروط',
+  'Precision must be greater than zero': 'يجب أن تكون الدقة أكبر من الصفر',
+  'Select an active cash rounding method': 'اختر طريقة تقريب نقدي نشطة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

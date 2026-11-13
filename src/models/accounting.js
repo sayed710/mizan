@@ -6,7 +6,7 @@ import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning,
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { configuredAccount } from './configured-account.js';
+import { activeCashRoundingError, configuredAccount } from './configured-account.js';
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
@@ -1986,6 +1986,8 @@ export const accountingModels = {
     label: 'Invoices',
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
+      const roundingErr = activeCashRoundingError(db, after.invoice_cash_rounding_id, before?.invoice_cash_rounding_id);
+      if (roundingErr) return roundingErr;
       if (after.invoice_payment_term_id) {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
         if (term?.company_id && term.company_id !== (after.company_id ?? 1)) return 'Payment terms belong to another company';

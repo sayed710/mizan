@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { models } from '../models/index.js';
-import { groupRecords, write, writeMany } from '../orm.js';
+import { groupRecords, read, write, writeMany } from '../orm.js';
 import { t } from '../i18n.js';
-import { display, FieldInput, isNumeric, money, OptionalColsMenu, useOptionalColumns } from '../ui.jsx';
+import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOptionalColumns } from '../ui.jsx';
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
@@ -146,13 +146,15 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
           );
         }
         const editable = def.editableList?.includes(f);
-        const text = editable ? null : display(db, field, r[f], r);
-        const badge = editable ? null : badgeClass(field.badge, r[f]);
+        const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
+        const text = editable || isTags ? null : display(db, field, r[f], r);
+        const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
         return (
           <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
             {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
+              : isTags ? <span className="many2many-tags">{(Array.isArray(r[f]) ? r[f] : []).map((id) => { const target = read(db, field.relation, Number(id)); return target ? <Tag key={target.id} name={target.display_name ?? target.name} /> : null; })}</span>
               : badge && text ? <span className={badge}>{text}</span> : text}
           </td>
         );

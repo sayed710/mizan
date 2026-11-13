@@ -150,8 +150,8 @@ export function seed() {
     }
   });
   if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
-  const vatGroupId = add('account.tax.group', { name: 'VAT' });
-  const stampGroupId = add('account.tax.group', { name: 'Stamp' });
+  const vatGroupId = add('account.tax.group', { name: 'VAT', sequence: 10, company_id: 1 });
+  const stampGroupId = add('account.tax.group', { name: 'Stamp', sequence: 20, company_id: 1 });
   const tax = (name, type_tax_use, amount, account, vals = {}) => {
     const accId = account ? accountId(db, account) : null;
     return add('account.tax', {

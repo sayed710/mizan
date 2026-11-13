@@ -202,16 +202,31 @@ test('refund of historical order without recorded rounding_account_id resolves f
     /Configure the profit account on the cash rounding method/
   );
 
-  // 3. When rounding method has no profit account, refund of historical order fails clearly
-  const unconfiguredRounding = create(histDb, 'account.cash.rounding', {
-    name: '0.05 UP Unconfigured',
-    rounding: 0.05,
-    rounding_method: 'UP',
-    strategy: 'add_invoice_line',
-    profit_account_id: null,
-    loss_account_id: null,
-  });
-  const unconfiguredDb = write(unconfiguredRounding.db, 'pos.config', cfg.id, { cash_rounding: true, rounding_method_id: unconfiguredRounding.id });
+  // 3. When a legacy stored rounding method has no profit account, refund of historical order fails clearly
+  assert.throws(
+    () => create(histDb, 'account.cash.rounding', {
+      name: '0.05 UP Unconfigured',
+      rounding: 0.05,
+      rounding_method: 'UP',
+      strategy: 'add_invoice_line',
+      profit_account_id: null,
+      loss_account_id: null,
+    }),
+    /Configure the profit account on 0.05 UP Unconfigured/
+  );
+  const unconfiguredId = (histDb.seq['account.cash.rounding'] ?? 0) + 1;
+  const unconfiguredStoredDb = {
+    ...histDb,
+    seq: { ...histDb.seq, 'account.cash.rounding': unconfiguredId },
+    records: {
+      ...histDb.records,
+      'account.cash.rounding': [
+        ...(histDb.records['account.cash.rounding'] ?? []),
+        { id: unconfiguredId, name: '0.05 UP Unconfigured', rounding: 0.05, rounding_method: 'UP', strategy: 'add_invoice_line', active: true, profit_account_id: null, loss_account_id: null },
+      ],
+    },
+  };
+  const unconfiguredDb = write(unconfiguredStoredDb, 'pos.config', cfg.id, { cash_rounding: true, rounding_method_id: unconfiguredId });
   assert.throws(
     () => payOrder(unconfiguredDb, { lines: histOrder.lines, method: cash.id, refund_of: histOrder.id }),
     /Configure the profit account on 0.05 UP Unconfigured/

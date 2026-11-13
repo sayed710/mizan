@@ -1213,6 +1213,43 @@ MIGRATIONS.push({ version: 47, name: 'payment-terms-parity', up(db) {
   return { ...db, records: { ...db.records, 'account.payment.term': nextTerms } };
 } });
 
+/** Backfill company_id (from owning taxes, else main company) and sequence on tax groups, plus sequence/active/currency_ids on cash roundings. */
+MIGRATIONS.push({ version: 48, name: 'tax-groups-and-cash-rounding-parity', up(db) {
+  const companies = db.records['res.company'] ?? [];
+  const mainCompanyId = companies.find((c) => !c.parent_id)?.id ?? companies[0]?.id ?? 1;
+  const taxes = db.records['account.tax'] ?? [];
+  const groups = db.records['account.tax.group'] ?? [];
+  const roundings = db.records['account.cash.rounding'] ?? [];
+
+  let nextGroupSeq = Math.max(0, ...groups.map((g) => Number(g.sequence) || 0));
+  const nextGroups = groups.map((g) => {
+    let companyId = g.company_id;
+    if (companyId == null) {
+      const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
+      companyId = owners.length === 1 ? owners[0] : mainCompanyId;
+    }
+    const sequence = g.sequence ?? (nextGroupSeq += 10);
+    return { ...g, company_id: companyId, sequence };
+  });
+
+  let nextRoundingSeq = Math.max(0, ...roundings.map((r) => Number(r.sequence) || 0));
+  const nextRoundings = roundings.map((r) => ({
+    ...r,
+    active: r.active === undefined ? true : r.active,
+    sequence: r.sequence ?? (nextRoundingSeq += 10),
+    currency_ids: Array.isArray(r.currency_ids) ? r.currency_ids : [],
+  }));
+
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      ...(groups.length ? { 'account.tax.group': nextGroups } : {}),
+      ...(roundings.length ? { 'account.cash.rounding': nextRoundings } : {}),
+    },
+  };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */
