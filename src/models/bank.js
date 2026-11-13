@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
+import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, ruleMatches, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -162,7 +162,7 @@ function resolveAndValidatePayments(db, line) {
 
   const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id, company);
   const journal = read(db, 'account.journal', via.id);
-  if (journal && !['bank', 'cash'].includes(journal.type)) throw new Error('Bank transactions need a bank or cash journal');
+  if (journal && !isLiquidityJournal(journal)) throw new Error('Bank transactions need a bank or cash journal');
   if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
   // Amounts are compared in company currency; only a foreign-currency bank journal fixes the payment currency.
   const companyCurrency = read(db, 'res.company', company)?.currency_id;
@@ -426,7 +426,7 @@ function lineGuard(db, before, after) {
   if (!after.journal_id) return 'Bank Journal is required';
   const journal = read(db, 'account.journal', after.journal_id);
   if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
-  if (!['bank', 'cash'].includes(journal.type)) return 'Bank transactions need a bank or cash journal';
+  if (!isLiquidityJournal(journal)) return 'Bank transactions need a bank or cash journal';
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
     if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';

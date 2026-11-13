@@ -1,6 +1,6 @@
 import { Fragment, useRef, useState } from 'react';
 import { models } from '../models/index.js';
-import { fieldReadonly } from '../field-metadata.js';
+import { fieldReadonly, fieldRequired } from '../field-metadata.js';
 import { aggregate, create, messagesOf, postNote, read, search, unlink, write } from '../orm.js';
 import { ACTIVITY_TYPES, activityState, markDone } from '../models/mail.js';
 import { today } from '../models/common.js';
@@ -50,16 +50,20 @@ function withComputed(model, vals, db) {
   return { ...vals, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(vals, db)])) };
 }
 
-function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record }) {
+function Field({ db, model, name, label: labelOverride, value, onChange, readonly, record, isNew = false }) {
   const field = models[model].fields[name];
   const id = `f-${name}`;
   const label = labelOverride ? t(labelOverride) : (field.custom ? field.label : t(field.label));
-  const text = <>{label}{field.required && <span className="req" aria-hidden="true">*</span>}</>;
+  const required = fieldRequired(field, record, db, isNew);
+  const text = <>{label}{required && <span className="req" aria-hidden="true">*</span>}</>;
   const isReadonly = readonly || fieldReadonly(field, record, db);
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} label={typeof label === 'string' ? label : undefined} /></div>
+      <div className="field-value">
+        <FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} label={typeof label === 'string' ? label : undefined} isNew={isNew} />
+        {field.help && <div className="field-help">{t(field.help)}</div>}
+      </div>
     </div>
   );
 }
@@ -68,15 +72,15 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
 const lockFor = (def, readonly, name, record, db) => readonly
   && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
 
-function renderGroupItem(item, { db, model, def, current, set, readonly, titled }) {
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled, isNew }) {
   if (typeof item === 'string') {
     const field = def.fields[item];
     const itemReadonly = lockFor(def, readonly, item, current, db);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
       const isReadonly = itemReadonly || fieldReadonly(field, current, db);
-      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} />;
+      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} isNew={isNew} />;
     }
-    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} />;
+    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} isNew={isNew} />;
   }
   if (item && Array.isArray(item.fields)) {
     const first = def.fields[item.fields[0]];
@@ -92,7 +96,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
             return (
               <Fragment key={f}>
                 {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
-                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={idx > 0 ? t(fd.label) : undefined} />
+                <FieldInput db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={isRo} record={current} label={t(fd.label)} placeholder={idx > 0 ? t(fd.label) : undefined} isNew={isNew} />
               </Fragment>
             );
           })}
@@ -100,7 +104,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
       </div>
     );
   }
-  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} />;
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} isNew={isNew} />;
 }
 
 function renderGroups(groups, opts) {
@@ -591,7 +595,7 @@ export function FormView({ leaf, id, base, params }) {
                   : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
                       value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
-            {renderGroups(groups, { db, model, def, current, set, readonly: locked })}
+            {renderGroups(groups, { db, model, def, current, set, readonly: locked, isNew })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits
                 db={db}
@@ -625,7 +629,7 @@ export function FormView({ leaf, id, base, params }) {
                           placeholder={placeholder} readonly={activeTab.readonly || (locked && ['one2many', 'text', 'html'].includes(def.fields[f].type))} />
                       )
                       // Plain fields in a tab get a label, like fields in the header groups.
-                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} />);
+                      : <Field key={f} db={db} model={model} name={f} value={current[f]} onChange={set(f)} readonly={tabReadonly} record={current} isNew={isNew} />);
                     return (
                       <>
                         {model === 'account.return' && activeTab.label === 'Tax Report' ? (
@@ -643,7 +647,7 @@ export function FormView({ leaf, id, base, params }) {
                         ) : (
                           <>
                             {(activeTab.fields ?? []).map((f) => renderTabField(f))}
-                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly })}
+                            {activeTab.groups && renderGroups(activeTab.groups, { db, model, def, current, set, readonly: tabReadonly, isNew })}
                           </>
                         )}
                         {(activeTab.aside?.length > 0 || (footer.length > 0 && tab === 0)) && (

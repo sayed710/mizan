@@ -1,6 +1,6 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
@@ -75,9 +75,10 @@ function archivedLineAccountGuard(db, before, after, ctx = {}) {
 }
 
 function journalSequenceGuard(db, before, after) {
+  const useRefund = Boolean(after.refund_sequence);
   const sequences = [
     ['invoice_sequence_prefix', 'invoice_sequence_next_number'],
-    ['refund_sequence_prefix', 'refund_sequence_next_number'],
+    ...(useRefund ? [['refund_sequence_prefix', 'refund_sequence_next_number']] : []),
   ];
   const allPrefixes = sequences.map(([prefixField]) => after[prefixField]);
   if (allPrefixes.some((prefix) => prefix != null && (!String(prefix).trim() || String(prefix).trim() !== prefix))) {
@@ -98,7 +99,7 @@ function journalSequenceGuard(db, before, after) {
     }
     const sequenceUsed = before && (db.records['account.move'] ?? []).some((move) => move.state === 'posted'
       && move.journal_id === before.id && move.move_type != null && move.move_type !== 'entry'
-      && (prefixField === 'refund_sequence_prefix') === isRefund(move));
+      && (prefixField === 'refund_sequence_prefix') === (isRefund(move) && Boolean(before.refund_sequence)));
     if (sequenceUsed && before[prefixField] !== prefix) {
       return 'A journal sequence prefix cannot change after a document is posted in that sequence';
     }
@@ -109,18 +110,19 @@ function journalSequenceGuard(db, before, after) {
   if (new Set(prefixes).size !== prefixes.length) return 'Invoice and refund sequence prefixes must be different';
   const configured = new Set(prefixes);
   const duplicates = (db.records['account.journal'] ?? []).some((journal) => journal.id !== before?.id
-    && [journal.invoice_sequence_prefix, journal.refund_sequence_prefix].some((prefix) => configured.has(prefix)));
+    && [journal.invoice_sequence_prefix, ...(journal.refund_sequence ? [journal.refund_sequence_prefix] : [])].some((prefix) => configured.has(prefix)));
   return duplicates ? 'Each journal sequence prefix must be unique' : null;
 }
 
+/** Resolve the sequence prefix and next number field to use for posting an invoice or credit note. */
 export function journalInvoiceSequence(journal, move) {
-  const refund = isRefund(move);
+  const refund = isRefund(move) && Boolean(journal.refund_sequence);
   const prefixField = refund ? 'refund_sequence_prefix' : 'invoice_sequence_prefix';
   const numberField = refund ? 'refund_sequence_next_number' : 'invoice_sequence_next_number';
   const prefix = journal[prefixField];
   const nextNumber = Number(journal[numberField]);
   if (!prefix || !String(prefix).trim()) {
-    throw new Error(`Configure the ${isRefund(move) ? 'refund' : 'invoice'} sequence prefix on the selected journal`);
+    throw new Error(`Configure the ${refund ? 'refund' : 'invoice'} sequence prefix on the selected journal`);
   }
   if (!Number.isSafeInteger(nextNumber) || nextNumber < 1) {
     throw new Error(`Configure a positive next ${refund ? 'refund' : 'invoice'} sequence number on the selected journal`);
@@ -131,6 +133,39 @@ export function journalInvoiceSequence(journal, move) {
     numberField,
     nextNumber,
   };
+}
+
+/** Compute MOD 97-10 check digits per ISO 11649 for an alphanumeric reference. */
+function iso11649CheckDigits(alnum) {
+  const rearranged = `${alnum}RF00`;
+  let rem = 0;
+  for (const ch of rearranged) {
+    const digits = ch >= 'A' && ch <= 'Z' ? String(ch.charCodeAt(0) - 55) : ch;
+    for (const d of digits) rem = (rem * 10 + Number(d)) % 97;
+  }
+  return String(98 - rem).padStart(2, '0');
+}
+
+/** Compute invoice payment_reference on posting according to journal communication settings. */
+export function computePaymentReference(db, move, journal, moveName) {
+  if (!journal || journal.type !== 'sale') return null;
+  const refType = journal.invoice_reference_type ?? 'invoice';
+  if (refType === 'none') return null;
+  const model = journal.invoice_reference_model ?? 'odoo';
+  const partner = refType === 'partner' ? read(db, 'res.partner', move.partner_id) : null;
+  const rawBase = refType === 'partner'
+    ? ((partner?.ref && String(partner.ref).trim()) || String(partner?.id ?? move.partner_id ?? ''))
+    : String(moveName ?? move.name ?? '');
+  if (!rawBase) return null;
+  if (model === 'number') {
+    const digits = rawBase.replace(/\D/g, '');
+    return digits || rawBase;
+  }
+  if (model === 'euro') {
+    const alnum = rawBase.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    return alnum ? `RF${iso11649CheckDigits(alnum)}${alnum}` : null;
+  }
+  return rawBase;
 }
 
 const exchangeLines = (db, companyId, difference) => {
@@ -569,7 +604,13 @@ export function postMove(db, id) {
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
   const dueUpdate = r.invoice_payment_term_id ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }) : {};
   const originIds = [r.reversed_entry_id, r.debit_origin_id, r.correction_of_id].filter(Boolean);
-  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
+  const paymentReferenceUpdate = !r.payment_reference?.trim() && journalRecord.type === 'sale'
+    ? (() => {
+        const ref = computePaymentReference(db, r, journalRecord, name);
+        return ref ? { payment_reference: ref } : {};
+      })()
+    : {};
+  let posted = postAnalytic(write(db, 'account.move', id, { state: 'posted', name, journal_id: journal, ...paymentReferenceUpdate, ...dueUpdate, line_ids, invoice_line_ids: resolvedLines }, originIds.length ? { archivedOriginIds: originIds } : {}), id);
   if (counterpart) {
     const bill = create(posted, 'account.move', counterpart);
     posted = write(bill.db, 'account.move', id, { intercompany_move_id: bill.id });
@@ -813,7 +854,8 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
   });
   const record = { state: 'posted', company_id: r.company_id ?? 1, currency_id: r.currency_id ?? null, move_id: paymentMove, outstanding_account_id: liquidityAccountId ?? outstanding, journal_id: via.id, invoice_id: r.id, partner_id: r.partner_id, amount: docRound(value + excess), unapplied: extra, date, payment_type: sale ? 'inbound' : 'outbound', partner_type: isPurchase(r) ? 'supplier' : 'customer', memo: r.name, ...(checkNumber != null ? { check_number: checkNumber } : {}), ...(recipientBankId ? { partner_bank_id: recipientBankId } : {}) };
   const draftName = paymentId ? read(withEntry, 'account.payment', paymentId)?.name : null;
-  const name = draftName && draftName !== '/' ? draftName : nextName(withEntry, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
+  const moveName = read(withEntry, 'account.move', paymentMove).name;
+  const name = draftName && draftName !== '/' ? draftName : paymentName(withEntry, journal, date, moveName);
   const withPayment = paymentId
     ? write(withEntry, 'account.payment', paymentId, { ...record, name })
     : create(withEntry, 'account.payment', { ...record, name }).db;
@@ -1471,35 +1513,108 @@ export const accountingModels = {
   'account.journal': {
     label: 'Journals',
     guard: (db, before, after) => {
-      if (after.suspense_account_id) {
-        const account = read(db, 'account.account', after.suspense_account_id);
-        if (!['bank', 'cash'].includes(after.type) || !account || account.active === false || (account.company_id && account.company_id !== (after.company_id ?? 1))) return 'Select an active suspense account belonging to this bank or cash journal company';
-      }
-      for (const [field, label] of [['profit_account_id', 'profit'], ['loss_account_id', 'loss']]) {
-        if (!after[field]) continue;
+      const companyId = after.company_id ?? 1;
+      const checkAccount = (field, label, allowedTypes = null) => {
+        if (!after[field]) return null;
+        if (allowedTypes && !allowedTypes.includes(after.type)) {
+          return `${label} is only valid for ${allowedTypes.join('/')} journals`;
+        }
         const account = read(db, 'account.account', after[field]);
-        if (after.type !== 'cash' || !account || account.active === false || (account.company_id && account.company_id !== (after.company_id ?? 1))) return `Select an active ${label} account belonging to this cash journal company`;
+        if (!account || account.active === false || (account.company_id && account.company_id !== companyId)) {
+          return `Select an active ${label.toLowerCase()} belonging to this journal company`;
+        }
+        return null;
+      };
+      const accountErr = checkAccount('default_account_id', 'Default account')
+        ?? checkAccount('suspense_account_id', 'Suspense account', ['bank', 'cash', 'credit'])
+        ?? checkAccount('non_deductible_account_id', 'Private share account', ['purchase'])
+        ?? checkAccount('profit_account_id', 'Profit account', ['cash', 'bank'])
+        ?? checkAccount('loss_account_id', 'Loss account', ['cash', 'bank'])
+        ?? checkAccount('outstanding_receipts_account_id', 'Outstanding receipts account', ['bank', 'cash', 'credit'])
+        ?? checkAccount('outstanding_payments_account_id', 'Outstanding payments account', ['bank', 'cash', 'credit']);
+      if (accountErr) return accountErr;
+      if (after.bank_account_id) {
+        if (after.type !== 'bank') return 'Bank account number is only valid for bank journals';
+        const bankAcc = read(db, 'res.partner.bank', after.bank_account_id);
+        if (!bankAcc || bankAcc.active === false || (bankAcc.company_id && bankAcc.company_id !== companyId)) {
+          return 'Select an active bank account belonging to this journal company';
+        }
       }
       return journalSequenceGuard(db, before, after) ?? secureHeadsGuard(db, before, after);
     },
     protectDelete: (db, journal) => (journal.secure_chain_heads ?? []).length ? 'Journals with secure chains cannot be deleted' : null,
     fields: {
-      name: { type: 'char', label: 'Journal Name', required: true },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      name: { type: 'char', label: 'Journal', required: true },
       code: { type: 'char', label: 'Sequence Prefix', required: true },
-      type: { type: 'selection', label: 'Type', options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['bank', 'Bank'], ['cash', 'Cash'], ['general', 'Miscellaneous']] },
+      type: {
+        type: 'selection', label: 'Type', required: true,
+        options: [['sale', 'Sales'], ['purchase', 'Purchase'], ['cash', 'Cash'], ['bank', 'Bank'], ['credit', 'Credit Card'], ['general', 'Miscellaneous']],
+        help: 'Select "Sales" for customer invoices journals; "Purchase" for vendor bills journals; "Cash", "Bank" or "Credit Card" for customer or vendor payments; "Miscellaneous" for everything else.',
+      },
+      active: { type: 'boolean', label: 'Active', optional: 'hide' },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      refund_sequence: {
+        type: 'boolean', label: 'Dedicated Credit Note Sequence',
+        help: 'Check this box if you don\'t want to share the same sequence for invoices and credit notes made from this journal',
+      },
+      payment_sequence: {
+        type: 'boolean', label: 'Dedicated Payment Sequence',
+        help: 'Check this box if you don\'t want to share the same sequence on payments and bank transactions posted on this journal',
+      },
       invoice_sequence_prefix: { type: 'char', label: 'Invoice Sequence Prefix' },
       invoice_sequence_next_number: { type: 'integer', label: 'Next Invoice Number' },
       refund_sequence_prefix: { type: 'char', label: 'Refund Sequence Prefix' },
       refund_sequence_next_number: { type: 'integer', label: 'Next Refund Number' },
-      default_account_id: { type: 'many2one', relation: 'account.account', label: 'Default Account' },
-      suspense_account_id: { type: 'many2one', relation: 'account.account', label: 'Suspense Account' },
+      default_account_id: {
+        type: 'many2one', relation: 'account.account', label: 'Default Account',
+        required: (r, _db, { isNew } = {}) => ['sale', 'purchase'].includes(r?.type) || (!isNew && isLiquidityJournal(r)),
+      },
+      suspense_account_id: {
+        type: 'many2one', relation: 'account.account', label: 'Suspense Account',
+        required: (r) => isLiquidityJournal(r),
+        help: 'Bank statements transactions will be posted on the suspense account until the final reconciliation allowing finding the right account.',
+      },
+      non_deductible_account_id: {
+        type: 'many2one', relation: 'account.account', label: 'Private Share Account',
+        help: 'Account used to register the private part of mixed expenses.',
+      },
       profit_account_id: { type: 'many2one', relation: 'account.account', label: 'Profit Account' },
       loss_account_id: { type: 'many2one', relation: 'account.account', label: 'Loss Account' },
       default_for_payments: { type: 'boolean', label: 'Default Payment Journal' },
       outstanding_receipts_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Receipts' },
       outstanding_payments_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Payments' },
       check_next_number: { type: 'integer', label: 'Next Check Number' },
+      bank_account_id: {
+        type: 'many2one', relation: 'res.partner.bank', label: 'Bank Account Number',
+        domain: (b, j, db) => {
+          const cid = j?.company_id ?? 1;
+          const comp = db && read(db, 'res.company', cid);
+          return (!b.company_id || b.company_id === cid) && (!comp?.partner_id || b.partner_id === comp.partner_id);
+        },
+      },
+      bank_statements_source: {
+        type: 'selection', label: 'Bank Feeds', widget: 'radio',
+        options: [
+          ['undefined', 'Undefined Yet'],
+          ['file_import', 'Manual (or import CAMT, CSV, JPEG, OFX, PDF, PNG, XLS, XLSX)'],
+          ['online_sync', 'Online Synchronization'],
+        ],
+        required: (r) => r?.type === 'bank',
+      },
       restrict_mode_hash_table: { type: 'boolean', label: 'Secure Posted Entries with Hash' },
+      invoice_reference_type: {
+        type: 'selection', label: 'Communication Type',
+        options: [['none', 'None'], ['partner', 'Based on Customer'], ['invoice', 'Based on Invoice']],
+      },
+      invoice_reference_model: {
+        type: 'selection', label: 'Communication Standard',
+        options: [
+          ['odoo', 'Full Reference (INV/2024/00001)'],
+          ['euro', 'European (RF83INV202400001)'],
+          ['number', 'Numbers only (202400001)'],
+        ],
+      },
       secure_chain_heads: { type: 'one2many', label: 'Secure Chain Heads', hidden: true, fields: {
         company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
         count: { type: 'integer', label: 'Count' }, last_sequence: { type: 'integer', label: 'Sequence' },
@@ -1507,32 +1622,84 @@ export const accountingModels = {
         last_move_name: { type: 'char', label: 'Last Entry Number' },
       } },
     },
-    defaults: () => ({ type: 'general', restrict_mode_hash_table: false }),
+    defaults: () => ({
+      type: 'general', active: true, sequence: 10,
+      refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
+    }),
+    createDefaults: (_db, vals = {}) => ({
+      ...(vals.type === 'bank' && vals.bank_statements_source === undefined ? { bank_statements_source: 'undefined' } : {}),
+      ...(vals.type === 'sale' && vals.invoice_reference_type === undefined ? { invoice_reference_type: 'invoice' } : {}),
+      ...(vals.type === 'sale' && vals.invoice_reference_model === undefined ? { invoice_reference_model: 'odoo' } : {}),
+      ...(vals.refund_sequence === undefined && vals.refund_sequence_prefix && vals.refund_sequence_prefix !== vals.invoice_sequence_prefix ? { refund_sequence: true } : {}),
+    }),
+    onchange: (r, key) => {
+      if (key === 'type') {
+        return {
+          ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
+          ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
+          ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
+        };
+      }
+      return {};
+    },
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    filters: [[
+      { id: 'sales', label: 'Sales', fn: (r) => r.type === 'sale' },
+      { id: 'purchases', label: 'Purchases', fn: (r) => r.type === 'purchase' },
+      { id: 'liquidity', label: 'Liquidity', fn: (r) => isLiquidityJournal(r) },
+      { id: 'miscellaneous', label: 'Miscellaneous', fn: (r) => r.type === 'general' },
+    ]],
     kanban: { title: 'name', lines: ['code', 'type'], counter: { label: 'Entries', model: 'account.move', field: 'journal_id' } },
-    list: ['name', 'type', 'code', 'default_account_id'],
+    list: ['sequence', 'name', 'type', 'code', 'default_account_id', 'active', 'company_id'],
     form: {
       title: 'name',
       chatter: true,
       smart: [{ label: 'Entries', model: 'account.move', field: 'journal_id', target: 'accounting/entries' }],
       groups: [['type', 'code']],
       tabs: (j) => {
-        const cashBank = ['bank', 'cash'].includes(j.type);
+        const liquidity = isLiquidityJournal(j);
         const invoiced = ['sale', 'purchase'].includes(j.type);
-        const accountLabel = { bank: 'Bank Account', cash: 'Cash Account' }[j.type];
+        const cashOrBank = ['cash', 'bank'].includes(j.type);
+        const accountLabel = {
+          sale: 'Default Income Account',
+          purchase: 'Default Expense Account',
+          bank: 'Bank Account',
+          cash: 'Cash Account',
+          credit: 'Credit Card Account',
+        }[j.type];
         const entries = [
           { field: 'default_account_id', label: accountLabel },
-          ...(cashBank ? ['suspense_account_id'] : []),
-          ...(j.type === 'cash' ? ['profit_account_id', 'loss_account_id'] : []),
-          ...(invoiced ? ['invoice_sequence_prefix', 'invoice_sequence_next_number', 'refund_sequence_prefix', 'refund_sequence_next_number'] : []),
-          ...(cashBank ? ['default_for_payments'] : []),
+          ...(liquidity ? ['suspense_account_id'] : []),
+          ...(j.type === 'purchase' ? ['non_deductible_account_id'] : []),
+          ...(cashOrBank ? ['profit_account_id', 'loss_account_id'] : []),
+          ...(invoiced ? [
+            'refund_sequence',
+            'invoice_sequence_prefix',
+            'invoice_sequence_next_number',
+            ...(j.refund_sequence ? ['refund_sequence_prefix', 'refund_sequence_next_number'] : []),
+          ] : []),
+          ...(liquidity ? ['payment_sequence', 'default_for_payments'] : []),
+        ];
+        const entryGroups = [
+          entries,
+          ...(j.type === 'bank' ? [{ title: 'Bank Account', fields: ['bank_account_id', 'bank_statements_source'] }] : []),
+        ];
+        const advancedGroups = [
+          ...(j.type !== 'bank' ? [{ title: 'Automation', fields: ['restrict_mode_hash_table'] }] : []),
+          ...(j.type === 'sale' ? [{
+            title: 'Payment Communications',
+            fields: j.invoice_reference_type === 'none'
+              ? ['invoice_reference_type']
+              : ['invoice_reference_type', 'invoice_reference_model'],
+          }] : []),
         ];
         return [
-          { label: 'Journal Entries', groups: [entries] },
-          ...(cashBank ? [
+          { label: 'Journal Entries', groups: entryGroups },
+          ...(liquidity ? [
             { label: 'Incoming Payments', groups: [['outstanding_receipts_account_id']] },
             { label: 'Outgoing Payments', groups: [['outstanding_payments_account_id', 'check_next_number']] },
           ] : []),
-          { label: 'Advanced Settings', groups: [['restrict_mode_hash_table']] },
+          ...(advancedGroups.length ? [{ label: 'Advanced Settings', groups: advancedGroups }] : []),
         ];
       },
     },
@@ -1826,7 +1993,7 @@ export const accountingModels = {
             fields: [
               { name: 'amount', type: 'monetary', label: 'Payment Amount', required: true, default: String(roundCurrency(residual(r, db) - discountAvailable(db, r), documentCurrency(db, r))) },
               { name: 'date', type: 'date', label: 'Payment Date', required: true, default: today() },
-              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: null, domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && ['bank', 'cash'].includes(j.type) },
+              { name: 'journal_id', type: 'many2one', relation: 'account.journal', label: 'Payment Journal', required: true, default: null, domain: (j) => (!j.company_id || j.company_id === (r.company_id ?? 1)) && isLiquidityJournal(j) },
             ],
           }),
           run: registerPayment,

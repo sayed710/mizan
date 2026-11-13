@@ -121,13 +121,19 @@ export function seed() {
   });
   const companyJournals = {};
   let demoBankJournal = null;
-  JOURNALS.forEach((journal) => {
+  JOURNALS.forEach((journal, idx) => {
     const id = add('account.journal', {
       code: journal.code, name: journal.name, type: journal.type,
+      sequence: (idx + 1) * 10, active: true,
       default_account_id: journal.account ? installedByCode[journal.account] : null,
-      ...(['bank', 'cash'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
+      ...(['bank', 'cash', 'credit'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
       ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
       default_for_payments: journal.default_for_payments === true,
+      ...(journal.refund_sequence != null ? { refund_sequence: journal.refund_sequence } : {}),
+      ...(journal.payment_sequence != null ? { payment_sequence: journal.payment_sequence } : {}),
+      ...(journal.bank_statements_source ? { bank_statements_source: journal.bank_statements_source } : {}),
+      ...(journal.invoice_reference_type ? { invoice_reference_type: journal.invoice_reference_type } : {}),
+      ...(journal.invoice_reference_model ? { invoice_reference_model: journal.invoice_reference_model } : {}),
       ...(journal.invoice_sequence_prefix ? { invoice_sequence_prefix: journal.invoice_sequence_prefix } : {}),
       ...(journal.invoice_sequence_next_number != null ? { invoice_sequence_next_number: journal.invoice_sequence_next_number } : {}),
       ...(journal.refund_sequence_prefix ? { refund_sequence_prefix: journal.refund_sequence_prefix } : {}),

@@ -37,10 +37,11 @@ test('many2one journal picker filters by invoice domain while retaining its curr
   const { FieldInput } = await import('./ui.jsx');
   const { models } = await import('./models/index.js');
   let db = seed();
-  const sale = create(db, 'account.journal', { name: 'Local sale option', code: 'RSAL', type: 'sale', company_id: 1 });
-  const purchase = create(sale.db, 'account.journal', { name: 'Local purchase option', code: 'RPUR', type: 'purchase', company_id: 1 });
-  const bank = create(purchase.db, 'account.journal', { name: 'Local bank option', code: 'RBAN', type: 'bank', company_id: 1 });
-  const foreign = create(bank.db, 'account.journal', { name: 'Other company sale option', code: 'ROTH', type: 'sale', company_id: 2 });
+  const acc = (code) => db.records['account.account'].find((a) => a.code === code).id;
+  const sale = create(db, 'account.journal', { name: 'Local sale option', code: 'RSAL', type: 'sale', company_id: 1, default_account_id: acc('400000') });
+  const purchase = create(sale.db, 'account.journal', { name: 'Local purchase option', code: 'RPUR', type: 'purchase', company_id: 1, default_account_id: acc('600000') });
+  const bank = create(purchase.db, 'account.journal', { name: 'Local bank option', code: 'RBAN', type: 'bank', company_id: 1, suspense_account_id: acc('101404') });
+  const foreign = create(bank.db, 'account.journal', { name: 'Other company sale option', code: 'ROTH', type: 'sale', company_id: 2, default_account_id: acc('400000') });
   db = foreign.db;
   const field = models['account.move'].fields.journal_id;
   const render = (move_type, value) => renderToStaticMarkup(React.createElement(FieldInput, { db, field, value, record: { company_id: 1, move_type }, onChange: () => {} }));

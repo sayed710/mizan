@@ -450,7 +450,9 @@ test('Regression: Two-company ownership for depreciation, disposal, deferral and
 
   const c2MiscJournal = create(db, 'account.journal', { name: 'C2 Misc', code: 'MISC2', type: 'general', company_id: c2Id });
   db = c2MiscJournal.db;
-  const c2BankJournal = create(db, 'account.journal', { name: 'C2 Bank', code: 'BNK2', type: 'bank', company_id: c2Id });
+  const c2Suspense = create(db, 'account.account', { code: '101404', name: 'C2 Suspense', account_type: 'asset_current', company_id: c2Id });
+  db = c2Suspense.db;
+  const c2BankJournal = create(db, 'account.journal', { name: 'C2 Bank', code: 'BNK2', type: 'bank', company_id: c2Id, suspense_account_id: c2Suspense.id });
   db = c2BankJournal.db;
 
   const c2AssetAcc = create(db, 'account.account', { code: '150000', name: 'C2 Asset', account_type: 'asset_fixed', company_id: c2Id });
@@ -595,10 +597,10 @@ test('Regression: Cross-company substitutions for journal, account and tax', () 
   db = c2Res.db;
   const c2Id = c2Res.id;
 
-  const c2Journal = create(db, 'account.journal', { name: 'C2 Sale', code: 'S2', type: 'sale', company_id: c2Id });
-  db = c2Journal.db;
   const c2Acc = create(db, 'account.account', { code: '700000', name: 'C2 Revenue', account_type: 'income', company_id: c2Id });
   db = c2Acc.db;
+  const c2Journal = create(db, 'account.journal', { name: 'C2 Sale', code: 'S2', type: 'sale', company_id: c2Id, default_account_id: c2Acc.id });
+  db = c2Journal.db;
   const c2Tax = create(db, 'account.tax', { name: 'C2 VAT', amount: 20, type_tax_use: 'sale', company_id: c2Id });
   db = c2Tax.db;
 

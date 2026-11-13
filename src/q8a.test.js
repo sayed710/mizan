@@ -140,8 +140,7 @@ test('Qodo 19: upgraded banks with shared suspense accounts configure suspense i
   const bankJournal = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
   const suspenseAccount = search(db, 'account.account').find((a) => a.code === '101404');
   db = write(db, 'account.account', suspenseAccount.id, { company_id: null });
-  db = write(db, 'account.journal', bankJournal.id, { suspense_account_id: null });
-  db = { ...db, schema_version: 29 };
+  db = { ...db, schema_version: 29, records: { ...db.records, 'account.journal': db.records['account.journal'].map((j) => (j.id === bankJournal.id ? { ...j, suspense_account_id: null } : j)) } };
 
   const migrated = migrate(db, 30);
   const upgradedJournal = read(migrated, 'account.journal', bankJournal.id);

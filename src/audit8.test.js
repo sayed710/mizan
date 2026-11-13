@@ -286,7 +286,7 @@ test('Item 1e: Statement line rejects batch_payment_id from another company', ()
   db = postMove(bill2.db, bill2.id);
 
   const liquidity = create(db, 'account.account', { name: 'Bank 2 Liquidity', code: '999802', account_type: 'asset_cash', company_id: c2.id });
-  const journal2 = create(liquidity.db, 'account.journal', { name: 'Bank 2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: liquidity.id });
+  const journal2 = create(liquidity.db, 'account.journal', { name: 'Bank 2', code: 'BNK2', type: 'bank', company_id: c2.id, default_account_id: liquidity.id, suspense_account_id: liquidity.id });
   db = journal2.db;
 
   const batch2 = create(db, 'account.batch.payment', {

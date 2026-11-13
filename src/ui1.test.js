@@ -272,10 +272,11 @@ test('rendered dashboard shows empty states for journals with no posted entries 
   let db = seed();
   const emptyBankAcc = create(db, 'account.account', { code: '101488', name: 'Empty Bank Account', account_type: 'asset_cash', company_id: 1 });
   const emptyCashAcc = create(emptyBankAcc.db, 'account.account', { code: '101588', name: 'Empty Cash Account', account_type: 'asset_cash', company_id: 1 });
-  const emptySale = create(emptyCashAcc.db, 'account.journal', { name: 'Empty Sale', code: 'ESAL', type: 'sale', invoice_sequence_prefix: 'ES/' });
-  const emptyPurchase = create(emptySale.db, 'account.journal', { name: 'Empty Purchase', code: 'EPUR', type: 'purchase', invoice_sequence_prefix: 'EP/' });
-  const emptyBank = create(emptyPurchase.db, 'account.journal', { name: 'Empty Bank', code: 'EBNK', type: 'bank', default_account_id: emptyBankAcc.id });
-  const emptyCash = create(emptyBank.db, 'account.journal', { name: 'Empty Cash', code: 'ECSH', type: 'cash', default_account_id: emptyCashAcc.id });
+  const suspId = accountId(emptyCashAcc.db, '101404', 1);
+  const emptySale = create(emptyCashAcc.db, 'account.journal', { name: 'Empty Sale', code: 'ESAL', type: 'sale', default_account_id: accountId(emptyCashAcc.db, '400000', 1), invoice_sequence_prefix: 'ES/' });
+  const emptyPurchase = create(emptySale.db, 'account.journal', { name: 'Empty Purchase', code: 'EPUR', type: 'purchase', default_account_id: accountId(emptySale.db, '600000', 1), invoice_sequence_prefix: 'EP/' });
+  const emptyBank = create(emptyPurchase.db, 'account.journal', { name: 'Empty Bank', code: 'EBNK', type: 'bank', default_account_id: emptyBankAcc.id, suspense_account_id: suspId });
+  const emptyCash = create(emptyBank.db, 'account.journal', { name: 'Empty Cash', code: 'ECSH', type: 'cash', default_account_id: emptyCashAcc.id, suspense_account_id: suspId });
   // Also post an entry on an unrelated cash journal so the empty cash card is clearly isolated.
   const seededCash = search(emptyCash.db, 'account.journal').find((j) => j.type === 'cash' && j.code === 'CSH1');
   db = postEntry(emptyCash.db, {
@@ -317,7 +318,7 @@ test('rendered dashboard shows empty states for journals with no posted entries 
 
 test('sale journal with only a posted manual entry still shows Create your first invoice.', async () => {
   let db = seed();
-  const emptySale = create(db, 'account.journal', { name: 'Manual Only Sale', code: 'MSAL', type: 'sale', invoice_sequence_prefix: 'MS/' });
+  const emptySale = create(db, 'account.journal', { name: 'Manual Only Sale', code: 'MSAL', type: 'sale', default_account_id: accountId(db, '400000'), invoice_sequence_prefix: 'MS/' });
   db = postEntry(emptySale.db, {
     journal: 'MSAL', journal_id: emptySale.id, date: today(), ref: 'Manual adjustment',
     lines: [{ account_id: accountId(emptySale.db, '400000'), debit: 100 }, { account_id: accountId(emptySale.db, '301000'), credit: 100 }],
@@ -368,8 +369,8 @@ test('non-empty journal cards omit empty-state taglines, separators, and onboard
 test('empty sales journal card links company setup to the journal company or active company', async () => {
   let db = seed();
   const c2 = create(db, 'res.company', { name: 'Branch Co', currency_id: read(db, 'res.company', 1).currency_id });
-  const branchSale = create(c2.db, 'account.journal', { name: 'Branch Sale', code: 'BSAL', type: 'sale', company_id: c2.id, invoice_sequence_prefix: 'BS/' });
-  const sharedSale = create(branchSale.db, 'account.journal', { name: 'Shared Sale', code: 'SSAL', type: 'sale', invoice_sequence_prefix: 'SS/' });
+  const branchSale = create(c2.db, 'account.journal', { name: 'Branch Sale', code: 'BSAL', type: 'sale', company_id: c2.id, default_account_id: accountId(c2.db, '400000'), invoice_sequence_prefix: 'BS/' });
+  const sharedSale = create(branchSale.db, 'account.journal', { name: 'Shared Sale', code: 'SSAL', type: 'sale', default_account_id: accountId(branchSale.db, '400000'), invoice_sequence_prefix: 'SS/' });
   db = {
     ...sharedSale.db,
     settings: { ...sharedSale.db.settings, current_company_id: c2.id, allowed_company_ids: [1, c2.id] },
@@ -382,7 +383,7 @@ test('empty sales journal card links company setup to the journal company or act
 test('empty bank journal statement import imports into that journal and exits empty state', async () => {
   let db = seed();
   const emptyBankAcc = create(db, 'account.account', { code: '101489', name: 'Import Bank Account', account_type: 'asset_cash', company_id: 1 });
-  const emptyBank = create(emptyBankAcc.db, 'account.journal', { name: 'Import Bank', code: 'IBNK', type: 'bank', default_account_id: emptyBankAcc.id });
+  const emptyBank = create(emptyBankAcc.db, 'account.journal', { name: 'Import Bank', code: 'IBNK', type: 'bank', default_account_id: emptyBankAcc.id, suspense_account_id: accountId(emptyBankAcc.db, '101404', 1) });
   db = emptyBank.db;
 
   const { initStore, commit, getDb } = await import('./store.js');

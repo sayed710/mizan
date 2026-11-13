@@ -14,7 +14,8 @@ test('outbound checks keep journal-specific sequential numbers on payments after
   let db = branch.db;
   for (const companyId of [1, branch.id]) {
     const bank = search(db, 'account.account').find((account) => account.code === '101401');
-    const journal = create(db, 'account.journal', { name: 'Check journal', code: `CHK${companyId}`, type: 'bank', company_id: companyId, default_account_id: bank.id, check_next_number: 700 });
+    const suspense = search(db, 'account.account').find((account) => account.code === '101404' && (!account.company_id || account.company_id === companyId)) ?? bank;
+    const journal = create(db, 'account.journal', { name: 'Check journal', code: `CHK${companyId}`, type: 'bank', company_id: companyId, default_account_id: bank.id, suspense_account_id: suspense.id, check_next_number: 700 });
     db = journal.db;
     const issue = () => {
       const bill = create(db, 'account.move', { move_type: 'in_invoice', company_id: companyId, partner_id: 7, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });

@@ -47,14 +47,27 @@ export const CHART = [
 
 
 export const JOURNALS = [
-  { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, company_default: 'sales' },
-  { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
-  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true },
-  { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501' },
+  { code: 'INV', name: 'Customer Invoices', type: 'sale', account: '400000', invoice_sequence_prefix: 'INV/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RINV/', refund_sequence_next_number: 1, invoice_reference_type: 'invoice', invoice_reference_model: 'odoo', company_default: 'sales' },
+  { code: 'BILL', name: 'Vendor Bills', type: 'purchase', account: '600000', invoice_sequence_prefix: 'BILL/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RBILL/', refund_sequence_next_number: 1, company_default: 'purchases' },
+  { code: 'BNK1', name: 'Bank', type: 'bank', account: '101401', default_for_payments: true, payment_sequence: true, bank_statements_source: 'undefined' },
+  { code: 'CSH1', name: 'Cash', type: 'cash', account: '101501', payment_sequence: true },
   { code: 'MISC', name: 'Miscellaneous Operations', type: 'general', company_default: 'general' },
   { code: 'SAL', name: 'Salaries', type: 'general', account: '620000' },
-  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1, company_default: 'pos' },
+  { code: 'POSS', name: 'Point of Sale', type: 'sale', account: '400000', invoice_sequence_prefix: 'POS/', invoice_sequence_next_number: 1, refund_sequence: true, refund_sequence_prefix: 'RPOS/', refund_sequence_next_number: 1, invoice_reference_type: 'invoice', invoice_reference_model: 'odoo', company_default: 'pos' },
 ];
+
+export const LIQUIDITY_JOURNAL_TYPES = ['bank', 'cash', 'credit'];
+export const STATEMENT_JOURNAL_TYPES = ['bank', 'credit'];
+/** True when a journal (or journal type) acts as a liquidity journal (bank, cash, or credit card). */
+export const isLiquidityJournal = (journalOrType) => LIQUIDITY_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
+/** True when a journal (or journal type) supports bank/card statement reconciliation and outstanding payment accounts. */
+export const isStatementJournal = (journalOrType) => STATEMENT_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
+
+/** Assign a dedicated P{code}/{year}/ payment number or share the journal's entry sequence. */
+export function paymentName(db, journal, date, moveName = null) {
+  if (journal?.payment_sequence) return nextName(db, 'account.payment', `P${journal.code}/${date.slice(0, 4)}/`);
+  return moveName ?? nextName(db, 'account.move', `${journal.code}/${date.slice(0, 4)}/`);
+}
 
 const uniqueByCode = (records, model, code, predicate = () => true) => {
   const matches = records.filter((record) => record.code === code && predicate(record));
@@ -617,7 +630,7 @@ export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
     [journal] = defaults;
   }
   if (journal.active === false) throw new Error('The selected payment journal is archived');
-  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Payment journal must be a bank or cash journal');
+  if (!isLiquidityJournal(journal)) throw new Error('Payment journal must be a bank or cash journal');
   if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
   const id = assertCompanyAccount(db, journal.default_account_id, companyId, 'asset_cash', 'The selected journal liquidity account');
   const account = read(db, 'account.account', id);

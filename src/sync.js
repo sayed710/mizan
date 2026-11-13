@@ -761,7 +761,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
     ].filter(Number.isInteger) : [];
     const includeCashBasisTargets = model === 'account.move' && Boolean(rec.cash_basis_origin_move_id);
     // Keep specific authorization failures ahead of the generic locked-form error.
-    const err = validate(model, rec, seen) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
+    const err = validate(model, rec, seen, !before) ?? authorityRules[model]?.(seen, before, rec, { isAdmin, login, name: author })
       ?? models[model].guard?.(seen, before, rec, { isAdmin, login, name: author, companies, settings: isAdmin ? d.settings : null, archivedOriginIds, includeCashBasisTargets });
     if (err) throw new Error(err);
     if (model === 'account.move') {

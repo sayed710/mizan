@@ -21,6 +21,7 @@ function makeBankJournal(db, { code = 'BNK2', name = 'Bank B', companyId = null 
     type: 'bank',
     ...(companyId ? { company_id: companyId } : {}),
     default_account_id: accountId(db, '101501', companyId),
+    suspense_account_id: accountId(db, '101404', companyId),
     outstanding_receipts_account_id: accountId(db, '101402', companyId),
     outstanding_payments_account_id: accountId(db, '101403', companyId),
     check_next_number: 500,

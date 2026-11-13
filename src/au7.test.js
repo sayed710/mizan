@@ -626,12 +626,14 @@ test('Area C: Terms, partial payment, aging by due date, early discount, follow-
 
   // 5. Outbound check numbering and cancellation keeping history
   const bankAcc = search(db, 'account.account').find((a) => a.code === '101401').id;
+  const suspenseAcc = search(db, 'account.account').find((a) => a.code === '101404').id;
   const checkJournal = create(db, 'account.journal', {
     name: 'Check Journal',
     code: 'CHK',
     type: 'bank',
     company_id: 1,
     default_account_id: bankAcc,
+    suspense_account_id: suspenseAcc,
     check_next_number: 501,
   });
   db = checkJournal.db;

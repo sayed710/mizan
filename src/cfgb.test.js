@@ -57,8 +57,9 @@ test('two sales journals number independently', () => {
 
 test('posting an invoice line without an account raises an error if journal has no default account', () => {
   let db = seed();
-  const j = create(db, 'account.journal', { name: 'No Default Sale', code: 'NDS', type: 'sale', company_id: 1, default_account_id: null, invoice_sequence_prefix: 'NDS/', invoice_sequence_next_number: 1 });
-  db = j.db;
+  const inc = search(db, 'account.account').find((a) => a.code === '400000' && (a.company_id ?? 1) === 1);
+  const j = create(db, 'account.journal', { name: 'No Default Sale', code: 'NDS', type: 'sale', company_id: 1, default_account_id: inc.id, invoice_sequence_prefix: 'NDS/', invoice_sequence_next_number: 1 });
+  db = { ...j.db, records: { ...j.db.records, 'account.journal': j.db.records['account.journal'].map((rec) => (rec.id === j.id ? { ...rec, default_account_id: null } : rec)) } };
   const move = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, journal_id: j.id, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 10, tax: 0 }] });
   assert.throws(() => postMove(move.db, move.id), /no default account/i);
 });

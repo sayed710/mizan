@@ -3,6 +3,7 @@
 // Every function returns a new db; nothing is mutated.
 import { models } from './registry.js';
 import { distributionError } from './analytic_distribution.js';
+import { fieldRequired } from './field-metadata.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD', currency_unit: 'Dollars', currency_unit_currency: 'USD' } });
 
@@ -55,9 +56,9 @@ export function read(db, model, id) {
 }
 
 /** @returns {string|null} error message when a required field is empty */
-export function validate(model, vals, db) {
+export function validate(model, vals, db, isNew = false) {
   const missing = Object.entries(models[model].fields).find(
-    ([k, f]) => f.required && (vals[k] == null || vals[k] === ''),
+    ([k, f]) => fieldRequired(f, vals, db, isNew) && (vals[k] == null || vals[k] === ''),
   );
   return missing ? `${missing[1].label} is required` : distributionError(models[model].fields, vals, db);
 }
@@ -115,7 +116,7 @@ export function create(db, model, vals, ctx = undefined) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec, ctx);
+  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   const res = {

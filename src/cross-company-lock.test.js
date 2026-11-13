@@ -12,7 +12,7 @@ let sharedBankId;
 function fixture(lockedCompany) {
   let db = seed();
   const company = createCompany(db, { name: 'Second company', currency_id: db.settings.base_currency_id }); db = company.db;
-  const sharedBank = create(db, 'account.journal', { name: 'Shared Bank', code: 'SBNK', type: 'bank', company_id: null, default_account_id: db.records['account.account'].find((a) => a.code === '101401').id });
+  const sharedBank = create(db, 'account.journal', { name: 'Shared Bank', code: 'SBNK', type: 'bank', company_id: null, default_account_id: db.records['account.account'].find((a) => a.code === '101401').id, suspense_account_id: db.records['account.account'].find((a) => a.code === '101404').id });
   db = sharedBank.db;
   sharedBankId = sharedBank.id;
   const partner = db.records['res.partner'][0].id;

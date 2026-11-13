@@ -2,6 +2,7 @@ const JOURNAL_LISTS = {
   sale: 'invoices',
   purchase: 'bills',
   bank: 'bank',
+  credit: 'bank',
   cash: 'entries',
   general: 'entries',
 };

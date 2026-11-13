@@ -386,7 +386,8 @@ test('bank and cash journal cards compute outstanding payments only when configu
   assert.equal(initialCash.miscCount, 1);
   assert.equal(initialCash.miscBalance, 5000);
 
-  const emptyBank = create(db, 'account.journal', { name: 'New Bank', code: 'NBK', type: 'bank', default_account_id: create(db, 'account.account', { code: '101499', name: 'New Bank Acc', account_type: 'asset_cash', company_id: 1 }).id });
+  const bankAcc = create(db, 'account.account', { code: '101499', name: 'New Bank Acc', account_type: 'asset_cash', company_id: 1 });
+  const emptyBank = create(bankAcc.db, 'account.journal', { name: 'New Bank', code: 'NBK', type: 'bank', default_account_id: bankAcc.id, suspense_account_id: accountId(bankAcc.db, '101404') });
   db = emptyBank.db;
   const emptyBankCard = journalCards(db).find((c) => c.journal.id === emptyBank.id);
   assert.equal(emptyBankCard.hasPosted, false);
@@ -498,9 +499,17 @@ test('journalCards surfaces misconfigured outstanding account errors on that jou
   const c2OutRec = create(bankAcc.db, 'account.account', { code: '101495', name: 'C2 Only Out', account_type: 'asset_current', company_id: c2.id });
   const sharedBank = create(c2OutRec.db, 'account.journal', {
     name: 'Misconfigured Shared Bank', code: 'MBNK', type: 'bank', company_id: null,
-    default_account_id: bankAcc.id, outstanding_receipts_account_id: c2OutRec.id,
+    default_account_id: bankAcc.id, suspense_account_id: accountId(c2OutRec.db, '101404'),
   });
-  db = { ...sharedBank.db, settings: { ...sharedBank.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] } };
+  // Simulate legacy misconfigured state directly since journal guards reject cross-company outstanding accounts on write.
+  const injectedRecords = sharedBank.db.records['account.journal'].map((j) => (
+    j.id === sharedBank.id ? { ...j, outstanding_receipts_account_id: c2OutRec.id } : j
+  ));
+  db = {
+    ...sharedBank.db,
+    records: { ...sharedBank.db.records, 'account.journal': injectedRecords },
+    settings: { ...sharedBank.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] },
+  };
   const cards = journalCards(db);
   const broken = cards.find((c) => c.journal.id === sharedBank.id);
   assert.equal(broken.kind, 'error');

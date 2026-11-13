@@ -1131,6 +1131,37 @@ MIGRATIONS.push({ version: 39, name: 'Recover fiscal position exclusions, keep d
   };
 } });
 
+MIGRATIONS.push({ version: 40, name: 'journal-parity', up(db) {
+  const journals = db.records['account.journal'] ?? [];
+  if (!journals.length) return db;
+  const nextJournals = journals.map((j, idx) => {
+    const invoiced = j.type === 'sale' || j.type === 'purchase';
+    const liquidity = j.type === 'bank' || j.type === 'cash' || j.type === 'credit';
+    const hasDistinctRefund = Boolean(
+      j.refund_sequence_prefix && j.refund_sequence_prefix !== j.invoice_sequence_prefix,
+    );
+    return {
+      ...j,
+      sequence: j.sequence ?? (idx + 1) * 10,
+      active: j.active === undefined ? true : j.active,
+      refund_sequence: typeof j.refund_sequence === 'boolean'
+        ? j.refund_sequence
+        : (invoiced && hasDistinctRefund),
+      payment_sequence: typeof j.payment_sequence === 'boolean'
+        ? j.payment_sequence
+        : liquidity,
+      ...(j.type === 'bank' && j.bank_statements_source === undefined
+        ? { bank_statements_source: 'undefined' }
+        : {}),
+      ...(j.type === 'sale' ? {
+        invoice_reference_type: j.invoice_reference_type ?? 'invoice',
+        invoice_reference_model: j.invoice_reference_model ?? 'odoo',
+      } : {}),
+    };
+  });
+  return { ...db, records: { ...db.records, 'account.journal': nextJournals } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

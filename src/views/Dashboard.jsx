@@ -5,6 +5,7 @@ import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
+import { isLiquidityJournal, isStatementJournal } from '../models/ledger.js';
 import { statementLinesWithoutJournal } from '../models/bank.js';
 import { companyViewDb } from '../companyView.js';
 import { currentCompany } from '../models/company.js';
@@ -104,13 +105,14 @@ function JournalCard({ card, companyId }) {
       </section>
     );
   }
-  if (card.kind === 'bank' || card.kind === 'cash') {
+  if (isLiquidityJournal(card.kind)) {
     const empty = !card.hasPosted && !card.toReconcile;
+    const isStatement = isStatementJournal(card.kind);
     return (
       <section className="panel journal-card">
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
-          card.kind === 'bank' ? (
+          isStatement ? (
             <>
               <p className="journal-empty muted">{t('Import your bank statements to reconcile them.')}</p>
               <label className="btn primary sm">
@@ -136,7 +138,7 @@ function JournalCard({ card, companyId }) {
           <>
             <dl>
               <div><dt>{t('Balance')}</dt><dd>{money(card.balance)}</dd></div>
-              {card.kind === 'bank' && card.hasOutstandingAccounts && (
+              {isStatement && card.hasOutstandingAccounts && (
                 <div><dt>{card.outstandingCount} {t('Outstanding Payments')}</dt><dd>{money(card.outstandingBalance)}</dd></div>
               )}
               {card.miscCount > 0 && (
@@ -144,7 +146,7 @@ function JournalCard({ card, companyId }) {
               )}
             </dl>
             <RateNote count={card.unratedCount} />
-            {card.kind === 'bank' && card.toReconcile > 0 && (
+            {isStatement && card.toReconcile > 0 && (
               <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
             )}
           </>

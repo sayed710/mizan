@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { journalItems } from '../models/ledger.js';
+import { isLiquidityJournal, journalItems } from '../models/ledger.js';
 import { read } from '../orm.js';
 import { commit, getDb, useDb } from '../store.js';
 import { reconcileJournalItems, unreconcileJournalItems, writeoffJournalItem } from '../models/pay.js';
@@ -79,7 +79,7 @@ export function JournalItems({ leaf = {} } = {}) {
       <label>{t('Date')} <input required type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label>
       {action !== 'Unreconcile' && <label>{t('Amount in Invoice Currency')} <input required={action === 'Write Off'} type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={t('Available balance')} /></label>}
       {action === 'Write Off' && <>
-        <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => ['bank', 'cash'].includes(j.type)).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
+        <label>{t('Journal')} <select required value={journalId} onChange={(e) => setJournalId(e.target.value)}><option value="">{t('Select a journal')}</option>{(db.records['account.journal'] ?? []).filter((j) => isLiquidityJournal(j)).map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}</select></label>
         <label>{t('Write-off Account')} <select required value={accountId} onChange={(e) => setAccountId(e.target.value)}><option value="">{t('Select an account')}</option>{(db.records['account.account'] ?? []).filter((a) => a.active !== false && !a.deprecated && !['asset_receivable', 'liability_payable', 'off_balance'].includes(a.account_type)).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label>
         <label>{t('Write-off Label')} <input required value={label} onChange={(e) => setLabel(e.target.value)} /></label>
       </>}

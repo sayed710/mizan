@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyDiff, diffDb } from './sync.js';
-import { create, read, write } from './orm.js';
+import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
@@ -50,8 +50,10 @@ test('Revalue Foreign Currency form action saves both generated entries through 
 
 test('expense journal selector and posting allow only company general or purchase journals', () => {
   const initial = seed();
-  const bank = create(initial, 'account.journal', { name: 'Q13 Expense Bank', code: 'Q13B', type: 'bank', company_id: 1 });
-  const sales = create(bank.db, 'account.journal', { name: 'Q13 Expense Sales', code: 'Q13S', type: 'sale', company_id: 1 });
+  const suspenseAcc = search(initial, 'account.account').find((a) => a.code === '101404');
+  const incomeAcc = search(initial, 'account.account').find((a) => a.code === '400000');
+  const bank = create(initial, 'account.journal', { name: 'Q13 Expense Bank', code: 'Q13B', type: 'bank', company_id: 1, suspense_account_id: suspenseAcc.id });
+  const sales = create(bank.db, 'account.journal', { name: 'Q13 Expense Sales', code: 'Q13S', type: 'sale', company_id: 1, default_account_id: incomeAcc.id });
   const expense = create(sales.db, 'hr.expense', {
     name: 'Employee travel', employee_id: 2, company_id: 1, date: '2026-06-01', total_amount: 100,
     tax: 0, payment_mode: 'own_account',

@@ -161,7 +161,7 @@ test('batch rejects invoice currency different from fixed journal currency befor
   const eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
   const made = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 3, company_id: 1, invoice_date: '2026-01-01', invoice_line_ids: [{ name: 'Service', qty: 1, price_unit: 100, tax: 0 }] });
   db = postMove(made.db, made.id);
-  const j = create(db, 'account.journal', { name: 'Foreign bank', code: 'FBK', type: 'bank', company_id: 1, currency_id: eur.id, default_account_id: accountId(db, '101501', 1) });
+  const j = create(db, 'account.journal', { name: 'Foreign bank', code: 'FBK', type: 'bank', company_id: 1, currency_id: eur.id, default_account_id: accountId(db, '101501', 1), suspense_account_id: accountId(db, '101404', 1) });
   const b = create(j.db, 'account.batch.payment', { batch_type: 'inbound', company_id: 1, journal_id: j.id, date: '2026-01-02', lines: [{ move_id: made.id, amount: 100 }] });
   assert.throws(() => postBatch(b.db, read(b.db, 'account.batch.payment', b.id)), /currency must match/i);
   assert.equal(read(b.db, 'account.batch.payment', b.id).state, 'draft');

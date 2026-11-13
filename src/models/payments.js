@@ -4,7 +4,7 @@ import { nextName, today, validDate } from './common.js';
 import { discountAvailable, payMove, payWithDiscount } from './accounting.js';
 import { cents, round, roundCurrency, documentCurrency, companyCurrencyRecord, formatCurrency } from '../money.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
-import { paymentJournal } from './ledger.js';
+import { isLiquidityJournal, paymentJournal } from './ledger.js';
 import { nextCheckNumber } from './pay.js';
 import { isPaymentMatched } from './bank.js';
 import { recipientBankCompanyError } from './company.js';
@@ -154,7 +154,7 @@ export function postBatch(db, batch) {
     : [];
   const needsCheckCount = batch.batch_type === 'outbound' ? invoiceIds.length + unnumberedPaymentLines.length : 0;
   if (batch.batch_type === 'outbound' && needsCheckCount > 0 && (!Number.isSafeInteger(requested) || requested < 1)) throw new Error('Set the first check number to print');
-  if (!['bank', 'cash'].includes(journal.type) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
+  if (!isLiquidityJournal(journal) || (batch.batch_type === 'outbound' && journal.type !== 'bank')) {
     throw new Error(batch.batch_type === 'outbound' ? 'Checks require a bank journal' : 'Inbound batches require a bank or cash journal');
   }
   if (journal.company_id != null && journal.company_id !== company) throw new Error('Batch journal and invoices must belong to the same company');
