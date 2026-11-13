@@ -22,11 +22,14 @@ function currentRateInfo(currency, db) {
   const row = applicableRate(currency, date, companyId);
   // The company currency is the unit of every rate: Odoo shows it at 1 with no rate date.
   if (own?.id === currency.id) return { rate: 1, date: null };
-  if (!row) return { rate: null, date: null };
   const base = findBaseCurrency(db);
-  if (!own || !base || own.id === base.id) return { rate: Number(row.rate), date: row.date };
+  // The base currency's rate is implicitly 1 when it has no rate row, as in conversions.
+  const rate = row ? Number(row.rate) : base?.id === currency.id ? 1 : null;
+  if (rate == null) return { rate: null, date: null };
+  const rateDate = row?.date ?? null;
+  if (!own || !base || own.id === base.id) return { rate, date: rateDate };
   const ownRow = applicableRate(own, date, companyId);
-  return ownRow ? { rate: Number(row.rate) / Number(ownRow.rate), date: row.date } : { rate: null, date: null };
+  return ownRow ? { rate: rate / Number(ownRow.rate), date: rateDate } : { rate: null, date: null };
 }
 
 export function baseCurrency(db) {

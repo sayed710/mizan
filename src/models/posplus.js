@@ -503,7 +503,10 @@ export const posPlusModels = {
   },
   'pos.config': {
     label: 'Point of Sale',
-    guard: (db, before, after) => cashRoundingError(db, after.rounding_method_id, before?.rounding_method_id, after.company_id ?? 1, findCompanyCurrencyRecord(db, after.company_id ?? 1)?.id),
+    guard: (db, before, after) => {
+      const target = (c) => ({ id: c.rounding_method_id, companyId: c.company_id ?? 1, currencyId: findCompanyCurrencyRecord(db, c.company_id ?? 1)?.id });
+      return cashRoundingError(db, target(after), before && target(before));
+    },
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { create, read } from './orm.js';
+import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
@@ -79,4 +79,30 @@ test('the printed invoice shows the payment-term note or name unless the term is
   assert.equal(invoiceTermNote(db, { invoice_payment_term_id: named.id }), 'Payment Terms: 45 Days');
   assert.equal(invoiceTermNote(db, { invoice_payment_term_id: hidden.id }), null);
   assert.equal(invoiceTermNote(db, {}), null);
+});
+
+test('editing a rounding method later does not block writes on invoices that already use it', () => {
+  let db = seed();
+  const method = rounding(db, { name: 'Shared', strategy: 'biggest_tax' });
+  db = method.db;
+  const move = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', invoice_cash_rounding_id: method.id, invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 10, tax_ids: [1] }] });
+  db = move.db;
+  const other = db.records['res.currency'].find((c) => c.id !== db.records['res.company'][0].currency_id);
+  db = write(db, 'account.cash.rounding', method.id, { currency_ids: [other.id] });
+  assert.doesNotThrow(() => write(db, 'account.move', move.id, { ref: 'still editable' }));
+  const cleared = write(db, 'account.move', move.id, { invoice_cash_rounding_id: false });
+  assert.throws(() => write(cleared, 'account.move', move.id, { invoice_cash_rounding_id: method.id }), /does not apply to this currency/);
+});
+
+test('the base currency shows an implicit current rate of 1 against another company currency', () => {
+  const db = seed();
+  const own = db.records['res.company'].find((c) => c.id === 1).currency_id;
+  const base = db.records['res.currency'].find((c) => c.id !== own && (c.rate_ids ?? []).length === 0) ?? db.records['res.currency'].find((c) => c.id !== own);
+  const ownRec = db.records['res.currency'].find((c) => c.id === own);
+  const setup = {
+    ...db,
+    settings: { ...db.settings, base_currency_id: base.id },
+    records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === base.id ? { ...c, rate_ids: [] } : c.id === own ? { ...ownRec, rate_ids: [{ date: '2020-01-01', rate: 4 }] } : c)) },
+  };
+  assert.equal(read(setup, 'res.currency', base.id).rate, 0.25);
 });

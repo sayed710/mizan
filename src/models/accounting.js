@@ -225,7 +225,8 @@ const untaxedAmount = (r, db) => {
     if (/configure.*currency/i.test(err?.message)) return null;
     throw err;
   }
-  return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id) }).untaxed;
+  const side = ['out_refund', 'in_refund'].includes(r.move_type) ? 'refund' : 'invoice';
+  return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id), side }).untaxed;
 };
 
 /** Sign a document-currency amount: credit notes and vendor refunds show as negative, avoiding -0. */
@@ -1977,8 +1978,8 @@ export const accountingModels = {
     label: 'Invoices',
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
-      const company = after.company_id ?? 1;
-      const roundingErr = cashRoundingError(db, after.invoice_cash_rounding_id, before?.invoice_cash_rounding_id, company, after.currency_id ?? findCompanyCurrencyRecord(db, company)?.id);
+      const roundingTarget = (m) => ({ id: m.invoice_cash_rounding_id, companyId: m.company_id ?? 1, currencyId: m.currency_id ?? findCompanyCurrencyRecord(db, m.company_id ?? 1)?.id });
+      const roundingErr = cashRoundingError(db, roundingTarget(after), before && roundingTarget(before));
       if (roundingErr) return roundingErr;
       if (after.invoice_payment_term_id) {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);

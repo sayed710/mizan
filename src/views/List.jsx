@@ -6,6 +6,7 @@ import { display, FieldInput, isNumeric, money, OptionalColsMenu, Tag, useOption
 import { commit, companiesOf, getDb } from '../store.js';
 import { companySum, unratedCount } from '../models/money.js';
 import { PAGE_SIZE } from './paging.js';
+import { today } from '../models/common.js';
 import { RateNote } from './RateNote.jsx';
 
 function sortRecords(db, fields, records, sort) {
@@ -149,8 +150,10 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
         const isTags = !editable && field.type === 'many2many' && field.widget === 'many2many_tags';
         const text = editable || isTags ? null : display(db, field, r[f], r);
         const badge = editable || isTags ? null : badgeClass(field.badge, r[f]);
+        // Odoo's relative-date widget shows a past date in red.
+        const pastDue = field.widget === 'remaining_days' && text && r[f] && r[f] < today();
         return (
-          <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : ''].filter(Boolean).join(' ')}
+          <td key={f} className={[isNumeric(field) ? 'num' : '', field.bold ? 'bold' : '', pastDue ? 'text-danger' : ''].filter(Boolean).join(' ')}
             onClick={editable ? (e) => e.stopPropagation() : undefined}>
             {editable ? <FieldInput db={db} field={field} value={r[f]} label={colLabel(fields, f, listLabels)}
               onChange={(value) => { try { commit(write(getDb(), model, r.id, { [f]: value })); } catch (e) { alert(t(e.message)); } }} />
