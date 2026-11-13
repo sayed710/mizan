@@ -407,3 +407,69 @@ test('Arabic translations cover new Chart of Accounts labels and errors', async 
     globalThis.localStorage = prevStorage;
   }
 });
+
+test('shared chart accounts take company or shared default taxes, and the picker offers them', () => {
+  let db = seed();
+  const shared = search(db, 'account.account').find((a) => !a.company_id && a.account_type === 'income');
+  assert.ok(shared, 'seeded chart has a shared income account');
+  const saleTax = search(db, 'account.tax').find((x) => x.name === 'VAT 14%' && x.type_tax_use === 'sale');
+  db = write(db, 'account.account', shared.id, { tax_ids: [saleTax.id] });
+  assert.deepEqual(read(db, 'account.account', shared.id).tax_ids, [saleTax.id]);
+  const domain = models['account.account'].fields.tax_ids.domain;
+  assert.equal(domain(saleTax, read(db, 'account.account', shared.id)), true);
+  const neutral = create(db, 'account.tax', { name: 'Neutral 3%', type_tax_use: 'sale', amount: 3 });
+  const company = create(neutral.db, 'account.account', { code: '490200', name: 'Company Income', account_type: 'income', company_id: 1 });
+  assert.equal(domain(read(company.db, 'account.tax', neutral.id), read(company.db, 'account.account', company.id)), true);
+  const co2 = create(company.db, 'res.company', { name: 'Co2' });
+  const co2Tax = create(co2.db, 'account.tax', { name: 'Co2 VAT', type_tax_use: 'sale', amount: 15, company_id: co2.id });
+  assert.equal(domain(read(co2Tax.db, 'account.tax', co2Tax.id), read(co2Tax.db, 'account.account', company.id)), false);
+  // On an invoice of company 1, a shared account carrying a company-2 tax applies only company 1's tax.
+  db = write(co2Tax.db, 'account.account', shared.id, { tax_ids: [co2Tax.id, saleTax.id] });
+  const line = models['account.move'].fields.invoice_line_ids.onchange({ name: 'x', qty: 1, price_unit: 10, account_id: shared.id }, 'account_id', db, { move_type: 'out_invoice', company_id: 1 });
+  assert.equal(line.tax_id, saleTax.id);
+});
+
+test('picking an account without a default tax keeps the line tax', () => {
+  let db = seed();
+  const plain = create(db, 'account.account', { code: '490300', name: 'No Default Tax', account_type: 'income', company_id: 1 });
+  db = plain.db;
+  const onchange = models['account.move'].fields.invoice_line_ids.onchange;
+  const move = { move_type: 'in_invoice', company_id: 1 };
+  const line = { name: 'Digitized', qty: 1, price_unit: 100, tax: 7, tax_id: null };
+  const after = onchange({ ...line, account_id: plain.id }, 'account_id', db, move);
+  assert.equal(after.tax, 7);
+  const purchTax = search(db, 'account.tax').find((x) => x.name === 'VAT 14%' && x.type_tax_use === 'purchase');
+  const kept = onchange({ ...line, tax_id: purchTax.id, tax: 14, account_id: plain.id }, 'account_id', db, move);
+  assert.equal(kept.tax_id, purchTax.id);
+  assert.equal(kept.tax, 14);
+});
+
+test('account Balance button opens journal items of that account only', async () => {
+  const smart = models['account.account'].form.smart.find((s) => s.label === 'Balance');
+  assert.equal(smart.target({ id: 6 }), 'accounting/journal-items?account=6');
+  const db = seed();
+  const items = journalItems(db, {});
+  const own = items.filter((l) => l.account_id === 6);
+  const other = items.find((l) => l.account_id !== 6 && l.move_name && !own.some((o) => o.move_name === l.move_name));
+  assert.ok(own.length && other, 'seed has posted items on account 6 and on an unrelated entry');
+  const prevLocation = globalThis.location;
+  globalThis.location = { hash: '#/accounting/journal-items?account=6' };
+  const { JournalItems } = await import('./views/JournalItems.jsx');
+  const view = await mountView((React) => React.createElement(JournalItems, { leaf: {} }), db);
+  try {
+    const text = view.host.textContent;
+    assert.ok(text.includes(read(db, 'account.account', 6).name));
+    for (const l of own) assert.ok(text.includes(l.move_name), l.move_name);
+    assert.ok(!text.includes(other.move_name), other.move_name);
+  } finally {
+    await view.done();
+    globalThis.location = prevLocation;
+  }
+});
+
+test('Studio custom fields install on the tab-only account form', async () => {
+  const { installCustomFields } = await import('./models/studio.js');
+  assert.doesNotThrow(() => installCustomFields([{ model: 'account.account', label: 'Audit Ref', type: 'char' }]));
+  assert.ok(models['account.account'].form.groups.some((g) => g.custom && g.includes('x_audit_ref')));
+  assert.doesNotThrow(() => installCustomFields([{ model: 'account.account', label: 'Audit Ref', type: 'char' }]));
+});

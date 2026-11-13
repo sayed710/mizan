@@ -6,7 +6,7 @@ import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
-import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, taxSnapshot, validateTaxCompany } from './taxes.js';
+import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -1244,7 +1244,8 @@ function outstandingCreditNotes(db, r) {
 /** All outstanding credit rows (unapplied payments + open credit notes) formatted for the invoice form widget. */
 function outstandingCredits(db, r) {
   return [
-    ...outstandingPaymentCredits(db, r),
+    // Payment credits are kept in company currency; credit-note residuals in the note's own currency.
+    ...outstandingPaymentCredits(db, r).map((p) => ({ ...p, display_currency_id: companyCurrencyRecord(db, p.company_id ?? 1)?.id ?? null })),
     ...outstandingCreditNotes(db, r).map((note) => ({
       id: `move:${note.id}`,
       move_id: note.id,
@@ -1253,6 +1254,7 @@ function outstandingCredits(db, r) {
       unapplied: residual(note, db),
       company_id: note.company_id,
       currency_id: note.currency_id,
+      display_currency_id: note.currency_id,
     })),
   ];
 }
@@ -1286,7 +1288,8 @@ const invoiceLineField = {
     if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {
       const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
       const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
-      const accTax = account ? (accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) ?? taxSnapshot(null)) : null;
+      // An account without a default tax for this side keeps the line's current tax.
+      const accTax = account ? accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) : null;
       if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
     }
     return isDoc && ['product_id', 'account_id'].includes(key)
@@ -1365,7 +1368,7 @@ export const accountingModels = {
       name: { type: 'char', label: 'Account Name', required: true },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
-      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', domain: (r, acc) => !r.company_id || r.company_id === acc?.company_id },
+      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', domain: (r, acc) => !r.company_id || !acc?.company_id || r.company_id === acc.company_id },
       fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category' },
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
@@ -1384,7 +1387,7 @@ export const accountingModels = {
       for (const taxId of after.tax_ids ?? []) {
         const tax = read(db, 'account.tax', taxId);
         if (!tax) return 'Select an existing default tax';
-        if (tax.company_id && tax.company_id !== after.company_id) return 'Tax belongs to another company';
+        if (tax.company_id && after.company_id && tax.company_id !== after.company_id) return 'Tax belongs to another company';
       }
       if (after.fiscal_category_id) {
         const category = read(db, 'account.fiscal.category', after.fiscal_category_id);
@@ -1408,7 +1411,7 @@ export const accountingModels = {
     form: {
       title: 'display_name',
       titleFields: ['code', 'name'],
-      smart: [{ label: 'Balance', valueField: 'current_balance', value: (db, r) => accountBalance(db, r), target: 'accounting/journal-items' }],
+      smart: [{ label: 'Balance', valueField: 'current_balance', value: (db, r) => accountBalance(db, r), target: (r) => `accounting/journal-items?account=${r.id}` }],
       tabs: [
         {
           label: 'Accounting',

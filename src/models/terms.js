@@ -167,8 +167,10 @@ export const termModels = {
     defaults: () => ({ sequence: 10, early_discount: false, discount_percent: 0, discount_days: 0, line_ids: [newLine()] }),
     createDefaults: (_db, vals) => (vals?.early_discount ? { discount_tax_computation: 'included' } : {}),
     onchange: (r, key) => (key === 'early_discount' && r.early_discount && !r.discount_tax_computation ? { discount_tax_computation: 'included' } : {}),
-    guard: (_db, _before, after) => {
-      if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation)) {
+    guard: (_db, before, after) => {
+      // Terms saved before the mode existed keep reading as 'included' (discountTaxComputation) and stay editable.
+      const legacyUnset = after.discount_tax_computation == null && before?.early_discount && before.discount_tax_computation == null;
+      if (after.early_discount && !DISCOUNT_TAX_COMPUTATIONS.has(after.discount_tax_computation) && !legacyUnset) {
         return 'Select a discount tax computation mode';
       }
       for (const l of after.line_ids ?? []) {

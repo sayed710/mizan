@@ -47,9 +47,11 @@ export function installCustomFields(list = []) {
       }
       custom.push(f.name);
     } else {
-      const custom = def.form.groups.find((g) => g.custom);
+      // Tab-only forms (e.g. account.account) have no top-level groups until a custom field adds one.
+      const groups = def.form.groups ?? [];
+      const custom = groups.find((g) => g.custom);
       if (custom) custom.push(f.name);
-      else def.form.groups = [...def.form.groups, Object.assign([f.name], { custom: true })];
+      else def.form.groups = [...groups, Object.assign([f.name], { custom: true })];
     }
     installed.set(key, true);
     if (f.inList && !def.list.includes(f.name)) def.list = [...def.list, f.name];

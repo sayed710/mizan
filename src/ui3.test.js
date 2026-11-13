@@ -5,6 +5,7 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { debitNote, postMove, payMove } from './models/accounting.js';
 import { today } from './models/common.js';
+import { companyCurrencyRecord } from './money.js';
 
 const move = (db, id) => read(db, 'account.move', id);
 const debitButton = models['account.move'].form.buttons.find((b) => b.label === 'Debit Note');
@@ -216,4 +217,17 @@ test('widget rows carry payment name, paid-on date and available credit (finding
   assert.equal(row.unapplied, 10);
   assert.ok(row.name, 'the row shows the payment number');
   assert.ok(row.date, 'the row shows when it was paid');
+});
+
+test('outstanding payment credits are shown in company currency even when the payment carried a foreign currency', () => {
+  const first = postedDocument();
+  let db = payMove(first.db, first.id, 150);
+  const payment = db.records['account.payment'].find((p) => p.invoice_id === first.id);
+  const foreign = search(db, 'res.currency').find((c) => c.id !== companyCurrencyRecord(db, 1).id);
+  // A payment registered on a foreign invoice keeps that invoice's currency_id while `unapplied` is in company currency.
+  db = { ...db, records: { ...db.records, 'account.payment': db.records['account.payment'].map((p) => (p.id === payment.id ? { ...p, currency_id: foreign.id } : p)) } };
+  const second = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 80, tax: 0 }] });
+  db = postMove(second.db, second.id);
+  const row = models['account.move'].form.outstandingCredits.list(db, move(db, second.id)).find((r) => r.id === payment.id);
+  assert.equal(row.display_currency_id, companyCurrencyRecord(db, 1).id);
 });

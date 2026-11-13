@@ -125,7 +125,7 @@ function SmartButtons({ db, model, rec, smart }) {
           const text = field ? display(db, field, value ?? 0, rec) : String(value ?? '');
           const label = t(s.label ?? field?.label);
           return s.target
-            ? <a key={s.label} className="smart" href={`#/${s.target}`}><b>{text}</b><span>{label}</span></a>
+            ? <a key={s.label} className="smart" href={`#/${typeof s.target === 'function' ? s.target(rec) : s.target}`}><b>{text}</b><span>{label}</span></a>
             : <div key={s.label} className="smart"><b>{text}</b><span>{label}</span></div>;
         }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
@@ -156,7 +156,7 @@ function OutstandingCredits({ db, spec, current, onApply }) {
         </tr></thead>
         <tbody>
           {rows.map((row) => {
-            const currency = spec.fields.some((f) => f.money) ? (read(db, 'res.currency', row.currency_id) ?? companyCurrencyRecord(db, row.company_id ?? 1)) : null;
+            const currency = spec.fields.some((f) => f.money) ? (read(db, 'res.currency', row.display_currency_id) ?? companyCurrencyRecord(db, row.company_id ?? 1)) : null;
             return (
               <tr key={row.id}>
                 {spec.fields.map((f) => (

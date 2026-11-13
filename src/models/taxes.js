@@ -251,7 +251,8 @@ export function productTax(db, product, side, fpId, companyId = null) {
 export function accountTax(db, account, side, fpId, companyId = null) {
   const own = (account?.tax_ids ?? []).filter((id) => {
     const tax = read(db, 'account.tax', id);
-    return tax && tax.active !== false && tax.type_tax_use === side;
+    // A shared account can carry taxes of several companies; only this company's (or shared) ones apply.
+    return tax && tax.active !== false && tax.type_tax_use === side && (!tax.company_id || !companyId || tax.company_id === companyId);
   });
   return mapTaxIds(db, own, fpId, companyId);
 }

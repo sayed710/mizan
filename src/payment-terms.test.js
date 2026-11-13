@@ -306,3 +306,12 @@ test('payment term form hides discount fields when early_discount is off, render
     await ctx.done();
   }
 });
+
+test('an early-discount term saved before the tax mode existed stays editable', () => {
+  const term = create(seed(), 'account.payment.term', { name: 'Legacy 2/10', early_discount: true, discount_percent: 2, discount_days: 10 });
+  // Stored before discount_tax_computation existed: the field is absent.
+  const db = { ...term.db, records: { ...term.db.records, 'account.payment.term': term.db.records['account.payment.term'].map((t) => (t.id === term.id ? { ...t, discount_tax_computation: undefined } : t)) } };
+  const renamed = write(db, 'account.payment.term', term.id, { name: 'Legacy 2/10 net 30' });
+  assert.equal(read(renamed, 'account.payment.term', term.id).name, 'Legacy 2/10 net 30');
+  assert.throws(() => write(db, 'account.payment.term', term.id, { discount_tax_computation: 'bogus' }), /Select a discount tax computation mode/);
+});

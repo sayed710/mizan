@@ -41,7 +41,9 @@ export function JournalItems({ leaf = {} } = {}) {
   const name = (model, id) => read(db, model, id)?.name ?? '';
   const mode = leaf.reviewMode ?? 'posted';
   const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
-  const rows = journalItems(db, { from, to, reviewMode: mode }).map((line) => ({
+  // The account form's Balance button opens this report scoped to that account (#/...?account=ID).
+  const accountFilter = Number(new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').get('account')) || null;
+  const rows = journalItems(db, { from, to, reviewMode: mode }).filter((line) => !accountFilter || line.account_id === accountFilter).map((line) => ({
     ...line,
     account: name('account.account', line.account_id),
     partner: name('res.partner', line.partner_id),
@@ -56,6 +58,7 @@ export function JournalItems({ leaf = {} } = {}) {
   }
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t(title)}</h1>
+      {accountFilter && <span className="facet">{t('Account')}: {read(db, 'account.account', accountFilter)?.display_name ?? read(db, 'account.account', accountFilter)?.name} <a href="#/accounting/journal-items" aria-label={t('Remove')}>×</a></span>}
       <label>{t('From')} <input aria-label={t('From')} type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
       <label>{t('To')} <input aria-label={t('To')} type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
       <label>{t('Search')} <input aria-label={t('Search')} value={query} onChange={(e) => setQuery(e.target.value)} /></label>
