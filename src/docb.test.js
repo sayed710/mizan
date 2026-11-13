@@ -51,7 +51,11 @@ test('three-way exception blocks payment until explicitly approved', () => {
   const posted = run(bill.db, 'account.move', bill.id, 'Confirm').db;
   assert.equal(read(posted, 'account.move', bill.id).should_be_paid, 'exception');
   assert.throws(() => run(posted, 'account.move', bill.id, 'Register Payment'), /resolve or approve/i);
+  const draft = create(posted, 'account.payment', { partner_id: read(posted, 'account.move', bill.id).partner_id, payment_type: 'outbound', partner_type: 'supplier', amount: 1 });
+  const picker = models['account.payment'].fields.invoice_id.domain;
+  assert.equal(picker(read(posted, 'account.move', bill.id), read(draft.db, 'account.payment', draft.id), draft.db), false, 'the invoice picker hides bills payment would refuse');
   const approved = run(posted, 'account.move', bill.id, 'Approve for Payment').db;
+  assert.equal(picker(read(approved, 'account.move', bill.id), read(draft.db, 'account.payment', draft.id), approved), true);
   const companyId = read(approved, 'account.move', bill.id).company_id ?? 1;
   const bank = search(approved, 'account.journal').find((journal) => journal.default_for_payments && (!journal.company_id || journal.company_id === companyId));
   const paid = run(approved, 'account.move', bill.id, 'Register Payment', { amount: '40', date: read(approved, 'account.move', bill.id).invoice_date, journal_id: bank.id }).db;

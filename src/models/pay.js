@@ -130,6 +130,9 @@ export function unreconcileJournalItems(db, selections, { date } = {}) {
   return next;
 }
 
+/** Whether a document's invoice date is later than the payment date, so the payment cannot settle it. */
+const invoiceAfterPayment = (move, date) => Boolean(move.invoice_date && move.invoice_date > date);
+
 /**
  * Post a draft payment. With an invoice it pays that invoice; otherwise one entry is booked for the whole amount
  * and applied to the partner's open documents, oldest due first. Any rest stays as an outstanding credit.
@@ -154,6 +157,7 @@ export function postPayment(db, p) {
     if (currentPayment.currency_id && invoice && currentPayment.currency_id !== documentCurrency(db, invoice)?.id) {
       throw new Error('The payment currency must match the invoice currency');
     }
+    if (invoice && invoiceAfterPayment(invoice, date)) throw new Error(`The payment date cannot be before the invoice date of ${invoice.name}`);
   }
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
   const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
@@ -741,11 +745,13 @@ export const payModels = {
       return_id: { type: 'many2one', relation: 'account.return', label: 'Tax Return', readonly: true },
       invoice_id: {
         type: 'many2one', relation: 'account.move', label: 'Invoice',
-        // An open posted document of this payment's partner, company and direction.
-        domain: (m, r) => m.state === 'posted' && isInvoice(m) && Number(m.amount_residual) > 0
+        // An open posted document of this payment's partner, company and direction that posting accepts.
+        domain: (m, r, db) => m.state === 'posted' && isInvoice(m) && Number(m.amount_residual) > 0
           && (m.company_id ?? 1) === (r?.company_id ?? 1)
           && (!r?.partner_id || m.partner_id === r.partner_id)
-          && Boolean(SETTLES[r?.partner_type]?.[r?.payment_type]?.includes(m.move_type)),
+          && Boolean(SETTLES[r?.partner_type]?.[r?.payment_type]?.includes(m.move_type))
+          && !invoiceAfterPayment(m, r?.date ?? today())
+          && shouldBePaid(db, m) !== 'exception',
       },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },

@@ -370,8 +370,8 @@ test('a draft payment can target one open invoice in that invoice currency', () 
   const rec = read(draft.db, 'account.payment', draft.id);
   assert.ok(models['account.payment'].form.groups(rec).flat().some((f) => f === 'invoice_id'));
   const domain = models['account.payment'].fields.invoice_id.domain;
-  assert.equal(domain(read(draft.db, 'account.move', inv.id), rec), true);
-  assert.equal(domain(read(draft.db, 'account.move', inv.id), { ...rec, payment_type: 'outbound', partner_type: 'supplier' }), false);
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), rec, draft.db), true);
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), { ...rec, payment_type: 'outbound', partner_type: 'supplier' }, draft.db), false);
   const linked = write(draft.db, 'account.payment', draft.id, { invoice_id: inv.id });
   const invoiceCurrency = read(linked, 'account.payment', draft.id).currency_id;
   assert.ok(invoiceCurrency, 'picking the invoice sets the payment currency');
@@ -390,4 +390,17 @@ test('posted payment memo is editable only outside a locked period', () => {
   assert.deepEqual(unlocked(payment, db), ['memo']);
   const lockedDb = { ...db, records: { ...db.records, 'res.company': db.records['res.company'].map((c) => ({ ...c, lock_date: '2026-01-31' })) } };
   assert.deepEqual(unlocked(payment, lockedDb), []);
+});
+
+test('a draft payment cannot target or settle an invoice dated after the payment', () => {
+  let db = seed();
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-03-10', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  const draft = create(db, 'account.payment', { partner_id: 2, amount: 40, date: '2026-03-02' });
+  const rec = read(draft.db, 'account.payment', draft.id);
+  const domain = models['account.payment'].fields.invoice_id.domain;
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), rec, draft.db), false);
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), { ...rec, date: '2026-03-10' }, draft.db), true);
+  const linked = write(draft.db, 'account.payment', draft.id, { invoice_id: inv.id });
+  assert.throws(() => postPayment(linked, read(linked, 'account.payment', draft.id)), /cannot be before the invoice date/);
 });

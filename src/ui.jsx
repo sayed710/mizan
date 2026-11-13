@@ -435,7 +435,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     const ids = (Array.isArray(value) ? value : []).map((item) => Number(item && typeof item === 'object' ? item.id : item)).filter((item) => Number.isSafeInteger(item) && item > 0);
     const locked = isReadonly || field.compute;
     const target = targetOf(field.relation, db.settings?.uninstalled ?? []);
-    const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record)));
+    const candidates = relationCandidates(db, field.relation, null).filter((r) => !ids.includes(r.id) && (!field.domain || field.domain(r, record, db)));
     return (
       <div className="many2many-tags">
         {ids.map((item) => {
@@ -504,7 +504,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(Number(e.target.value) || null)}>
           <option value="">{placeholder ?? ''}</option>
-          {relationCandidates(db, field.relation, value).filter((r) => !field.domain || r.id === Number(value) || field.domain(r, record)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
+          {relationCandidates(db, field.relation, value).filter((r) => !field.domain || r.id === Number(value) || field.domain(r, record, db)).map((r) => <option key={r.id} value={r.id}>{r.display_name ?? r.name}</option>)}
         </select>
       );
     case 'priority': return <Stars value={value} onChange={onChange} />;
