@@ -369,18 +369,33 @@ export function applyFilters(model, records, activeIds, db = null, filterGroups 
   return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r, db))));
 }
 
+/** Whether more than one active company exists (company records, else the settings list). */
+export function isMultiCompany(db) {
+  const recs = (db?.records?.['res.company'] ?? []).filter((c) => c.active !== false);
+  return (recs.length || (db?.settings?.companies?.length ?? 1)) > 1;
+}
+
 /** Text search: every term must match some searchable field value on the record. */
 export function matches(db, model, rec, terms, searchFields = null) {
   const fields = models[model].fields;
   const keys = searchFields ?? models[model].searchFields ?? Object.keys(fields);
   const explicitSearch = Boolean(searchFields ?? models[model].searchFields);
+  const multiCompany = isMultiCompany(db);
   const haystack = keys
     .map((k) => {
       const f = fields[k];
-      if (!f) return '';
+      if (!f || (f.multiCompanyOnly && !multiCompany)) return '';
       if (f.type === 'many2one') {
-        const target = read(db, f.relation, rec[k]);
+        const target = db && rec[k] != null ? read(db, f.relation, rec[k]) : null;
         return `${target?.name ?? ''} ${target?.display_name ?? ''}`.trim();
+      }
+      if (f.type === 'many2many') {
+        return (Array.isArray(rec[k]) ? rec[k] : [])
+          .map((id) => (db ? read(db, f.relation, Number(id)) : null))
+          .filter(Boolean)
+          .map((target) => `${target.name ?? ''} ${target.display_name ?? ''}`.trim())
+          .filter(Boolean)
+          .join(' ');
       }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
       if (explicitSearch && ['monetary', 'float', 'integer'].includes(f.type)) {

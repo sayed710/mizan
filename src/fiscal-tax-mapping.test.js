@@ -433,7 +433,7 @@ test('the fiscal position form shows the two tabs and no tax mapping', async () 
     await ctx.done();
   }
 
-  // List view has sequence handle order, name, country, auto_apply
+  // List view has sequence drag handle, name, and company (multi-company only)
   const reorderedDb = write(baseDb, 'account.fiscal.position', exportFp.id, { sequence: 1 });
   const listCtx = await mountView(
     (React) => React.createElement(ActionView, {
@@ -445,8 +445,10 @@ test('the fiscal position form shows the two tabs and no tax mapping', async () 
   );
   try {
     const table = find(listCtx.host, (n) => n.tagName === 'TABLE' && hasClass(n, 'list'));
+    const handleTh = find(table, (n) => n.tagName === 'TH' && hasClass(n, 'handle-col'));
+    assert.equal(props(handleTh)?.['aria-label'], 'Sequence', 'first column is sequence drag handle');
     const headers = allFind(table, (n) => n.tagName === 'TH').map((th) => th.textContent.trim()).filter(Boolean);
-    assert.deepEqual(headers, ['Sequence', 'Fiscal Position', 'Country', 'Detect Automatically']);
+    assert.deepEqual(headers, ['Fiscal Position']);
     const firstRowName = allFind(table, (n) => n.tagName === 'TBODY')[0]?.childNodes?.[0]?.childNodes?.[2]?.textContent?.trim();
     assert.equal(firstRowName, 'Export', 'orders list by sequence');
   } finally {

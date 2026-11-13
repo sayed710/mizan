@@ -1523,6 +1523,7 @@ const ar = {
   'With residual': 'ذات متبقٍ',
   'Tax Grid': 'الشبكة الضريبية',
   'Journal Item': 'بند قيد',
+  Domestic: 'محلي',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

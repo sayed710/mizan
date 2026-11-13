@@ -79,7 +79,8 @@ export function ActionView({ leaf, base, params }) {
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const needsArchived = search.filters.some((id) => (filters ?? []).flat().find((f) => f.id === id)?.includeArchived);
+  const needsArchived = Boolean(leaf.includeArchived ?? def.includeArchived)
+    || search.filters.some((id) => (filters ?? []).flat().find((f) => f.id === id)?.includeArchived);
   const archiveMode = search.archived ? true : (needsArchived ? 'all' : false);
   const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, archiveMode), search.filters, db, filters)
     .filter((r) => matches(db, model, r, search.terms, searchFields));

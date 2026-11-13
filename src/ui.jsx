@@ -1,7 +1,7 @@
 // Shared widgets: field display/input, icons, avatar, tags.
 import { Component, useEffect, useRef, useState } from 'react';
 import { models, targetOf } from './models/index.js';
-import { read } from './orm.js';
+import { isMultiCompany, read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
@@ -311,7 +311,7 @@ export function OptionalColsMenu({ items, optionalState, onToggle }) {
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly, record }) {
-  const multiCompany = (db?.records?.['res.company'] ?? []).filter((c) => c.active !== false).length > 1;
+  const multiCompany = isMultiCompany(db);
   const allCols = (field.columnsFor?.(record, db) ?? Object.entries(field.fields)).filter(([, f]) => !f.hidden && (!f.multiCompanyOnly || multiCompany));
   const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
   const storageKey = o2mStorageKey(model, fieldName, field, id);
