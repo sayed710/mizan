@@ -6,6 +6,9 @@ import { companyCurrency, conversionRate } from './currency.js';
 const docDate = (rec) => rec.invoice_date ?? rec.date_order ?? rec.date ?? today();
 export const currencyCode = (db, rec) => (rec?.currency_id ? read(db, 'res.currency', rec.currency_id)?.name ?? null : null);
 
+/** True when more than one currency is active in the database. */
+export const hasMultiCurrency = (db) => (db?.records?.['res.currency'] ?? []).filter((c) => c.active !== false).length > 1;
+
 export function reportingValue(db, rec, amount, at = today(), { companyBooked = false } = {}) {
   if (amount == null) return null;
   const own = companyCurrency(db, rec?.company_id);

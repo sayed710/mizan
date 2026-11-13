@@ -33,8 +33,15 @@ function Facets({ model, search, setSearch, filters = null, listLabels = null, g
 function SearchPanel({ model, search, setSearch, onClose, filters = null, groupBys = null, listLabels = null, groupByLabels = null, listFields = null }) {
   const def = models[model];
   const fields = def.fields;
-  const multiCompany = companiesOf(getDb()).length > 1;
-  const favorites = getDb().settings?.favorites?.[model] ?? [];
+  const db = getDb();
+  const multiCompany = companiesOf(db).length > 1;
+  const favorites = db.settings?.favorites?.[model] ?? [];
+  const visibleGroupBy = (g) => {
+    const meta = { ...fields[g], ...(listFields ?? def.listFields)?.[g] };
+    if (meta.multiCompanyOnly && !multiCompany) return false;
+    if (meta.groupByWhen && !meta.groupByWhen(db)) return false;
+    return true;
+  };
   const toggle = (key, value) => {
     const list = search[key];
     setSearch({ ...search, [key]: list.includes(value) ? list.filter((x) => x !== value) : [...list, value] });
@@ -69,7 +76,7 @@ function SearchPanel({ model, search, setSearch, onClose, filters = null, groupB
       <section>
         <h3>≡ {t('Group By')}</h3>
         <ul>
-          {(groupBys ?? def.groupBys ?? []).filter((g) => !(fields[g]?.multiCompanyOnly || (listFields ?? def.listFields)?.[g]?.multiCompanyOnly) || multiCompany).map((g) => (
+          {(groupBys ?? def.groupBys ?? []).filter(visibleGroupBy).map((g) => (
             <li key={g}>
               <button type="button" aria-pressed={search.groupBy.includes(g)} onClick={() => toggle('groupBy', g)}>{groupByLabel(def, g, listLabels, groupByLabels)}</button>
             </li>

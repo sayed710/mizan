@@ -1505,6 +1505,10 @@ const ar = {
   'Unit/Base': 'وحدة/أساس',
   'Base/Unit': 'أساس/وحدة',
   'Technical Rate': 'السعر التقني',
+  'Payment Currency': 'عملة الدفعة',
+  'Payment Date': 'تاريخ الدفع',
+  'Payment Date: This Month': 'تاريخ الدفع: هذا الشهر',
+  'Payment Date: This Year': 'تاريخ الدفع: هذه السنة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

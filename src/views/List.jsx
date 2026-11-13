@@ -34,16 +34,22 @@ export function reorderSequenceUpdates(records, fromId, toId, field = 'sequence'
 
 export const colLabel = (fields, f, listLabels) => t(listLabels?.[f] ?? fields[f].label);
 
-const resolveListFields = (fields, listFields) => {
-  if (!listFields) return fields;
-  const resolved = { ...fields };
-  for (const [k, v] of Object.entries(listFields)) if (resolved[k]) resolved[k] = { ...resolved[k], ...v };
+const resolveListFields = (fields, listFields, db = null) => {
+  const base = listFields ? { ...fields } : fields;
+  if (listFields) {
+    for (const [k, v] of Object.entries(listFields)) if (base[k]) base[k] = { ...base[k], ...v };
+  }
+  if (!db) return base;
+  const resolved = { ...base };
+  for (const [k, f] of Object.entries(resolved)) {
+    if (typeof f?.optional === 'function') resolved[k] = { ...f, optional: f.optional(db) };
+  }
   return resolved;
 };
 
 /** Compute the ordered visible columns for a list view given company count and optional toggles. */
 export function visibleListColumns(def, db, optionalState = {}, { list = null, optionalList = null, listFields = null } = {}) {
-  const fields = resolveListFields(def.fields, listFields);
+  const fields = resolveListFields(def.fields, listFields, db);
   const isVisible = (f, defaultVisible) => optionalState[f] ?? defaultVisible;
   const multiCompany = companiesOf(db).length > 1;
   const baseCols = (list ?? def.list).filter((f) => !fields[f]?.multiCompanyOnly || multiCompany);
@@ -77,7 +83,7 @@ const Totals = ({ db, cols, fields, records }) =>
 
 export function List({ db, model, records, open, selected, setSelected, groupBy, page, list = null, optionalList = null, listFields = null, listDecoration = null, optionalStorageKey = null, listLabels = null, emptyHelp = null }) {
   const def = models[model];
-  const fields = resolveListFields(def.fields, listFields);
+  const fields = resolveListFields(def.fields, listFields, db);
   const [optionalState, , toggleCol] = useOptionalColumns(optionalStorageKey ?? `mizan-list-cols:${model}`);
   const { cols, optionalCols } = visibleListColumns(def, db, optionalState, { list, optionalList, listFields });
   const handleField = cols.find((f) => fields[f]?.widget === 'handle');

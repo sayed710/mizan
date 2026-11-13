@@ -369,10 +369,11 @@ export function applyFilters(model, records, activeIds, db = null, filterGroups 
   return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r, db))));
 }
 
-/** Text search: every term must match some char/text/many2one display value. */
+/** Text search: every term must match some searchable field value on the record. */
 export function matches(db, model, rec, terms, searchFields = null) {
   const fields = models[model].fields;
   const keys = searchFields ?? models[model].searchFields ?? Object.keys(fields);
+  const explicitSearch = Boolean(searchFields ?? models[model].searchFields);
   const haystack = keys
     .map((k) => {
       const f = fields[k];
@@ -382,6 +383,11 @@ export function matches(db, model, rec, terms, searchFields = null) {
         return `${target?.name ?? ''} ${target?.display_name ?? ''}`.trim();
       }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
+      if (explicitSearch && ['monetary', 'float', 'integer'].includes(f.type)) {
+        const val = f.compute ? f.compute(rec, db) : rec[k];
+        if (val == null || val === '') return '';
+        return f.type === 'integer' || !Number.isFinite(Number(val)) ? String(val) : `${val} ${Number(val).toFixed(2)}`;
+      }
       return ['char', 'text', 'selection'].includes(f.type) ? String(rec[k] ?? '') : '';
     })
     .join(' ')

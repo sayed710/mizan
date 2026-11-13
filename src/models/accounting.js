@@ -22,6 +22,7 @@ import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { recipientBankCompanyError } from './company.js';
+import { openActivitiesText } from './mail.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -1577,11 +1578,9 @@ function signedCompanyTotal(r, db) {
   return rate == null ? null : sign * roundCurrency(base * rate, own);
 }
 
+/** Comma-separated open activity labels on an account move. */
 function moveActivities(r, db) {
-  if (!db) return '';
-  const open = (db.records?.['mail.activity'] ?? [])
-    .filter((a) => a.active !== false && !a.done && a.res_model === 'account.move' && a.res_id === r.id);
-  return open.map((a) => a.summary || a.activity_type || t('Activity')).join(', ');
+  return openActivitiesText(db, 'account.move', r.id);
 }
 
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);

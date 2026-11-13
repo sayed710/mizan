@@ -6,7 +6,7 @@ import { salesModels } from './sales.js';
 import { accountingModels, journalEntriesView, purchaseInvoiceView, salesInvoiceView } from './accounting.js';
 import { assetModels } from './assets.js';
 import { taxModels } from './taxes.js';
-import { payModels } from './pay.js';
+import { payModels, customerPaymentView, vendorPaymentView } from './pay.js';
 import { elearningModels } from './elearning.js';
 import { surveyModels } from './surveys.js';
 import { smsModels } from './sms.js';
@@ -201,7 +201,7 @@ const allApps = [
           defaults: { move_type: 'out_refund' },
           ...salesInvoiceView,
         },
-        { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, listLabels: { partner_id: 'Customer' } },
+        { key: 'payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'customer', defaults: { partner_type: 'customer', payment_type: 'inbound' }, ...customerPaymentView },
         { key: 'products', label: 'Products', model: 'product' },
         customers,
       ] },
@@ -226,7 +226,7 @@ const allApps = [
           defaults: { move_type: 'in_refund' },
           ...purchaseInvoiceView,
         },
-        { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, listLabels: { partner_id: 'Vendor' } },
+        { key: 'vendor-payments', label: 'Payments', model: 'account.payment', domain: (r) => r.partner_type === 'supplier', defaults: { partner_type: 'supplier', payment_type: 'outbound' }, ...vendorPaymentView },
         { key: 'checks', label: 'Checks', type: 'report', report: 'checks' },
         { key: 'products', label: 'Products', model: 'product' },
         vendors,

@@ -13,6 +13,8 @@ import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
 import { shouldBePaid } from './billcontrol.js';
 import { companyFilter, recipientBankCompanyError } from './company.js';
+import { openActivitiesText } from './mail.js';
+import { hasMultiCurrency } from './money.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -703,6 +705,70 @@ function paymentCompanySignedAmount(r, db) {
   return roundCo(sign * raw);
 }
 
+/** Signed payment amount in the payment's own currency (inbound positive, outbound negative). */
+function paymentSignedAmount(r) {
+  const signed = (r.payment_type === 'outbound' ? -1 : 1) * (Number(r.amount) || 0);
+  return signed === 0 ? 0 : signed;
+}
+
+const PAYMENT_LIST = [
+  'date', 'name', 'journal_id', 'company_id', 'partner_id',
+  'amount_signed', 'currency_id', 'activities', 'amount_company_currency_signed', 'display_state',
+];
+
+const PAYMENT_LIST_FIELDS = {
+  company_id: { optional: 'hide', multiCompanyOnly: true },
+  amount_signed: { optional: (db) => (hasMultiCurrency(db) ? 'show' : 'hide'), sum: false },
+  currency_id: { optional: 'hide', groupByWhen: hasMultiCurrency },
+  activities: { optional: 'hide' },
+  amount_company_currency_signed: { sum: 'Total' },
+};
+
+const PAYMENT_SEARCH_FIELDS = ['name', 'partner_id', 'memo', 'amount', 'journal_id'];
+
+const PAYMENT_FILTERS = [
+  [
+    { id: 'customer', label: 'Customer Payments', fn: (r) => r.partner_type === 'customer' },
+    { id: 'supplier', label: 'Vendor Payments', fn: (r) => r.partner_type === 'supplier' },
+  ],
+  [
+    { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
+    { id: 'paid', label: 'Paid', fn: (r) => r.state === 'posted' },
+  ],
+  [
+    { id: 'outstanding', label: 'Outstanding', fn: (r, db) => r.state === 'posted' && !(db && isPaymentMatched(db, r)) },
+  ],
+  monthFilters('date', 'Payment Date'),
+];
+
+const PAYMENT_GROUP_BYS = ['partner_id', 'journal_id', 'display_state', 'date', 'currency_id', 'company_id'];
+const PAYMENT_GROUP_BY_LABELS = { partner_id: 'Partner', display_state: 'Status', date: 'Payment Date', currency_id: 'Currency' };
+
+/** Highlight draft payments as info and cancelled payments as muted on payment lists. */
+const paymentListDecoration = (r) => (r.state === 'draft' ? 'info' : r.state === 'cancel' ? 'muted' : null);
+
+export const customerPaymentView = {
+  list: PAYMENT_LIST,
+  listFields: PAYMENT_LIST_FIELDS,
+  listLabels: { partner_id: 'Customer', currency_id: 'Payment Currency' },
+  groupByLabels: PAYMENT_GROUP_BY_LABELS,
+  listDecoration: paymentListDecoration,
+  searchFields: PAYMENT_SEARCH_FIELDS,
+  filters: PAYMENT_FILTERS,
+  groupBys: PAYMENT_GROUP_BYS,
+};
+
+export const vendorPaymentView = {
+  list: PAYMENT_LIST,
+  listFields: PAYMENT_LIST_FIELDS,
+  listLabels: { partner_id: 'Vendor', currency_id: 'Payment Currency' },
+  groupByLabels: PAYMENT_GROUP_BY_LABELS,
+  listDecoration: paymentListDecoration,
+  searchFields: PAYMENT_SEARCH_FIELDS,
+  filters: PAYMENT_FILTERS,
+  groupBys: PAYMENT_GROUP_BYS,
+};
+
 const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
   const nextVoided = after.voided_check_numbers ?? [];
@@ -734,9 +800,11 @@ export const payModels = {
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       amount: { type: 'monetary', label: 'Amount' },
+      amount_signed: { type: 'monetary', label: 'Amount in Currency', compute: paymentSignedAmount },
       amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
       // A payment of an invoice is made in that invoice's currency (payMove books it in invoice units).
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: (r) => Boolean(r?.invoice_id) },
+      activities: { type: 'char', label: 'Activities', compute: (r, db) => openActivitiesText(db, 'account.payment', r.id) },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
       voided_check_numbers: { type: 'one2many', label: 'Voided Checks', readonly: true, fields: { check_number: { type: 'integer', label: 'Check Number' }, date: { type: 'date', label: 'Date' } } },
@@ -765,29 +833,21 @@ export const payModels = {
         type: 'selection',
         label: 'Status',
         options: DISPLAY_STATES,
-        badge: { draft: 'muted', posted: 'ok', reconciled: 'ok', cancel: 'muted', reversed: 'muted' },
-        compute: (r, db) => (r.state === 'posted' && isPaymentMatched(db, r) ? 'reconciled' : r.state),
+        badge: { draft: 'info', posted: 'warning', reconciled: 'success', cancel: 'muted', reversed: 'muted' },
+        compute: (r, db) => (r.state === 'posted' && db && isPaymentMatched(db, r) ? 'reconciled' : r.state),
       },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0 }),
     onchange: (r, key, db) => (key === 'invoice_id' && r.invoice_id && db ? { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null } : {}),
-    groupBys: ['partner_id', 'journal_id', 'display_state', 'date'],
-    filters: [
-      [
-        { id: 'customer', label: 'Customer Payments', fn: (r) => r.partner_type === 'customer' },
-        { id: 'supplier', label: 'Vendor Payments', fn: (r) => r.partner_type === 'supplier' },
-      ],
-      [
-        { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
-        { id: 'paid', label: 'Paid', fn: (r) => r.state === 'posted' },
-      ],
-      [
-        { id: 'outstanding', label: 'Outstanding', fn: (r) => r.display_state === 'posted' },
-      ],
-      monthFilters('date'),
-    ],
+    groupBys: PAYMENT_GROUP_BYS,
+    groupByLabels: PAYMENT_GROUP_BY_LABELS,
+    searchFields: PAYMENT_SEARCH_FIELDS,
+    filters: PAYMENT_FILTERS,
     kanban: { title: 'name', lines: ['partner_id', 'amount_company_currency_signed', 'date'], badge: 'display_state' },
-    list: ['date', 'name', 'journal_id', 'partner_id', 'amount_company_currency_signed', 'display_state'],
+    list: PAYMENT_LIST,
+    listFields: PAYMENT_LIST_FIELDS,
+    listLabels: { currency_id: 'Payment Currency' },
+    listDecoration: paymentListDecoration,
     graph: { groupBy: 'date', measure: 'amount' },
     form: {
       statusbar: 'state',
