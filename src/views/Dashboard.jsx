@@ -7,12 +7,43 @@ import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { statementLinesWithoutJournal } from '../models/bank.js';
 import { companyViewDb } from '../companyView.js';
+import { currentCompany } from '../models/company.js';
 import { invoiceKpis } from '../dashboardKpis.js';
 import { RateNote } from './RateNote.jsx';
 import { journalCardListUrl } from './journalDashboard.js';
+import { importAccept, importModelFile } from './importModelFile.js';
+
+const STEP_ICONS = {
+  company: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20h16M6 20V5h12v15M10 9h1M13 9h1M10 13h1M13 13h1M10 20v-3h4v3" />
+    </svg>
+  ),
+  tax: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6L6 18" />
+      <circle cx="7.5" cy="7.5" r="2" />
+      <circle cx="16.5" cy="16.5" r="2" />
+    </svg>
+  ),
+  bill: (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 4h7l4 4v12H7zM14 4v4h4M10 12h5M10 16h5" />
+    </svg>
+  ),
+};
+
+function OnboardingStep({ href, icon, label }) {
+  return (
+    <a className="journal-onboarding-step" href={href}>
+      <span className="journal-onboarding-icon" aria-hidden="true">{STEP_ICONS[icon]}</span>
+      <span>{t(label)}</span>
+    </a>
+  );
+}
 
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
-function JournalCard({ card }) {
+function JournalCard({ card, companyId }) {
   const list = journalCardListUrl(card);
   if (card.kind === 'sale' || card.kind === 'purchase') {
     const sale = card.kind === 'sale';
@@ -27,7 +58,7 @@ function JournalCard({ card }) {
       <section className="panel journal-card">
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
-          <p className="journal-empty muted">{t(sale ? 'Create your first invoice.' : 'Create your first bill.')}</p>
+          <p className="journal-empty muted">{t(sale ? 'Get paid online and send your invoices.' : 'Record your vendor bills and pay them easily.')}</p>
         ) : (
           <dl>
             {rows.map(([label, count, amount, href]) => (
@@ -40,6 +71,20 @@ function JournalCard({ card }) {
         )}
         <RateNote count={card.unratedCount} />
         <a className="btn primary sm" href={actionHref}>{t(actionLabel)}</a>
+        {empty && (
+          sale ? (
+            <div className="journal-onboarding">
+              <OnboardingStep href={`#/open/res.company/${companyId}`} icon="company" label="Set up your company" />
+              <span className="journal-onboarding-sep muted">{t('and')}</span>
+              <OnboardingStep href="#/accounting/taxes" icon="tax" label="Configure taxes" />
+            </div>
+          ) : (
+            <div className="journal-onboarding journal-onboarding-single">
+              <span className="journal-onboarding-sep muted">{t('or')}</span>
+              <OnboardingStep href="#/accounting/bills/new" icon="bill" label="Create a vendor bill manually" />
+            </div>
+          )
+        )}
         {!empty && (
           <Graph
             data={card.monthlyTotals.map((m) => ({ label: m.month, shortLabel: m.month.slice(5), value: m.total }))}
@@ -56,7 +101,28 @@ function JournalCard({ card }) {
       <section className="panel journal-card">
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
-          <p className="journal-empty muted">{t('No transactions yet.')}</p>
+          card.kind === 'bank' ? (
+            <>
+              <p className="journal-empty muted">{t('Import your bank statements to reconcile them.')}</p>
+              <label className="btn primary sm">
+                {t('Import Statement')}
+                <input
+                  type="file"
+                  accept={importAccept('account.bank.statement.line')}
+                  hidden
+                  onChange={(e) => {
+                    if (e.target.files[0]) importModelFile('account.bank.statement.line', { journal_id: card.journal.id }, e.target.files[0]);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <p className="journal-empty muted">{t('Record your cash transactions.')}</p>
+              <a className="btn primary sm" href={list}>{t('Cash Transactions')}</a>
+            </>
+          )
         ) : (
           <>
             <dl>
@@ -91,6 +157,7 @@ function JournalCard({ card }) {
 /** Invoicing overview: KPI tiles (each links to the matching list) + journal cards + monthly invoiced chart. */
 export function Dashboard() {
   const db = companyViewDb(useDb());
+  const activeCompanyId = currentCompany(db);
   const invoices = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice');
   const kpi = invoiceKpis(db, today().slice(0, 7));
   const byPartner = kpi.topCustomers;
@@ -117,7 +184,7 @@ export function Dashboard() {
           </a>
         ))}
       </div>
-      <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
+      <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} companyId={c.journal.company_id ?? activeCompanyId} />)}</div>
       <div className="dash-grid">
         <section className="panel">
           <h2>{t('Monthly invoiced')}</h2>

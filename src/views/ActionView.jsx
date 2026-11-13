@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { models, viewsOf } from '../models/index.js';
 import { applyFilters, matches, read, search as searchRecords, unlink } from '../orm.js';
 import { display, SimulatedNote } from '../ui.jsx';
-import { fromCsv, importCsvRows, toCsv } from '../csv.js';
+import { toCsv } from '../csv.js';
 import { commit, getDb, useDb } from '../store.js';
+import { importAccept, importModelFile } from './importModelFile.js';
 import { t } from '../i18n.js';
 import { ControlPanel, emptySearch } from './ControlPanel.jsx';
 import { Kanban } from './Kanban.jsx';
@@ -87,16 +88,7 @@ export function ActionView({ leaf, base, params }) {
       return field.type === 'many2one' ? r[f] ?? '' : ['monetary', 'float', 'integer'].includes(field.type) && typeof r[f] === 'number' && Number.isFinite(r[f]) ? r[f] : display(db, field, r[f]);
     }))]));
   };
-  const importCsv = async (file) => {
-    try {
-      const text = await file.text();
-      const res = def.importFile && !/\.csv$/i.test(file.name) ? def.importFile.run(getDb(), file.name, text, importDefaults) : importCsvRows(getDb(), model, importDefaults, fromCsv(text));
-      // Report the import only once the server has accepted it (a refusal shows its own message).
-      if ((await commit(res.db)).ok) alert(t('{n} record(s) imported.', { n: res.count }));
-    } catch (e) {
-      alert(e instanceof Error ? e.message : t('Import failed'));
-    }
-  };
+  const importCsv = (file) => importModelFile(model, importDefaults, file);
   const groupBy = search.groupBy;
   const kanbanGroup = groupBy[0] ?? def.kanban?.groupBy;
   const win = pageWindow(records.length, offset);
@@ -151,7 +143,7 @@ export function ActionView({ leaf, base, params }) {
           {importJournals.map((journal) => <option key={journal.id} value={journal.id}>{journal.name}</option>)}
         </select>
       </label>}
-      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={['.csv,text/csv', def.importFile?.accept].filter(Boolean).join(',')} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
+      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={importAccept(model)} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
       {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       {pager}
     </>
