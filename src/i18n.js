@@ -1467,6 +1467,16 @@ const ar = {
   'Cash In': 'تدفق نقدي داخل',
   'Cash Out': 'تدفق نقدي خارج',
   'Last 12 Months': 'آخر 12 شهراً',
+  'Cancel Entry': 'إلغاء القيد',
+  'Reversal Entries': 'قيود العكس',
+  'Reversed Entry': 'القيد المعكوس',
+  'Reconciled items': 'البنود المطابقة',
+  'Adjusting Entries': 'قيود التسوية',
+  'Bank transaction': 'معاملة بنكية',
+  'Auto-post until': 'الترحيل التلقائي حتى',
+  'Total Debit': 'إجمالي المدين',
+  'Total Credit': 'إجمالي الدائن',
+  'Journal entry is not balanced: total debit must equal total credit.': 'القيد المحاسبي غير متوازن: يجب أن يتساوى إجمالي المدين مع إجمالي الدائن.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

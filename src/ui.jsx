@@ -5,7 +5,7 @@ import { read } from './orm.js';
 import { relationCandidates } from './companyView.js';
 import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
-import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money.js';
+import { companyCurrencyRecord, documentCurrency, formatCurrency, roundCurrency } from './money.js';
 import { parseAmount } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
@@ -290,12 +290,13 @@ export function OptionalColsMenu({ items, optionalState, onToggle }) {
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
 function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly, record }) {
-  const allCols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
+  const allCols = (field.columnsFor?.(record, db) ?? Object.entries(field.fields)).filter(([, f]) => !f.hidden);
   const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
   const storageKey = o2mStorageKey(model, fieldName, field, id);
   const [optionalState, isVisible, toggleCol] = useOptionalColumns(storageKey);
 
   const cols = allCols.filter(([k, f]) => !f.optional || isVisible(k, f.optional !== 'hide'));
+  const totalCols = field.totalColumns?.(record, db) ?? [];
   const priced = 'price_unit' in field.fields;
   const displayOpts = field.fields?.display_type?.options || [];
   const hasSection = displayOpts.some(([v]) => v === 'line_section');
@@ -388,6 +389,22 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             </tr>
           )}
         </tbody>
+        {totalCols.length > 0 && cols.some(([k]) => totalCols.includes(k)) && (
+          <tfoot>
+            <tr>
+              {cols.map(([k, f], idx) => {
+                if (totalCols.includes(k)) {
+                  const ownCurrency = companyCurrencyRecord(db, record?.company_id ?? db?.settings?.current_company_id ?? 1);
+                  const sum = roundCurrency(value.reduce((acc, l) => acc + (Number(l?.[k]) || 0), 0), ownCurrency);
+                  return <td key={k} className="num"><strong>{display(db, { ...f, currency: f.currency ?? 'company' }, sum, record)}</strong></td>;
+                }
+                return <td key={k}>{idx === 0 ? <strong>{t('Total')}</strong> : null}</td>;
+              })}
+              {priced && <td />}
+              {hasActionCol && <td />}
+            </tr>
+          </tfoot>
+        )}
       </table>
     </div>
   );

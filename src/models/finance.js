@@ -129,7 +129,7 @@ export function returnCompanies(db, ret) {
 export const returnTaxLock = (db, companyId, excludeId = null) => (db.records?.['account.return'] ?? [])
   .filter((r) => r.id !== excludeId && ['submitted', 'paid'].includes(r.state) && returnCompanies(db, r).includes(companyId))
   .map((r) => r.date_to).filter(Boolean).sort().at(-1) ?? '';
-const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
+export const isReturnEntry = (db, move) => !!move.tax_return_id && (read(db, 'account.return', move.tax_return_id)?.closing_move_ids ?? []).includes(move.id);
 /** Tax locks apply only to entries carrying tax information or touching a tax account. */
 export function taxLockFor(db, move) {
   if (!move) return '';
@@ -147,7 +147,7 @@ export function taxLockFor(db, move) {
 }
 
 /** A reconciled bank transaction points at this entry: it has to stay posted and in place. */
-const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === id || l.writeoff_move_id === id || (l.allocations ?? []).some((a) => a.payment_move_id === id || a.writeoff_move_id === id) || (l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id)));
+export const bookedByBank = (db, id) => (db.records['account.bank.statement.line'] ?? []).some((l) => l.bank_move_id === id || l.writeoff_move_id === id || (l.allocations ?? []).some((a) => a.payment_move_id === id || a.writeoff_move_id === id) || (l.state === 'reconciled' && (l.move_id === id || l.payment_move_id === id)));
 
 /**
  * Journal items of a posted entry need an existing account: reports group by account and silently skip unknown

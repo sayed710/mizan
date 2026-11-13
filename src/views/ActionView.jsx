@@ -27,6 +27,10 @@ export function parseRel(db, model, raw) {
     const payment = read(db, 'account.payment', Number(id));
     return { field, fieldLabel: 'Payment', id: Number(id), label: payment?.name ?? `#${id}` };
   }
+  if (model === 'account.deferral' && field === 'move_id') {
+    const move = read(db, 'account.move', Number(id));
+    return { field, fieldLabel: 'Journal Entry', id: Number(id), label: move?.name ?? `#${id}` };
+  }
   const f = models[model].fields[field];
   if (!f || f.type !== 'many2one') return null;
   return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };

@@ -764,6 +764,55 @@ export function reconciledJournalItems(db, move) {
   });
 }
 
+/** Move IDs connected to `moveId` through active settlements, payments, and bank reconciliations. */
+export function matchedMoveIds(db, moveId) {
+  const matched = new Set([moveId]);
+  const queue = [moveId];
+  const { applications } = reconcileIndex(db);
+  const paymentRecords = db.records['account.payment'] ?? [];
+  const statements = db.records['account.bank.statement.line'] ?? [];
+  const enqueue = (id) => {
+    if (id && !matched.has(id)) {
+      matched.add(id);
+      queue.push(id);
+    }
+  };
+  while (queue.length) {
+    const curId = queue.shift();
+    const cur = read(db, 'account.move', curId);
+    for (const row of cur?.payments ?? []) {
+      if (row.reversed || row.unapplied) continue;
+      enqueue(row.move_id);
+      enqueue(row.payment_move_id);
+      enqueue(row.payment_fx_move_id);
+      enqueue(row.cash_basis_move_id);
+    }
+    for (const { invoice, row } of applications.get(curId) ?? []) {
+      if (row.reversed || row.unapplied) continue;
+      enqueue(invoice.id);
+      enqueue(row.move_id);
+      enqueue(row.payment_move_id);
+      enqueue(row.payment_fx_move_id);
+      enqueue(row.cash_basis_move_id);
+    }
+    for (const st of statements) {
+      const allocs = st.allocations ?? [];
+      const linkedPaymentIds = new Set([st.payment_id, ...(st.payment_ids ?? [])].filter(Boolean));
+      const paymentMoveIds = paymentRecords.filter((p) => p.move_id && linkedPaymentIds.has(p.id)).map((p) => p.move_id);
+      const allIds = [
+        st.bank_move_id,
+        st.move_id,
+        st.payment_move_id,
+        st.writeoff_move_id,
+        ...allocs.flatMap((a) => [a.invoice_id, a.payment_move_id, a.writeoff_move_id]),
+        ...paymentMoveIds,
+      ].filter(Boolean);
+      if (allIds.includes(curId)) allIds.forEach(enqueue);
+    }
+  }
+  return matched;
+}
+
 /** Identity of an embedded journal line, independent of its position and derived matching state. */
 export function journalItemIdentity({ reconciled: _reconciled, ...line }) {
   return JSON.stringify(line);
