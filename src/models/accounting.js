@@ -1441,13 +1441,6 @@ const lineItem = {
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };
 
-/** Total debit or credit of a manual entry's journal items in company currency (the entry form footer); null for documents. */
-const lineSideTotal = (side) => (r, db) => {
-  if (r?.move_type !== 'entry') return null;
-  const own = db ? companyCurrencyRecord(db, r.company_id ?? 1) : null;
-  return roundCurrency((r?.line_ids ?? []).reduce((s, l) => s + (Number(l?.[side]) || 0), 0), own);
-};
-
 /** Reversal entries linked to `r` via `reversed_entry_id`. */
 const moveReversalEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.reversed_entry_id === r.id) : []);
 
@@ -1967,8 +1960,6 @@ export const accountingModels = {
       },
       amount_tax: { type: 'monetary', label: 'Taxes', compute: (r, db) => invoiceTaxAmount(r, db) },
       amount_total: { type: 'monetary', label: 'Total', compute: total },
-      debit_total: { type: 'monetary', label: 'Total Debit', currency: 'company', compute: lineSideTotal('debit') },
-      credit_total: { type: 'monetary', label: 'Total Credit', currency: 'company', compute: lineSideTotal('credit') },
       amount_total_signed: { type: 'monetary', label: 'Total', currency: 'company', compute: signedCompanyTotal },
       amount_paid: { type: 'monetary', label: 'Paid', readonly: true },
       amount_residual: { type: 'monetary', label: 'Amount Due', compute: residual },
@@ -2328,7 +2319,7 @@ export const accountingModels = {
             ],
           },
         ]),
-      footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['debit_total', 'credit_total']),
+      footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : []),
       // The outstanding-credits widget lists unapplied payments and open credit notes and applies a chosen one.
       outstandingCredits: {
         title: 'Outstanding Credits',

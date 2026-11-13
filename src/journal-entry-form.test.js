@@ -97,7 +97,7 @@ async function mountMoveForm({ leaf, id, db: initialDb }) {
   };
 }
 
-test('manual journal entry form (Accounting > Accounting > Journal Entries): main groups, tabs, columns, warning and footer totals', async () => {
+test('manual journal entry form (Accounting > Accounting > Journal Entries): main groups, tabs, columns, warning and table totals', async () => {
   const leaf = leafFor('Accounting', 'entries');
   assert.ok(leaf, 'Journal Entries leaf exists under Accounting > Accounting');
 
@@ -172,8 +172,7 @@ test('manual journal entry form (Accounting > Accounting > Journal Entries): mai
     assert.ok(tfootTexts.some((txt) => txt.includes('120')));
     assert.ok(tfootTexts.some((txt) => txt.includes('90')));
 
-    const footerDl = find(ctx.host, (n) => n.tagName === 'DL' && hasClass(n, 'totals'));
-    assert.ok(footerDl.textContent.includes('Total Debit') && footerDl.textContent.includes('Total Credit'));
+    assert.equal(find(ctx.host, (n) => n.tagName === 'DL' && hasClass(n, 'totals')), null, 'totals appear once, under the Journal Items table, as in Odoo');
 
     const postBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Post');
     await ctx.React.act(async () => props(postBtn).onClick());
@@ -616,8 +615,6 @@ test('invoices/bills keep their form untouched and Arabic i18n covers every new 
     'Reversal of',
     'Fiscal Position',
     'Terms and Conditions',
-    'Total Debit',
-    'Total Credit',
     'Journal entry is not balanced: total debit must equal total credit.',
   ];
   const prevStorage = globalThis.localStorage;

@@ -1474,8 +1474,6 @@ const ar = {
   'Adjusting Entries': 'قيود التسوية',
   'Bank transaction': 'معاملة بنكية',
   'Auto-post until': 'الترحيل التلقائي حتى',
-  'Total Debit': 'إجمالي المدين',
-  'Total Credit': 'إجمالي الدائن',
   'Journal entry is not balanced: total debit must equal total credit.': 'القيد المحاسبي غير متوازن: يجب أن يتساوى إجمالي المدين مع إجمالي الدائن.',
 };
 
