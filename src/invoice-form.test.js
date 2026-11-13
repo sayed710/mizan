@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
-import { create } from './orm.js';
+import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor } from './models/index.js';
+import { taxSnapshot } from './models/taxes.js';
+import { applyDiff, diffDb } from './sync.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -238,6 +240,81 @@ test('journal entry form remains unchanged', async () => {
 
     const tabLabels = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab').map((n) => n.textContent.trim());
     assert.deepEqual(tabLabels, ['Journal Items']);
+  } finally {
+    await ctx.done();
+  }
+});
+
+test('invoice with section and note added via lines widget saves, syncs, posts, and keeps totals unchanged', async () => {
+  const leaf = leafFor('Customers', 'invoices');
+  const ctx = await mountMoveForm({ leaf, id: 'new' });
+  try {
+    const db0 = ctx.getDb();
+    const saleTax = read(db0, 'account.tax', read(db0, 'res.company', 1).account_sale_tax_id);
+    const partner = search(db0, 'res.partner')[0];
+    const product = search(db0, 'product')[0];
+    let moveId;
+    await ctx.React.act(async () => {
+      moveId = await ctx.createMove({
+        move_type: 'out_invoice',
+        partner_id: partner.id,
+        invoice_date: '2026-04-01',
+        invoice_line_ids: [{
+          product_id: product.id,
+          name: product.name,
+          qty: 2,
+          price_unit: 100,
+          discount: 0,
+          ...taxSnapshot(saleTax, db0),
+        }],
+      });
+    });
+    const beforeSaveDb = ctx.getDb();
+    const beforeTotals = read(beforeSaveDb, 'account.move', moveId);
+
+    await ctx.render(moveId);
+
+    const addSectionBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Add a section');
+    const addNoteBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Add a note');
+    await ctx.React.act(async () => props(addSectionBtn).onClick());
+    await ctx.React.act(async () => props(addNoteBtn).onClick());
+
+    const sectionRow = find(ctx.host, (n) => n.tagName === 'TR' && hasClass(n, 'o2m-section'));
+    const noteRow = find(ctx.host, (n) => n.tagName === 'TR' && hasClass(n, 'o2m-note'));
+    const sectionInput = find(sectionRow, (n) => n.tagName === 'INPUT');
+    const noteInput = find(noteRow, (n) => n.tagName === 'INPUT');
+    await ctx.React.act(async () => props(sectionInput).onChange({ target: { value: 'Services' } }));
+    await ctx.React.act(async () => props(noteInput).onChange({ target: { value: 'Net 30' } }));
+
+    const saveBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    assert.ok(saveBtn, 'Save button is visible');
+    await ctx.React.act(async () => props(saveBtn).onClick());
+    await Promise.resolve();
+
+    const syncedAfterSave = applyDiff(beforeSaveDb, diffDb(beforeSaveDb, ctx.getDb()), { isAdmin: true });
+    const saved = read(syncedAfterSave, 'account.move', moveId);
+    assert.equal(saved.invoice_line_ids.length, 3);
+    for (const special of saved.invoice_line_ids.slice(1)) {
+      assert.equal(special.tax_id, null);
+      assert.deepEqual(special.tax_ids, []);
+      assert.equal(special.tax_source_id, null);
+      assert.deepEqual(special.tax_breakdown, []);
+      assert.equal(special.tax_name, '');
+      assert.deepEqual(special.invoice_repartition_line_ids, []);
+      assert.deepEqual(special.refund_repartition_line_ids, []);
+      assert.equal(special.tax, 0);
+    }
+
+    const confirmBtn = find(ctx.host, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Confirm');
+    assert.ok(confirmBtn, 'Confirm button is visible');
+    await ctx.React.act(async () => props(confirmBtn).onClick());
+
+    const syncedAfterPost = applyDiff(syncedAfterSave, diffDb(syncedAfterSave, ctx.getDb()), { isAdmin: true });
+    const posted = read(syncedAfterPost, 'account.move', moveId);
+    assert.equal(posted.state, 'posted');
+    assert.equal(posted.amount_untaxed, beforeTotals.amount_untaxed);
+    assert.equal(posted.amount_tax, beforeTotals.amount_tax);
+    assert.equal(posted.amount_total, beforeTotals.amount_total);
   } finally {
     await ctx.done();
   }

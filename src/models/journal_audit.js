@@ -1,4 +1,5 @@
 import { round } from '../money.js';
+import { isNonZeroBaseGridLine } from './taxes.js';
 
 /** Journal items and signed tax totals in the requested period and company. */
 export function journalAudit(db, { from = '', to = '', companyId = null } = {}) {
@@ -15,7 +16,7 @@ export function journalAudit(db, { from = '', to = '', companyId = null } = {}) 
       const debit = Number(line.debit) || 0, credit = Number(line.credit) || 0;
       group.debit = round(group.debit + debit); group.credit = round(group.credit + credit);
       group.items.push({ move, line, date });
-      if (line.tax_name && !line.tax_grid_base) {
+      if (line.tax_name && !isNonZeroBaseGridLine(line)) {
         const side = line.tax_side || (String(move.move_type).startsWith('in_') ? 'purchase' : 'sale');
         const amount = line.tax_zero ? 0 : side === 'purchase' ? debit - credit : credit - debit;
         const taxId = line.tax_id ?? null;

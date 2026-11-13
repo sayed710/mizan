@@ -105,3 +105,81 @@ test('journal audit for cash-basis payment with tagged base keeps base items and
   assert.equal(misc.taxes.length, 1);
   assert.deepEqual(misc.taxes[0], { name: 'Audit CB 20%', base: 1000, tax: 200 });
 });
+
+test('journal audit includes zero-rated tax with base tags (base and 0 tax) while excluding cash-basis base-grid lines', async () => {
+  const { seed } = await import('./seed.js');
+  const { create, read, search } = await import('./orm.js');
+  const { postMove, payMove } = await import('./models/accounting.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { taxSnapshot } = await import('./models/taxes.js');
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Zero Base', applicability: 'taxes', tax_negate: false });
+  const cbBaseTag = create(baseTag.db, 'account.account.tag', { name: '+CB Base', applicability: 'taxes', tax_negate: false });
+  const cbTaxTag = create(cbBaseTag.db, 'account.account.tag', { name: '+CB Tax', applicability: 'taxes', tax_negate: false });
+  const zeroTax = create(cbTaxTag.db, 'account.tax', {
+    name: 'Zero Export 0%',
+    amount: 0,
+    amount_type: 'percent',
+    type_tax_use: 'sale',
+    company_id: 1,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(cbTaxTag.db, '251000'), tag_ids: [] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(cbTaxTag.db, '251000'), tag_ids: [] },
+    ],
+  });
+  const cbTax = create(zeroTax.db, 'account.tax', {
+    name: 'CB Sale 10%',
+    amount: 10,
+    amount_type: 'percent',
+    type_tax_use: 'sale',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: accountId(zeroTax.db, '251100'),
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [cbBaseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(zeroTax.db, '251000'), tag_ids: [cbTaxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [cbBaseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(zeroTax.db, '251000'), tag_ids: [cbTaxTag.id] },
+    ],
+  });
+  db = cbTax.db;
+  const partner = search(db, 'res.partner')[0];
+  const zeroInv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-04-10',
+    company_id: 1,
+    invoice_line_ids: [{ name: 'Export service', qty: 1, price_unit: 500, ...taxSnapshot(read(db, 'account.tax', zeroTax.id)) }],
+  });
+  db = postMove(zeroInv.db, zeroInv.id);
+  const postedZero = read(db, 'account.move', zeroInv.id);
+  assert.ok(postedZero.line_ids.some((l) => l.tax_grid_base && l.tax_zero), 'posted zero-rated line carries both tax_grid_base and tax_zero');
+
+  const cbInv = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-04-10',
+    company_id: 1,
+    invoice_line_ids: [{ name: 'CB service', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', cbTax.id)) }],
+  });
+  db = postMove(cbInv.db, cbInv.id);
+  db = payMove(db, cbInv.id, 1100, '2026-04-11');
+
+  const groups = journalAudit(db, { from: '2026-04-10', to: '2026-04-11', companyId: 1 });
+  const sale = groups.find((g) => g.journal.type === 'sale');
+  assert.ok(sale);
+  assert.deepEqual(sale.taxes, [
+    { name: 'CB Sale 10%', base: 1000, tax: 100 },
+    { name: 'Zero Export 0%', base: 500, tax: 0 },
+  ]);
+  const misc = groups.find((g) => g.journal.code === 'MISC');
+  assert.ok(misc);
+  assert.ok(misc.items.some((item) => item.line.tax_grid_base && !item.line.tax_zero));
+  assert.deepEqual(misc.taxes, [{ name: 'CB Sale 10%', base: 1000, tax: 100 }]);
+});

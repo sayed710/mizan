@@ -7,6 +7,7 @@ import { lang, t } from './i18n.js';
 import { currencyCode } from './models/money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money.js';
 import { parseAmount } from './models/common.js';
+import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
 import { fieldReadonly } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
@@ -265,7 +266,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
   };
   const addSpecialLine = (displayType) => {
     const base = field.newLine?.(record, db) ?? {};
-    onChange([...value, { ...base, display_type: displayType, name: '', qty: 0, price_unit: 0, tax: 0, tax_id: [] }]);
+    onChange([...value, { ...base, ...replaceTaxSnapshot(taxSnapshot(null)), tax_source_id: null, tax_ids: [], display_type: displayType, name: '', qty: 0, price_unit: 0 }]);
   };
 
   return (

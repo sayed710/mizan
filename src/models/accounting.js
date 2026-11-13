@@ -523,6 +523,7 @@ export function postMove(db, id) {
     if (term?.company_id && term.company_id !== (r.company_id ?? 1)) throw new Error('Payment terms belong to another company');
   }
   for (const line of r.invoice_line_ids ?? []) {
+    if (isSectionOrNote(line)) continue;
     validateTaxCompany(db, [line.tax_source_id], r.company_id ?? 1);
     validateTaxCompany(db, [line.tax_id, ...(line.tax_ids ?? []), ...(line.tax_breakdown ?? []).map((tax) => tax.tax_id)], r.company_id ?? 1);
   }
