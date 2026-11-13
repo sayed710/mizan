@@ -1,7 +1,7 @@
 // Analytic plans, invoice allocations and budgets, alongside existing timesheets.
 import { create, nextSequence, read, search, unlink, write } from '../orm.js';
 import { dayOf, subtotal, today } from './common.js';
-import { toCompany } from './currency.js';
+import { conversionRate, toCompany } from './currency.js';
 import { convert } from './uom.js';
 import { analyticActualLines, financeModels } from './finance.js';
 import { moreModels } from './more.js';
@@ -194,12 +194,45 @@ export function removeAnalytic(db, moveId) {
   return ids.length ? unlink(db, 'account.analytic.line', ids) : db;
 }
 
-/** Return positive cost debits, income credits and signed balance in an inclusive period. */
+// Raw analytic lines grouped by account, built once per records snapshot (records are replaced on every change).
+const linesByAccountCache = new WeakMap();
+const linesByAccount = (db) => {
+  let grouped = linesByAccountCache.get(db.records);
+  if (!grouped) {
+    grouped = new Map();
+    for (const line of db.records['account.analytic.line'] ?? []) {
+      const list = grouped.get(line.account_id);
+      if (list) list.push(line); else grouped.set(line.account_id, [line]);
+    }
+    linesByAccountCache.set(db.records, grouped);
+  }
+  return grouped;
+};
+
+/** The currency an analytic account reports in: its company's, or the current company's for a shared account. */
+const analyticAccountCurrency = (db, account) => findCompanyCurrencyRecord(db, account?.company_id ?? currentCompany(db));
+
+/**
+ * Return positive cost debits, income credits and signed balance in an inclusive period, in the account's
+ * currency. Lines of companies with another currency are converted at their date; all values are null when
+ * a rate is missing, rather than adding amounts of different currencies.
+ */
 export function analyticBalance(db, accountId, { from, to } = {}) {
-  const lines = search(db, 'account.analytic.line').filter((r) => r.account_id === accountId && inPeriod(r, from, to));
-  const debit = round(lines.reduce((s, r) => s + Math.max(0, -(Number(r.amount) || 0)), 0));
-  const credit = round(lines.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0));
-  return { debit, credit, balance: round(credit - debit) };
+  // The raw record: read() would compute this account's balance fields and recurse here.
+  const account = (db.records['account.analytic.account'] ?? []).find((a) => a.id === accountId);
+  const target = analyticAccountCurrency(db, account);
+  let debit = 0;
+  let credit = 0;
+  for (const line of linesByAccount(db).get(accountId) ?? []) {
+    if (!inPeriod(line, from, to)) continue;
+    const source = findCompanyCurrencyRecord(db, line.company_id ?? 1);
+    const rate = !target || !source || source.id === target.id ? 1 : conversionRate(db, source.id, target.id, line.date, line.company_id ?? null);
+    if (rate == null) return { debit: null, credit: null, balance: null };
+    const amount = (Number(line.amount) || 0) * rate;
+    if (amount < 0) debit -= amount; else credit += amount;
+  }
+  const money = (v) => (target ? roundCurrency(v, target) : round(v));
+  return { debit: money(debit), credit: money(credit), balance: money(credit - debit) };
 }
 
 const day = (date) => {

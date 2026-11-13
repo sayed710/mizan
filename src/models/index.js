@@ -237,7 +237,7 @@ const allApps = [
       { label: 'Accounting', children: [
                 { label: 'Transactions', children: [
           { key: 'entries', label: 'Journal Entries', model: 'account.move', ...journalEntriesView },
-          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
+          { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line' },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
           { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },

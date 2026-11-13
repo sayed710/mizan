@@ -209,3 +209,25 @@ test('miscellaneous and draft entries menus use the journal entries search, not 
     assert.ok(ids.includes('posted'), `${key} keeps the entries filters`);
   }
 });
+
+test('a shared analytic account converts other-currency company lines before adding them', () => {
+  let db = seed();
+  const own = db.records['res.company'].find((c) => c.id === 1).currency_id;
+  const other = db.records['res.currency'].find((c) => c.id !== own);
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Other currency co', currency_id: other.id });
+  db = c2.db;
+  db = { ...db, records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === other.id ? { ...c, rate_ids: [{ date: '2020-01-01', rate: 2 }] } : c)) } };
+  const plan = create(db, 'account.analytic.plan', { name: 'Shared plan' });
+  db = plan.db;
+  const account = create(db, 'account.analytic.account', { name: 'Shared', plan_id: plan.id, company_id: null });
+  db = account.db;
+  db = create(db, 'account.analytic.line', { name: 'Own', account_id: account.id, amount: 30, company_id: 1, date: '2026-03-01' }).db;
+  db = create(db, 'account.analytic.line', { name: 'Other', account_id: account.id, amount: 40, company_id: c2.id, date: '2026-03-01' }).db;
+  assert.equal(read(db, 'account.analytic.account', account.id).balance, 50);
+});
+
+test('the Analytic Items menu, which the Gross Margin button opens, includes timesheet lines as in Odoo', () => {
+  const flat = (items) => items.flatMap((i) => (i.children ? flat(i.children) : [i]));
+  const leaf = flat(menusFor('accounting')).find((l) => l.key === 'analytic-items');
+  assert.equal(leaf.domain, undefined);
+});
