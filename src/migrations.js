@@ -1190,6 +1190,18 @@ MIGRATIONS.push({ version: 42, name: 'Statement line currency from journal', up:
   return { ...db, records: { ...db.records, 'account.bank.statement.line': next } };
 } });
 
+MIGRATIONS.push({ version: 43, name: 'currency-parity', up(db) {
+  const currencies = db.records['res.currency'] ?? [];
+  if (!currencies.length) return db;
+  const nextCurrencies = currencies.map(({ unit_name: unitName, ...c }) => ({
+    ...c,
+    currency_unit_label: c.currency_unit_label ?? unitName ?? null,
+    active: c.active === undefined ? true : c.active,
+    position: c.position ?? 'before',
+  }));
+  return { ...db, records: { ...db.records, 'res.currency': nextCurrencies } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

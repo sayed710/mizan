@@ -218,9 +218,10 @@ test('credit notes and refunds show signed negative document-currency amounts, b
     const tds = allFind(row, (n) => n.tagName === 'TD');
     assert.ok(hasClass(tds[1], 'bold'), 'Number cell is bold');
     assert.ok(hasClass(tds[6], 'bold'), 'Total cell is bold');
-    assert.equal(tds[5].textContent.trim(), '-€40.00');
-    assert.equal(tds[6].textContent.trim(), '-€44.00');
-    assert.equal(tds[7].textContent.trim(), '-€44.00');
+    // Seeded EUR places its symbol after the amount, as Odoo does.
+    assert.equal(tds[5].textContent.trim(), '-40.00 €');
+    assert.equal(tds[6].textContent.trim(), '-44.00 €');
+    assert.equal(tds[7].textContent.trim(), '-44.00 €');
     const tfoot = find(ctx.host, (n) => n.tagName === 'TFOOT');
     const footCells = allFind(tfoot, (n) => n.tagName === 'TD').map((td) => td.textContent.trim());
     // 40 EUR at rate 0.5 -> 80 USD; negative for credit note in company currency.

@@ -501,6 +501,7 @@ export function FormView({ leaf, id, base, params }) {
   const groups = resolve(def.form.groups) ?? def.form.groups ?? [];
   // A non-blocking warning shown above the form, such as an exceeded credit limit.
   const warning = def.form.warning?.(current, db) ?? null;
+  const banner = def.form.banner?.(current, db) ?? null;
   const footer = [].concat(resolve(def.form.footer) ?? []);
   const locked = !isNew && !!def.form.lockedWhen?.(current, db);
 
@@ -577,6 +578,7 @@ export function FormView({ leaf, id, base, params }) {
 
           {error && <div className="alert" role="alert">{error}</div>}
           {warning && <div className="alert alert-warning" role="status">{warning}</div>}
+          {banner && <div className="alert alert-info" role="status">{t(banner)}</div>}
           <SimulatedNote text={def.simulated} />
           {wizard && <Wizard db={db} spec={wizard.spec} error={wizard.error} onConfirm={confirmWizard} onCancel={() => setWizard(null)} />}
 
@@ -584,7 +586,7 @@ export function FormView({ leaf, id, base, params }) {
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
             {!isNew && def.form.smart && <SmartButtons db={db} model={model} rec={current} smart={def.form.smart} />}
             {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
-            <div className="title-field">
+            {!def.form.hideTitle && <div className="title-field">
               {Array.isArray(def.form.titleFields)
                 ? <div className="field-pair">{def.form.titleFields.map((f) => {
                     const fd = def.fields[f];
@@ -594,7 +596,7 @@ export function FormView({ leaf, id, base, params }) {
                   ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
                   : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
                       value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
-            </div>
+            </div>}
             {renderGroups(groups, { db, model, def, current, set, readonly: locked, isNew })}
             {def.form.outstandingCredits && !isNew && (
               <OutstandingCredits

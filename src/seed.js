@@ -92,8 +92,12 @@ export function seed() {
   const set = (model, id, vals) => { db = write(db, model, id, vals); };
   const mainCurrency = add('res.currency', {
     name: 'USD',
+    full_name: 'US Dollar',
     symbol: '$',
-    unit_name: 'Dollars',
+    currency_unit_label: 'Dollars',
+    currency_subunit_label: 'Cents',
+    position: 'before',
+    active: true,
     rounding: 0.01,
     rate_ids: [{ date: '0001-01-01', rate: 1, company_id: null }],
   });
@@ -536,8 +540,8 @@ export function seed() {
   add('account.payment.term', { name: '10 Days after End of Next Month', sequence: 7, line_ids: [line(100, 10, 'percent', 'days_after_end_of_next_month')] });
   add('account.payment.term', { name: '90 days, on the 10th', sequence: 10, line_ids: [line(100, 90, 'percent', 'days_end_of_month_on_the', { days_next_month: 10 })] });
   set('res.partner', 3, { property_payment_term_id: t30 });
-  add('res.currency', { name: 'EUR', symbol: '€', unit_name: 'Euros', rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
-  add('res.currency', { name: 'SAR', symbol: '﷼', unit_name: 'Saudi Riyals', rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
+  add('res.currency', { name: 'EUR', full_name: 'Euro', symbol: '€', currency_unit_label: 'Euros', currency_subunit_label: 'Cents', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 0.92, company_id: null }, { date: addDays(today(), -1), rate: 0.9, company_id: null }] });
+  add('res.currency', { name: 'SAR', full_name: 'Saudi Riyal', symbol: '﷼', currency_unit_label: 'Saudi Riyals', currency_subunit_label: 'Halalas', position: 'after', active: true, rate_ids: [{ date: addDays(today(), -60), rate: 3.75, company_id: null }] });
 
   // Standard Incoterms 2020
   INCOTERMS_2020.forEach(([code, name]) => {

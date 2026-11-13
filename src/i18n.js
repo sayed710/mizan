@@ -1489,6 +1489,22 @@ const ar = {
   'In {n} days': 'خلال {n} أيام',
   '1 day ago': 'منذ يوم واحد',
   '{n} days ago': 'منذ {n} أيام',
+  // Currencies (Odoo 20 parity)
+  'Inverse Rate': 'السعر العكسي',
+  Inactive: 'غير نشط',
+  "This is your company's currency.": 'هذه هي عملة شركتك.',
+  'Currency Unit': 'وحدة العملة',
+  'Currency Subunit': 'الوحدة الفرعية للعملة',
+  'Symbol Position': 'موضع الرمز',
+  'After Amount': 'بعد المبلغ',
+  'Before Amount': 'قبل المبلغ',
+  'Price Accuracy': 'دقة السعر',
+  'Rounding Factor': 'معامل التقريب',
+  'Visible to all': 'مرئي للجميع',
+  'Base Currency': 'العملة الأساسية',
+  'Unit/Base': 'وحدة/أساس',
+  'Base/Unit': 'أساس/وحدة',
+  'Technical Rate': 'السعر التقني',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

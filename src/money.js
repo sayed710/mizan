@@ -36,29 +36,42 @@ export function currencyDecimalPlaces(currency) {
   return Math.min(15, Math.max(0, fractionalDigits - Number(exponent)));
 }
 
-/** Format using the configured increment's decimal places, not an ISO-code default. */
+/** Format using the configured increment's decimal places, and honour symbol position when given. */
 export function formatCurrency(amount, currency, code = currency?.name) {
   const digits = currencyDecimalPlaces(currency);
   const precision = { minimumFractionDigits: digits, maximumFractionDigits: digits };
-  let formatter;
-  try {
-    formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: code, ...precision });
-  } catch {
-    formatter = new Intl.NumberFormat('en-US', precision);
-  }
   const value = Number(amount);
-  return formatter.format(Number.isFinite(value) ? value : 0);
+  const safe = Number.isFinite(value) ? value : 0;
+  if (code === '') return new Intl.NumberFormat('en-US', precision).format(safe);
+
+  const isoCode = /^[A-Za-z]{3}$/.test(String(code ?? '')) ? code : null;
+  if (currency?.position === 'after') {
+    const numberText = new Intl.NumberFormat('en-US', precision).format(safe);
+    const isoSymbol = !currency.symbol && isoCode
+      ? new Intl.NumberFormat('en-US', { style: 'currency', currency: isoCode, ...precision }).formatToParts(0).find((p) => p.type === 'currency')?.value
+      : null;
+    const sym = currency.symbol || isoSymbol || code || '';
+    return sym ? `${numberText} ${sym}` : numberText;
+  }
+
+  if (currency?.symbol && (currency?.position === 'before' || !isoCode)) {
+    const absText = new Intl.NumberFormat('en-US', precision).format(Math.abs(safe));
+    return `${safe < 0 ? '-' : ''}${currency.symbol}${absText}`;
+  }
+  if (isoCode) {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: isoCode, ...precision }).format(safe);
+  }
+  return new Intl.NumberFormat('en-US', precision).format(safe);
 }
 
-/** Resolve currencies without requiring callers to materialize computed ORM fields. */
-export function companyCurrencyRecord(db, companyId = null) {
+/** Resolve the company currency record without throwing when unconfigured. */
+export function findCompanyCurrencyRecord(db, companyId = null) {
   if (typeof companyId === 'object' && companyId !== null) {
     throw new TypeError('companyCurrencyRecord expects a company ID or null, got an object');
   }
-  const isMain = companyId == null;
-  const targetId = isMain ? 1 : companyId;
-  const company1 = (db?.records?.['res.company'] ?? []).find((c) => c.id === 1);
-  const company = targetId === 1 ? company1 : (db?.records?.['res.company'] ?? []).find((c) => c.id === targetId);
+  const targetId = companyId == null ? 1 : companyId;
+  const companies = db?.records?.['res.company'] ?? [];
+  const company = companies.find((c) => c.id === targetId);
 
   let currencyId;
   if (company) {
@@ -71,9 +84,14 @@ export function companyCurrencyRecord(db, companyId = null) {
   }
 
   const currencies = db?.records?.['res.currency'] ?? [];
-  const currency = currencyId ? currencies.find((c) => c.id === currencyId) : null;
+  return currencyId ? (currencies.find((c) => c.id === currencyId) ?? null) : null;
+}
+
+/** Resolve currencies without requiring callers to materialize computed ORM fields. */
+export function companyCurrencyRecord(db, companyId = null) {
+  const currency = findCompanyCurrencyRecord(db, companyId);
   if (!currency) {
-    if (isMain) throw new Error('Configure the base currency before converting currencies');
+    if (companyId == null) throw new Error('Configure the base currency before converting currencies');
     throw new Error('Configure the company currency before converting currencies');
   }
   return currency;

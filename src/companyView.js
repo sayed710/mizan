@@ -9,9 +9,9 @@ export const viewRecords = (db, model, options) => companyFilter(db, search(db, 
 
 /** Records visible in an action before search-panel filtering. */
 export const actionRecords = (db, leaf, rel, archived = false) =>
-  viewRecords(db, leaf.model, { includeArchived: archived })
+  viewRecords(db, leaf.model, { includeArchived: archived === true || archived === 'all' })
     .filter((r) => {
-      if (archived && r.active !== false) return false;
+      if (archived === true && r.active !== false) return false;
       if (leaf.domain && !leaf.domain(r, db)) return false;
       if (!rel) return true;
       if (rel.field === 'payment_id' && leaf.model === 'account.move') {

@@ -111,7 +111,7 @@ test('Finding 8: early-payment discount entries populate currency_id and amount_
   const base = seed();
   const eur = create(base, 'res.currency', {
     name: 'EUR',
-    unit_name: 'Euro',
+    currency_unit_label: 'Euro',
     rate_ids: [{ date: '0001-01-01', rate: 1.25 }], // 1 USD = 1.25 EUR, so 1 EUR = 0.8 USD
   });
 

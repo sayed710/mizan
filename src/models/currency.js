@@ -1,7 +1,7 @@
 // Foreign currencies with dated rates; amounts convert to the company currency for the ledger.
 import { read } from '../orm.js';
 import { today } from './common.js';
-import { companyCurrencyRecord, currencyDecimalPlaces, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, currencyDecimalPlaces, findCompanyCurrencyRecord, roundCurrency } from '../money.js';
 
 
 /** Units of `currencyId` per 1 base-currency unit on `date`: the latest configured rate on or before it. */
@@ -11,8 +11,25 @@ const applicableRate = (currency, date, companyId = null) => {
   return (companyId == null ? null : latest(companyId)) ?? latest(null);
 };
 
+// Raw lookup: read() would compute this currency's own rate fields, which call back into here.
+const findBaseCurrency = (db) => (db?.settings?.base_currency_id ? (db.records?.['res.currency'] ?? []).find((c) => c.id === db.settings.base_currency_id) ?? null : null);
+
+/** Effective rate and date today for `currency` in the current company, without throwing when unconfigured. */
+function currentRateInfo(currency, db) {
+  const companyId = db?.settings?.current_company_id ?? 1;
+  const own = findCompanyCurrencyRecord(db, companyId);
+  const date = today();
+  const row = applicableRate(currency, date, companyId);
+  if (own?.id === currency.id) return { rate: 1, date: row?.date ?? null };
+  if (!row) return { rate: null, date: null };
+  const base = findBaseCurrency(db);
+  if (!own || !base || own.id === base.id) return { rate: Number(row.rate), date: row.date };
+  const ownRow = applicableRate(own, date, companyId);
+  return ownRow ? { rate: Number(row.rate) / Number(ownRow.rate), date: row.date } : { rate: null, date: null };
+}
+
 export function baseCurrency(db) {
-  const currency = read(db, 'res.currency', db.settings?.base_currency_id);
+  const currency = findBaseCurrency(db);
   if (!currency) throw new Error('Configure the base currency before converting currencies');
   return currency;
 }
@@ -78,34 +95,95 @@ export const currencyModels = {
     },
     fields: {
       name: { type: 'char', label: 'Currency', required: true },
+      full_name: { type: 'char', label: 'Name', optional: 'show' },
       symbol: { type: 'char', label: 'Symbol' },
-      unit_name: { type: 'char', label: 'Whole Unit Name for Amounts in Words' },
-      rounding: { type: 'float', label: 'Rounding', required: true, digits: 15 },
+      currency_unit_label: { type: 'char', label: 'Currency Unit' },
+      currency_subunit_label: { type: 'char', label: 'Currency Subunit' },
+      position: { type: 'selection', label: 'Symbol Position', options: [['after', 'After Amount'], ['before', 'Before Amount']] },
+      active: { type: 'boolean', label: 'Active', widget: 'toggle' },
+      rounding: { type: 'float', label: 'Rounding Factor', required: true, digits: 15 },
       decimal_places: { type: 'integer', label: 'Decimal Places', compute: (r) => currencyDecimalPlaces(r) },
+      rate_date: { type: 'date', label: 'Date', compute: (r, db) => currentRateInfo(r, db).date },
+      rate: { type: 'float', label: 'Current Rate', digits: [6, 6], compute: (r, db) => currentRateInfo(r, db).rate },
+      inverse_rate: {
+        type: 'float',
+        label: 'Inverse Rate',
+        digits: [6, 6],
+        optional: 'hide',
+        compute: (r, db) => {
+          const v = currentRateInfo(r, db).rate;
+          return v ? Number((1 / v).toPrecision(12)) : null;
+        },
+      },
+      current_rate: { type: 'float', label: 'Current Rate', hidden: true, compute: (r, db) => currentRateInfo(r, db).rate },
       rate_ids: {
         type: 'one2many',
         label: 'Rates',
-        fields: { date: { type: 'date', label: 'Date' }, rate: { type: 'float', label: 'Unit per Company Currency' }, company_id: { type: 'many2one', relation: 'res.company', label: 'Company' } },
+        sort: (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')),
+        fields: {
+          date: { type: 'date', label: 'Date' },
+          company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true, placeholder: 'Visible to all' },
+          company_currency_id: {
+            type: 'many2one',
+            relation: 'res.currency',
+            label: 'Base Currency',
+            compute: (line, db) => findCompanyCurrencyRecord(db, line.company_id ?? db?.settings?.current_company_id ?? 1)?.id ?? null,
+          },
+          company_rate: {
+            type: 'float',
+            label: 'Unit/Base',
+            digits: [6, 6],
+            editable: true,
+            compute: (line) => Number(line.rate || 0),
+          },
+          inverse_company_rate: {
+            type: 'float',
+            label: 'Base/Unit',
+            digits: [6, 6],
+            editable: true,
+            compute: (line) => (Number(line.rate) > 0 ? Number((1 / Number(line.rate)).toPrecision(12)) : 0),
+          },
+          rate: { type: 'float', label: 'Technical Rate', digits: [6, 6], optional: 'hide' },
+        },
         newLine: (record, db) => ({ date: today(), rate: 1, company_id: db?.settings?.current_company_id ?? null }),
-      },
-      current_rate: {
-        type: 'float',
-        label: 'Current Rate',
-        compute: (r, db) => {
-          try {
-            if (companyCurrencyRecord(db, db.settings?.current_company_id ?? 1)?.id === r.id) return 1;
-          } catch (err) {
-            if (/configure.*currency/i.test(err?.message)) return null;
-            throw err;
+        onchange: (line, changed) => {
+          if (changed === 'company_rate') {
+            const { company_rate: v, ...rest } = line;
+            const num = Number(v);
+            return { ...rest, rate: Number.isFinite(num) ? num : line.rate };
           }
-          const rate = applicableRate(r, today(), db.settings?.current_company_id ?? null);
-          return rate ? Number(rate.rate) : null;
+          if (changed === 'inverse_company_rate') {
+            const { inverse_company_rate: v, ...rest } = line;
+            const num = Number(v);
+            return { ...rest, rate: Number.isFinite(num) && num > 0 ? 1 / num : 0 };
+          }
+          return line;
         },
       },
     },
-    defaults: () => ({ rounding: 0.01, rate_ids: [] }),
-    kanban: { title: 'name', lines: ['symbol', 'current_rate'] },
-    list: ['name', 'symbol', 'unit_name', 'rounding', 'decimal_places', 'current_rate'],
-    form: { title: 'name', groups: [['symbol', 'unit_name', 'rounding', 'decimal_places'], ['current_rate']], tabs: [{ label: 'Rates', fields: ['rate_ids'] }], chatter: true },
+    defaults: () => ({ rounding: 0.01, position: 'before', active: true, rate_ids: [] }),
+    kanban: { title: 'name', lines: ['symbol', 'rate'] },
+    list: ['name', 'symbol', 'full_name', 'rate_date', 'rate', 'inverse_rate', 'active'],
+    editableList: ['active'],
+    listDecoration: (r) => (r.active === false ? 'muted' : ''),
+    searchFields: ['name', 'full_name', 'symbol', 'currency_unit_label', 'currency_subunit_label'],
+    filters: [[
+      { id: 'active', label: 'Active', fn: (r) => r.active !== false },
+      { id: 'inactive', label: 'Inactive', includeArchived: true, fn: (r) => r.active === false },
+    ]],
+    form: {
+      title: 'name',
+      hideTitle: true,
+      banner: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id ? "This is your company's currency." : null),
+      groups: [
+        ['name', 'full_name', 'active'],
+        ['symbol', 'currency_unit_label', 'currency_subunit_label', 'position'],
+        { title: 'Price Accuracy', fields: ['rounding', 'decimal_places'] },
+      ],
+      tabs: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id
+        ? []
+        : [{ label: 'Rates', fields: ['rate_ids'] }]),
+      chatter: true,
+    },
   },
 };

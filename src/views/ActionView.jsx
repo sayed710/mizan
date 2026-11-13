@@ -79,7 +79,9 @@ export function ActionView({ leaf, base, params }) {
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters, db, filters)
+  const needsArchived = search.filters.some((id) => (filters ?? []).flat().find((f) => f.id === id)?.includeArchived);
+  const archiveMode = search.archived ? true : (needsArchived ? 'all' : false);
+  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, archiveMode), search.filters, db, filters)
     .filter((r) => matches(db, model, r, search.terms, searchFields));
   const records = def.sort ? [...filtered].sort(def.sort) : filtered;
   // The "how to start" help belongs to a truly empty list, not to a search or filter that matched nothing.
