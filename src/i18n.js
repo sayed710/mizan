@@ -1461,6 +1461,12 @@ const ar = {
   'Invalid regular expression in counterpart line amount': 'تعبير نمطي غير صالح في مبلغ البند المقابل',
   'Counterpart line amount must be numeric': 'يجب أن يكون مبلغ البند المقابل رقمياً',
   'Percentage amount must be between 0 and 100': 'يجب أن تكون النسبة المئوية بين 0 و 100',
+  // Bank Transactions list parity (Odoo 20)
+  'Running Balance': 'الرصيد التراكمي',
+  'Transaction Type': 'نوع المعاملة',
+  'Cash In': 'تدفق نقدي داخل',
+  'Cash Out': 'تدفق نقدي خارج',
+  'Last 12 Months': 'آخر 12 شهراً',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

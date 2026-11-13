@@ -1,6 +1,6 @@
 // Bank reconciliation: statement lines matched to open invoices/bills, or booked directly to an account.
 import { read, search, write } from '../orm.js';
-import { today } from './common.js';
+import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
 import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
@@ -496,6 +496,51 @@ export const isStatementLineWithoutJournal = (line) => line.state === 'to_check'
 /** Unreconciled statement lines saved before a journal was required; they count on no bank card until assigned one. */
 export const statementLinesWithoutJournal = (db) => (db.records['account.bank.statement.line'] ?? []).filter(isStatementLineWithoutJournal);
 
+/** Canonical display and running-balance order of bank statement lines: date, then sequence, then id. */
+export const statementLineOrder = (a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id;
+
+const runningBalanceCache = new WeakMap();
+
+/** Cumulative balance map (line id -> balance in journal currency) for one journal, computed and never stored. */
+function journalRunningBalances(db, journalId) {
+  if (!db?.records || !journalId) return null;
+  let byJournal = runningBalanceCache.get(db.records);
+  if (!byJournal) {
+    byJournal = new Map();
+    runningBalanceCache.set(db.records, byJournal);
+  }
+  let map = byJournal.get(journalId);
+  if (map) return map;
+  const journal = read(db, 'account.journal', journalId);
+  const currency = (journal?.currency_id ? read(db, 'res.currency', journal.currency_id) : null)
+    ?? (journal ? companyCurrencyRecord(db, journal.company_id ?? 1) : null);
+  const lines = (db.records['account.bank.statement.line'] ?? [])
+    .filter((l) => l.active !== false && l.journal_id === journalId)
+    .sort(statementLineOrder);
+  map = new Map();
+  let balance = 0;
+  for (const line of lines) {
+    balance += Number(line.amount) || 0;
+    if (currency) balance = roundCurrency(balance, currency);
+    map.set(line.id, balance);
+  }
+  byJournal.set(journalId, map);
+  return map;
+}
+
+/** Computed cumulative balance of a statement line within its journal. */
+function computeRunningBalance(r, db) {
+  if (!db || !r?.journal_id || r.active === false) return null;
+  const map = journalRunningBalances(db, r.journal_id);
+  return map?.has(r.id) ? map.get(r.id) : (Number(r.amount) || 0);
+}
+
+/** Liquidity journal type ('bank', 'cash', or 'credit') for a statement line, or null when missing/non-liquidity. */
+function statementJournalType(db, r) {
+  const journal = db && r?.journal_id ? read(db, 'account.journal', r.journal_id) : null;
+  return journal && isLiquidityJournal(journal) ? journal.type : null;
+}
+
 export const bankModels = {
   'account.bank.statement.line': {
     label: 'Bank Transactions',
@@ -505,13 +550,16 @@ export const bankModels = {
     // Statement files from the bank (beside the generic CSV import).
     importFile: { accept: '.ofx,.qfx,.xml', run: importStatement },
     fields: {
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
       date: { type: 'date', label: 'Date', required: true },
       payment_ref: { type: 'char', label: 'Label', required: true },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       amount: { type: 'monetary', label: 'Amount', required: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
-      state: { type: 'selection', label: 'Status', tracking: true, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
-      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
+      running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, compute: computeRunningBalance },
+      state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
+      journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j) },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
       payment_id: { type: 'many2one', relation: 'account.payment', label: 'Existing Payment' },
       payment_ids: { type: 'many2many', relation: 'account.payment', label: 'Existing Payments' },
@@ -521,7 +569,11 @@ export const bankModels = {
       writeoff_label: { type: 'char', label: 'Write-off Label' },
       writeoff_amount: { type: 'monetary', label: 'Write-off Amount' },
       writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry', readonly: true },
-      bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', readonly: true },
+      bank_move_id: { type: 'many2one', relation: 'account.move', label: 'Bank Entry', readonly: true, optional: 'hide' },
+      account_number: { type: 'char', label: 'Account Number', optional: 'hide' },
+      narration: { type: 'char', label: 'Notes', optional: 'hide' },
+      ref: { type: 'char', label: 'Reference', optional: 'hide' },
+      transaction_type: { type: 'char', label: 'Transaction Type', optional: 'hide' },
       open_amount: { type: 'monetary', label: 'Open Amount', readonly: true },
       allocations: { type: 'one2many', label: 'Matched Documents', readonly: true, fields: {
         invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
@@ -534,15 +586,34 @@ export const bankModels = {
       counterpart_account_id: { type: 'many2one', relation: 'account.account', label: 'Book to Account', domain: (account, record) => eligibleCounterpart(account, record?.company_id ?? 1) },
       name: { type: 'char', label: 'Name', compute: (r) => r.payment_ref },
     },
-    defaults: () => ({ date: today(), state: 'to_check' }),
+    defaults: () => ({ sequence: 10, date: today(), state: 'to_check' }),
     createDefaults: (db, vals) => ({ currency_id: read(db, 'account.journal', vals.journal_id)?.currency_id ?? companyCurrencyRecord(db, vals.company_id)?.id ?? null }),
+    onchange: (r, key, db) => {
+      if (key !== 'journal_id') return {};
+      const journal = read(db, 'account.journal', r.journal_id);
+      return { currency_id: journal?.currency_id ?? companyCurrencyRecord(db, journal?.company_id ?? r.company_id)?.id ?? null };
+    },
+    sort: statementLineOrder,
+    searchFields: ['payment_ref', 'partner_id', 'ref', 'account_number', 'narration', 'transaction_type', 'journal_id', 'bank_move_id', 'move_id'],
     defaultFilters: ['open'],
-    filters: [[{ id: 'open', label: 'To Reconcile', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Reconciled', fn: (r) => r.state === 'reconciled' }],
-      [{ id: 'in', label: 'Incoming', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Outgoing', fn: (r) => r.amount < 0 }],
-      [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }]],
-    groupBys: ['state', 'partner_id', 'date'],
+    filters: [
+      [{ id: 'open', label: 'To Reconcile', fn: (r) => r.state === 'to_check' }, { id: 'done', label: 'Reconciled', fn: (r) => r.state === 'reconciled' }],
+      [{ id: 'in', label: 'Cash In', fn: (r) => r.amount > 0 }, { id: 'out', label: 'Cash Out', fn: (r) => r.amount < 0 }],
+      [
+        { id: 'bank', label: 'Bank', fn: (r, db) => statementJournalType(db, r) === 'bank' },
+        { id: 'cash', label: 'Cash', fn: (r, db) => statementJournalType(db, r) === 'cash' },
+        { id: 'credit', label: 'Credit Card', fn: (r, db) => statementJournalType(db, r) === 'credit' },
+      ],
+      [
+        ...monthFilters('date', 'Date'),
+        { id: 'date_last_12_months', label: 'Last 12 Months', fn: (r) => Boolean(r.date) && r.date >= shiftMonth(today(), -12) && r.date <= today() },
+      ],
+      [{ id: 'unassigned', label: 'Without a Journal', fn: isStatementLineWithoutJournal }],
+    ],
+    groupBys: ['currency_id', 'company_id', 'journal_id', 'date'],
     kanban: { groupBy: 'state', title: 'payment_ref', lines: ['date', 'amount', 'partner_id'] },
-    list: ['date', 'payment_ref', 'partner_id', 'amount', 'open_amount', 'move_id', 'state'],
+    list: ['sequence', 'date', 'payment_ref', 'partner_id', 'amount', 'journal_id', 'running_balance', 'bank_move_id', 'account_number', 'narration', 'ref', 'transaction_type', 'state'],
+    listLabels: { journal_id: 'Journal', bank_move_id: 'Journal Entry' },
     listDecoration: (r) => (r.state === 'to_check' ? 'info' : null),
     views: ['list', 'kanban'],
     form: {

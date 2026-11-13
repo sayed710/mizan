@@ -6,31 +6,79 @@ const ofxDate = (v) => (/^\d{8}/.test(v ?? '') ? `${v.slice(0, 4)}-${v.slice(4, 
 // OFX 1.x is SGML: tags may be left unclosed, so a value runs to the next "<".
 const ofxTag = (block, tag) => block.match(new RegExp(`<${tag}>([^<\\r\\n]*)`, 'i'))?.[1]?.trim() ?? '';
 
-/** Transactions of an OFX/QFX file as { date, amount, payment_ref, unique_import_id }. */
-export function parseOfx(text) {
-  return [...String(text).matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>)/gi)].map(([, b]) => ({
-    date: ofxDate(ofxTag(b, 'DTPOSTED')),
-    amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
-    payment_ref: [ofxTag(b, 'NAME'), ofxTag(b, 'MEMO')].filter(Boolean).join(' - '),
-    unique_import_id: ofxTag(b, 'FITID') || null,
-  })).filter((l) => l.date && Number.isFinite(l.amount));
+/** Transactions of an OFX/QFX file as { date, amount, payment_ref, unique_import_id }, or with metadata details. */
+export function parseOfx(text, { details = false } = {}) {
+  return [...String(text).matchAll(/<STMTTRN>([\s\S]*?)(?=<\/STMTTRN>|<STMTTRN>|<\/BANKTRANLIST>)/gi)].map(([, b]) => {
+    const memo = ofxTag(b, 'MEMO');
+    const account_number = ofxTag(b, 'ACCTID');
+    const ref = ofxTag(b, 'REFNUM') || ofxTag(b, 'CHECKNUM');
+    const transaction_type = ofxTag(b, 'TRNTYPE');
+    return {
+      date: ofxDate(ofxTag(b, 'DTPOSTED')),
+      amount: Number(ofxTag(b, 'TRNAMT').replace(',', '.')),
+      payment_ref: [ofxTag(b, 'NAME'), memo].filter(Boolean).join(' - '),
+      unique_import_id: ofxTag(b, 'FITID') || null,
+      ...(details ? {
+        ...(account_number ? { account_number } : {}),
+        ...(memo ? { narration: memo } : {}),
+        ...(ref ? { ref } : {}),
+        ...(transaction_type ? { transaction_type } : {}),
+      } : {}),
+    };
+  }).filter((l) => l.date && Number.isFinite(l.amount));
 }
 
 const xmlTag = (block, path) => path.reduce((acc, tag) => acc?.match(new RegExp(`<(?:\\w+:)?${tag}\\b[^>]*>([\\s\\S]*?)</(?:\\w+:)?${tag}>`))?.[1], block)?.trim() ?? '';
 const unescapeXml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
 
+const camtAccount = (block, isDebit) => {
+  const order = isDebit ? ['CdtrAcct', 'DbtrAcct'] : ['DbtrAcct', 'CdtrAcct'];
+  for (const tag of order) {
+    const acct = xmlTag(block, [tag]);
+    if (!acct) continue;
+    const iban = xmlTag(acct, ['Id', 'IBAN']) || xmlTag(acct, ['Id', 'Othr', 'Id']);
+    if (iban) return unescapeXml(iban);
+  }
+  return '';
+};
+
+const camtTxType = (block) => {
+  const bk = xmlTag(block, ['BkTxCd']);
+  if (!bk) return '';
+  const prtry = xmlTag(bk, ['Prtry', 'Cd']);
+  if (prtry) return unescapeXml(prtry);
+  return unescapeXml([xmlTag(bk, ['Domn', 'Cd']), xmlTag(bk, ['Fmly', 'Cd']), xmlTag(bk, ['Fmly', 'SubFmlyCd'])].filter(Boolean).join('-'));
+};
+
 /** Booked entries of an ISO 20022 CAMT.053 statement; debits (DBIT) are negative. */
-export function parseCamt(text) {
+export function parseCamt(text, { details = false } = {}) {
   return [...String(text).matchAll(/<(?:\w+:)?Ntry>([\s\S]*?)<\/(?:\w+:)?Ntry>/g)].map(([, b]) => {
     const amount = Number(xmlTag(b, ['Amt']));
     const amountTag = b.match(/<(?:\w+:)?Amt\b[^>]*>/)?.[0] ?? '';
     const ref = xmlTag(b, ['Ustrd']) || xmlTag(b, ['AddtlNtryInf']) || xmlTag(b, ['Nm']);
+    const isDebit = xmlTag(b, ['CdtDbtInd']) === 'DBIT';
+    const account_number = details ? camtAccount(b, isDebit) : '';
+    const narration = details ? unescapeXml(xmlTag(b, ['AddtlTxInf']) || xmlTag(b, ['AddtlNtryInf'])) : '';
+    const lineRef = details ? unescapeXml([
+      xmlTag(b, ['NtryRef']),
+      xmlTag(b, ['EndToEndId']),
+      xmlTag(b, ['TxId']),
+      xmlTag(b, ['InstrId']),
+      xmlTag(b, ['CdtrRefInf', 'Ref']),
+    ].find((v) => v && v.toUpperCase() !== 'NOTPROVIDED') ?? '') : '';
+    const transaction_type = details ? camtTxType(b) : '';
     return {
       date: (xmlTag(b, ['BookgDt', 'Dt']) || xmlTag(b, ['BookgDt', 'DtTm'])).slice(0, 10) || null,
       currency: amountTag.match(/\sCcy\s*=\s*["']([^"']+)["']/)?.[1] ?? null,
-      amount: xmlTag(b, ['CdtDbtInd']) === 'DBIT' ? -amount : amount,
+      amount: isDebit ? -amount : amount,
       payment_ref: unescapeXml(ref),
       unique_import_id: xmlTag(b, ['AcctSvcrRef']) || null,
+      ...(details ? {
+        ...(account_number ? { account_number } : {}),
+        ...(narration ? { narration } : {}),
+        ...(lineRef ? { ref: lineRef } : {}),
+        ...(transaction_type ? { transaction_type } : {}),
+      } : {}),
     };
   }).filter((l) => /^\d{4}-\d{2}-\d{2}$/.test(l.date ?? '') && Number.isFinite(l.amount));
 }
@@ -66,7 +114,7 @@ export function statementImportDefaults(journal, defaults = {}) {
 /** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
 export function importStatement(db, fileName, text, defaults = {}) {
   const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
-  const lines = camt ? parseCamt(text) : parseOfx(text);
+  const lines = camt ? parseCamt(text, { details: true }) : parseOfx(text, { details: true });
   if (!lines.length) throw new Error('No transactions found in this file');
   if (!defaults.journal_id) throw new Error('Bank Journal is required');
   const journal = read(db, 'account.journal', defaults.journal_id);
