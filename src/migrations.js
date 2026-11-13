@@ -1312,3 +1312,34 @@ export function migrate(db, toVersion = SCHEMA_VERSION) {
   if (!pending.length) return db;
   return { ...pending.reduce((acc, m) => m.up(acc), db), schema_version: toVersion };
 }
+
+MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(db) {
+  const categories = db.records['product.category'] ?? [];
+  if (!categories.length) return db;
+  const byId = new Map(categories.map((c) => [c.id, c]));
+  const inheritedCosting = (cat) => {
+    const seen = new Set();
+    for (let cur = cat; cur && !seen.has(cur.id); cur = byId.get(cur.parent_id)) {
+      seen.add(cur.id);
+      if (cur.property_cost_method) return cur.property_cost_method;
+    }
+    return 'standard';
+  };
+  const nextCategories = categories.map((c) => {
+    const {
+      property_account_income_id: legacyIncome,
+      property_account_expense_id: legacyExpense,
+      ...rest
+    } = c;
+    return {
+      ...rest,
+      property_cost_method: c.property_cost_method || inheritedCosting(byId.get(c.parent_id)),
+      ...(c.property_account_income_categ_id == null && legacyIncome != null ? { property_account_income_categ_id: legacyIncome } : {}),
+      ...(c.property_account_expense_categ_id == null && legacyExpense != null ? { property_account_expense_categ_id: legacyExpense } : {}),
+    };
+  });
+  return {
+    ...db,
+    records: { ...db.records, 'product.category': nextCategories },
+  };
+} });

@@ -1609,6 +1609,23 @@ const ar = {
   'Determine who will be assigned to the activity:\n- Follow-up Responsible (default)\n- Salesperson: Sales Person defined on the invoice\n- Account Manager: Sales Person defined on the customer': 'تحديد من سيتم تعيين النشاط له:\n- مسؤول المتابعة (افتراضي)\n- مندوب المبيعات: مندوب المبيعات المحدد في الفاتورة\n- مدير الحساب: مندوب المبيعات المحدد في العميل',
   'Due Days must be a non-negative integer': 'يجب أن تكون أيام الاستحقاق عدداً صحيحاً غير سالب',
   'Activity Type and Summary are required when Schedule Activity is enabled': 'نوع النشاط والملخص مطلوبان عند تفعيل جدولة النشاط',
+  // Product Categories (Odoo 20 parity)
+  'e.g. Lamps': 'مثال: مصابيح',
+  'This account will be used when validating a customer invoice.': 'سيُستخدم هذا الحساب عند اعتماد فاتورة العميل.',
+  'The expense is accounted for when a vendor bill is validated, except in anglo-saxon accounting with perpetual inventory valuation in which case the expense (Cost of Goods Sold account) is recognized at the customer invoice validation.': 'يُثبت المصروف عند اعتماد فاتورة المورد، باستثناء المحاسبة الأنجلوساكسونية مع تقييم المخزون المستمر حيث يُثبت المصروف (حساب تكلفة البضاعة المباعة) عند اعتماد فاتورة العميل.',
+  'Invoices to be Issued Account': 'حساب فواتير قيد الإصدار',
+  'Account holding the accrued value of the goods delivered but not invoiced yet. With perpetual valuation, it counterbalances the stock valuation account at closing.': 'حساب يحتفظ بالقيمة المستحقة للبضائع المسلمة التي لم تُفوتر بعد. ومع التقييم المستمر، يقابل حساب تقييم المخزون عند الإقفال.',
+  'Invoiced Not Delivered Account': 'حساب المفوتر غير المسلم',
+  'Account holding the accrued value of the goods invoiced but not delivered yet. With perpetual valuation, it counterbalances the stock valuation account at closing.': 'حساب يحتفظ بالقيمة المستحقة للبضائع المفوترة التي لم تُسلم بعد. ومع التقييم المستمر، يقابل حساب تقييم المخزون عند الإقفال.',
+  'Periodic (at closing)': 'دوري (عند الإقفال)',
+  'Perpetual (at invoicing)': 'مستمر (عند الفوترة)',
+  'Average Cost (AVCO)': 'متوسط التكلفة (AVCO)',
+  'Stock Account': 'حساب المخزون',
+  'Stock Variation': 'تغير المخزون',
+  'At closing, register the inventory variation of the period into a specific account': 'عند الإقفال، سجل تغير المخزون للفترة في حساب محدد',
+  'Category hierarchy cannot contain a cycle': 'لا يمكن أن يحتوي تسلسل الفئات على دورة',
+  'Product Categories is required': 'فئات المنتجات مطلوبة',
+  'Costing Method is required': 'طريقة التكلفة مطلوبة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
