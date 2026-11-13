@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { companyViewDb } from '../companyView.js';
-import { analyticEligibleAccount, isLiquidityJournal, journalItems } from '../models/ledger.js';
+import { analyticEligibleAccount, isLiquidityJournal, journalItems, matchedMoveIds } from '../models/ledger.js';
 import { reportingBookedOrNull } from '../models/money.js';
 import { RateNote } from './RateNote.jsx';
 import { read } from '../orm.js';
@@ -118,13 +118,22 @@ export function JournalItems({ leaf = {} } = {}) {
   const name = (model, id) => read(db, model, id)?.name ?? '';
   const names = (model, ids) => ids.map((id) => name(model, id)).filter(Boolean).join(', ');
   const title = mode === 'unreconciled' ? 'Unreconciled' : mode === 'draft' ? 'Draft Entries' : 'Journal Items';
-  // The account form's Balance button opens this report scoped to that account (#/...?account=ID).
-  const accountFilter = Number(new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '').get('account')) || null;
-  // Same company scope as accountBalance: the account's company, else the current one.
+  // The account form's Balance button opens this report scoped to that account (#/...?account=ID),
+  // and Reconciled items smart button scopes it to the matched reconciliation set (#/...?reconciled_of=ID).
+  const hashParams = new URLSearchParams((globalThis.location?.hash ?? '').split('?')[1] ?? '');
+  const accountFilter = Number(hashParams.get('account')) || null;
+  const reconciledOf = Number(hashParams.get('reconciled_of')) || null;
+  // Same company scope as accountBalance: the account's company, else the reconciled move's, else current one.
   const filterAccount = accountFilter ? read(db, 'account.account', accountFilter) : null;
-  const filterCompany = filterAccount ? (filterAccount.company_id ?? db.settings?.current_company_id ?? 1) : null;
+  const filterMove = reconciledOf ? read(db, 'account.move', reconciledOf) : null;
+  const filterCompany = filterAccount
+    ? (filterAccount.company_id ?? db.settings?.current_company_id ?? 1)
+    : filterMove
+      ? (filterMove.company_id ?? db.settings?.current_company_id ?? 1)
+      : null;
+  const matchedMoves = reconciledOf ? matchedMoveIds(db, reconciledOf) : null;
   const enriched = journalItems(db, { from, to, reviewMode: 'all', ...(filterCompany ? { company_id: filterCompany } : {}) })
-    .filter((line) => !accountFilter || line.account_id === accountFilter)
+    .filter((line) => (!accountFilter || line.account_id === accountFilter) && (!matchedMoves || (matchedMoves.has(line.move_id) && line.reconciled)))
     .map((line) => {
       const taxIds = lineIds(line, 'tax_ids', 'tax_id');
       const gridIds = lineIds(line, 'tax_tag_ids', 'tag_ids');

@@ -2,6 +2,7 @@ import { SHARED_MODELS, read, search } from './orm.js';
 import { companyFilter, currentCompany, restrictRecords, scopeAuditChanges, visibleTo } from './models/company.js';
 import { resolveDocumentJournal } from './models/ledger.js';
 import { isMoveSettledByPayment } from './models/pay.js';
+import { deferralLinksMove } from './models/deferred.js';
 
 /** Search UI records in the allowed companies, keeping shared records. */
 export const viewRecords = (db, model, options) => companyFilter(db, search(db, model, options), model);
@@ -16,6 +17,9 @@ export const actionRecords = (db, leaf, rel, archived = false) =>
       if (rel.field === 'payment_id' && leaf.model === 'account.move') {
         const payment = read(db, 'account.payment', rel.id);
         return isMoveSettledByPayment(r, payment);
+      }
+      if (rel.field === 'move_id' && leaf.model === 'account.deferral') {
+        return deferralLinksMove(r, rel.id);
       }
       if (rel.field === 'journal_id' && leaf.model === 'account.move') {
         const jId = r.journal_id ?? (r.state === 'draft' && r.move_type !== 'entry' ? resolveDocumentJournal(db, r)?.id : null);

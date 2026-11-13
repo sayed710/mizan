@@ -9,6 +9,13 @@ import { allocateCents, companyCurrencyRecord, documentCurrency, roundCurrency }
 const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
 const DAY = 86400000;
 
+/** Whether deferral schedule `d` links directly to journal entry `moveId`. */
+export const deferralLinksMove = (d, moveId) => Boolean(d && moveId) && (
+  d.source_move_id === moveId
+  || (d.board ?? []).some((l) => l.move_id === moveId || l.reversal_move_id === moveId)
+  || (d.credit_adjustments ?? []).some((adj) => (adj.move_ids ?? []).includes(moveId))
+);
+
 export function effectivelyReversedEntryIds(moves) {
   const posted = (moves ?? []).filter((m) => m.state === 'posted');
   const reversalsBySource = new Map();

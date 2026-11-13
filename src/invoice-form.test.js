@@ -224,22 +224,15 @@ test('vendor bill form shows Vendor and Bill Reference', async () => {
   }
 });
 
-test('journal entry form remains unchanged', async () => {
+test('the Miscellaneous Entries menu opens the Odoo journal entry form', async () => {
   const leaf = leafFor('Accounting', 'misc');
   const ctx = await mountMoveForm({ leaf, id: 'new' });
   try {
     const labels = fieldLabelsOf(ctx.host);
-    assert.ok(labels.includes('Partner'));
-    assert.ok(labels.includes('Reference'));
-    assert.ok(labels.includes('Date'));
-    assert.ok(labels.includes('Payment Terms'));
-    assert.ok(labels.includes('Due Date'));
-    assert.ok(labels.includes('Journal'));
-    assert.ok(labels.includes('Cash Rounding'));
-    assert.equal(find(ctx.host, (n) => hasClass(n, 'field-pair')), null, 'entry form does not pair Due Date or Payment Terms');
-
+    for (const label of ['Reference', 'Accounting Date', 'Journal']) assert.ok(labels.includes(label), label);
+    for (const label of ['Payment Terms', 'Due Date', 'Cash Rounding']) assert.ok(!labels.includes(label), `${label} belongs to invoices`);
     const tabLabels = allFind(ctx.host, (n) => n.tagName === 'BUTTON' && props(n)?.role === 'tab').map((n) => n.textContent.trim());
-    assert.deepEqual(tabLabels, ['Journal Items']);
+    assert.deepEqual(tabLabels, ['Journal Items', 'Other Info']);
   } finally {
     await ctx.done();
   }

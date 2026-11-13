@@ -1,7 +1,7 @@
-import { create, postNote, read, unlink, write } from '../orm.js';
+import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
-import { creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
@@ -13,9 +13,9 @@ import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, fi
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
 import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
-import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard } from './hash_chain.js';
+import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
-import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, validateInvoiceDeferralCredit } from './deferred.js';
+import { adjustInvoiceDeferralsForCreditNote, createInvoiceDeferrals, deferralLinksMove, reverseInvoiceDeferrals, revertInvoiceDeferralCreditAdjustment, validateInvoiceDeferralCredit } from './deferred.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
@@ -545,6 +545,7 @@ export function postMove(db, id) {
   if (!journalRecord.code?.trim()) throw new Error('Set a short code on the journal');
     const year = (r.invoice_date ?? r.date ?? today()).slice(0, 4);
     const name = enteredName ?? nextName(db, 'account.move', `${journalRecord.code}/${year}/`);
+    if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
     if ((r.line_ids ?? []).some((line) => {
       const account = read(db, 'account.account', line.account_id);
       return account?.company_id && account.company_id !== (r.company_id ?? 1);
@@ -609,6 +610,7 @@ export function postMove(db, id) {
   const matchWarnings = checkBillMatch(db, r);
   const sequence = journalInvoiceSequence(journalRecord, r);
   const name = enteredName ?? sequence.name;
+  if (postedBeforeSecuredChain(db, { ...r, state: 'posted', name, journal_id: journal }, r)) throw new Error(SECURED_ORDER_ERROR);
   if (isRefund(r) && r.reversed_entry_id) creditCheck(db, r);
   const counterpart = intercompanyBill(db, r);
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
@@ -1424,8 +1426,82 @@ const lineItem = {
     tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', hidden: true },
     analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', hidden: true },
   },
+  columnsFor: (record) => (record?.move_type === 'entry'
+    ? [
+      ['account_id', lineItem.fields.account_id],
+      ['partner_id', lineItem.fields.partner_id],
+      ['name', lineItem.fields.name],
+      ['currency_id', { ...lineItem.fields.currency_id, optional: 'hide' }],
+      ['amount_currency', { ...lineItem.fields.amount_currency, optional: 'hide' }],
+      ['date_maturity', lineItem.fields.date_maturity],
+      ['tax_ids', { ...lineItem.fields.tax_ids, hidden: false }],
+      ['debit', lineItem.fields.debit],
+      ['credit', lineItem.fields.credit],
+      ['tax_tag_ids', { ...lineItem.fields.tax_tag_ids, label: 'Tax Grids', hidden: false, optional: 'hide' }],
+      ['discount_date', { ...lineItem.fields.discount_date, hidden: false, optional: 'hide' }],
+    ]
+    : null),
+  totalColumns: (record) => (record?.move_type === 'entry' ? ['debit', 'credit'] : null),
   newLine: () => ({ account_id: null, partner_id: null, name: '', debit: 0, credit: 0 }),
 };
+
+/** Reversal entries linked to `r` via `reversed_entry_id`. */
+const moveReversalEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.reversed_entry_id === r.id) : []);
+
+/** Posted or draft payments whose journal entry is `r`. */
+const movePayments = (db, r) => (db && r?.id ? search(db, 'account.payment').filter((p) => p.move_id === r.id) : []);
+
+/** Adjusting entries linked to `r` via `deferred_adjustment_of_id`. */
+const moveAdjustingEntries = (db, r) => (db && r?.id ? search(db, 'account.move').filter((m) => m.deferred_adjustment_of_id === r.id) : []);
+
+/** Deferral schedules referencing journal entry `r`. */
+const moveDeferrals = (db, r) => (db && r?.id ? search(db, 'account.deferral').filter((d) => deferralLinksMove(d, r.id)) : []);
+
+/** Tax return that lists `r` among its closing moves. */
+const closingTaxReturn = (db, r) => (db && r?.id
+  ? (db.records?.['account.return'] ?? []).find((ret) => (!r.tax_return_id || ret.id === r.tax_return_id) && (ret.closing_move_ids ?? []).includes(r.id))
+  : null);
+
+/** Bank statement line that created or wrote off entry `r`. */
+const bankStatementLineForMove = (db, r) => (db && r?.id
+  ? search(db, 'account.bank.statement.line').find((l) => l.bank_move_id === r.id || l.writeoff_move_id === r.id)
+  : null);
+
+/** Visible warning banner on a manual entry form when its non-zero lines do not balance. */
+function unbalancedEntryWarning(db, r) {
+  if (!r || r.move_type !== 'entry') return '';
+  const lines = r.line_ids ?? [];
+  const own = db ? companyCurrencyRecord(db, r.company_id ?? 1) : null;
+  const hasAmounts = lines.some((l) => (Number(l.debit) || 0) !== 0 || (Number(l.credit) || 0) !== 0);
+  if (!hasAmounts || (!badLineSign(lines) && isBalanced(lines, own))) return '';
+  return t('Journal entry is not balanced: total debit must equal total credit.');
+}
+
+/** Whether a move can be reset back to draft under Mizan's settlement, hash, bank, and lock rules. */
+function canResetMove(r, db) {
+  if (!r || r.state === 'draft' || r.inalterable_hash || Number(r.amount_paid) > 0) return false;
+  if (db && settlingEntries(db).has(r.id)) return false;
+  if (r.move_type === 'entry' && db) {
+    if (bookedByBank(db, r.id)) return false;
+    const lock = recordLockDate(db, r);
+    if (lock && moveDate(r) <= lock) return false;
+  }
+  return true;
+}
+
+/** Whether a posted manual entry is in an unhashed restricted journal and can be hash-locked. */
+function canLockEntry(r, db) {
+  if (!r || r.move_type !== 'entry' || r.state !== 'posted' || r.inalterable_hash || !r.journal_id || !db) return false;
+  return Boolean(read(db, 'account.journal', r.journal_id)?.restrict_mode_hash_table);
+}
+
+/** Cancel a draft move and clear any dangling reversal link on its source entry. */
+function cancelMove(db, r) {
+  let next = write(db, 'account.move', r.id, { state: 'cancel' });
+  const source = r.reversed_entry_id && read(next, 'account.move', r.reversed_entry_id);
+  if (source?.reversal_move_id === r.id) next = write(next, 'account.move', source.id, { reversal_move_id: null });
+  return { db: syncInvoicedQty(removeAnalytic(next, r.id), r) };
+}
 
 /** Company-currency signed total: posted lines when booked, else the document total at its rate (null without one). */
 function signedCompanyTotal(r, db) {
@@ -1456,6 +1532,7 @@ function moveActivities(r, db) {
 const moveJournalType = (db, r) => (db && r?.journal_id ? read(db, 'account.journal', r.journal_id)?.type ?? null : null);
 
 export const journalEntriesView = {
+  defaults: { move_type: 'entry' },
   list: ['accounting_date', 'name', 'partner_id', 'ref', 'journal_id', 'amount_total_signed', 'state'],
   optionalList: ['invoice_date', 'activities'],
   listLabels: { accounting_date: 'Date', invoice_date: 'Invoice Date', amount_total_signed: 'Total', state: 'Status' },
@@ -1835,6 +1912,7 @@ export const accountingModels = {
           } : {}),
         };
       }
+      if (r.move_type === 'entry' && key === 'date') return { invoice_date: r.date };
       return ['invoice_payment_term_id', 'invoice_date'].includes(key) ? termDue(db, r) : {};
     },
     fields: {
@@ -1844,7 +1922,7 @@ export const accountingModels = {
         type: 'many2one',
         relation: 'account.journal',
         label: 'Journal',
-        domain: (j, r) => (!j.company_id || j.company_id === (r?.company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
+        domain: (j, r, db) => (!j.company_id || j.company_id === (r?.company_id ?? db?.settings?.current_company_id ?? 1)) && (r?.move_type === 'entry' ? true : isPurchase(r) ? j.type === 'purchase' : j.type === 'sale'),
       },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
@@ -1964,6 +2042,17 @@ export const accountingModels = {
       narration: { type: 'text', label: 'Terms and Conditions' },
     },
     defaults: () => ({ name: '/', move_type: 'out_invoice', state: 'draft', invoice_date: today(), auto_post: 'no', invoice_line_ids: [], line_ids: [], amount_paid: 0 }),
+    createDefaults: (db, vals = {}) => {
+      if ((vals.move_type ?? 'out_invoice') !== 'entry') return {};
+      const date = vals.date ?? vals.invoice_date ?? today();
+      const companyId = vals.company_id ?? db?.settings?.current_company_id ?? 1;
+      const defaultJournal = vals.journal_id == null ? resolveDocumentJournal(db, { move_type: 'entry', company_id: companyId })?.id ?? null : null;
+      return {
+        ...(vals.date == null ? { date } : {}),
+        ...(vals.invoice_date == null ? { invoice_date: date } : {}),
+        ...(defaultJournal ? { journal_id: defaultJournal } : {}),
+      };
+    },
     filters: [
       [{ id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' }, { id: 'posted', label: 'Posted', fn: (r) => r.state === 'posted' }],
       [
@@ -1983,8 +2072,66 @@ export const accountingModels = {
       statusbar: 'state',
       statusbarHide: ['cancel'],
       lockedWhen: (r) => r.state !== 'draft' || Boolean(r.inalterable_hash),
+      smart: [
+        {
+          label: 'Reversal Entries',
+          when: (r, db) => r.move_type === 'entry' && moveReversalEntries(db, r).length > 0,
+          value: (db, r) => moveReversalEntries(db, r).length,
+          target: (r) => `accounting/entries?view=list&rel=reversed_entry_id:${r.id}`,
+        },
+        {
+          label: 'Reversed Entry',
+          when: (r) => r.move_type === 'entry' && Boolean(r.reversed_entry_id),
+          value: () => '',
+          target: (r) => `accounting/entries/${r.reversed_entry_id}`,
+        },
+        {
+          label: 'Payments',
+          when: (r, db) => r.move_type === 'entry' && movePayments(db, r).length > 0,
+          value: (db, r) => movePayments(db, r).length,
+          target: (r, db) => {
+            const list = movePayments(db, r);
+            if (list.length === 1) return `${list[0].partner_type === 'supplier' ? 'accounting/vendor-payments' : 'accounting/payments'}/${list[0].id}`;
+            return `${list.every((p) => p.partner_type === 'supplier') ? 'accounting/vendor-payments' : 'accounting/payments'}?view=list&rel=move_id:${r.id}`;
+          },
+        },
+        {
+          label: 'Reconciled items',
+          when: (r, db) => r.move_type === 'entry' && Boolean(r.id) && r.state === 'posted' && reconciledJournalItems(db, r).some((l) => l.reconciled),
+          value: () => '',
+          target: (r) => `accounting/journal-items?reconciled_of=${r.id}`,
+        },
+        {
+          label: 'Adjusting Entries',
+          when: (r, db) => r.move_type === 'entry' && moveAdjustingEntries(db, r).length > 0,
+          value: (db, r) => moveAdjustingEntries(db, r).length,
+          target: (r) => `accounting/entries?view=list&rel=deferred_adjustment_of_id:${r.id}`,
+        },
+        {
+          label: 'Deferrals',
+          when: (r, db) => r.move_type === 'entry' && moveDeferrals(db, r).length > 0,
+          value: (db, r) => moveDeferrals(db, r).length,
+          target: (r, db) => {
+            const list = moveDeferrals(db, r);
+            return list.length === 1 ? `accounting/deferrals/${list[0].id}` : `accounting/deferrals?view=list&rel=move_id:${r.id}`;
+          },
+        },
+        {
+          label: 'Tax Return',
+          when: (r, db) => r.move_type === 'entry' && Boolean(closingTaxReturn(db, r)),
+          value: () => '',
+          target: (r, db) => `accounting/tax-returns/${closingTaxReturn(db, r).id}`,
+        },
+        {
+          label: 'Bank transaction',
+          when: (r, db) => r.move_type === 'entry' && Boolean(bankStatementLineForMove(db, r)),
+          value: () => '',
+          target: (r, db) => `accounting/bank/${bankStatementLineForMove(db, r).id}`,
+        },
+      ],
       buttons: [
-        { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
+        { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', visible: (r) => isInvoice(r), run: (db, r) => ({ db: postMove(db, r.id) }) },
+        { label: 'Post', primary: true, when: (r) => r.move_type === 'entry' && r.state === 'draft', run: (db, r) => ({ db: postMove(db, r.id) }) },
         {
           label: 'Reverse Entry',
           when: (r, db) => r.state === 'posted' && r.move_type === 'entry' && (!r.reversal_move_id || (db?.records['account.move'] ?? []).some((m) => m.id === r.reversal_move_id && m.state === 'cancel')) && !(db?.records['account.move'] ?? []).some((m) => m.state === 'posted' && m.reversed_entry_id === r.id) && !(db && settlingEntries(db).has(r.id)),
@@ -2098,19 +2245,16 @@ export const accountingModels = {
         },
         { label: 'Correct Credit Note', when: (r) => r.state === 'posted' && isRefund(r), run: correctCreditNote },
         { label: 'Print', when: (r) => r.state === 'posted' && isInvoice(r), run: (db, r) => ({ db, go: `#/print/account.move/${r.id}` }) },
-        { label: 'Reset to Draft', when: (r, db) => r.state !== 'draft' && !r.inalterable_hash && !(Number(r.amount_paid) > 0) && !(db && settlingEntries(db).has(r.id)), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
-        { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, run: (db, r) => {
-          let next = write(db, 'account.move', r.id, { state: 'cancel' });
-          const source = r.reversed_entry_id && read(next, 'account.move', r.reversed_entry_id);
-          if (source?.reversal_move_id === r.id) next = write(next, 'account.move', source.id, { reversal_move_id: null });
-          return { db: syncInvoicedQty(removeAnalytic(next, r.id), r) };
-        } },
+        { label: 'Reset to Draft', when: (r, db) => canResetMove(r, db), run: (db, r) => ({ db: removeAnalytic(write(db, 'account.move', r.id, { state: 'draft', ...(isInvoice(r) ? { line_ids: [] } : {}) }), r.id) }) },
+        { label: 'Lock', when: canLockEntry, run: (db, r) => ({ db: secureEntries(db, { throughMoveId: r.id }) }) },
+        { label: 'Cancel Entry', when: (r) => r.move_type === 'entry' && r.state === 'draft' && Boolean(r.id) && !r.inalterable_hash, run: cancelMove },
+        { label: 'Cancel', when: (r) => r.state === 'draft' && !r.inalterable_hash, visible: (r) => isInvoice(r), run: cancelMove },
       ],
       ribbon: (r) => (r.state === 'cancel' ? 'Cancelled' : paymentState(r) === 'paid' ? 'Paid' : paymentState(r) === 'partial' ? 'Partial' : null),
       subtitle: (r) => ({ in_invoice: 'Vendor Bill', in_refund: 'Vendor Refund', out_refund: 'Credit Note', entry: 'Journal Entry' })[r.move_type] ?? 'Customer Invoice',
       title: 'name',
       // Evaluated for the record on screen only: it scans the partner's receivables or vendor bill duplicates.
-      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : ''),
+      warning: (r, db) => (r.move_type === 'out_invoice' ? creditWarning(db, r.partner_id, r.state === 'posted' ? 0 : total(r, db), r) : r.move_type === 'in_invoice' ? duplicateBillWarning(db, r) : unbalancedEntryWarning(db, r)),
       groups: (r) => (isInvoice(r)
         ? [
           [{ field: 'partner_id', label: isPurchase(r) ? 'Vendor' : 'Customer' }],
@@ -2122,8 +2266,8 @@ export const accountingModels = {
           ],
         ]
         : [
-          ['partner_id', 'ref', 'invoice_origin', 'intercompany_move_id', 'incoterm_id', 'incoterm_location', 'auto_post', 'auto_post_until', 'auto_reverse', 'reverse_date', 'reverse_journal_id'],
-          ['invoice_date', 'invoice_payment_term_id', 'invoice_date_due', 'journal_id', 'currency_id', 'fiscal_position_id', 'invoice_cash_rounding_id', 'payment_date', 'should_be_paid', 'inalterable_hash', 'secure_sequence_number'],
+          ['ref'],
+          ['date', 'journal_id'],
         ]),
       tabs: (r) => (isInvoice(r)
         ? [
@@ -2164,8 +2308,25 @@ export const accountingModels = {
             ],
           },
         ]
-        : [{ label: 'Journal Items', fields: ['line_ids'] }]),
-      footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : ['amount_total']),
+        : [
+          { label: 'Journal Items', fields: ['line_ids'] },
+          {
+            label: 'Other Info',
+            groups: [
+              [
+                'auto_post',
+                ...(['monthly', 'quarterly', 'yearly'].includes(r?.auto_post) ? [{ field: 'auto_post_until', label: 'Auto-post until' }] : []),
+                ...(r?.reversed_entry_id ? ['reversed_entry_id'] : []),
+                'auto_reverse',
+                ...(r?.auto_reverse ? ['reverse_date', 'reverse_journal_id'] : []),
+                'fiscal_position_id',
+                'currency_id',
+              ],
+              ['narration'],
+            ],
+          },
+        ]),
+      footer: (r) => (isInvoice(r) ? ['amount_untaxed', 'amount_tax', 'amount_total', 'amount_residual'] : []),
       // The outstanding-credits widget lists unapplied payments and open credit notes and applies a chosen one.
       outstandingCredits: {
         title: 'Outstanding Credits',

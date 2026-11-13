@@ -1461,6 +1461,23 @@ const ar = {
   'Invalid regular expression in counterpart line amount': 'تعبير نمطي غير صالح في مبلغ البند المقابل',
   'Counterpart line amount must be numeric': 'يجب أن يكون مبلغ البند المقابل رقمياً',
   'Percentage amount must be between 0 and 100': 'يجب أن تكون النسبة المئوية بين 0 و 100',
+  // Bank Transactions list parity (Odoo 20)
+  'Running Balance': 'الرصيد التراكمي',
+  'Transaction Type': 'نوع المعاملة',
+  'This entry would be numbered before the secured entries of its journal': 'هذا القيد سيأخذ رقمًا يسبق القيود المؤمَّنة في يوميته',
+  'Post or cancel the earlier draft entries of this journal before locking this entry': 'رحّل أو ألغِ القيود المسودة السابقة في هذه اليومية قبل قفل هذا القيد',
+  'Transactions can only be reordered within the same date and journal': 'يمكن إعادة ترتيب الحركات داخل نفس التاريخ واليومية فقط',
+  'Cash In': 'تدفق نقدي داخل',
+  'Cash Out': 'تدفق نقدي خارج',
+  'Last 12 Months': 'آخر 12 شهراً',
+  'Cancel Entry': 'إلغاء القيد',
+  'Reversal Entries': 'قيود العكس',
+  'Reversed Entry': 'القيد المعكوس',
+  'Reconciled items': 'البنود المطابقة',
+  'Adjusting Entries': 'قيود التسوية',
+  'Bank transaction': 'معاملة بنكية',
+  'Auto-post until': 'الترحيل التلقائي حتى',
+  'Journal entry is not balanced: total debit must equal total credit.': 'القيد المحاسبي غير متوازن: يجب أن يتساوى إجمالي المدين مع إجمالي الدائن.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
