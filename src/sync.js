@@ -547,13 +547,6 @@ export function rebaseDiff(d, remapped) {
 const MAX_DB_CHARS =200 * 1024 * 1024; // ponytail: whole-db size cap for the single JSON blob; move to per-model tables beyond this
 
 /**
- * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
- * `author` (their name) by the approval rules in authority.js.
- * @param {object} db
- * @param {any} d
- * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null, login?: string | null, companies?: any, readOnly?: Set<string> | null }} [options]
- */
-/**
  * Whether every line of `rec` on an archived account copies a line of the posted origin move on that account:
  * opposite side (reversal, credit note, correction) or same side (debit note), never for a larger amount.
  */
@@ -575,6 +568,13 @@ function mirrorsOriginOnArchived(db, rec, originId, opposite) {
   return journalOk && (rec.invoice_line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => originInvoiceAccounts.has(l.account_id));
 }
 
+/**
+ * Apply an untrusted diff to the authoritative db. Throws on invalid input. `login` is the acting user, used with
+ * `author` (their name) by the approval rules in authority.js.
+ * @param {object} db
+ * @param {any} d
+ * @param {{ author?: string, isAdmin?: boolean, allowed?: Set<string> | null, login?: string | null, companies?: any, readOnly?: Set<string> | null }} [options]
+ */
 export function applyDiff(db, d, { author, isAdmin = false, allowed = null, login = null, companies = null, readOnly = null } = {}) {
   isAdmin = isAdmin === true;
   if (!d || typeof d !== 'object') throw new Error('Invalid change set');
