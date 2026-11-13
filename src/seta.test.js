@@ -156,8 +156,8 @@ test('Finding 4: postPayment resolves company default payment journal and reject
   const posted = postPayment(db, read(db, 'account.payment', pay.id));
   assert.equal(read(posted, 'account.payment', pay.id).state, 'posted');
 
-  const bankJournal1 = search(db, 'account.journal').find((j) => j.type === 'bank' && !j.company_id);
-  const badPay = create(db, 'account.payment', {
+  const bankJournal1 = search(db, 'account.journal').find((j) => j.type === 'bank' && j.company_id === 1);
+  assert.throws(() => create(db, 'account.payment', {
     partner_id: partner.id,
     amount: 50,
     payment_type: 'outbound',
@@ -165,10 +165,27 @@ test('Finding 4: postPayment resolves company default payment journal and reject
     company_id: comp2Id,
     journal_id: bankJournal1.id,
     state: 'draft',
+  }), /Journal: select a record shared with or belonging to this company/);
+
+  // Even for a pre-existing stored draft payment pointing at another company's journal, postPayment rejects it.
+  const seededBadPay = create(db, 'account.payment', {
+    partner_id: partner.id,
+    amount: 50,
+    payment_type: 'outbound',
+    partner_type: 'supplier',
+    company_id: comp2Id,
+    journal_id: bankJournal2.id,
+    state: 'draft',
   });
-  db = write(badPay.db, 'account.journal', bankJournal1.id, { company_id: 1 });
+  const forcedDb = {
+    ...seededBadPay.db,
+    records: {
+      ...seededBadPay.db.records,
+      'account.payment': seededBadPay.db.records['account.payment'].map((p) => (p.id === seededBadPay.id ? { ...p, journal_id: bankJournal1.id } : p)),
+    },
+  };
   assert.throws(() => {
-    postPayment(db, read(db, 'account.payment', badPay.id));
+    postPayment(forcedDb, read(forcedDb, 'account.payment', seededBadPay.id));
   }, /Payment journal belongs to another company/i);
 });
 
@@ -296,8 +313,8 @@ test('Finding 3: migration 25 copies global locks to all companies and clears se
     },
   };
   const migrated = migrate(oldDb);
-  assert.equal(SCHEMA_VERSION, 46);
-  assert.equal(migrated.schema_version, 46);
+  assert.equal(SCHEMA_VERSION, 47);
+  assert.equal(migrated.schema_version, 47);
   assert.equal('lock_date' in migrated.settings, false);
   assert.equal('sale_lock_date' in migrated.settings, false);
   assert.equal('purchase_lock_date' in migrated.settings, false);

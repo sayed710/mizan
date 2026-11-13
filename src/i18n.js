@@ -1636,6 +1636,7 @@ const ar = {
   'Select a product category which will use analytic account specified in analytic default (e.g. create new customer invoice or Sales order if we select this product, it will automatically take this as an analytic account)': 'اختر فئة منتج تستخدم الحساب التحليلي المحدد في الافتراضي التحليلي (مثلاً عند إنشاء فاتورة عميل جديدة أو أمر بيع، إذا اخترت هذا المنتج فسيأخذ هذا الحساب التحليلي تلقائياً)',
   'This analytic distribution will apply to all financial accounts sharing the prefix specified.': 'سينطبق هذا التوزيع التحليلي على جميع الحسابات المالية التي تشترك في البادئة المحددة.',
   'Analytic accounts in the distribution must belong to the model company': 'يجب أن تنتمي الحسابات التحليلية في التوزيع إلى شركة النموذج',
+  'Upgrade: this journal\'s company could not be proved from its accounts or posted entries; set the company on the journal.': 'ترقية: تعذّر إثبات شركة هذا الدفتر من حساباته أو قيوده المرحّلة؛ يرجى تحديد الشركة على الدفتر.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

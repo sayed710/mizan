@@ -6,7 +6,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -130,6 +130,7 @@ export function seed() {
       code: journal.code, name: journal.name, type: journal.type,
       sequence: (idx + 1) * 10, active: true,
       default_account_id: journal.account ? installedByCode[journal.account] : null,
+      ...(isLiquidityJournal(journal) ? { company_id: 1 } : {}),
       ...(['bank', 'cash', 'credit'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
       ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
       default_for_payments: journal.default_for_payments === true,

@@ -36,8 +36,8 @@ test('company chart defaults resolve receivable, payable, and payment journal by
   let db = seed();
   const receivable = create(db, 'account.account', { code: '120100', name: 'Configured receivable', account_type: 'asset_receivable', company_id: 1 });
   const payable = create(receivable.db, 'account.account', { code: '210100', name: 'Configured payable', account_type: 'liability_payable', company_id: 1 });
-  const bank = create(payable.db, 'account.account', { code: '101999', name: 'Configured bank', account_type: 'asset_cash' });
-  const journal = create(bank.db, 'account.journal', { name: 'Configured bank journal', code: 'CUSTOM', type: 'bank', default_account_id: bank.id, suspense_account_id: bank.id });
+  const bank = create(payable.db, 'account.account', { code: '101999', name: 'Configured bank', account_type: 'asset_cash', company_id: 1 });
+  const journal = create(bank.db, 'account.journal', { name: 'Configured bank journal', code: 'CUSTOM', type: 'bank', company_id: 1, default_account_id: bank.id, suspense_account_id: bank.id });
   db = write(journal.db, 'res.company', 1, { account_default_receivable_id: receivable.id, account_default_payable_id: payable.id });
   const originalDefault = search(db, 'account.journal').find((j) => j.default_for_payments);
   db = write(db, 'account.journal', originalDefault.id, { default_for_payments: false });
@@ -64,7 +64,7 @@ test('a new company keeps its configured counterpart account identities and paym
   const accounts = search(branch.db, 'account.account').filter((account) => account.company_id === branch.id);
   assert.equal(created.account_default_receivable_id, accounts.find((account) => account.account_type === 'asset_receivable').id);
   assert.equal(created.account_default_payable_id, accounts.find((account) => account.account_type === 'liability_payable').id);
-  assert.equal(paymentJournal(branch.db, null, branch.id).id, paymentJournal(branch.db, null, 1).id);
+  assert.throws(() => paymentJournal(branch.db, null, branch.id), /Select a payment journal or configure one default bank or cash journal/);
 });
 
 test('POS posts the configured company receivable account', () => {

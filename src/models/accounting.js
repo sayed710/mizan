@@ -489,9 +489,11 @@ export function intercompanyBill(db, move) {
     if (!account || (account.company_id && account.company_id !== buyer.id)) {
       throw new Error(`Configure an expense account for ${product.name}`);
     }
+    const sourceUntaxed = !line.tax_id && !line.tax_ids?.length && !(Number(line.tax) || 0);
     let tax;
     try {
       tax = productTax(db, product, 'purchase', fpId, buyer.id);
+      if (sourceUntaxed && !tax?.tax_id && !tax?.tax_ids?.length) tax = { tax: 0 };
       if (tax?.tax_id) validateTaxCompany(db, [tax.tax_id, ...(tax.tax_ids ?? [])], buyer.id);
     } catch {
       throw new Error(`Configure purchase taxes for ${buyer.name} on ${product.name}`);

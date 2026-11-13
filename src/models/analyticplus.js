@@ -137,15 +137,23 @@ export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) 
   }
 }
 
+/** Return the analytic line category used for an accounting move. */
+export function analyticMoveCategory(move) {
+  if (move?.move_type === 'entry') return 'journal_entry';
+  if (['in_invoice', 'in_refund'].includes(move?.move_type)) return 'vendor_bill';
+  return 'invoice';
+}
+
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
 export function analyticLinesForMove(db, move, { historical = false } = {}) {
+  const category = analyticMoveCategory(move);
   if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
     const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
     name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
     general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
-    partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+    partner_id: line.partner_id ?? move.partner_id ?? null, category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
     }));
   });
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
@@ -170,7 +178,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
         general_account: read(db, 'account.account', account)?.code || '',
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
-        category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+        category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };
     });
   });
@@ -181,7 +189,7 @@ export function postAnalytic(db, moveId) {
   const move = read(db, 'account.move', moveId);
   if (!move) throw new Error('Invoice or bill not found');
   if (move.state !== 'posted') throw new Error('Post the invoice or bill before creating analytic lines');
-  const category = move.move_type === 'entry' ? 'journal_entry' : move.move_type === 'in_invoice' ? 'vendor_bill' : 'invoice';
+  const category = analyticMoveCategory(move);
   if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && r.category === category)) return db;
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }

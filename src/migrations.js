@@ -1343,3 +1343,35 @@ MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(d
     records: { ...db.records, 'product.category': nextCategories },
   };
 } });
+
+MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', up(db) {
+  const journals = db.records['account.journal'] ?? [];
+  if (!journals.length) return db;
+  const accountById = new Map((db.records['account.account'] ?? []).map((a) => [a.id, a]));
+  const postedMovesByJournal = new Map();
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state !== 'posted' || move.journal_id == null) continue;
+    const list = postedMovesByJournal.get(move.journal_id) ?? [];
+    list.push(move);
+    postedMovesByJournal.set(move.journal_id, list);
+  }
+  const companyIds = new Set((db.records['res.company'] ?? []).map((c) => c.id));
+  const unresolvedIds = [];
+  let changed = false;
+  const nextJournals = journals.map((j) => {
+    if (j.company_id != null) return j;
+    const resolved = provableJournalCompany(j, accountById, postedMovesByJournal.get(j.id) ?? [], companyIds);
+    if (resolved == null) {
+      unresolvedIds.push(j.id);
+      return j;
+    }
+    changed = true;
+    return { ...j, company_id: resolved };
+  });
+  let next = changed ? { ...db, records: { ...db.records, 'account.journal': nextJournals } } : db;
+  if (unresolvedIds.length) {
+    next = { ...next, messages: next.messages ?? [] };
+    for (const id of unresolvedIds) next = postNote(next, 'account.journal', id, UNRESOLVED_JOURNAL_COMPANY_NOTE);
+  }
+  return next;
+} });
