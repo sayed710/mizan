@@ -64,18 +64,21 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
   );
 }
 
+const lockFor = (def, readonly, name) => readonly && !(def.form?.unlockedFields ?? []).includes(name);
+
 function renderGroupItem(item, { db, model, def, current, set, readonly, titled }) {
   if (typeof item === 'string') {
     const field = def.fields[item];
+    const itemReadonly = lockFor(def, readonly, item);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
-      const isReadonly = readonly || fieldReadonly(field, current, db);
+      const isReadonly = itemReadonly || fieldReadonly(field, current, db);
       return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} />;
     }
-    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={readonly} record={current} />;
+    return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={itemReadonly} record={current} />;
   }
   if (item && Array.isArray(item.fields)) {
     const first = def.fields[item.fields[0]];
-    const firstReadonly = readonly || fieldReadonly(first, current, db);
+    const firstReadonly = lockFor(def, readonly, item.fields[0]) || fieldReadonly(first, current, db);
     const labelText = t(item.label ?? first.label);
     return (
       <div key={item.fields.join('+')} className="field">
@@ -83,7 +86,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
         <div className="field-value field-pair">
           {item.fields.map((f, idx) => {
             const fd = def.fields[f];
-            const isRo = readonly || fieldReadonly(fd, current, db);
+            const isRo = lockFor(def, readonly, f) || fieldReadonly(fd, current, db);
             return (
               <Fragment key={f}>
                 {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
@@ -95,7 +98,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
       </div>
     );
   }
-  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={readonly} record={current} />;
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field)} record={current} />;
 }
 
 function renderGroups(groups, opts) {
@@ -119,14 +122,18 @@ function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
-        if (s.valueField) {
-          const field = model ? models[model]?.fields?.[s.valueField] : null;
+        if (s.when && !s.when(rec, db)) return null;
+        if (s.valueField || s.value) {
+          const field = s.valueField && model ? models[model]?.fields?.[s.valueField] : null;
           const value = s.value ? s.value(db, rec) : rec[s.valueField];
           const text = field ? display(db, field, value ?? 0, rec) : String(value ?? '');
-          const label = t(s.label ?? field?.label);
-          return s.target
-            ? <a key={s.label} className="smart" href={`#/${typeof s.target === 'function' ? s.target(rec) : s.target}`}><b>{text}</b><span>{label}</span></a>
-            : <div key={s.label} className="smart"><b>{text}</b><span>{label}</span></div>;
+          const rawLabel = typeof s.label === 'function' ? s.label(rec, db) : s.label;
+          const label = t(rawLabel ?? field?.label);
+          const target = typeof s.target === 'function' ? s.target(rec, db) : s.target;
+          const inner = <>{text !== '' && <b>{text}</b>}<span>{label}</span></>;
+          return target
+            ? <a key={rawLabel ?? s.valueField} className="smart" href={`#/${target}`}>{inner}</a>
+            : <div key={rawLabel ?? s.valueField} className="smart">{inner}</div>;
         }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];

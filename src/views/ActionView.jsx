@@ -23,6 +23,10 @@ export { actionRecords } from '../companyView.js';
 export function parseRel(db, model, raw) {
   if (!raw) return null;
   const [field, id] = raw.split(':');
+  if (model === 'account.move' && field === 'payment_id') {
+    const payment = read(db, 'account.payment', Number(id));
+    return { field, fieldLabel: 'Payment', id: Number(id), label: payment?.name ?? `#${id}` };
+  }
   const f = models[model].fields[field];
   if (!f || f.type !== 'many2one') return null;
   return { field, id: Number(id), label: read(db, f.relation, Number(id))?.name ?? `#${id}` };
@@ -69,7 +73,7 @@ export function ActionView({ leaf, base, params }) {
   const narrowed = search.terms.length > 0 || search.filters.length > 0 || search.archived;
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
-  const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };
+  const defaults = { ...leaf.defaults, ...(search.rel && models[model].fields[search.rel.field] ? { [search.rel.field]: search.rel.id } : {}) };
   const statementImport = model === 'account.bank.statement.line' && !!def.importFile;
   const importJournals = statementImport && !defaults.journal_id
     ? statementImportJournalChoices(db, defaults.company_id ?? null)

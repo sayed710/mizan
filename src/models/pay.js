@@ -1,18 +1,18 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
-import { nextName, sameCommercialPartner, today, validDate } from './common.js';
+import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
-import { rateAt, toCompany } from './currency.js';
+import { conversionRate, rateAt, toCompany } from './currency.js';
 import { paymentCompanyAmount, settlementCompanyAmount } from './settlement.js';
 import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { isPaymentMatched, unreconcile } from './bank.js';
 import { shouldBePaid } from './billcontrol.js';
-import { recipientBankCompanyError } from './company.js';
+import { companyFilter, recipientBankCompanyError } from './company.js';
 
 const money = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -632,7 +632,59 @@ function writeReprintedCheck(db, payment, number, voidedCheckNumbers) {
   }
 }
 
-const STATES = [['draft', 'Draft'], ['posted', 'Posted'], ['cancel', 'Cancelled'], ['reversed', 'Reversed']];
+const STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
+const DISPLAY_STATES = [['draft', 'Draft'], ['posted', 'Paid'], ['reconciled', 'Reconciled'], ['cancel', 'Canceled'], ['reversed', 'Reversed']];
+
+/** True when `move` is an invoice/bill/credit note actively settled by `payment`. */
+export const isMoveSettledByPayment = (move, payment) => Boolean(
+  payment?.move_id && isInvoice(move) && (move?.payments ?? []).some((p) => !p.reversed && p.move_id === payment.move_id),
+);
+
+/** Invoices/bills actively settled by `payment` in the visible company scope. */
+export const paymentSettledMoves = (db, payment) => (
+  payment?.move_id
+    ? companyFilter(db, search(db, 'account.move').filter((m) => isMoveSettledByPayment(m, payment)), 'account.move')
+    : []
+);
+
+const paymentBankLabel = (r) => (r?.payment_type === 'outbound'
+  ? (r?.partner_type === 'supplier' ? 'Vendor Bank Account' : 'Customer Bank Account')
+  : 'Company Bank Account');
+
+/** Company-currency signed payment amount (outbound negative), reusing posted liquidity lines when booked. */
+function paymentCompanySignedAmount(r, db) {
+  if (!r) return 0;
+  const companies = db?.records?.['res.company'] ?? [];
+  const companyCurr = companies.length ? companyCurrencyRecord(db, r.company_id) : null;
+  const roundCo = (n) => {
+    // Display-only: an amount too large to round has no company value; Confirm still rejects it.
+    if (!Number.isFinite(Math.abs(n) / Number(companyCurr?.rounding ?? 0.01))) return null;
+    const rounded = companyCurr ? roundCurrency(n, companyCurr) : round(n);
+    return rounded === 0 ? 0 : rounded;
+  };
+  if (r.move_id) {
+    const move = (db?.records?.['account.move'] ?? []).find((m) => m.id === r.move_id);
+    if (move) {
+      const journalIdUsed = r.journal_id ?? move.journal_id;
+      const journal = journalIdUsed ? (db.records['account.journal'] ?? []).find((j) => j.id === journalIdUsed) : null;
+      const liquidity = r.outstanding_account_id ?? journal?.default_account_id;
+      const lines = (move.line_ids ?? []).filter((l) => (liquidity ? l.account_id === liquidity : false));
+      if (lines.length) {
+        return roundCo(lines.reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+      }
+    }
+  }
+  const raw = Number(r.amount) || 0;
+  const sign = r.payment_type === 'outbound' ? -1 : 1;
+  if (r.currency_id && companyCurr && r.currency_id !== companyCurr.id) {
+    const at = r.date ?? today();
+    const companyId = r.company_id ?? 1;
+    const rate = conversionRate(db, r.currency_id, companyCurr.id, at, companyId);
+    if (rate == null) return null;
+    return roundCo(sign * toCompany(db, r.currency_id, raw, at, companyId));
+  }
+  return roundCo(sign * raw);
+}
 
 const validCheckWrite = (db, before, after) => {
   const priorVoided = before?.voided_check_numbers ?? [];
@@ -660,12 +712,13 @@ export const payModels = {
     invariant: paymentInvariant,
     fields: {
       name: { type: 'char', label: 'Number', readonly: true },
-      payment_type: { type: 'selection', label: 'Payment Type', options: [['inbound', 'Receive'], ['outbound', 'Send']] },
+      payment_type: { type: 'selection', label: 'Payment Type', widget: 'radio', options: [['outbound', 'Send'], ['inbound', 'Receive']] },
       partner_type: { type: 'selection', label: 'Partner Type', options: [['customer', 'Customer'], ['supplier', 'Vendor']] },
       partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       amount: { type: 'monetary', label: 'Amount' },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
+      amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
       voided_check_numbers: { type: 'one2many', label: 'Voided Checks', readonly: true, fields: { check_number: { type: 'integer', label: 'Check Number' }, date: { type: 'date', label: 'Date' } } },
@@ -680,17 +733,54 @@ export const payModels = {
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
       unapplied: { type: 'monetary', label: 'Outstanding Credit', readonly: true, currency: 'company' },
-      state: { type: 'selection', label: 'Status', tracking: true, options: STATES },
+      state: { type: 'selection', label: 'Status', tracking: true, options: STATES, badge: { draft: 'muted', posted: 'ok', cancel: 'muted', reversed: 'muted' } },
+      display_state: {
+        type: 'selection',
+        label: 'Status',
+        options: DISPLAY_STATES,
+        badge: { draft: 'muted', posted: 'ok', reconciled: 'ok', cancel: 'muted', reversed: 'muted' },
+        compute: (r, db) => (r.state === 'posted' && isPaymentMatched(db, r) ? 'reconciled' : r.state),
+      },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0 }),
-    groupBys: ['partner_id', 'payment_type', 'state', 'date'],
-    filters: [[{ id: 'in', label: 'Customer Payments', fn: (r) => r.payment_type === 'inbound' }, { id: 'out', label: 'Vendor Payments', fn: (r) => r.payment_type === 'outbound' }]],
-    kanban: { title: 'name', lines: ['partner_id', 'amount', 'date'], badge: 'state' },
-    list: ['date', 'name', 'partner_id', 'memo', 'payment_type', 'amount', 'state'],
+    groupBys: ['partner_id', 'journal_id', 'display_state', 'date'],
+    filters: [
+      [
+        { id: 'customer', label: 'Customer Payments', fn: (r) => r.partner_type === 'customer' },
+        { id: 'supplier', label: 'Vendor Payments', fn: (r) => r.partner_type === 'supplier' },
+      ],
+      [
+        { id: 'draft', label: 'Draft', fn: (r) => r.state === 'draft' },
+        { id: 'paid', label: 'Paid', fn: (r) => r.state === 'posted' },
+      ],
+      [
+        { id: 'outstanding', label: 'Outstanding', fn: (r) => r.display_state === 'posted' },
+      ],
+      monthFilters('date'),
+    ],
+    kanban: { title: 'name', lines: ['partner_id', 'amount_company_currency_signed', 'date'], badge: 'display_state' },
+    list: ['date', 'name', 'journal_id', 'partner_id', 'amount_company_currency_signed', 'display_state'],
     graph: { groupBy: 'date', measure: 'amount' },
     form: {
       statusbar: 'state',
+      statusbarFor: 'display_state',
+      statusbarHide: ['reconciled', 'cancel', 'reversed'],
+      unlockedFields: ['memo'],
       lockedWhen: (r) => r.state !== 'draft',
+      smart: [
+        {
+          label: (r) => (r.partner_type === 'supplier' ? 'Bills' : 'Invoices'),
+          when: (r, db) => paymentSettledMoves(db, r).length > 0,
+          value: (db, r) => paymentSettledMoves(db, r).length,
+          target: (r) => `${r.partner_type === 'supplier' ? 'accounting/bills' : 'accounting/invoices'}?view=list&rel=payment_id:${r.id}`,
+        },
+        {
+          label: 'Journal Entry',
+          when: (r) => Boolean(r.move_id),
+          value: () => '',
+          target: (r) => `accounting/entries/${r.move_id}`,
+        },
+      ],
       buttons: [
         { label: 'Confirm', primary: true, when: (r) => r.state === 'draft', run: (db, r) => ({ db: postPayment(db, read(db, 'account.payment', r.id)) }) },
         {
@@ -722,13 +812,27 @@ export const payModels = {
             return { db: applyPaymentCredit(db, r.id, values.invoice_id, values.date) };
           },
         },
-        { label: 'Journal Entry', when: (r) => r.move_id, run: (db, r) => ({ db, go: `#/accounting/entries/${r.move_id}` }) },
         { label: 'Reverse', when: (r) => r.state === 'posted', run: (db, r) => ({ db: reversePayment(db, read(db, 'account.payment', r.id)) }) },
         { label: 'Reprint Check', when: (r) => r.state === 'posted' && r.check_number != null, run: (db, r) => ({ db: reprintCheck(db, r), go: `#/print/account.payment/${r.id}` }) },
         { label: 'Cancel', when: (r) => r.state === 'draft', vals: { state: 'cancel' } },
       ],
       title: 'name',
-      groups: [['payment_type', 'partner_type', 'partner_id', 'amount', 'journal_id'], ['date', 'memo', 'invoice_id', 'move_id', 'unapplied']],
+      groups: (r) => [
+        [
+          'payment_type',
+          { field: 'partner_id', label: r?.partner_type === 'supplier' ? 'Vendor' : 'Customer' },
+          { label: 'Amount', fields: ['amount', 'currency_id'] },
+          'date',
+          'memo',
+        ],
+        [
+          'journal_id',
+          { field: 'partner_bank_id', label: paymentBankLabel(r) },
+        ],
+        ...(r?.invoice_id || Number(r?.unapplied) > 0
+          ? [[...(r?.invoice_id ? ['invoice_id'] : []), ...(Number(r?.unapplied) > 0 ? ['unapplied'] : [])]]
+          : []),
+      ],
       chatter: true,
     },
   },

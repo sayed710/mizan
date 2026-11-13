@@ -409,7 +409,7 @@ function NumberInput({ id, value, onChange, integer, ...rest }) {
 /** True when FieldInput renders a single form control that a <label htmlFor> can point at. */
 export const isLabelable = (field, readonly, record, db) => {
   const isReadonly = readonly || fieldReadonly(field, record, db);
-  return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type);
+  return !(isReadonly || field?.compute) && !['one2many', 'priority'].includes(field?.type) && field?.widget !== 'radio';
 };
 
 function DistributionInput({ value, onChange, ...props }) {
@@ -482,6 +482,18 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean': return <input {...a11y} type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />;
     case 'selection':
+      if (field.widget === 'radio') {
+        return (
+          <div id={id} role="radiogroup" aria-label={label} className="radio-group">
+            {field.options.map(([k, l]) => (
+              <label key={k} className="radio-option">
+                <input type="radio" name={id || fieldName} value={k} checked={value === k} onChange={() => onChange(k)} />
+                <span>{t(l)}</span>
+              </label>
+            ))}
+          </div>
+        );
+      }
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
           {!field.required && <option value="" />}

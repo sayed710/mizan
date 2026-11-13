@@ -186,9 +186,11 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .field-pair > :first-child, .field-pair > :last-child { flex: 1; min-width: 0; }
 .field-join { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .req { color: var(--danger); margin-inline-start: 2px; }
-.field-value input:not([type='checkbox']), .field-value select, .tab-panel textarea, .lines input, .lines select {
+.field-value input:not([type='checkbox']):not([type='radio']), .field-value select, .tab-panel textarea, .lines input, .lines select {
   width: 100%; border: 0; border-bottom: 1px solid var(--border-input); padding: 4px 2px; background: none; outline: 0;
 }
+.radio-group { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.field .radio-option { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; cursor: pointer; }
 .field-value input:focus, .field-value select:focus, .tab-panel textarea:focus, .lines input:focus, .lines select:focus { border-bottom-color: var(--brand); }
 .readonly { color: var(--muted); }
 .tags-input { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border-bottom: 1px solid var(--border-input); padding: 2px 0; }

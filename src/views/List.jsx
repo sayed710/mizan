@@ -28,10 +28,11 @@ const badgeClass = (map, value) => (map ? (map[value] ? `badge badge-${map[value
 const Totals = ({ db, cols, fields, records }) =>
   cols.map((f) => {
     const monetary = fields[f].type === 'monetary';
-    const unrated = monetary ? unratedCount(db, records) : 0;
+    const companyBooked = fields[f].currency === 'company';
+    const unrated = monetary ? unratedCount(db, records, undefined, { field: f, companyBooked }) : 0;
     return (
       <td key={f} className="num" title={unrated ? t('Excludes {n} documents in a currency with no exchange rate', { n: unrated }) : undefined}>
-        {monetary ? <>{money(companySum(db, records, f))} <RateNote count={unrated} /></> : ''}
+        {monetary ? <>{money(companySum(db, records, f, undefined, { companyBooked }))} <RateNote count={unrated} /></> : ''}
       </td>
     );
   });

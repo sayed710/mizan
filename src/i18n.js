@@ -1386,6 +1386,10 @@ const ar = {
   'Fiscal Position Mappings': 'تعيينات الأوضاع المالية',
   'Excluded Taxes': 'الضرائب المستبعدة',
   'Tax Invoice Label': 'اسم الضريبة على الفاتورة',
+  'Customer Bank Account': 'حساب بنك العميل',
+  'Vendor Bank Account': 'حساب بنك المورد',
+  'Company Bank Account': 'حساب بنك الشركة',
+  'Outstanding': 'معلّقة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
