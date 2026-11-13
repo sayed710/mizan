@@ -3,7 +3,7 @@ import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
 import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
 import { applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
-import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
+import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
 import { companyCurrencyRecord, documentCurrency, round, roundCurrency } from '../money.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
@@ -149,6 +149,12 @@ export function postPayment(db, p) {
     }
   }
   const date = currentPayment.date ?? today();
+  if (currentPayment.invoice_id) {
+    const invoice = read(db, 'account.move', currentPayment.invoice_id);
+    if (currentPayment.currency_id && invoice && currentPayment.currency_id !== documentCurrency(db, invoice)?.id) {
+      throw new Error('The payment currency must match the invoice currency');
+    }
+  }
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
   const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
   const name = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
@@ -640,6 +646,10 @@ export const isMoveSettledByPayment = (move, payment) => Boolean(
   payment?.move_id && isInvoice(move) && (move?.payments ?? []).some((p) => !p.reversed && p.move_id === payment.move_id),
 );
 
+/** Settled documents a smart button can open: refunds/credit notes, or invoices/bills. */
+const settledOfType = (db, payment, refunds) => paymentSettledMoves(db, payment)
+  .filter((m) => ['out_refund', 'in_refund'].includes(m.move_type) === refunds);
+
 /** Invoices/bills actively settled by `payment` in the visible company scope. */
 export const paymentSettledMoves = (db, payment) => (
   payment?.move_id
@@ -718,7 +728,8 @@ export const payModels = {
       partner_bank_id: { type: 'many2one', relation: 'res.partner.bank', label: 'Recipient Bank Account' },
       amount: { type: 'monetary', label: 'Amount' },
       amount_company_currency_signed: { type: 'monetary', label: 'Amount', currency: 'company', compute: (r, db) => paymentCompanySignedAmount(r, db) },
-      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
+      // A payment of an invoice is made in that invoice's currency (payMove books it in invoice units).
+      currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: (r) => Boolean(r?.invoice_id) },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Journal' },
       check_number: { type: 'integer', label: 'Check Number', readonly: true },
       voided_check_numbers: { type: 'one2many', label: 'Voided Checks', readonly: true, fields: { check_number: { type: 'integer', label: 'Check Number' }, date: { type: 'date', label: 'Date' } } },
@@ -728,7 +739,14 @@ export const payModels = {
       destination_account_code: { type: 'char', label: 'Destination Account Code', hidden: true },
       is_tax_payment: { type: 'boolean', label: 'Tax Payment', hidden: true },
       return_id: { type: 'many2one', relation: 'account.return', label: 'Tax Return', readonly: true },
-      invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
+      invoice_id: {
+        type: 'many2one', relation: 'account.move', label: 'Invoice',
+        // An open posted document of this payment's partner, company and direction.
+        domain: (m, r) => m.state === 'posted' && isInvoice(m) && Number(m.amount_residual) > 0
+          && (m.company_id ?? 1) === (r?.company_id ?? 1)
+          && (!r?.partner_id || m.partner_id === r.partner_id)
+          && Boolean(SETTLES[r?.partner_type]?.[r?.payment_type]?.includes(m.move_type)),
+      },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true },
       outstanding_account_id: { type: 'many2one', relation: 'account.account', label: 'Outstanding Account', readonly: true, hidden: true },
       sale_id: { type: 'many2one', relation: 'sale.order', label: 'Sales Order', readonly: true },
@@ -743,6 +761,7 @@ export const payModels = {
       },
     },
     defaults: () => ({ name: '/', payment_type: 'inbound', partner_type: 'customer', date: today(), state: 'draft', amount: 0 }),
+    onchange: (r, key, db) => (key === 'invoice_id' && r.invoice_id && db ? { currency_id: documentCurrency(db, read(db, 'account.move', r.invoice_id))?.id ?? null } : {}),
     groupBys: ['partner_id', 'journal_id', 'display_state', 'date'],
     filters: [
       [
@@ -765,14 +784,24 @@ export const payModels = {
       statusbar: 'state',
       statusbarFor: 'display_state',
       statusbarHide: ['reconciled', 'cancel', 'reversed'],
-      unlockedFields: ['memo'],
+      // Memo stays editable on posted payments, except inside a locked period (the dated lock rejects it).
+      unlockedFields: (r, db) => {
+        const lock = r && db ? recordLockDate(db, r) : null;
+        return lock && String(r.date ?? today()) <= lock ? [] : ['memo'];
+      },
       lockedWhen: (r) => r.state !== 'draft',
       smart: [
         {
           label: (r) => (r.partner_type === 'supplier' ? 'Bills' : 'Invoices'),
-          when: (r, db) => paymentSettledMoves(db, r).length > 0,
-          value: (db, r) => paymentSettledMoves(db, r).length,
+          when: (r, db) => settledOfType(db, r, false).length > 0,
+          value: (db, r) => settledOfType(db, r, false).length,
           target: (r) => `${r.partner_type === 'supplier' ? 'accounting/bills' : 'accounting/invoices'}?view=list&rel=payment_id:${r.id}`,
+        },
+        {
+          label: (r) => (r.partner_type === 'supplier' ? 'Refunds' : 'Credit Notes'),
+          when: (r, db) => settledOfType(db, r, true).length > 0,
+          value: (db, r) => settledOfType(db, r, true).length,
+          target: (r) => `${r.partner_type === 'supplier' ? 'accounting/refunds' : 'accounting/credit-notes'}?view=list&rel=payment_id:${r.id}`,
         },
         {
           label: 'Journal Entry',
@@ -829,8 +858,8 @@ export const payModels = {
           'journal_id',
           { field: 'partner_bank_id', label: paymentBankLabel(r) },
         ],
-        ...(r?.invoice_id || Number(r?.unapplied) > 0
-          ? [[...(r?.invoice_id ? ['invoice_id'] : []), ...(Number(r?.unapplied) > 0 ? ['unapplied'] : [])]]
+        ...(r?.invoice_id || r?.state === 'draft' || Number(r?.unapplied) > 0
+          ? [[...(r?.invoice_id || r?.state === 'draft' ? ['invoice_id'] : []), ...(Number(r?.unapplied) > 0 ? ['unapplied'] : [])]]
           : []),
       ],
       chatter: true,

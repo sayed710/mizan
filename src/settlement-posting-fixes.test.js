@@ -136,6 +136,10 @@ test('Finding 1: archived receivable/income accounts do not block system posting
   const forged = postEntry(db, { journal: 'MISC', date: '2026-02-15', ref: 'Forged', company: 1, archivedOriginIds: [invForDebit.id], lines: [{ account: cashAccId, debit: 30 }, { account: legacyIncId, credit: 30 }] });
   const forgedDb = write(forged.db, 'account.move', forged.id, { reversed_entry_id: invForDebit.id });
   assert.throws(() => applyDiff(db, diffDb(db, forgedDb)), /Archived accounts cannot be selected/);
+  // Several archived-account lines cannot together exceed what the origin booked on that account.
+  const split = postEntry(db, { journal: 'MISC', date: '2026-02-15', ref: 'Split reversal', company: 1, archivedOriginIds: [invForDebit.id], lines: [{ account: legacyIncId, debit: 60 }, { account: legacyIncId, debit: 60 }, { account: cashAccId, credit: 120 }] });
+  const splitDb = write(split.db, 'account.move', split.id, { reversed_entry_id: invForDebit.id });
+  assert.throws(() => applyDiff(db, diffDb(db, splitDb)), /Archived accounts cannot be selected/);
 
   // 6) Manual entry / direct invoice / adding new line choosing archived account still fails.
   assert.throws(

@@ -555,14 +555,20 @@ function mirrorsOriginOnArchived(db, rec, originId, opposite) {
   const origin = (db.records['account.move'] ?? []).find((m) => m.id === originId);
   if (origin?.state !== 'posted') return false;
   const archived = (id) => (db.records['account.account'] ?? []).find((a) => a.id === id)?.active === false;
-  const side = (l) => [Number(l.debit) || 0, Number(l.credit) || 0];
-  const journalOk = (rec.line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => {
-    const [debit, credit] = side(l);
-    return (origin.line_ids ?? []).some((o) => {
-      if (o.account_id !== l.account_id) return false;
-      const [od, oc] = side(o);
-      return opposite ? debit <= oc + 1e-9 && credit <= od + 1e-9 : debit <= od + 1e-9 && credit <= oc + 1e-9;
-    });
+  // Totals per archived account: the new move may not post more on an account than the origin booked on the matching side.
+  const totals = (lines, keep) => {
+    const out = new Map();
+    for (const l of lines ?? []) {
+      if (!keep(l.account_id)) continue;
+      const [d, c] = out.get(l.account_id) ?? [0, 0];
+      out.set(l.account_id, [d + (Number(l.debit) || 0), c + (Number(l.credit) || 0)]);
+    }
+    return out;
+  };
+  const originTotals = totals(origin.line_ids, () => true);
+  const journalOk = [...totals(rec.line_ids, archived)].every(([accountId, [debit, credit]]) => {
+    const [od, oc] = originTotals.get(accountId) ?? [0, 0];
+    return opposite ? debit <= oc + 1e-9 && credit <= od + 1e-9 : debit <= od + 1e-9 && credit <= oc + 1e-9;
   });
   const originInvoiceAccounts = new Set((origin.invoice_line_ids ?? []).map((l) => l.account_id));
   return journalOk && (rec.invoice_line_ids ?? []).filter((l) => archived(l.account_id)).every((l) => originInvoiceAccounts.has(l.account_id));

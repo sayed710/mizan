@@ -1390,6 +1390,7 @@ const ar = {
   'Vendor Bank Account': 'حساب بنك المورد',
   'Company Bank Account': 'حساب بنك الشركة',
   'Outstanding': 'معلّقة',
+  'The payment currency must match the invoice currency': 'يجب أن تطابق عملة الدفعة عملة الفاتورة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

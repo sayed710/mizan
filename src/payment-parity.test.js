@@ -258,9 +258,13 @@ test('Payment form renders Odoo 20 groups, radio Payment Type, direction-aware b
     assert.equal(radios.length, 2);
     assert.equal(radios.some((r) => props(r).value === 'outbound' && props(r).checked), true);
     const draftGroups = allFind(host, (n) => n.tagName === 'DIV' && hasClass(n, 'group'));
-    assert.equal(draftGroups.length, 2);
+    // Draft payments also offer the invoice to settle (Qodo: new payments must be able to target one invoice).
+    assert.equal(draftGroups.length, 3);
     assert.deepEqual(fieldLabelsOf(draftGroups[0]), ['Payment Type', 'Customer', 'Amount', 'Date', 'Memo']);
     assert.deepEqual(fieldLabelsOf(draftGroups[1]), ['Journal', 'Customer Bank Account']);
+    assert.deepEqual(fieldLabelsOf(draftGroups[2]), ['Invoice']);
+    const radioGroup = allFind(host, (n) => props(n)?.role === 'radiogroup')[0];
+    assert.equal(props(radioGroup)['aria-label'], 'Payment Type');
     const headerButtons = () => allFind(host, (n) => hasClass(n, 'form-header'))[0]?.childNodes[0]?.childNodes
       .filter((b) => b.tagName === 'BUTTON')
       .map((b) => b.textContent.trim());
@@ -338,4 +342,52 @@ test('Arabic translations cover every Odoo 20 payment status, direction, and ban
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('payment smart buttons count only documents their destination lists', () => {
+  let db = seed();
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-03-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  db = payMove(db, inv.id, 100, '2026-03-02');
+  const payment = db.records['account.payment'].at(-1);
+  const smart = models['account.payment'].form.smart;
+  const invoices = smart.find((s) => typeof s.label === 'function' && s.label(payment) === 'Invoices');
+  const notes = smart.find((s) => typeof s.label === 'function' && s.label(payment) === 'Credit Notes');
+  assert.equal(invoices.value(db, payment), 1);
+  assert.equal(notes.when(payment, db), false);
+  // Pretend the settled document were a credit note: it moves to the Credit Notes button.
+  const asRefund = { ...db, records: { ...db.records, 'account.move': db.records['account.move'].map((m) => (m.id === inv.id ? { ...m, move_type: 'out_refund' } : m)) } };
+  assert.equal(invoices.when(payment, asRefund), false);
+  assert.equal(notes.value(asRefund, payment), 1);
+  assert.match(notes.target(payment), /^accounting\/credit-notes\?view=list&rel=payment_id:/);
+});
+
+test('a draft payment can target one open invoice in that invoice currency', () => {
+  let db = seed();
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 2, invoice_date: '2026-03-01', invoice_line_ids: [{ product_id: 1, qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  const draft = create(db, 'account.payment', { partner_id: 2, amount: 40, date: '2026-03-02' });
+  const rec = read(draft.db, 'account.payment', draft.id);
+  assert.ok(models['account.payment'].form.groups(rec).flat().some((f) => f === 'invoice_id'));
+  const domain = models['account.payment'].fields.invoice_id.domain;
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), rec), true);
+  assert.equal(domain(read(draft.db, 'account.move', inv.id), { ...rec, payment_type: 'outbound', partner_type: 'supplier' }), false);
+  const linked = write(draft.db, 'account.payment', draft.id, { invoice_id: inv.id });
+  const invoiceCurrency = read(linked, 'account.payment', draft.id).currency_id;
+  assert.ok(invoiceCurrency, 'picking the invoice sets the payment currency');
+  assert.equal(models['account.payment'].fields.currency_id.readonly(read(linked, 'account.payment', draft.id)), true);
+  const other = search(linked, 'res.currency').find((c) => c.id !== invoiceCurrency);
+  const forged = { ...linked, records: { ...linked.records, 'account.payment': linked.records['account.payment'].map((p) => (p.id === draft.id ? { ...p, currency_id: other.id } : p)) } };
+  assert.throws(() => postPayment(forged, read(forged, 'account.payment', draft.id)), /payment currency must match the invoice currency/);
+});
+
+test('posted payment memo is editable only outside a locked period', () => {
+  let db = seed();
+  const draft = create(db, 'account.payment', { partner_id: 2, amount: 25, date: '2026-01-05' });
+  db = postPayment(draft.db, read(draft.db, 'account.payment', draft.id));
+  const payment = read(db, 'account.payment', draft.id);
+  const unlocked = models['account.payment'].form.unlockedFields;
+  assert.deepEqual(unlocked(payment, db), ['memo']);
+  const lockedDb = { ...db, records: { ...db.records, 'res.company': db.records['res.company'].map((c) => ({ ...c, lock_date: '2026-01-31' })) } };
+  assert.deepEqual(unlocked(payment, lockedDb), []);
 });

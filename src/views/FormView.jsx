@@ -59,17 +59,19 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
   return (
     <div className="field">
       {isLabelable(field, isReadonly, record, db) ? <label htmlFor={id}>{text}</label> : <span className="field-label">{text}</span>}
-      <div className="field-value"><FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} /></div>
+      <div className="field-value"><FieldInput db={db} model={model} fieldName={name} field={field} value={value} onChange={onChange} id={id} readonly={isReadonly} record={record} label={typeof label === 'string' ? label : undefined} /></div>
     </div>
   );
 }
 
-const lockFor = (def, readonly, name) => readonly && !(def.form?.unlockedFields ?? []).includes(name);
+// `unlockedFields` may depend on the record (e.g. a posted payment's memo outside a locked period).
+const lockFor = (def, readonly, name, record, db) => readonly
+  && !((typeof def.form?.unlockedFields === 'function' ? def.form.unlockedFields(record, db) : def.form?.unlockedFields) ?? []).includes(name);
 
 function renderGroupItem(item, { db, model, def, current, set, readonly, titled }) {
   if (typeof item === 'string') {
     const field = def.fields[item];
-    const itemReadonly = lockFor(def, readonly, item);
+    const itemReadonly = lockFor(def, readonly, item, current, db);
     if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
       const isReadonly = itemReadonly || fieldReadonly(field, current, db);
       return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} />;
@@ -78,7 +80,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
   }
   if (item && Array.isArray(item.fields)) {
     const first = def.fields[item.fields[0]];
-    const firstReadonly = lockFor(def, readonly, item.fields[0]) || fieldReadonly(first, current, db);
+    const firstReadonly = lockFor(def, readonly, item.fields[0], current, db) || fieldReadonly(first, current, db);
     const labelText = t(item.label ?? first.label);
     return (
       <div key={item.fields.join('+')} className="field">
@@ -86,7 +88,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
         <div className="field-value field-pair">
           {item.fields.map((f, idx) => {
             const fd = def.fields[f];
-            const isRo = lockFor(def, readonly, f) || fieldReadonly(fd, current, db);
+            const isRo = lockFor(def, readonly, f, current, db) || fieldReadonly(fd, current, db);
             return (
               <Fragment key={f}>
                 {idx > 0 && item.join && <span className="field-join">{t(item.join)}</span>}
@@ -98,7 +100,7 @@ function renderGroupItem(item, { db, model, def, current, set, readonly, titled 
       </div>
     );
   }
-  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field)} record={current} />;
+  return <Field key={item.field} db={db} model={model} name={item.field} label={item.label} value={current[item.field]} onChange={set(item.field)} readonly={lockFor(def, readonly, item.field, current, db)} record={current} />;
 }
 
 function renderGroups(groups, opts) {
