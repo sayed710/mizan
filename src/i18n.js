@@ -1234,6 +1234,7 @@ const ar = {
   'Incoterm Location': 'موقع شرط التجارة',
   'Depreciation Model': 'نموذج الإهلاك',
   'Secure Posted Entries with Hash': 'تأمين القيود المرحلة بالتجزئة',
+  'Sequence Prefix': 'بادئة التسلسل', 'Cash Account': 'الحساب النقدي', 'Incoming Payments': 'المدفوعات الواردة', 'Outgoing Payments': 'المدفوعات الصادرة', 'Advanced Settings': 'الإعدادات المتقدمة',
   'Inalterability Hash': 'تجزئة عدم قابلية التعديل',
   'Inalterability Sequence Number': 'رقم تسلسل عدم قابلية التعديل',
   'Display Name': 'الاسم المعروض',
