@@ -554,6 +554,8 @@ export const taxModels = {
       if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
         try { configuredAccount(db, after.cash_basis_transition_account_id, after.company_id, 'cash basis transition', after.name); } catch (error) { return error.message; }
       }
+      const group = after.tax_group_id ? read(db, 'account.tax.group', after.tax_group_id) : null;
+      if (group?.company_id && group.company_id !== (after.company_id ?? 1)) return 'The tax group must belong to the tax company';
       for (const row of [...(after.invoice_repartition_line_ids ?? []), ...(after.refund_repartition_line_ids ?? [])]) {
         if (row.account_id) {
           const account = read(db, 'account.account', row.account_id);
@@ -604,7 +606,7 @@ export const taxModels = {
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
-      tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
+      tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
       refund_repartition_line_ids: repartitionField('Distribution for Refunds'),

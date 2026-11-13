@@ -797,6 +797,7 @@ export function reconciledJournalItems(db, move) {
         : 0,
     };
   };
+  let unappliedLeft = Math.max(0, Number(payment?.unapplied) || 0);
   return rawLines.map((line, index) => {
     const account = read(db, 'account.account', line.account_id);
     let reconciled = false;
@@ -824,8 +825,10 @@ export function reconciledJournalItems(db, move) {
         const lineDoc = docLineTotal(line);
         ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, lineDoc > 1e-9 ? remainingByIndex.get(index) / lineDoc : 0));
       } else if (posted && !document && payment?.unapplied != null && counterpart && Math.abs(amount_residual) > 1e-9) {
-        const ratio = Math.min(1, Math.max(0, Number(payment.unapplied) || 0) / Math.abs(amount_residual));
-        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, ratio));
+        // The payment's unapplied amount is open once, shared across its counterpart lines in order.
+        const share = Math.min(unappliedLeft, Math.abs(amount_residual));
+        unappliedLeft -= share;
+        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, share / Math.abs(amount_residual)));
       }
     }
     return { ...line, reconciled, amount_residual, amount_residual_currency };

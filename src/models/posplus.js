@@ -410,8 +410,10 @@ export const posPlusModels = {
       if (!Number.isFinite(precision) || precision <= 0) return 'Precision must be greater than zero';
       const company = after.company_id ?? db.settings?.current_company_id ?? 1;
       const owner = after.name || 'the cash rounding method';
+      // Accounts become required when the method is created or its strategy/accounts change, so legacy methods stay archivable.
+      const accountsTouched = !before || ['strategy', 'profit_account_id', 'loss_account_id'].some((f) => before[f] !== after[f]);
       for (const field of ['profit_account_id', 'loss_account_id']) {
-        if (after.strategy !== 'add_invoice_line' && !after[field]) continue;
+        if (!after[field] && (after.strategy !== 'add_invoice_line' || !accountsTouched)) continue;
         try {
           configuredAccount(db, after[field], company, field === 'profit_account_id' ? 'profit' : 'loss', owner);
         } catch (error) {

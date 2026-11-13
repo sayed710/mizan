@@ -1559,6 +1559,7 @@ const ar = {
   'Precision must be greater than zero': 'يجب أن تكون الدقة أكبر من الصفر',
   'Select an active cash rounding method': 'اختر طريقة تقريب نقدي نشطة',
   'The cash rounding method belongs to another company': 'طريقة التقريب النقدي تابعة لشركة أخرى',
+  'The tax group must belong to the tax company': 'يجب أن تتبع مجموعة الضرائب شركة الضريبة',
   'The cash rounding method does not apply to this currency': 'طريقة التقريب النقدي لا تنطبق على هذه العملة',
   // Incoterms, Fiscal Years, Account Tags parity (Odoo 20)
   'Incoterms are series of sales terms. They are used to divide transaction costs and responsibilities between buyer and seller and reflect state-of-the-art transportation practices.': 'شروط التجارة الدولية (Incoterms) هي مجموعة من شروط البيع تُستخدم لتوزيع تكاليف المعاملة ومسؤولياتها بين المشتري والبائع وتعكس أحدث ممارسات النقل.',

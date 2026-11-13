@@ -43,7 +43,9 @@ export function accountingCompany(db) {
   }
   const purchase = create(next, 'account.journal', { name: 'Branch expense journal', code: 'EXP2', type: 'purchase', company_id: branch.id, default_account_id: accountIds['600000'] });
   const sourceTax = read(purchase.db, 'account.tax', read(purchase.db, 'res.company', 1).account_purchase_tax_id);
-  const tax = create(purchase.db, 'account.tax', { ...sourceTax, company_id: branch.id, ...Object.fromEntries(['invoice_repartition_line_ids', 'refund_repartition_line_ids'].map((key) => [key, (sourceTax[key] ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: accountIds['131000'] } : l))])) });
+  const sourceGroup = read(purchase.db, 'account.tax.group', sourceTax.tax_group_id);
+  const group = create(purchase.db, 'account.tax.group', { ...sourceGroup, id: undefined, company_id: branch.id });
+  const tax = create(group.db, 'account.tax', { ...sourceTax, company_id: branch.id, tax_group_id: group.id, ...Object.fromEntries(['invoice_repartition_line_ids', 'refund_repartition_line_ids'].map((key) => [key, (sourceTax[key] ?? []).map((l) => (l.repartition_type === 'tax' ? { ...l, account_id: accountIds['131000'] } : l))])) });
   next = write(tax.db, 'res.company', branch.id, { account_default_receivable_id: accountIds['121000'], account_default_payable_id: accountIds['211000'], default_purchase_journal_id: purchase.id, default_general_journal_id: generalJournalId, account_purchase_tax_id: tax.id });
   next = write(next, 'account.journal', bankJournalId, { default_for_payments: true });
   return { db: next, id: branch.id };
@@ -57,7 +59,7 @@ export function assertEntryCompany(assert, db, entry, companyId) {
 
 /** Give a fixture company its own VAT accounts and default sales and purchase taxes, which plain-rate lines post to. */
 export function withDefaultVat(db, companyId, rate = 14) {
-  const madeGroup = create(db, 'account.tax.group', { name: 'VAT' });
+  const madeGroup = create(db, 'account.tax.group', { name: 'VAT', company_id: companyId });
   let next = madeGroup.db;
   const tax = (type_tax_use, account_type, name) => {
     const account = create(next, 'account.account', { name, code: `VAT-${type_tax_use}-${companyId}`, account_type, company_id: companyId });

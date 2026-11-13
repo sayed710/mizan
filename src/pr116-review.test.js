@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, read, write } from './orm.js';
 import { seed } from './seed.js';
-import { models } from './models/index.js';
-import { postMove } from './models/accounting.js';
+import { menusFor, models } from './models/index.js';
+import { payMove, postMove } from './models/accounting.js';
 import { total } from './models/common.js';
 import { isBalanced, reconciledJournalItems } from './models/ledger.js';
 import { MIGRATIONS } from './migrations.js';
@@ -164,4 +164,48 @@ test('the API computes analytic balances only from the caller\'s companies', () 
   assert.equal(one.body.balance, 30);
   const list = handleApi({ method: 'GET', path: '/api/v1/account.analytic.account', query: new URLSearchParams(), db, user, companies: new Set([1]), company: 1 });
   assert.equal(list.body.records.find((r) => r.id === account.id).balance, 30);
+});
+
+test('an overpayment shows its unapplied amount open once across the payment lines', () => {
+  let db = seed();
+  const move = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 100, tax_ids: [] }] });
+  db = payMove(postMove(move.db, move.id), move.id, 120, '2026-03-02');
+  const payment = db.records['account.move'].find((m) => m.id !== move.id && m.state === 'posted' && (m.line_ids ?? []).some((l) => l.partner_id === 1) && m.move_type === 'entry' && m.date === '2026-03-02');
+  const open = reconciledJournalItems(db, payment)
+    .filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable')
+    .reduce((sum, l) => sum + Math.abs(l.amount_residual ?? 0), 0);
+  assert.equal(open, 20);
+});
+
+test('archiving a legacy add-line rounding method without accounts is allowed, adding one without accounts is not', () => {
+  let db = seed();
+  const legacy = { id: 900, name: 'Legacy', rounding: 0.05, rounding_method: 'HALF-UP', strategy: 'add_invoice_line', active: true, sequence: 10, currency_ids: [] };
+  db = { ...db, records: { ...db.records, 'account.cash.rounding': [...(db.records['account.cash.rounding'] ?? []), legacy] } };
+  assert.doesNotThrow(() => write(db, 'account.cash.rounding', 900, { active: false }));
+  assert.throws(() => rounding(db, { name: 'New', strategy: 'add_invoice_line' }));
+});
+
+test("a tax cannot use another company's tax group", () => {
+  let db = seed();
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Company Two' });
+  db = c2.db;
+  const group = create(db, 'account.tax.group', { name: 'Main only', company_id: 1 });
+  db = group.db;
+  const field = models['account.tax'].fields.tax_group_id;
+  assert.equal(field.domain(read(db, 'account.tax.group', group.id), { company_id: c2.id }, db), false);
+  const tax = db.records['account.tax'].find((t) => t.company_id === c2.id) ?? null;
+  if (tax) assert.throws(() => write(db, 'account.tax', tax.id, { tax_group_id: group.id }), /tax group must belong/);
+  assert.throws(() => create(db, 'account.tax', { name: 'Branch tax', amount: 5, amount_type: 'percent', type_tax_use: 'sale', company_id: c2.id, tax_group_id: group.id }), /tax group must belong/);
+});
+
+test('miscellaneous and draft entries menus use the journal entries search, not invoice filters', () => {
+  const leaves = menusFor('accounting');
+  const flat = (items) => items.flatMap((i) => (i.children ? flat(i.children) : [i]));
+  const all = flat(leaves);
+  for (const key of ['misc', 'draft-entries']) {
+    const leaf = all.find((l) => l.key === key);
+    const ids = leaf.filters.flat().map((f) => f.id);
+    assert.ok(!ids.includes('unpaid') && !ids.includes('overdue'), `${key} has no invoice filters`);
+    assert.ok(ids.includes('posted'), `${key} keeps the entries filters`);
+  }
 });

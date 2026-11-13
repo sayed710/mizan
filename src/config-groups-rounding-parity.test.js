@@ -418,7 +418,8 @@ test('migration 45 backfills tax group company_id from owning taxes (else main c
   db = branch.db;
   const branchTaxAccount = create(db, 'account.account', { name: 'Branch VAT', code: '219901', account_type: 'liability_current', company_id: branch.id });
   db = branchTaxAccount.db;
-  const groupBranch = create(db, 'account.tax.group', { name: 'VAT - Shared Name' });
+  // Created under the branch so the tax can use it; company_id is stripped below to simulate pre-45 data.
+  const groupBranch = create(db, 'account.tax.group', { name: 'VAT - Shared Name', company_id: branch.id });
   db = groupBranch.db;
   const groupUnowned = create(db, 'account.tax.group', { name: 'Branch Name Hint Should Be Ignored' });
   db = groupUnowned.db;

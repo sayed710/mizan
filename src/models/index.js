@@ -94,6 +94,9 @@ import { orderpointModels } from './orderpoint.js';
 import { productConfigModels } from './productconfig.js';
 import { configurableReportModels } from './configurableReports.js';
 
+// Generic entry menus search like Journal Entries, not like invoices.
+const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
+
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
@@ -237,7 +240,7 @@ const allApps = [
           { key: 'analytic-items', label: 'Analytic Items', model: 'account.analytic.line', domain: (r) => !!r.move_id || (r.category && r.category !== 'timesheet') },
           { key: 'bank', label: 'Bank Transactions', model: 'account.bank.statement.line' },
           { key: 'batch-payments', label: 'Batch Payments', model: 'account.batch.payment' },
-          { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
+          { key: 'misc', label: 'Miscellaneous Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.move_type === 'entry', defaults: { move_type: 'entry' } },
         ] },
                 { label: 'Assets & Liabilities', children: [
           { key: 'assets', label: 'Assets', model: 'account.asset' },
@@ -257,7 +260,7 @@ const allApps = [
           { key: 'journal-items', label: 'Journal Items', type: 'report', report: 'journalItems' },
           { key: 'to-check', label: 'To Check', model: 'account.bank.statement.line', domain: (r) => r.state === 'to_check', defaults: { state: 'to_check' } },
           { key: 'unreconciled', label: 'Unreconciled', type: 'report', report: 'unreconciledItems', reviewMode: 'unreconciled' },
-          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
+          { key: 'draft-entries', label: 'Draft Entries', model: 'account.move', ...entriesSearch, domain: (r) => r.state === 'draft', defaults: { state: 'draft' } },
           { key: 'audit-trail', label: 'Audit Trail', type: 'report', report: 'audit' },
           { key: 'journal-audit', label: 'Journal Audit', type: 'report', report: 'journalAudit' },
           { key: 'inalterability-check', label: 'Data Inalterability Check', type: 'report', report: 'inalterability' },
