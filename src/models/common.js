@@ -9,20 +9,22 @@ import { invoiceTaxGroups } from './ledger.js';
 /** Record ids inside a line's tax repartition snapshot rows, so id remaps follow them. */
 const REPARTITION_REFS = { account_id: 'account.account', tag_ids: 'account.account.tag' };
 
+/** Resolve the top-level commercial partner id for `partnerId` by walking `parent_id`, guarding cycles. */
+export function commercialPartnerId(db, partnerId) {
+  let partner = read(db, 'res.partner', partnerId);
+  const seen = new Set();
+  while (partner?.parent_id) {
+    if (seen.has(partner.id)) return null;
+    seen.add(partner.id);
+    partner = read(db, 'res.partner', partner.parent_id);
+  }
+  return partner?.id ?? null;
+}
+
 /** Compare explicit partner hierarchies at their commercial parent; contacts without a parent match only themselves. */
 export function sameCommercialPartner(db, leftId, rightId) {
-  const commercialId = (id) => {
-    let partner = read(db, 'res.partner', id);
-    const seen = new Set();
-    while (partner?.parent_id) {
-      if (seen.has(partner.id)) return null;
-      seen.add(partner.id);
-      partner = read(db, 'res.partner', partner.parent_id);
-    }
-    return partner?.id ?? null;
-  };
-  const left = commercialId(leftId);
-  return left != null && left === commercialId(rightId);
+  const left = commercialPartnerId(db, leftId);
+  return left != null && left === commercialPartnerId(db, rightId);
 }
 
 // Field/line helpers shared by order-like models (sales, purchase, invoices).

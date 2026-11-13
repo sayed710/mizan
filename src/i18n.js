@@ -1637,6 +1637,13 @@ const ar = {
   'This analytic distribution will apply to all financial accounts sharing the prefix specified.': 'سينطبق هذا التوزيع التحليلي على جميع الحسابات المالية التي تشترك في البادئة المحددة.',
   'Analytic accounts in the distribution must belong to the model company': 'يجب أن تنتمي الحسابات التحليلية في التوزيع إلى شركة النموذج',
   'Upgrade: this journal\'s company could not be proved from its accounts or posted entries; set the company on the journal.': 'ترقية: تعذّر إثبات شركة هذا الدفتر من حساباته أو قيوده المرحّلة؛ يرجى تحديد الشركة على الدفتر.',
+  // Invoice Analysis (Odoo 20 account.invoice.report)
+  'Partner Company': 'شركة الشريك',
+  'Revenue/Expense Account': 'حساب الإيراد/المصروف',
+  'Product Quantity': 'كمية المنتج',
+  'Untaxed Total': 'الإجمالي غير الخاضع للضريبة',
+  'Average Price': 'متوسط السعر',
+  'Vendors Bills': 'فواتير الموردين',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

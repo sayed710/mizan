@@ -140,8 +140,8 @@ export function Graph({ db, model, records, groupBy, onPickGroup, data: external
   const [showTable, setShowTable] = useState(false);
   const by = groupBy?.[0] ?? def.groupBy;
   const data = externalData ?? (by
-    ? groupRecords(db, model, records, by).filter((g) => g.records.length).map((g) => ({ key: g.key, label: t(g.label), value: aggregate(g.records, measure) }))
-    : [{ key: null, label: t('Total'), value: aggregate(records, measure) }]);
+    ? groupRecords(db, model, records, by).filter((g) => g.records.length).map((g) => ({ key: g.key, label: t(g.label), value: aggregate(g.records, measure, model) }))
+    : [{ key: null, label: t('Total'), value: aggregate(records, measure, model) }]);
   const fmt = formatValue ?? ((v) => formatMeasure(model, measure, v));
   if (compact) return <Cartesian data={data} kind="bar" fmt={fmt} compact />;
   return (

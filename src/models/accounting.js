@@ -189,7 +189,8 @@ const exchangeLines = (db, companyId, difference) => {
 };
 
 export const isInvoice = (r) => Boolean(r && r.move_type !== 'entry');
-const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
+/** Whether a move is a customer credit note or vendor refund. */
+export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
@@ -204,7 +205,8 @@ export const residual = (r, db) => {
   }
   return db ? Math.max(0, roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), curr)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)));
 };
-const paymentState = (r, db) => {
+/** Payment status (`paid`, `partial`, `not_paid`, or `unavailable`) of an invoice or bill. */
+export const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
   const res = residual(r, db);
   // Without a resolvable currency the open amount is unknown; say so rather than guess paid or partial.

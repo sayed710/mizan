@@ -8,7 +8,7 @@ import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
-import { companyViewDb, scopeAuditRows } from '../companyView.js';
+import { scopeAuditRows } from '../companyView.js';
 import { currentCompany } from '../models/company.js';
 import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
 import { auditSummary } from '../audit.js';
@@ -27,6 +27,7 @@ import { JournalItems } from './JournalItems.jsx';
 import { LoansAnalysis } from './LoansAnalysis.jsx';
 import { Checks } from './Checks.jsx';
 import { CashflowAnalysis } from './CashflowAnalysis.jsx';
+import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { ConfigurableReportPage } from './ConfigurableReport.jsx';
 
 // Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
@@ -562,13 +563,10 @@ export function Reports({ leaf, id }) {
 
 function ReportPage({ leaf }) {
   const sourceDb = useDb();
-  const allowed = sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)];
-  const allowedSet = new Set(allowed);
-  const companyDb = companyViewDb(sourceDb);
-  const companies = companiesOf(sourceDb).filter((company) => allowedSet.has(company.id));
+  const [companyId, setCompanyId] = useState('all');
+  const { companyDb, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId, { allowAll: leaf.report !== 'customerStatement' });
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
-  const [companyId, setCompanyId] = useState('all');
   const [ledgerId, setLedgerId] = useState('');
   const [journalId, setJournalId] = useState('');
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
@@ -593,9 +591,6 @@ function ReportPage({ leaf }) {
         },
       }
     : companyDb;
-  const selectedCompany = leaf.report === 'customerStatement' && (companyId === 'all' || !allowedSet.has(Number(companyId)))
-    ? String(currentCompany(sourceDb))
-    : (companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all');
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
@@ -647,14 +642,8 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-          <label className="inline-select">
-            {t('Company')}
-            <select aria-label={t('Company')} value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
-              {leaf.report !== 'customerStatement' && <option value="all">{t('All Companies')}</option>}
-              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </label>
+        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+          <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
         )}
         {showAnalyticFilter && analyticAccounts.length > 0 && (
           <label className="inline-select">
