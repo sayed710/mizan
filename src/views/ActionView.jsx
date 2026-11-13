@@ -62,8 +62,9 @@ export function ActionView({ leaf, base, params }) {
   const goTo = (to) => setPage({ key: pageKey, offset: to });
 
   const relQ = search.rel ? `&rel=${search.rel.field}:${search.rel.id}` : '';
-  const records = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
+  const filtered = applyFilters(model, actionRecords(db, leaf, search.rel, search.archived), search.filters)
     .filter((r) => matches(db, model, r, search.terms));
+  const records = def.sort ? [...filtered].sort(def.sort) : filtered;
   const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
   const newHref = `${base}/new?view=${view}${relQ}`;
   const defaults = { ...leaf.defaults, ...(search.rel ? { [search.rel.field]: search.rel.id } : {}) };

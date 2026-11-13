@@ -64,8 +64,13 @@ function Field({ db, model, name, label: labelOverride, value, onChange, readonl
   );
 }
 
-function renderGroupItem(item, { db, model, def, current, set, readonly }) {
+function renderGroupItem(item, { db, model, def, current, set, readonly, titled }) {
   if (typeof item === 'string') {
+    const field = def.fields[item];
+    if (titled && ['one2many', 'text', 'html'].includes(field.type)) {
+      const isReadonly = readonly || fieldReadonly(field, current, db);
+      return <FieldInput key={item} db={db} model={model} fieldName={item} field={field} value={current[item]} onChange={set(item)} id={`f-${item}`} readonly={isReadonly} record={current} label={t(field.label)} />;
+    }
     return <Field key={item} db={db} model={model} name={item} value={current[item]} onChange={set(item)} readonly={readonly} record={current} />;
   }
   if (item && Array.isArray(item.fields)) {
@@ -102,7 +107,7 @@ function renderGroups(groups, opts) {
         return (
           <div key={title ?? i} className="group">
             {title && <h3 className="group-title">{t(title)}</h3>}
-            {items.map((item) => renderGroupItem(item, opts))}
+            {items.map((item) => renderGroupItem(item, { ...opts, titled: Boolean(title) }))}
           </div>
         );
       })}

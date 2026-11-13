@@ -140,6 +140,8 @@ export function seed() {
     }
   });
   if (!demoBankJournal) throw new Error('Demo setup needs a default payment journal');
+  const vatGroupId = add('account.tax.group', { name: 'VAT' });
+  const stampGroupId = add('account.tax.group', { name: 'Stamp' });
   const tax = (name, type_tax_use, amount, account, vals = {}) => {
     const accId = account ? accountId(db, account) : null;
     return add('account.tax', {
@@ -150,7 +152,7 @@ export function seed() {
       tax_exigibility: 'on_invoice',
       price_include: false,
       active: true,
-      tax_group: 'VAT',
+      tax_group_id: vatGroupId,
       invoice_repartition_line_ids: [
         { repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] },
         { repartition_type: 'tax', factor_percent: 100, account_id: accId, tag_ids: [] },
@@ -168,7 +170,7 @@ export function seed() {
   const zeroImport = tax('0% Imports', 'purchase', 0, null);
   tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
   tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment', cash_basis_transition_account_id: installedByCode['251100'] });
-  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group: 'Stamp' });
+  tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group_id: stampGroupId });
   add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', tax_ids: [], account_ids: [] });
   add('account.fiscal.position', {
     name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.',

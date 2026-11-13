@@ -415,6 +415,18 @@ function validateRepartitionSide(lines, sideName) {
   return null;
 }
 
+const repartitionField = (label) => ({
+  type: 'one2many',
+  label,
+  fields: {
+    factor_percent: { type: 'float', label: '%', required: true },
+    repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
+    account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
+    tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
+  },
+  newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
+});
+
 export const taxModels = {
   'account.tax.group': {
     label: 'Tax Groups',
@@ -461,37 +473,18 @@ export const taxModels = {
       amount_type: { type: 'selection', label: 'Tax Computation', options: [['percent', 'Percentage'], ['fixed', 'Fixed'], ['group', 'Group of Taxes']] },
       amount: { type: 'float', label: 'Amount' },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
+      description: { type: 'char', label: 'Description' },
       type_tax_use: { type: 'selection', label: 'Tax Type', options: TAX_TYPES },
-      description: { type: 'char', label: 'Label on Invoices' },
+      tax_scope: { type: 'selection', label: 'Tax Scope', options: [['consu', 'Goods'], ['service', 'Services']] },
+      invoice_label: { type: 'char', label: 'Label on Invoices' },
       price_include: { type: 'boolean', label: 'Included in Price' },
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
       tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
-      tax_group: { type: 'char', label: 'Tax Group' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group' },
-      invoice_repartition_line_ids: {
-        type: 'one2many',
-        label: 'Distribution for Invoices',
-        fields: {
-          repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
-          factor_percent: { type: 'float', label: '%', required: true },
-          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
-          tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
-        },
-        newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
-      },
-      refund_repartition_line_ids: {
-        type: 'one2many',
-        label: 'Distribution for Refunds',
-        fields: {
-          repartition_type: { type: 'selection', label: 'Based On', options: [['base', 'Base'], ['tax', 'of Tax']], required: true },
-          factor_percent: { type: 'float', label: '%', required: true },
-          account_id: { type: 'many2one', relation: 'account.account', label: 'Account' },
-          tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tax Grids', domain: (r) => r.applicability === 'taxes' },
-        },
-        newLine: () => ({ repartition_type: 'tax', factor_percent: 100, account_id: null, tag_ids: [] }),
-      },
+      invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
+      refund_repartition_line_ids: repartitionField('Distribution for Refunds'),
       active: { type: 'boolean', label: 'Active' },
     },
     defaults: () => ({
@@ -505,7 +498,6 @@ export const taxModels = {
       include_base_amount: false,
       is_base_affected: true,
       active: true,
-      tax_group: 'VAT',
       ...defaultTaxRepartitionLines(null, []),
     }),
     createDefaults: (db, vals) => {
@@ -520,19 +512,32 @@ export const taxModels = {
       };
     },
     onchange: () => ({}),
-    groupBys: ['type_tax_use', 'tax_group'],
+    sort: (a, b) => (a.sequence ?? 1) - (b.sequence ?? 1) || (a.id ?? 0) - (b.id ?? 0),
+    groupBys: ['type_tax_use', 'tax_group_id'],
     filters: [[{ id: 'sale', label: 'Sales', fn: (r) => r.type_tax_use === 'sale' }, { id: 'purchase', label: 'Purchases', fn: (r) => r.type_tax_use === 'purchase' }]],
     kanban: { title: 'name', lines: ['type_tax_use', 'amount'] },
-    list: ['name', 'type_tax_use', 'amount_type', 'amount', 'price_include', 'include_base_amount', 'tax_exigibility'],
+    list: ['name', 'description', 'type_tax_use', 'tax_scope', 'invoice_label', 'active'],
     form: {
       title: 'name',
-      groups: [
-        ['amount_type', 'amount', 'children_tax_ids', 'sequence', 'description', 'type_tax_use'],
-        ['tax_group_id', 'tax_group', 'price_include', 'include_base_amount', 'is_base_affected', 'tax_exigibility', 'cash_basis_transition_account_id', 'active'],
+      groups: (r) => [
+        ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
+        ['type_tax_use', 'tax_scope'],
       ],
       tabs: [
-        { label: 'Distribution for Invoices', fields: ['invoice_repartition_line_ids'] },
-        { label: 'Distribution for Refunds', fields: ['refund_repartition_line_ids'] },
+        {
+          label: 'Definition',
+          groups: [
+            { title: 'Distribution for Invoices', fields: ['invoice_repartition_line_ids'] },
+            { title: 'Distribution for Refunds', fields: ['refund_repartition_line_ids'] },
+          ],
+        },
+        {
+          label: 'Advanced Options',
+          groups: [
+            ['invoice_label', 'tax_group_id'],
+            ['price_include', 'include_base_amount', 'is_base_affected', 'active', 'tax_exigibility', 'cash_basis_transition_account_id'],
+          ],
+        },
       ],
       chatter: true,
     },

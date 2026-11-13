@@ -57,11 +57,12 @@ export function assertEntryCompany(assert, db, entry, companyId) {
 
 /** Give a fixture company its own VAT accounts and default sales and purchase taxes, which plain-rate lines post to. */
 export function withDefaultVat(db, companyId, rate = 14) {
-  let next = db;
+  const madeGroup = create(db, 'account.tax.group', { name: 'VAT' });
+  let next = madeGroup.db;
   const tax = (type_tax_use, account_type, name) => {
     const account = create(next, 'account.account', { name, code: `VAT-${type_tax_use}-${companyId}`, account_type, company_id: companyId });
     const rows = [{ repartition_type: 'base', factor_percent: 100, account_id: null, tag_ids: [] }, { repartition_type: 'tax', factor_percent: 100, account_id: account.id, tag_ids: [] }];
-    const made = create(account.db, 'account.tax', { name: `${name} ${rate}%`, company_id: companyId, type_tax_use, amount: rate, amount_type: 'percent', tax_exigibility: 'on_invoice', active: true, tax_group: 'VAT', invoice_repartition_line_ids: rows, refund_repartition_line_ids: rows });
+    const made = create(account.db, 'account.tax', { name: `${name} ${rate}%`, company_id: companyId, type_tax_use, amount: rate, amount_type: 'percent', tax_exigibility: 'on_invoice', active: true, tax_group_id: madeGroup.id, invoice_repartition_line_ids: rows, refund_repartition_line_ids: rows });
     next = made.db;
     return made.id;
   };

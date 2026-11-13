@@ -331,7 +331,7 @@ const allApps = [
           { key: 'horizontal-groups', label: 'Horizontal Groups', model: 'account.report.horizontal.group' },
           { key: 'configurable-report-view', label: 'Accounting Report', type: 'report', report: 'configurable', hidden: true },
           { key: 'accounts', label: 'Chart of Accounts', model: 'account.account' },
-          { key: 'taxes', label: 'Taxes', model: 'account.tax' },
+          { key: 'taxes', label: 'Taxes', model: 'account.tax', view: 'list' },
           { key: 'tax-groups', label: 'Tax Groups', model: 'account.tax.group' },
           { key: 'journals', label: 'Journals', model: 'account.journal' },
           { key: 'multi-ledger', label: 'Multi-Ledger', model: 'account.journal.group' },
