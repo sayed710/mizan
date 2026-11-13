@@ -77,12 +77,12 @@ export function normalizeReconcileRule(rule) {
   const match_journal_ids = Array.isArray(rule.match_journal_ids) ? rule.match_journal_ids : [];
   // Legacy fixed amounts were shares on the counterpart side; Odoo 20 reads them as credit (+) or debit (-).
   // A rule limited to paid (outgoing) transactions books its counterpart as a debit, so its legacy amount turns negative.
-  // ponytail: a legacy rule for both directions keeps its sign, which is right for received money only.
-  const legacyDebit = match_nature === 'amount_paid';
-  const line_ids = (rule.line_ids ?? []).map((l, i) => syncLineAmount(
-    legacyDebit && l.amount_string == null && l.amount_type === 'fixed' && l.amount != null ? { ...l, amount: -Number(l.amount) } : l,
-    i,
-  ));
+  // A legacy rule for both directions keeps its counterpart-side share, flagged so either direction books it on the counterpart side.
+  const legacyFixed = (l) => l.amount_string == null && l.amount_type === 'fixed' && l.amount != null;
+  const line_ids = (rule.line_ids ?? []).map((l, i) => {
+    if (!legacyFixed(l) || match_nature === 'amount_received') return syncLineAmount(l, i);
+    return syncLineAmount(match_nature === 'amount_paid' ? { ...l, amount: -Number(l.amount) } : { ...l, legacy_counterpart_share: true }, i);
+  });
   return {
     ...rest,
     rule_type,
@@ -172,6 +172,7 @@ function splitCounterparts(lines, balance, currency, paymentRef = '', incoming =
   const rawOf = (l) => (l.amount_string != null && l.amount_string !== '' ? Number(l.amount_string) : Number(l.amount)) || 0;
   const fixedValueOf = (l) => {
     const raw = roundCurrency(rawOf(l), currency);
+    if (l.legacy_counterpart_share) return raw;
     // In Odoo 20 fixed lines follow accounting polarity (negative=debit, positive=credit);
     // express value relative to the counterpart direction (credit when incoming, debit when outgoing).
     return incoming ? raw : -raw;
@@ -400,22 +401,26 @@ export function applyRule(db, rule, line) {
     const tolerance = Number(rule.payment_tolerance) || 0;
     if (tolerance > 0) {
       const tolType = rule.payment_tolerance_type || 'percentage';
-      const match = ordered.find((m) => {
+      const within = ordered.filter((m) => {
         const res = residual(m);
         const limit = tolType === 'amount' ? tolerance : roundCurrency(res * tolerance / 100, companyCurrency);
         return Math.abs(res - target) <= limit;
       });
+      const dateOf = (m) => m.invoice_date || m.date || '';
+      if (within.length > 1 && dateOf(within[0]) === dateOf(within[1])) {
+        throw new Error('Multiple invoices match. Review and select one in "Match with".');
+      }
+      const match = within[0];
       if (match) {
         const res = residual(match);
         if (target < res) {
           const wo = (rule.line_ids ?? []).find((l) => l.account_id);
           if (wo) {
             const diff = roundCurrency(res - target, companyCurrency);
-            const signedWo = line.amount >= 0 ? -diff : diff;
             const withWo = write(db, 'account.bank.statement.line', line.id, {
               writeoff_account_id: wo.account_id,
               writeoff_label: wo.label || rule.name || 'Payment Tolerance',
-              writeoff_amount: signedWo,
+              writeoff_amount: diff,
             });
             return reconcileWith(withWo, read(withWo, 'account.bank.statement.line', line.id), match.id);
           }
@@ -443,7 +448,7 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
  * rules and manual matching remain available for the remainder.
  */
 export function autoReconcile(db) {
-  const rules = activeRules(db).filter((r) => isAutoRule(r) && r.match_label !== 'match_regex');
+  const rules = activeRules(db).filter((r) => isAutoRule(r) && r.match_label !== 'match_regex' && !(r.line_ids ?? []).some((l) => l.amount_type === 'regex'));
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
     const line = read(acc, 'account.bank.statement.line', l.id);
     const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));

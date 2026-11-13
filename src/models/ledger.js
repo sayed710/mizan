@@ -632,7 +632,7 @@ export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
   if (journal.active === false) throw new Error('The selected payment journal is archived');
   if (!isLiquidityJournal(journal)) throw new Error('Payment journal must be a bank or cash journal');
   if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
-  const id = assertCompanyAccount(db, journal.default_account_id, companyId, 'asset_cash', 'The selected journal liquidity account');
+  const id = assertCompanyAccount(db, journal.default_account_id, companyId, journal.type === 'credit' ? 'liability_credit_card' : 'asset_cash', 'The selected journal liquidity account');
   const account = read(db, 'account.account', id);
   return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }

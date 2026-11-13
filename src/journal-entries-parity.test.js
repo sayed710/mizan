@@ -6,6 +6,7 @@ import { create, read, search } from './orm.js';
 import { seed } from './seed.js';
 import { menusFor, models } from './models/index.js';
 import { postMove } from './models/accounting.js';
+import { accountId } from './models/ledger.js';
 import { postPayment, reverseEntry, unreconcileJournalItems } from './models/pay.js';
 import { today } from './models/common.js';
 import { t } from './i18n.js';
@@ -581,4 +582,16 @@ test('Arabic translations cover new Journal Entries and Journal Items labels', a
   } finally {
     globalThis.localStorage = prevStorage;
   }
+});
+
+test('a posted invoice total is its receivable amount, not the sum of every debit line', () => {
+  let db = seed();
+  const income = accountId(db, '400000');
+  const discount = search(db, 'account.account').find((a) => a.account_type === 'expense' && (a.company_id ?? 1) === 1).id;
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-04-01', invoice_line_ids: [
+    { name: 'Goods', account_id: income, qty: 1, price_unit: 100, tax: 0, tax_ids: [] },
+    { name: 'Discount', account_id: discount, qty: 1, price_unit: -10, tax: 0, tax_ids: [] },
+  ] });
+  db = postMove(inv.db, inv.id);
+  assert.equal(read(db, 'account.move', inv.id).amount_total_signed, 90);
 });

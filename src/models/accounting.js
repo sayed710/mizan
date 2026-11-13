@@ -74,6 +74,16 @@ function archivedLineAccountGuard(db, before, after, ctx = {}) {
   return null;
 }
 
+/**
+ * Odoo gives sale and purchase journals their own credit note sequence ("R" + the invoice prefix);
+ * any journal given a distinct refund prefix uses it too.
+ */
+function derivedRefundSequence(j) {
+  const own = ['sale', 'purchase'].includes(j.type) && j.invoice_sequence_prefix && !j.refund_sequence_prefix;
+  if (own) return { refund_sequence: true, refund_sequence_prefix: `R${j.invoice_sequence_prefix}`, refund_sequence_next_number: j.refund_sequence_next_number ?? 1 };
+  return j.refund_sequence_prefix && j.refund_sequence_prefix !== j.invoice_sequence_prefix ? { refund_sequence: true } : {};
+}
+
 function journalSequenceGuard(db, before, after) {
   const useRefund = Boolean(after.refund_sequence);
   const sequences = [
@@ -604,7 +614,7 @@ export function postMove(db, id) {
   const { line_ids, resolvedLines } = postedInvoiceLines(db, { ...r, journal_id: journal }, name);
   const dueUpdate = r.invoice_payment_term_id ? termDue(db, { ...r, invoice_date: r.invoice_date ?? today() }) : {};
   const originIds = [r.reversed_entry_id, r.debit_origin_id, r.correction_of_id].filter(Boolean);
-  const paymentReferenceUpdate = !r.payment_reference?.trim() && journalRecord.type === 'sale'
+  const paymentReferenceUpdate = !r.payment_reference?.trim() && r.move_type === 'out_invoice' && journalRecord.type === 'sale'
     ? (() => {
         const ref = computePaymentReference(db, r, journalRecord, name);
         return ref ? { payment_reference: ref } : {};
@@ -1421,7 +1431,12 @@ const lineItem = {
 function signedCompanyTotal(r, db) {
   if (!r || r.move_type === 'entry' || !r.move_type) return total(r, db);
   const sign = isInbound(r) ? 1 : -1;
-  if (r.state === 'posted' && (r.line_ids ?? []).length) return sign * round2((r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0));
+  if (r.state === 'posted' && (r.line_ids ?? []).length && db) {
+    // Receivable/payable lines carry the document total; a zero-total invoice has none and totals 0.
+    const counterpartType = ['in_invoice', 'in_refund', 'in_receipt'].includes(r.move_type) ? 'liability_payable' : 'asset_receivable';
+    const net = (r.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === counterpartType).reduce((s, l) => s + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    return sign * round2(Math.abs(net));
+  }
   const base = total(r, db);
   if (base == null || !db) return base == null ? null : sign * base;
   const own = companyCurrencyRecord(db, r.company_id ?? 1);
@@ -1675,10 +1690,11 @@ export const accountingModels = {
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
     }),
     createDefaults: (_db, vals = {}) => ({
+      ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
+      ...(vals.refund_sequence === undefined ? derivedRefundSequence(vals) : {}),
       ...(vals.type === 'bank' && vals.bank_statements_source === undefined ? { bank_statements_source: 'undefined' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_type === undefined ? { invoice_reference_type: 'invoice' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_model === undefined ? { invoice_reference_model: 'odoo' } : {}),
-      ...(vals.refund_sequence === undefined && vals.refund_sequence_prefix && vals.refund_sequence_prefix !== vals.invoice_sequence_prefix ? { refund_sequence: true } : {}),
     }),
     onchange: (r, key) => {
       if (key === 'type') {
@@ -1686,6 +1702,8 @@ export const accountingModels = {
           ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
+          payment_sequence: isLiquidityJournal(r),
+          ...(r.refund_sequence ? {} : derivedRefundSequence(r)),
         };
       }
       return {};

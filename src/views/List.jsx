@@ -90,10 +90,13 @@ export function List({ db, model, records, open, selected, setSelected, groupBy,
   };
   const dropRow = (targetId) => {
     if (!canDrag || dragId == null || dragId === targetId) return;
-    const updates = reorderSequenceUpdates(records, dragId, targetId, handleField);
+    // Renumber the whole stored list, not just the filtered rows, so hidden records keep their place.
+    const current = getDb();
+    const all = [...(current.records[model] ?? [])].sort((a, b) => (Number(a[handleField]) || 0) - (Number(b[handleField]) || 0) || a.id - b.id);
+    const updates = reorderSequenceUpdates(all, dragId, targetId, handleField);
     setDragId(null);
     if (!updates.size) return;
-    try { commit(writeMany(getDb(), model, updates)); } catch (e) { alert(t(e.message)); }
+    try { commit(writeMany(current, model, updates)); } catch (e) { alert(t(e.message)); }
   };
 
   const row = (r, depth) => (

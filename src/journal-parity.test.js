@@ -16,6 +16,7 @@ import { cashflowAnalysis } from './models/reports.js';
 import { createCompany } from './models/company.js';
 import { migrate, SCHEMA_VERSION } from './migrations.js';
 import { fieldRequired } from './field-metadata.js';
+import { saveFormRecord } from './views/formSave.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 const { reorderSequenceUpdates, visibleListColumns } = await import('./views/List.jsx');
@@ -34,12 +35,13 @@ function accountsFor(db, companyId = 1) {
 
 function makeCreditJournal(db, companyId = 1, overrides = {}) {
   const accs = accountsFor(db, companyId);
-  return create(db, 'account.journal', {
+  const card = create(db, 'account.account', { code: `2190${companyId}`, name: 'Corporate Card', account_type: 'liability_credit_card', company_id: companyId });
+  return create(card.db, 'account.journal', {
     name: 'Corporate Card',
     code: 'CARD',
     type: 'credit',
     company_id: companyId,
-    default_account_id: accs.bank,
+    default_account_id: card.id,
     suspense_account_id: accs.suspense,
     payment_sequence: true,
     ...overrides,
@@ -400,7 +402,7 @@ test('account.journal guards reject missing required accounts per type, archived
   });
   db = createdCard.db;
   assert.equal(read(db, 'account.journal', createdCard.id).default_account_id ?? null, null);
-  assert.throws(() => write(db, 'account.journal', createdCard.id, { name: 'Draft Card Renamed' }), /Default Account is required/);
+  assert.throws(() => saveFormRecord(db, 'account.journal', createdCard.id, { name: 'Draft Card Renamed' }), /Default Account is required/);
 
   // Cross-company and archived accounts rejected
   const co2Income = create(db, 'account.account', { code: '400222', name: 'Co2 Income', account_type: 'income', company_id: comp2.id });
@@ -533,4 +535,44 @@ test('account.journal list columns, search filters, sequence ordering, and per-t
   assert.equal(creditEntries.includes('profit_account_id'), false);
   assert.equal(creditEntries.includes('loss_account_id'), false);
   assert.equal(creditTabs.find((t) => t.label === 'Advanced Settings').groups[0].title, 'Automation');
+});
+
+test('a credit card journal pays from its credit card liability account', async () => {
+  const { paymentJournal } = await import('./models/ledger.js');
+  const card = makeCreditJournal(seed());
+  const resolved = paymentJournal(card.db, card.id, 1);
+  assert.equal(read(card.db, 'account.account', resolved.accountId).account_type, 'liability_credit_card');
+});
+
+test('new journals take their payment and credit note sequences from the type, as Odoo does', () => {
+  const db = seed();
+  const accs = accountsFor(db);
+  const bank = create(db, 'account.journal', { name: 'Bank 2', code: 'BNK9', type: 'bank', default_account_id: accs.bank, suspense_account_id: accs.suspense });
+  assert.equal(read(bank.db, 'account.journal', bank.id).payment_sequence, true);
+  const sale = create(db, 'account.journal', { name: 'Exports', code: 'EXP', type: 'sale', default_account_id: accs.income, invoice_sequence_prefix: 'EXP/', invoice_sequence_next_number: 1 });
+  const saleJ = read(sale.db, 'account.journal', sale.id);
+  assert.equal(saleJ.refund_sequence, true);
+  assert.equal(saleJ.refund_sequence_prefix, 'REXP/');
+  assert.equal(saleJ.payment_sequence, false);
+  const misc = create(db, 'account.journal', { name: 'Misc 2', code: 'MSC9', type: 'general' });
+  assert.equal(read(misc.db, 'account.journal', misc.id).refund_sequence, false);
+});
+
+test('a journal stored before Default Account was required accepts system updates, but its form asks for the account', () => {
+  const db = seed();
+  const sale = search(db, 'account.journal').find((j) => j.type === 'sale' && (j.company_id ?? 1) === 1);
+  const legacy = { ...db, records: { ...db.records, 'account.journal': db.records['account.journal'].map((j) => (j.id === sale.id ? { ...j, default_account_id: null } : j)) } };
+  const renamed = write(legacy, 'account.journal', sale.id, { name: 'Renamed' });
+  assert.equal(read(renamed, 'account.journal', sale.id).name, 'Renamed');
+  assert.throws(() => saveFormRecord(legacy, 'account.journal', sale.id, { name: 'Renamed' }), /Default Account is required/);
+});
+
+test('credit notes get no payment communication', () => {
+  let db = seed();
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-04-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  assert.ok(read(db, 'account.move', inv.id).payment_reference);
+  const refund = create(db, 'account.move', { move_type: 'out_refund', partner_id: 5, invoice_date: '2026-04-02', invoice_line_ids: [{ qty: 1, price_unit: 40, tax: 0 }] });
+  db = postMove(refund.db, refund.id);
+  assert.ok(!read(db, 'account.move', refund.id).payment_reference);
 });

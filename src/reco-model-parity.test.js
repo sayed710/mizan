@@ -479,3 +479,51 @@ test('the Journals condition offers only liquidity journals of the model company
   assert.ok(offered.every((type) => ['bank', 'cash', 'credit'].includes(type)));
   assert.equal(domain({ type: 'bank', company_id: 2 }, { company_id: 1 }), false);
 });
+
+test('an incoming underpayment within tolerance writes the difference off to the counterpart account', () => {
+  let db = seed();
+  const fee = accountId(db, '600000');
+  const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-04-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
+  db = postMove(inv.db, inv.id);
+  const rule = addRule(db, { rule_type: 'matching_rule', payment_tolerance: 5, payment_tolerance_type: 'amount', line_ids: [{ account_id: fee, amount_type: 'percentage', amount_string: '100', label: 'Short' }] });
+  const line = addLine(rule.db, { payment_ref: 'Short 96', amount: 96, partner_id: 5 });
+  const after = applyRule(line.db, read(line.db, MODEL, rule.id), read(line.db, LINE, line.id));
+  assert.equal(read(after, 'account.move', inv.id).amount_residual, 0);
+  assert.equal(read(after, LINE, line.id).state, 'reconciled');
+});
+
+test('a tolerance match between two same-day invoices asks for manual selection', () => {
+  let db = seed();
+  for (const price of [100, 101]) {
+    const inv = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 5, invoice_date: '2026-04-01', invoice_line_ids: [{ qty: 1, price_unit: price, tax: 0 }] });
+    db = postMove(inv.db, inv.id);
+  }
+  const rule = addRule(db, { rule_type: 'matching_rule', payment_tolerance: 5, payment_tolerance_type: 'amount' });
+  const line = addLine(rule.db, { payment_ref: 'Pay 98', amount: 98, partner_id: 5 });
+  assert.throws(() => applyRule(line.db, read(line.db, MODEL, rule.id), read(line.db, LINE, line.id)), /Multiple invoices match/);
+});
+
+test('autoReconcile leaves rules with a regex counterpart line to manual use', () => {
+  const db = seed();
+  const fee = accountId(db, '600000');
+  const rule = addRule(db, { trigger: 'auto_reconcile', line_ids: [{ account_id: fee, amount_type: 'regex', amount_string: String.raw`FEE (\d+)`, label: 'Fee' }, { account_id: fee, amount_type: 'percentage', amount_string: '100', label: 'Rest' }] });
+  const line = addLine(rule.db, { payment_ref: 'FEE 10', amount: -50 });
+  assert.equal(read(autoReconcile(line.db), LINE, line.id).state, 'to_check');
+});
+
+test('a migrated two-way fixed rule books its amount on the counterpart side in both directions', () => {
+  const base = seed();
+  const expense = accountId(base, '600000');
+  const legacy = { ...base, schema_version: 39, records: { ...base.records, [MODEL]: [
+    { id: 913, name: 'Both fee', company_id: 1, rule_type: 'writeoff_button', active: true, line_ids: [{ account_id: expense, amount_type: 'fixed', amount: 25, label: 'Fee' }, { account_id: expense, amount_type: 'percentage', amount: 100, label: 'Rest' }] },
+  ] } };
+  const migrated = migrate(legacy, SCHEMA_VERSION);
+  const counterpartSides = (amount) => {
+    const line = addLine(migrated, { payment_ref: 'Fee', amount });
+    const after = applyRule(line.db, read(line.db, MODEL, 913), read(line.db, LINE, line.id));
+    const entry = read(after, 'account.move', read(after, LINE, line.id).move_id);
+    return entry.line_ids.filter((l) => l.account_id === expense).map((l) => (amount > 0 ? l.credit : l.debit));
+  };
+  assert.deepEqual(counterpartSides(100), [25, 75]);
+  assert.deepEqual(counterpartSides(-100), [25, 75]);
+});

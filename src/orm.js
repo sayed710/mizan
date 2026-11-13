@@ -55,10 +55,17 @@ export function read(db, model, id) {
   return r && withComputed(models[model].fields, r, db);
 }
 
-/** @returns {string|null} error message when a required field is empty */
-export function validate(model, vals, db, isNew = false) {
+const isEmpty = (v) => v == null || v === '';
+
+/**
+ * @returns {string|null} error message when a required field is empty.
+ * A conditional (function) requirement is a form rule: an update that leaves an already-empty field untouched passes,
+ * so records stored before the condition existed keep working until a user edits that field.
+ */
+export function validate(model, vals, db, isNew = false, before = null) {
   const missing = Object.entries(models[model].fields).find(
-    ([k, f]) => fieldRequired(f, vals, db, isNew) && (vals[k] == null || vals[k] === ''),
+    ([k, f]) => fieldRequired(f, vals, db, isNew) && isEmpty(vals[k])
+      && !(before && typeof f.required === 'function' && isEmpty(before[k])),
   );
   return missing ? `${missing[1].label} is required` : distributionError(models[model].fields, vals, db);
 }
@@ -161,7 +168,7 @@ function writeValues(db, model, before, vals) {
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
 function prepareWrite(db, model, before, vals, ctx = undefined) {
   const result = writeValues(db, model, before, vals);
-  const err = validate(model, result.after, db) ?? models[model].guard?.(db, before, result.after, ctx);
+  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
   return result;
@@ -192,7 +199,7 @@ export function writeManyAtomic(db, model, updates) {
   }
   let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
   for (const { before, after } of changes.values()) {
-    const error = validate(model, after, next) ?? models[model].guard?.(next, before, after);
+    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after);
     if (error) throw new Error(error);
     checkDeclared(model, after);
   }
