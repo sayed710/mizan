@@ -343,7 +343,7 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
       <table className="lines">
         <thead>
           <tr>
-            {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{t(f.label)}</th>)}
+            {cols.map(([k, f]) => <th key={k} className={isNumeric(f) ? 'num' : ''}>{f.hideHeader ? '' : t(f.label)}</th>)}
             {priced && <th className="num">{t('Subtotal')}</th>}
             {hasActionCol && (
               <th className="o2m-cols-th" aria-label={optionalCols.length > 0 ? undefined : t('Delete')}>
@@ -387,9 +387,11 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
                   const cellPlaceholder = k === 'product_id' ? t('Select a product…') : (f.placeholder ? t(f.placeholder) : undefined);
                   return (
                     <td key={k} className={isNumeric(f) ? 'num' : ''}>
-                      {readonly
-                        ? (rateText ?? display(db, f, cellVal, cellRec))
-                        : <><FieldInput db={db} field={f} value={cellVal} record={cellRec} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${rowIdx + 1}`} placeholder={cellPlaceholder} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
+                      {f.hideWhen?.(cellRec, db)
+                        ? null
+                        : readonly
+                          ? (rateText ?? display(db, f, cellVal, cellRec))
+                          : <><FieldInput db={db} field={f} value={cellVal} record={cellRec} onChange={(v) => set(i, k, v)} label={`${t(f.label)} ${rowIdx + 1}`} placeholder={cellPlaceholder} />{rateText && <span className="readonly rate-only">{rateText}</span>}</>}
                     </td>
                   );
                 })}
@@ -525,7 +527,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
   // aria-required rather than required: saving is validated by the app, not by native form validation.
   const a11y = { id, 'aria-label': label, 'aria-required': isRequired || undefined };
   const text = (type = 'text', extra = {}) => (
-    <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
+    <input {...a11y} type={type} placeholder={placeholder} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
   switch (field.type) {
     case 'distribution': return <DistributionInput {...a11y} value={value} onChange={onChange} />;
@@ -537,9 +539,9 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       return <HtmlEditor id={id} label={htmlLabel} required={isRequired} value={value} placeholder={placeholder} onChange={onChange} />;
     }
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={placeholder ?? t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
-    case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
+    case 'integer': return <NumberInput {...a11y} placeholder={placeholder} value={value} onChange={onChange} integer />;
     case 'monetary':
-    case 'float': return <NumberInput {...a11y} value={value} onChange={onChange} />;
+    case 'float': return <NumberInput {...a11y} placeholder={placeholder} value={value} onChange={onChange} />;
     case 'date': return text('date');
     case 'datetime': return text('datetime-local', { value: value ? localInput(value) : '', onChange: (e) => onChange(pickedInstant(e.target.value, value)) });
     case 'boolean':
@@ -562,7 +564,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
           {!isRequired && <option value="" />}
-          {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
+          {field.options.filter(([k]) => !field.legacyOptions?.includes(k) || k === value).map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );
     case 'many2one':

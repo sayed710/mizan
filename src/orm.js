@@ -123,7 +123,7 @@ export function create(db, model, vals, ctx = undefined) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx);
+  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   const res = {
@@ -168,7 +168,7 @@ function writeValues(db, model, before, vals) {
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
 function prepareWrite(db, model, before, vals, ctx = undefined) {
   const result = writeValues(db, model, before, vals);
-  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx);
+  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx, vals);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
   return result;
@@ -198,8 +198,8 @@ export function writeManyAtomic(db, model, updates) {
     changes.set(id, { before, vals, ...writeValues(db, model, before, vals) });
   }
   let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
-  for (const { before, after } of changes.values()) {
-    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after);
+  for (const { before, after, vals } of changes.values()) {
+    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after, undefined, vals);
     if (error) throw new Error(error);
     checkDeclared(model, after);
   }

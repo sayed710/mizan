@@ -1202,6 +1202,17 @@ MIGRATIONS.push({ version: 43, name: 'currency-parity', up(db) {
   return { ...db, records: { ...db.records, 'res.currency': nextCurrencies } };
 } });
 
+MIGRATIONS.push({ version: 47, name: 'payment-terms-parity', up(db) {
+  const terms = db.records['account.payment.term'] ?? [];
+  if (!terms.length) return db;
+  const nextTerms = terms.map((t) => ({
+    ...t,
+    active: t.active === undefined ? true : t.active,
+    display_on_invoice: t.display_on_invoice === undefined ? true : t.display_on_invoice,
+  }));
+  return { ...db, records: { ...db.records, 'account.payment.term': nextTerms } };
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

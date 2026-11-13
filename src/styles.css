@@ -193,14 +193,22 @@ html[dir='rtl'] .toggle-switch:checked::before { transform: translateX(-14px); }
 .statusbar button:hover { background: var(--bg); }
 .statusbar button[aria-current='step'] { background: var(--brand); color: var(--on-brand); }
 .sheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px 28px; box-shadow: var(--shadow); }
+.title-label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
 .title-field input, .title-field h2 { width: 100%; font-size: 28px; font-weight: 600; border: 0; border-bottom: 1px solid transparent; padding: 2px 0; margin: 0 0 16px; outline: 0; background: none; }
 .title-field input:hover, .title-field input:focus { border-bottom-color: var(--brand); }
 .groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 40px; }
+.group-full { grid-column: 1 / -1; }
 .group-title { margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .field { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 10px; min-height: 36px; }
 .field label, .field .field-label { font-weight: 600; }
 .field-pair { display: flex; align-items: center; gap: 8px; }
 .field-pair > :first-child, .field-pair > :last-child { flex: 1; min-width: 0; }
+.field-inline { flex-wrap: wrap; }
+.field-inline > *, .field-inline > :first-child, .field-inline > :last-child { flex: 0 0 auto; }
+.field-inline input:not([type='checkbox']):not([type='radio']) { width: auto; min-width: 64px; max-width: 140px; }
+.group textarea { width: 100%; border: 0; border-bottom: 1px solid var(--border-input); padding: 4px 2px; background: none; outline: 0; resize: vertical; margin: 6px 0; }
+.group textarea:focus { border-bottom-color: var(--brand); }
+.group > .readonly { display: block; white-space: pre-line; margin-top: 6px; }
 .field-join { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .req { color: var(--danger); margin-inline-start: 2px; }
 .field-value input:not([type='checkbox']):not([type='radio']), .field-value select, .tab-panel textarea, .lines input, .lines select {

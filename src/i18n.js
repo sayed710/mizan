@@ -1524,6 +1524,24 @@ const ar = {
   'Tax Grid': 'الشبكة الضريبية',
   'Journal Item': 'بند قيد',
   Domestic: 'محلي',
+  // Payment Terms parity (Odoo 20)
+  'e.g. 30 days': 'مثلاً 30 يوماً',
+  '% if paid within': '% إذا دُفِع خلال',
+  days: 'أيام',
+  'Reduced tax:': 'تخفيض الضريبة:',
+  'Display terms on invoice': 'عرض الشروط على الفاتورة',
+  'Example:': 'مثال:',
+  'Example Amount': 'مبلغ المثال',
+  'Example Date': 'تاريخ المثال',
+  'Description on invoice (e.g. Payment terms: 30 days after invoice date)': 'الوصف على الفاتورة (مثلاً: شروط الدفع: 30 يوماً بعد تاريخ الفاتورة)',
+  'Early Payment Discount: {amount} if paid before {date}': 'خصم السداد المبكر: {amount} إذا دُفِع قبل {date}',
+  '{index} - Installment of {amount} due on {date}': '{index} - قسط بقيمة {amount} يستحق في {date}',
+  'Example amount must be a positive number': 'يجب أن يكون مبلغ المثال رقماً موجباً',
+  'Example date must be a valid date': 'يجب أن يكون تاريخ المثال تاريخاً صالحاً',
+  'Add at least one due term': 'أضف شرط استحقاق واحداً على الأقل',
+  'Fixed amounts exceed the total': 'المبالغ الثابتة تتجاوز الإجمالي',
+  'The balance due term must be the last one': 'يجب أن يكون شرط الرصيد المتبقي هو الأخير',
+  'Payment terms must allocate 100% of the total': 'يجب أن توزع شروط الدفع 100% من الإجمالي',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

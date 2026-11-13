@@ -31,7 +31,7 @@ test('Qodo 2: migration 34 sets default_general_journal_id for legacy companies 
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 43);
+  assert.equal(migrated.schema_version, 47);
   const updatedCompany = read(migrated, 'res.company', company.id);
   assert.equal(updatedCompany.default_general_journal_id, journal.id);
   // A company with one general journal gets no upgrade note
@@ -72,7 +72,7 @@ test('Qodo 2: migration 34 leaves companies with zero or several general journal
   };
 
   const migrated = migrate(legacyDb);
-  assert.equal(migrated.schema_version, 43);
+  assert.equal(migrated.schema_version, 47);
 
   // Both should remain unset
   assert.equal(read(migrated, 'res.company', compA.id).default_general_journal_id ?? null, null);
