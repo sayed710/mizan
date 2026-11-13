@@ -12,7 +12,7 @@ const props = (node) => node?.[Object.keys(node).find((k) => k.startsWith('__rea
 const classOf = (node) => props(node)?.className ?? node?.className ?? '';
 const hasClass = (node, cls) => typeof classOf(node) === 'string' && classOf(node).split(/\s+/).includes(cls);
 const fieldLabelsOf = (container) => allFind(container, (n) => hasClass(n, 'field'))
-  .map((f) => f.childNodes[0]?.textContent?.replace('*', '').trim());
+  .map((f) => f.childNodes[0]?.textContent?.replaceAll('*', '').trim());
 const allFind = (root, pred, out = []) => {
   if (!root) return out;
   if (pred(root)) out.push(root);
