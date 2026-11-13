@@ -1558,6 +1558,15 @@ const ar = {
   Conditions: 'الشروط',
   'Precision must be greater than zero': 'يجب أن تكون الدقة أكبر من الصفر',
   'Select an active cash rounding method': 'اختر طريقة تقريب نقدي نشطة',
+  // Incoterms, Fiscal Years, Account Tags parity (Odoo 20)
+  'Incoterms are series of sales terms. They are used to divide transaction costs and responsibilities between buyer and seller and reflect state-of-the-art transportation practices.': 'شروط التجارة الدولية (Incoterms) هي مجموعة من شروط البيع تُستخدم لتوزيع تكاليف المعاملة ومسؤولياتها بين المشتري والبائع وتعكس أحدث ممارسات النقل.',
+  'Incoterm Standard Code': 'الرمز القياسي لشرط التجارة الدولية',
+  'By unchecking the active field, you may hide an INCOTERM you will not use.': 'بإلغاء تحديد حقل النشاط، يمكنك إخفاء شرط تجارة دولية لن تستخدمه.',
+  'Fiscal Year 2018': 'السنة المالية 2018',
+  'Start Date, included in the fiscal year.': 'تاريخ البدء، مشمول في السنة المالية.',
+  'Ending Date, included in the fiscal year.': 'تاريخ الانتهاء، مشمول في السنة المالية.',
+  'Set active to false to hide the Account Tag without removing it.': 'اضبط النشاط على غير نشط لإخفاء وسم الحساب دون حذفه.',
+  'Country for which this tag is available, when applied on taxes.': 'الدولة التي يتاح لها هذا الوسم عند تطبيقه على الضرائب.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

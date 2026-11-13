@@ -18,7 +18,7 @@ test('a locked record keeps its editable fields on the server for non-admin user
   const closed = closeFiscalYear(year.db, year.id);
   const base = applyDiff(db, diffDb(db, closed), { author: 'Admin', isAdmin: true });
   const renamed = write(base, 'account.fiscal.year', year.id, { name: 'Renamed' });
-  assert.throws(() => applyDiff(base, diffDb(base, renamed), user), /locked: Fiscal Year cannot change/);
+  assert.throws(() => applyDiff(base, diffDb(base, renamed), user), /locked: Name cannot change/);
   // Administrators may still correct it, and workflow fields stay writable.
   assert.equal(read(applyDiff(base, diffDb(base, renamed), { author: 'Admin', isAdmin: true }), 'account.fiscal.year', year.id).name, 'Renamed');
   const reopened = write(base, 'account.fiscal.year', year.id, { state: 'open' });

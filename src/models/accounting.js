@@ -1775,15 +1775,6 @@ export const accountingModels = {
     form: { title: 'name', groups: [['name', 'code'], ['company_id', 'active']], tabs: [{ label: 'Accounts', fields: ['account_ids'], readonly: true }] },
   },
 
-  'account.account.tag': {
-    label: 'Account Tags',
-    fields: {
-      name: { type: 'char', label: 'Tag Name', required: true },
-    },
-    list: ['name'],
-    form: { title: 'name', groups: [['name']] },
-  },
-
   'account.journal': {
     label: 'Journals',
     guard: (db, before, after) => {
@@ -2179,7 +2170,7 @@ export const accountingModels = {
       inalterable_hash: { type: 'char', label: 'Inalterability Hash', readonly: true },
       inalterable_hash_version: { type: 'integer', label: 'Hash Version', readonly: true, hidden: true },
       secure_sequence_number: { type: 'integer', label: 'Inalterability Sequence Number', readonly: true },
-      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm' },
+      incoterm_id: { type: 'many2one', relation: 'account.incoterm', label: 'Incoterm', domain: (r) => r.active !== false },
       incoterm_location: { type: 'char', label: 'Incoterm Location' },
       exclude_from_followup: { type: 'boolean', label: 'Exclude from Follow-up' },
       auto_post: {
@@ -2525,16 +2516,24 @@ Object.assign(accountingModels, {
   'account.incoterm': {
     label: 'Incoterms',
     fields: {
-      name: { type: 'char', label: 'Name', required: true },
-      code: { type: 'char', label: 'Code', required: true },
-      active: { type: 'boolean', label: 'Active' },
+      name: {
+        type: 'char',
+        label: 'Name',
+        required: true,
+        help: 'Incoterms are series of sales terms. They are used to divide transaction costs and responsibilities between buyer and seller and reflect state-of-the-art transportation practices.',
+      },
+      code: { type: 'char', label: 'Code', required: true, help: 'Incoterm Standard Code' },
+      active: { type: 'boolean', label: 'Active', help: 'By unchecking the active field, you may hide an INCOTERM you will not use.' },
       display_name: { type: 'char', label: 'Display Name', compute: (r) => (r.code && r.name ? `${r.code} - ${r.name}` : r.code || r.name || '') },
     },
     defaults: () => ({ active: true }),
-    list: ['code', 'name', 'active'],
+    views: ['list'],
+    list: ['code', 'name'],
+    searchFields: ['name'],
     form: {
-      title: 'code',
-      groups: [['code', 'name'], ['active']],
+      title: 'name',
+      hideTitle: true,
+      groups: [['name', 'code']],
     },
   },
 
@@ -2606,17 +2605,20 @@ Object.assign(accountingModels, {
       },
       color: { type: 'integer', label: 'Color' },
       cash_flow_activity: { type: 'selection', label: 'Cash Flow Activity', options: [['operating', 'Operating'], ['investing', 'Investing'], ['financing', 'Financing']] },
-      active: { type: 'boolean', label: 'Active' },
-      country: { type: 'char', label: 'Country' },
+      active: { type: 'boolean', label: 'Active', help: 'Set active to false to hide the Account Tag without removing it.' },
+      country: { type: 'char', label: 'Country', help: 'Country for which this tag is available, when applied on taxes.' },
       balance_negate: { type: 'boolean', label: 'Negate Balance' },
     },
     defaults: () => ({ applicability: 'accounts', active: true, balance_negate: false, color: 0 }),
-    list: ['name', 'applicability', 'country', 'balance_negate', 'active'],
+    views: ['list'],
+    list: ['name', 'applicability', 'country', 'color'],
+    searchFields: ['name'],
     form: {
       title: 'name',
-      groups: [
-        ['name', 'applicability', 'color'],
-        ['country', 'balance_negate', 'cash_flow_activity', 'active'],
+      hideTitle: true,
+      groups: (r) => [
+        ['name', 'applicability', ...(r?.applicability === 'taxes' ? ['country'] : [])],
+        ['cash_flow_activity'],
       ],
     },
   },
