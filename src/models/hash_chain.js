@@ -174,6 +174,11 @@ export function secureEntries(db, { companyId = null, hashDate = null, throughMo
     .filter((j) => Boolean(j.restrict_mode_hash_table) && (!through || j.id === through.journal_id));
   const targetDate = hashDate || today();
   const inScope = (m) => (through ? (m.name ?? '').localeCompare(through.name ?? '') <= 0 : (m.invoice_date ?? m.date ?? '') <= targetDate);
+  // A numbered draft before the entry (reset to draft keeps its number) would land unhashed inside the chain once re-posted.
+  if (through && (db.records['account.move'] ?? []).some((m) => m.state === 'draft' && m.journal_id === through.journal_id
+    && (m.company_id ?? 1) === company && m.name && m.name !== '/' && inScope(m))) {
+    throw new Error('Post or cancel the earlier draft entries of this journal before locking this entry');
+  }
 
   let next = db;
   let securedThrough = '';

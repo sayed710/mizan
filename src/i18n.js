@@ -1464,6 +1464,7 @@ const ar = {
   // Bank Transactions list parity (Odoo 20)
   'Running Balance': 'الرصيد التراكمي',
   'Transaction Type': 'نوع المعاملة',
+  'Post or cancel the earlier draft entries of this journal before locking this entry': 'رحّل أو ألغِ القيود المسودة السابقة في هذه اليومية قبل قفل هذا القيد',
   'Transactions can only be reordered within the same date and journal': 'يمكن إعادة ترتيب الحركات داخل نفس التاريخ واليومية فقط',
   'Cash In': 'تدفق نقدي داخل',
   'Cash Out': 'تدفق نقدي خارج',

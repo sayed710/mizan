@@ -693,3 +693,22 @@ test('manual entries keep automatic reversal and foreign currency inputs', () =>
   assert.equal(cols.currency_id.optional, 'hide');
   assert.equal(cols.amount_currency.optional, 'hide');
 });
+
+test('Lock refuses while an earlier numbered draft of the journal could rejoin the chain later', async () => {
+  const { secureEntries } = await import('./models/hash_chain.js');
+  let db = seed();
+  const misc = search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1);
+  db = write(db, 'account.journal', misc.id, { restrict_mode_hash_table: true });
+  const accounts = search(db, 'account.account').filter((a) => (a.company_id ?? 1) === 1);
+  const [acc1, acc2] = [accounts.find((a) => a.account_type === 'expense'), accounts.find((a) => a.account_type === 'asset_current')];
+  const post = (date) => {
+    const res = create(db, 'account.move', { move_type: 'entry', journal_id: misc.id, date, line_ids: [{ account_id: acc1.id, debit: 10, credit: 0 }, { account_id: acc2.id, debit: 0, credit: 10 }] });
+    db = postMove(res.db, res.id);
+    return res.id;
+  };
+  const first = post('2026-03-01');
+  const second = post('2026-03-02');
+  db = write(db, 'account.move', first, { state: 'draft' });
+  assert.ok(read(db, 'account.move', first).name, 'the reset entry keeps its number');
+  assert.throws(() => secureEntries(db, { throughMoveId: second }), /earlier draft entries/);
+});
