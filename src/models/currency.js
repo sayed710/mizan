@@ -20,7 +20,8 @@ function currentRateInfo(currency, db) {
   const own = findCompanyCurrencyRecord(db, companyId);
   const date = today();
   const row = applicableRate(currency, date, companyId);
-  if (own?.id === currency.id) return { rate: 1, date: row?.date ?? null };
+  // The company currency is the unit of every rate: Odoo shows it at 1 with no rate date.
+  if (own?.id === currency.id) return { rate: 1, date: null };
   if (!row) return { rate: null, date: null };
   const base = findBaseCurrency(db);
   if (!own || !base || own.id === base.id) return { rate: Number(row.rate), date: row.date };
@@ -162,6 +163,7 @@ export const currencyModels = {
       },
     },
     defaults: () => ({ rounding: 0.01, position: 'before', active: true, rate_ids: [] }),
+    views: ['list', 'kanban'],
     kanban: { title: 'name', lines: ['symbol', 'rate'] },
     list: ['name', 'symbol', 'full_name', 'rate_date', 'rate', 'inverse_rate', 'active'],
     editableList: ['active'],
