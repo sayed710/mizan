@@ -21,7 +21,7 @@ const allFind = (root, pred, out = []) => {
   return out;
 };
 const fieldLabelsOf = (container) => allFind(container, (n) => hasClass(n, 'field'))
-  .map((f) => f.childNodes[0]?.textContent?.replace('*', '').trim());
+  .map((f) => f.childNodes[0]?.textContent?.replaceAll('*', '').trim());
 
 const findLeafByKey = (items, key) => {
   for (const item of items) {
