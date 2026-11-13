@@ -314,3 +314,106 @@ test('manual reminder before first level clears progress through catch-up after 
   assert.equal(partnerFollowUp(pCatchUp, 1)?.followup_date, null, 'followup_date must be cleared after catch-up');
 });
 
+test('journal cards compute draftAmount, lateAmount, and a 13-month posted series including zero months', async () => {
+  const { shiftMonth } = await import('./models/common.js');
+  let db = seed();
+  const saleJournal = search(db, 'account.journal').find((j) => j.type === 'sale' && j.code === 'INV');
+  const purchaseJournal = search(db, 'account.journal').find((j) => j.type === 'purchase' && j.code === 'BILL');
+  const created = create(db, 'account.journal', { name: 'Seasonal Sales', code: 'SEAS', type: 'sale', default_account_id: saleJournal.default_account_id, invoice_sequence_prefix: 'SEAS/', invoice_sequence_next_number: 1 });
+  db = created.db;
+  const at = '2026-11-15';
+  const twoMonthsAgo = shiftMonth(at, -2);
+  const draft = create(db, 'account.move', {
+    move_type: 'out_invoice', journal_id: created.id, partner_id: 3, invoice_date: at,
+    invoice_line_ids: [{ name: 'Draft item', qty: 1, price_unit: 250, tax: 0 }],
+  });
+  const late = invoice(draft.db, {
+    journal_id: created.id, invoice_date: twoMonthsAgo, invoice_date_due: addDays(at, -10),
+    invoice_line_ids: [{ name: 'Late item', qty: 1, price_unit: 400, tax: 0 }],
+  });
+  const current = invoice(late.db, {
+    journal_id: created.id, invoice_date: at, invoice_date_due: addDays(at, 10),
+    invoice_line_ids: [{ name: 'Current item', qty: 1, price_unit: 600, tax: 0 }],
+  });
+  const billDraft = create(current.db, 'account.move', {
+    move_type: 'in_invoice', journal_id: purchaseJournal.id, partner_id: 7, invoice_date: at,
+    invoice_line_ids: [{ name: 'Draft bill', qty: 1, price_unit: 320, tax: 0 }],
+  });
+  const lateBill = create(billDraft.db, 'account.move', {
+    move_type: 'in_invoice', journal_id: purchaseJournal.id, partner_id: 7,
+    invoice_date: twoMonthsAgo, invoice_date_due: addDays(at, -5),
+    invoice_line_ids: [{ name: 'Late bill', qty: 1, price_unit: 180, tax: 0 }],
+  });
+  db = run(lateBill.db, 'account.move', lateBill.id, 'Confirm');
+
+  const cards = journalCards(db, at);
+  const seasonal = cards.find((c) => c.journal.id === created.id);
+  assert.equal(seasonal.draft, 1);
+  assert.equal(seasonal.draftAmount, 250);
+  assert.equal(seasonal.unpaid, 2);
+  assert.equal(seasonal.unpaidAmount, 1000);
+  assert.equal(seasonal.late, 1);
+  assert.equal(seasonal.lateAmount, 400);
+  assert.equal(seasonal.monthlyTotals.length, 13);
+  assert.equal(seasonal.monthlyTotals[0].month, '2025-11');
+  assert.equal(seasonal.monthlyTotals.at(-1).month, '2026-11');
+  assert.equal(seasonal.monthlyTotals.find((m) => m.month === '2026-09').total, 400);
+  assert.equal(seasonal.monthlyTotals.find((m) => m.month === '2026-10').total, 0);
+  assert.equal(seasonal.monthlyTotals.find((m) => m.month === '2026-11').total, 600);
+
+  const billCard = cards.find((c) => c.journal.id === purchaseJournal.id);
+  assert.equal(billCard.draft, 1);
+  assert.equal(billCard.draftAmount, 320);
+  assert.ok(billCard.late >= 1);
+  assert.equal(billCard.lateAmount, 180);
+  assert.equal(billCard.monthlyTotals.length, 13);
+  assert.ok(cards.find((c) => c.journal.id === saleJournal.id).monthlyTotals.length === 13);
+});
+
+test('bank and cash journal cards compute outstanding payments only when configured and misc operations from general journals', async () => {
+  const { postEntry } = await import('./models/ledger.js');
+  const { postPayment } = await import('./models/pay.js');
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank' && j.code === 'BNK1');
+  const cash = search(db, 'account.journal').find((j) => j.type === 'cash' && j.code === 'CSH1');
+
+  const initialCards = journalCards(db);
+  const initialBank = initialCards.find((c) => c.journal.id === bank.id);
+  const initialCash = initialCards.find((c) => c.journal.id === cash.id);
+  assert.equal(initialBank.hasOutstandingAccounts, false);
+  assert.equal(initialBank.miscCount, 1);
+  assert.equal(initialBank.miscBalance, 150000);
+  assert.equal(initialCash.miscCount, 1);
+  assert.equal(initialCash.miscBalance, 5000);
+
+  const emptyBank = create(db, 'account.journal', { name: 'New Bank', code: 'NBK', type: 'bank', default_account_id: create(db, 'account.account', { code: '101499', name: 'New Bank Acc', account_type: 'asset_cash', company_id: 1 }).id });
+  db = emptyBank.db;
+  const emptyBankCard = journalCards(db).find((c) => c.journal.id === emptyBank.id);
+  assert.equal(emptyBankCard.hasPosted, false);
+  assert.equal(emptyBankCard.miscCount, 0);
+
+  const outReceipt = accountId(db, '101402');
+  const outPayment = accountId(db, '101403');
+  db = write(db, 'account.journal', bank.id, {
+    outstanding_receipts_account_id: outReceipt,
+    outstanding_payments_account_id: outPayment,
+  });
+  const pmtIn = create(db, 'account.payment', { partner_id: 3, company_id: 1, journal_id: bank.id, amount: 250, date: today(), payment_type: 'inbound', partner_type: 'customer' });
+  db = postPayment(pmtIn.db, read(pmtIn.db, 'account.payment', pmtIn.id));
+  const pmtOut = create(db, 'account.payment', { partner_id: 7, company_id: 1, journal_id: bank.id, amount: 100, date: today(), payment_type: 'outbound', partner_type: 'supplier' });
+  db = postPayment(pmtOut.db, read(pmtOut.db, 'account.payment', pmtOut.id));
+  db = postEntry(db, {
+    journal: 'MISC', date: today(), ref: 'Cash top-up',
+    lines: [{ account_id: cash.default_account_id, debit: 200 }, { account_id: accountId(db, '301000'), credit: 200 }],
+  }).db;
+
+  const updated = journalCards(db);
+  const bankCard = updated.find((c) => c.journal.id === bank.id);
+  const cashCard = updated.find((c) => c.journal.id === cash.id);
+  assert.equal(bankCard.hasOutstandingAccounts, true);
+  assert.equal(bankCard.outstandingCount, 2);
+  assert.equal(bankCard.outstandingBalance, 150);
+  assert.equal(cashCard.miscCount, 2);
+  assert.equal(cashCard.miscBalance, 5200);
+});
+

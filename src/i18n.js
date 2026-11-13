@@ -1309,6 +1309,10 @@ const ar = {
   'Supplier Payment Terms': 'شروط دفع المورد',
   'Default Sales Tax': 'ضريبة المبيعات الافتراضية',
   'Default Purchase Tax': 'ضريبة المشتريات الافتراضية',
+  'Misc. Operations': 'عمليات متنوعة',
+  'Create your first invoice.': 'أنشئ أول فاتورة لك.',
+  'Create your first bill.': 'أنشئ أول فاتورة مورد لك.',
+  'No transactions yet.': 'لا توجد معاملات بعد.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

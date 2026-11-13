@@ -14,25 +14,81 @@ import { journalCardListUrl } from './journalDashboard.js';
 /** Journal card: the journal's figures and the shortcuts Odoo puts on it. */
 function JournalCard({ card }) {
   const list = journalCardListUrl(card);
-  const figures = {
-    sale: [['To Validate', card.draft], ['Unpaid', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
-    purchase: [['To Validate', card.draft], ['To Pay', `${card.unpaid} · ${money(card.unpaidAmount)}`], ['Late', card.late]],
-    bank: [['Balance', money(card.balance)], ['To Reconcile', `${card.toReconcile} · ${money(card.toReconcileAmount)}`]],
-    cash: [['Balance', money(card.balance)]],
-    general: [['Posted Entries', card.entries], ['Drafts', card.draft]],
-  }[card.kind];
-  const action = { sale: ['New Invoice', '#/accounting/invoices/new'], purchase: ['New Bill', '#/accounting/bills/new'], bank: ['Reconcile', list], cash: ['Reconcile', `#/accounting/bank?view=list&rel=journal_id:${card.journal.id}`] }[card.kind];
+  if (card.kind === 'sale' || card.kind === 'purchase') {
+    const sale = card.kind === 'sale';
+    const [actionLabel, actionHref] = sale ? ['New Invoice', '#/accounting/invoices/new'] : ['New Bill', '#/accounting/bills/new'];
+    const empty = !card.entries && !card.draft;
+    const rows = [
+      ['To Validate', card.draft, card.draftAmount, `${list}&filter=draft`],
+      [sale ? 'Unpaid' : 'To Pay', card.unpaid, card.unpaidAmount, `${list}&filter=unpaid`],
+      ['Late', card.late, card.lateAmount, `${list}&filter=overdue`],
+    ];
+    return (
+      <section className="panel journal-card">
+        <h2><a href={list}>{card.journal.name}</a></h2>
+        {empty ? (
+          <p className="journal-empty muted">{t(sale ? 'Create your first invoice.' : 'Create your first bill.')}</p>
+        ) : (
+          <dl>
+            {rows.map(([label, count, amount, href]) => (
+              <div key={label}>
+                <dt><a href={href}>{count} {t(label)}</a></dt>
+                <dd><a href={href}>{money(amount)}</a></dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        <RateNote count={card.unratedCount} />
+        <a className="btn primary sm" href={actionHref}>{t(actionLabel)}</a>
+        {!empty && (
+          <Graph
+            data={card.monthlyTotals.map((m) => ({ label: m.month, shortLabel: m.month.slice(5), value: m.total }))}
+            formatValue={money}
+            compact
+          />
+        )}
+      </section>
+    );
+  }
+  if (card.kind === 'bank' || card.kind === 'cash') {
+    const empty = !card.hasPosted && !card.toReconcile;
+    return (
+      <section className="panel journal-card">
+        <h2><a href={list}>{card.journal.name}</a></h2>
+        {empty ? (
+          <p className="journal-empty muted">{t('No transactions yet.')}</p>
+        ) : (
+          <>
+            <dl>
+              <div><dt>{t('Balance')}</dt><dd>{money(card.balance)}</dd></div>
+              {card.kind === 'bank' && card.hasOutstandingAccounts && (
+                <div><dt>{card.outstandingCount} {t('Outstanding Payments')}</dt><dd>{money(card.outstandingBalance)}</dd></div>
+              )}
+              {card.miscCount > 0 && (
+                <div><dt>{card.miscCount} {t('Misc. Operations')}</dt><dd>{money(card.miscBalance)}</dd></div>
+              )}
+            </dl>
+            <RateNote count={card.unratedCount} />
+            {card.kind === 'bank' && card.toReconcile > 0 && (
+              <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
+            )}
+          </>
+        )}
+      </section>
+    );
+  }
   return (
     <section className="panel journal-card">
       <h2><a href={list}>{card.journal.name}</a></h2>
-      <dl>{figures.map(([label, value]) => <div key={label}><dt>{t(label)}</dt><dd>{value}</dd></div>)}</dl>
-      <RateNote count={card.unratedCount} />
-      {action && <a className="btn primary sm" href={action[1]}>{t(action[0])}</a>}
+      <dl>
+        <div><dt>{t('Posted Entries')}</dt><dd>{card.entries}</dd></div>
+        <div><dt>{t('Drafts')}</dt><dd>{card.draft}</dd></div>
+      </dl>
     </section>
   );
 }
 
-/** Invoicing overview: KPI tiles (each links to the matching list) + monthly invoiced chart. */
+/** Invoicing overview: KPI tiles (each links to the matching list) + journal cards + monthly invoiced chart. */
 export function Dashboard() {
   const db = companyViewDb(useDb());
   const invoices = search(db, 'account.move').filter((m) => m.state === 'posted' && m.move_type === 'out_invoice');
@@ -53,7 +109,6 @@ export function Dashboard() {
     <main className="action dashboard">
       <div className="control-panel"><h1 className="cp-title">{t('Dashboard')}</h1></div>
       <RateNote count={kpi.unratedCount} />
-      <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
       <div className="kpis">
         {tiles.map(([label, value, href]) => (
           <a key={label} className="kpi" href={href}>
@@ -62,6 +117,7 @@ export function Dashboard() {
           </a>
         ))}
       </div>
+      <div className="journal-cards">{journalCards(db).map((c) => <JournalCard key={c.journal.id} card={c} />)}</div>
       <div className="dash-grid">
         <section className="panel">
           <h2>{t('Monthly invoiced')}</h2>

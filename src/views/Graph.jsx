@@ -34,15 +34,19 @@ function niceMax(v) {
 }
 
 /** Pure SVG bar/line chart with one value axis and hover tooltips. */
-function Cartesian({ data, kind, fmt, onPick }) {
+function Cartesian({ data, kind, fmt, onPick, compact = false }) {
   const [hover, setHover] = useState(null);
-  const W = 900, H = 360, L = 70, B = 40, T = 16;
+  const W = compact ? 390 : 900;
+  const H = compact ? 120 : 360;
+  const L = compact ? 4 : 70;
+  const B = compact ? 22 : 40;
+  const T = compact ? 8 : 16;
   const max = niceMax(Math.max(0, ...data.map((d) => d.value)));
   const step = (W - L - 10) / Math.max(1, data.length);
   const x = (i) => L + step * i + step / 2;
   const y = (v) => T + (H - T - B) * (1 - v / max);
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
-  const barW = Math.min(64, step * 0.6);
+  const ticks = compact ? [] : [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
+  const barW = Math.min(compact ? 20 : 64, step * 0.6);
   return (
     <div className="chart-box">
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="chart" className="chart">
@@ -56,12 +60,13 @@ function Cartesian({ data, kind, fmt, onPick }) {
           <polyline fill="none" stroke={SERIES[0]} strokeWidth="2" points={data.map((d, i) => `${x(i)},${y(d.value)}`).join(' ')} />
         )}
         {data.map((d, i) => (
-          <g key={d.label} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onClick={() => onPick?.(d)} className="mark">
+          <g key={d.label} data-month={d.label} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onClick={() => onPick?.(d)} className="mark">
+            <title>{`${d.label}: ${fmt(d.value)}`}</title>
             <rect x={x(i) - step / 2} y={T} width={step} height={H - T - B} fill="transparent" />
             {kind === 'bar'
               ? <path d={barPath(x(i) - barW / 2, y(d.value), barW, y(0) - y(d.value))} fill={SERIES[0]} opacity={hover == null || hover === i ? 1 : 0.55} />
               : <circle cx={x(i)} cy={y(d.value)} r={hover === i ? 6 : 4} fill={SERIES[0]} stroke="var(--surface)" strokeWidth="2" />}
-            <text x={x(i)} y={H - B + 18} textAnchor="middle" className="axis">{truncate(d.label, step / 7)}</text>
+            <text x={x(i)} y={H - B + (compact ? 14 : 18)} textAnchor="middle" className="axis">{compact ? (d.shortLabel ?? d.label) : truncate(d.label, step / 7)}</text>
           </g>
         ))}
         <line x1={L} x2={W - 10} y1={y(0)} y2={y(0)} className="baseline" />
@@ -128,16 +133,17 @@ function Pie({ data, fmt }) {
   );
 }
 
-export function Graph({ db, model, records, groupBy, onPickGroup }) {
-  const def = models[model].graph ?? {};
+export function Graph({ db, model, records, groupBy, onPickGroup, data: externalData, formatValue, compact = false }) {
+  const def = model ? (models[model].graph ?? {}) : {};
   const [kind, setKind] = useState('bar');
   const [measure, setMeasure] = useState(def.measure ?? '__count');
   const [showTable, setShowTable] = useState(false);
-  const by = groupBy[0] ?? def.groupBy;
-  const data = by
+  const by = groupBy?.[0] ?? def.groupBy;
+  const data = externalData ?? (by
     ? groupRecords(db, model, records, by).filter((g) => g.records.length).map((g) => ({ key: g.key, label: t(g.label), value: aggregate(g.records, measure) }))
-    : [{ key: null, label: t('Total'), value: aggregate(records, measure) }];
-  const fmt = (v) => formatMeasure(model, measure, v);
+    : [{ key: null, label: t('Total'), value: aggregate(records, measure) }]);
+  const fmt = formatValue ?? ((v) => formatMeasure(model, measure, v));
+  if (compact) return <Cartesian data={data} kind="bar" fmt={fmt} compact />;
   return (
     <div className="graph-view">
       <div className="view-toolbar">
