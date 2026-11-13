@@ -391,6 +391,10 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .ranking li b { float: inline-end; }
 .settings-sheet { max-width: 720px; margin: 0 16px; }
 .settings-sheet h3 { margin: 24px 0 4px; }
+.settings-accounting { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+.settings-accounting h2 { margin: 0 0 8px; font-size: 18px; }
+.settings-block { margin-bottom: 16px; }
+.settings-block .setting-desc, .settings-block .setting-links { margin: 4px 0 0; font-size: 12px; }
 .settings-sheet label.btn { cursor: pointer; }
 
 @media (max-width: 960px) {

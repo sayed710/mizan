@@ -4,6 +4,7 @@ import { companiesOf, currentCompany, addUser, commit, createKey, getDb, getUser
 import { lang, setLang, setTheme, t, theme } from '../i18n.js';
 import { CURRENCIES } from '../ui.jsx';
 import { createCompany, ensureCurrencyRecord, renameCompany, setCompanyCurrency } from '../models/company.js';
+import { models } from '../models/index.js';
 import { migrate } from '../migrations.js';
 
 const isDb = (x) => x && typeof x === 'object' && x.records && typeof x.records === 'object' && x.seq && Array.isArray(x.messages);
@@ -179,6 +180,201 @@ function ApiKeys() {
   );
 }
 
+const ACCOUNTING_LOCK_FIELDS = [
+  ['lock_date', 'Lock Date', 'Prevent creating, editing or deleting accounting entries on or before this date.'],
+  ['sale_lock_date', 'Sales Lock Date', 'Prevent creating or modifying customer invoices and credit notes on or before this date.'],
+  ['purchase_lock_date', 'Purchase Lock Date', 'Prevent creating or modifying vendor bills and refunds on or before this date.'],
+  ['tax_lock_date', 'Tax Return Lock Date', 'Lock tax-impacting entries up to the submitted tax return period.'],
+];
+
+function SettingRow({ id, label, description, children }) {
+  return (
+    <div className="field" data-setting={id}>
+      <label htmlFor={id}>{t(label)}</label>
+      <div className="field-value">
+        {children}
+        {description && <p className="muted setting-desc">{t(description)}</p>}
+      </div>
+    </div>
+  );
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Validate company accounting setting values before passing them to ORM write. */
+function validateCompanySettingWrite(db, company, vals) {
+  for (const [field, use, label] of [['account_sale_tax_id', 'sale', 'Default Sales Tax'], ['account_purchase_tax_id', 'purchase', 'Default Purchase Tax']]) {
+    if (vals[field] === undefined || vals[field] === null) continue;
+    const tax = (db.records['account.tax'] ?? []).find((x) => x.id === vals[field]);
+    if (!tax || tax.active === false || tax.type_tax_use !== use || (tax.company_id && tax.company_id !== company.id)) {
+      return `${label} must be an active ${use} tax shared with or belonging to this company`;
+    }
+  }
+  if (vals.tax_calculation_rounding_method !== undefined && !['round_per_line', 'round_globally'].includes(vals.tax_calculation_rounding_method)) {
+    return 'Select a valid tax rounding method';
+  }
+  if (vals.tax_periodicity !== undefined && !['monthly', 'trimester', 'semester', 'year'].includes(vals.tax_periodicity)) {
+    return 'Select a valid tax periodicity';
+  }
+  if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
+    return 'Select a valid payment QR format';
+  }
+  for (const dateField of ['tax_start_date', 'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date']) {
+    if (vals[dateField] !== undefined && vals[dateField] !== null && !DATE_RE.test(vals[dateField])) {
+      return 'Enter a valid date';
+    }
+  }
+  return null;
+}
+
+/** Odoo-ordered Accounting settings blocks editing active res.company fields via the ORM write path. */
+function AccountingSection({ db, company, readOnly, onWriteCompany }) {
+  const fields = models['res.company']?.fields ?? {};
+  const hasField = (name) => Boolean(fields[name]);
+  const taxesByUse = (use) => (db.records['account.tax'] ?? [])
+    .filter((tax) => tax.active !== false && tax.type_tax_use === use && (!tax.company_id || !company || tax.company_id === company.id));
+  const showTaxes = ['account_sale_tax_id', 'account_purchase_tax_id', 'tax_calculation_rounding_method', 'tax_periodicity', 'tax_start_date', 'vat'].some(hasField);
+  const showCurrencies = hasField('currency_id') || !company;
+  const showCustomerPayments = hasField('invoice_qr') || hasField('company_iban');
+  const showVendorBills = hasField('three_way_matching');
+  const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
+  const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
+  const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
+
+  return (
+    <section className="settings-accounting" aria-label={t('Accounting')}>
+      <h2>{t('Accounting')}</h2>
+
+      {showTaxes && (
+        <div className="settings-block" data-block="taxes">
+          <h3>{t('Taxes')}</h3>
+          {[['account_sale_tax_id', 'Default Sales Tax', 'sale', 'Default tax applied automatically to new customer invoice and sales order lines.'],
+            ['account_purchase_tax_id', 'Default Purchase Tax', 'purchase', 'Default tax applied automatically to new vendor bill and purchase order lines.']]
+            .filter(([key]) => hasField(key))
+            .map(([key, label, use, desc]) => (
+              <SettingRow key={key} id={key} label={label} description={desc}>
+                <select id={key} disabled={readOnly || !company} value={company?.[key] ?? ''} onChange={(e) => onWriteCompany({ [key]: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">{t('None')}</option>
+                  {taxesByUse(use).map((tax) => <option key={tax.id} value={tax.id}>{tax.name}</option>)}
+                </select>
+              </SettingRow>
+            ))}
+          {hasField('tax_calculation_rounding_method') && (
+            <SettingRow id="tax_calculation_rounding_method" label="Rounding Method" description="Round tax amounts per invoice line or globally per tax group on the document.">
+              <select id="tax_calculation_rounding_method" disabled={readOnly || !company} value={company?.tax_calculation_rounding_method ?? 'round_per_line'}
+                onChange={(e) => onWriteCompany({ tax_calculation_rounding_method: e.target.value })}>
+                {roundingOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+              </select>
+            </SettingRow>
+          )}
+          {hasField('tax_periodicity') && (
+            <SettingRow id="tax_periodicity" label="Tax Periodicity" description="How often periodic tax returns are generated for the company.">
+              <select id="tax_periodicity" disabled={readOnly || !company} value={company?.tax_periodicity ?? 'monthly'}
+                onChange={(e) => onWriteCompany({ tax_periodicity: e.target.value })}>
+                {periodicityOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+              </select>
+            </SettingRow>
+          )}
+          {hasField('tax_start_date') && (
+            <SettingRow id="tax_start_date" label="Tax Period Start" description="First date from which periodic tax return periods are scheduled.">
+              <input id="tax_start_date" type="date" disabled={readOnly || !company} value={company?.tax_start_date ?? ''}
+                onChange={(e) => onWriteCompany({ tax_start_date: e.target.value || null })} />
+            </SettingRow>
+          )}
+          {hasField('vat') && (
+            <SettingRow id="company_vat" label="Company Tax ID" description="Company VAT registration number printed on invoices, tax reports and ZATCA QR codes.">
+              <input id="company_vat" disabled={readOnly || !company} value={company?.vat ?? ''}
+                onChange={(e) => onWriteCompany({ vat: e.target.value })} />
+            </SettingRow>
+          )}
+        </div>
+      )}
+
+      {showCurrencies && (
+        <div className="settings-block" data-block="currencies">
+          <h3>{t('Currencies')}</h3>
+          <SettingRow id="currency" label="Main Currency" description="The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.">
+            {company
+              ? <span id="currency" className="readonly">{currentCompany(db).currency}</span>
+              : (
+                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
+                  const currency = e.target.value;
+                  const curId = db.settings?.current_company_id ?? 1;
+                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
+                  commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
+                }}>
+                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+            <p className="muted setting-links">
+              <a href="#/accounting/currencies">{t('Currencies')}</a>
+              {company && <> {' · '} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></>}
+            </p>
+          </SettingRow>
+        </div>
+      )}
+
+      {showCustomerPayments && (
+        <div className="settings-block" data-block="customer_payments">
+          <h3>{t('Customer Payments')}</h3>
+          {hasField('invoice_qr') && (
+            <SettingRow id="invoice_qr" label="Payment QR Codes" description="Add a scannable payment QR code to printed customer invoices.">
+              <select id="invoice_qr" disabled={readOnly || !company} value={company?.invoice_qr ?? ''} onChange={(e) => onWriteCompany({ invoice_qr: e.target.value || null })}>
+                <option value="">{t('None')}</option>
+                <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
+                <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
+              </select>
+              {company?.invoice_qr === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
+            </SettingRow>
+          )}
+          {hasField('company_iban') && (
+            <SettingRow id="company_iban" label="Bank Account (IBAN)" description="Company IBAN encoded into SEPA (EPC) payment QR codes on customer invoices.">
+              <input id="company_iban" disabled={readOnly || !company} value={company?.company_iban ?? ''}
+                onChange={(e) => onWriteCompany({ company_iban: e.target.value })} />
+            </SettingRow>
+          )}
+        </div>
+      )}
+
+      {showVendorBills && (
+        <div className="settings-block" data-block="vendor_bills">
+          <h3>{t('Vendor Bills')}</h3>
+          {hasField('three_way_matching') && (
+            <SettingRow id="three_way_matching" label="Three-Way Matching" description="Verify that vendor bill quantities match the purchase order and receipt before marking bills ready to pay.">
+              <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
+                onChange={(e) => onWriteCompany({ three_way_matching: e.target.checked })} />
+            </SettingRow>
+          )}
+        </div>
+      )}
+
+      {showFiscalPeriods && (
+        <div className="settings-block" data-block="fiscal_periods">
+          <h3>{t('Fiscal Periods')}</h3>
+          {ACCOUNTING_LOCK_FIELDS.filter(([key]) => hasField(key)).map(([key, label, desc]) => (
+            <SettingRow key={key} id={key} label={label} description={desc}>
+              <input id={key} type="date" disabled={readOnly || !company} value={company?.[key] ?? ''}
+                onChange={(e) => onWriteCompany({ [key]: e.target.value || null })} />
+            </SettingRow>
+          ))}
+          {hasField('hard_lock_date') && (
+            <SettingRow id="hard_lock_date" label="Hard Lock Date" description="Permanent closing date that cannot be moved back or removed once set.">
+              <input id="hard_lock_date" type="date" disabled={readOnly || !company} min={company?.hard_lock_date ?? undefined} value={company?.hard_lock_date ?? ''}
+                onChange={(e) => company && e.target.value && e.target.value > (company.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && onWriteCompany({ hard_lock_date: e.target.value })} />
+            </SettingRow>
+          )}
+          {hasField('audit_trail') && (
+            <SettingRow id="audit_trail" label="Restrictive Audit Trail" description="Prevent altering posted entries, logs and sequences once permanently enabled.">
+              <input id="audit_trail" type="checkbox" checked={!!company?.audit_trail} disabled={readOnly || !company || !!company?.audit_trail}
+                onChange={(e) => company && e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && onWriteCompany({ audit_trail: true })} />
+            </SettingRow>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Settings() {
   const db = useDb();
   const [status, setStatus] = useState(null);
@@ -221,6 +417,18 @@ export function Settings() {
     }
   };
   const canReplaceData = !isServer() || getUser()?.isAdmin;
+  const writeCompany = (vals) => {
+    if (!company) return;
+    const currentDb = getDb();
+    const error = validateCompanySettingWrite(currentDb, company, vals);
+    if (error) { setStatus(t(error)); return; }
+    try {
+      setStatus(null);
+      commit(write(currentDb, 'res.company', company.id, vals));
+    } catch (e) {
+      setStatus(e.message);
+    }
+  };
 
   return (
     <main className="action settings">
@@ -243,28 +451,6 @@ export function Settings() {
           </div>
         </div>
         <div className="field">
-          <label htmlFor="currency">{t('Currency')}</label>
-          <div className="field-value">
-            {company
-              ? (
-                <>
-                  <span id="currency" className="readonly">{currentCompany(db).currency}</span>
-                  <p className="muted">{t('The company currency is part of its accounting: amounts are not converted, so it is set on the company record before posting.')} <a href={`#/open/res.company/${company.id}`}>{t('Open the company')}</a></p>
-                </>
-              )
-              : (
-                <select id="currency" disabled={readOnly} value={currentCompany(db).currency ?? CURRENCIES[0]} onChange={(e) => {
-                  const currency = e.target.value;
-                  const curId = db.settings?.current_company_id ?? 1;
-                  const companies = (db.settings?.companies ?? []).map((c) => (c.id === curId ? { ...c, currency } : c));
-                  commit(updateSettings(getDb(), { currency, ...(db.settings?.companies?.length ? { companies } : {}) }));
-                }}>
-                  {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              )}
-          </div>
-        </div>
-        <div className="field">
           <label htmlFor="theme">{t('Theme')}</label>
           <div className="field-value">
             <select id="theme" value={theme} onChange={(e) => setTheme(e.target.value)}>
@@ -283,64 +469,7 @@ export function Settings() {
             </select>
           </div>
         </div>
-        <div className="field">
-          <label htmlFor="lock_date">{t('Lock Date')}</label>
-          <div className="field-value">
-            <input id="lock_date" type="date" disabled={readOnly || !company} value={company?.lock_date ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { lock_date: e.target.value || null }))} />
-          </div>
-        </div>
-        {[['sale_lock_date', 'Sales Lock Date'], ['purchase_lock_date', 'Purchase Lock Date'], ['tax_lock_date', 'Tax Return Lock Date']].map(([key, label]) => (
-          <div className="field" key={key}>
-            <label htmlFor={key}>{t(label)}</label>
-            <div className="field-value">
-              <input id={key} type="date" disabled={readOnly || !company} value={company?.[key] ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { [key]: e.target.value || null }))} />
-            </div>
-          </div>
-        ))}
-        <div className="field">
-          <label htmlFor="hard_lock_date">{t('Hard Lock Date')}</label>
-          <div className="field-value">
-            <input id="hard_lock_date" type="date" disabled={readOnly || !company} min={company?.hard_lock_date ?? undefined} value={company?.hard_lock_date ?? ''}
-              onChange={(e) => company && e.target.value && e.target.value > (company.hard_lock_date ?? '') && confirm(t('The hard lock date cannot be moved back or removed. Continue?')) && commit(write(getDb(), 'res.company', company.id, { hard_lock_date: e.target.value }))} />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="invoice_qr">{t('Payment QR Codes')}</label>
-          <div className="field-value">
-            <select id="invoice_qr" disabled={readOnly || !company} value={company?.invoice_qr ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { invoice_qr: e.target.value || null }))}>
-              <option value="">{t('None')}</option>
-              <option value="zatca">{t('ZATCA phase 1 QR (Saudi)')}</option>
-              <option value="epc">{t('SEPA Credit Transfer (EPC)')}</option>
-            </select>
-            {company?.invoice_qr === 'zatca' && <p className="muted">{t('Prints the phase 1 QR only. ZATCA phase 2 (XML, cryptographic stamp, clearance) and Egypt or UAE e-invoicing are not supported yet.')}</p>}
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="company_vat">{t('Company Tax ID')}</label>
-          <div className="field-value">
-            <input id="company_vat" disabled={readOnly || !company} value={company?.vat ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { vat: e.target.value }))} />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="company_iban">{t('Bank Account (IBAN)')}</label>
-          <div className="field-value">
-            <input id="company_iban" disabled={readOnly || !company} value={company?.company_iban ?? ''} onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { company_iban: e.target.value }))} />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="three_way_matching">{t('Three-Way Matching')}</label>
-          <div className="field-value">
-            <input id="three_way_matching" type="checkbox" checked={!!company?.three_way_matching} disabled={readOnly || !company}
-              onChange={(e) => company && commit(write(getDb(), 'res.company', company.id, { three_way_matching: e.target.checked }))} />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="audit_trail">{t('Restrictive Audit Trail')}</label>
-          <div className="field-value">
-            <input id="audit_trail" type="checkbox" checked={!!company?.audit_trail} disabled={readOnly || !company || !!company?.audit_trail}
-              onChange={(e) => company && e.target.checked && confirm(t('The audit trail cannot be disabled once enabled. Continue?')) && commit(write(getDb(), 'res.company', company.id, { audit_trail: true }))} />
-          </div>
-        </div>
+        <AccountingSection db={db} company={company} readOnly={readOnly} onWriteCompany={writeCompany} />
         <h3>{t('Data')}</h3>
         <p className="muted">{t('Records stored')}: {total}</p>
         <div className="row">

@@ -275,6 +275,10 @@ function companyGuard(db, before, r, ctx) {
   for (const field of LOCK_DATE_FIELDS) {
     if (r[field] != null && r[field] !== '' && !validDate(r[field])) return `${companyModels['res.company'].fields[field].label} must be a valid date`;
   }
+  if (r.tax_start_date != null && r.tax_start_date !== '' && !validDate(r.tax_start_date)) return 'Tax Period Start must be a valid date';
+  if (r.tax_periodicity != null && r.tax_periodicity !== '' && !['monthly', 'trimester', 'semester', 'year'].includes(r.tax_periodicity)) return 'Select a valid tax periodicity';
+  if (r.tax_calculation_rounding_method != null && r.tax_calculation_rounding_method !== '' && !['round_per_line', 'round_globally'].includes(r.tax_calculation_rounding_method)) return 'Select a valid tax rounding method';
+  if (r.invoice_qr != null && r.invoice_qr !== '' && !['zatca', 'epc'].includes(r.invoice_qr)) return 'Select a valid payment QR format';
   if (before?.hard_lock_date && (!r.hard_lock_date || r.hard_lock_date < before.hard_lock_date)) return 'The hard lock date cannot be moved back or removed';
   if (before?.audit_trail && !r.audit_trail) return 'The audit trail cannot be disabled once enabled';
   if (ctx && !ctx.isAdmin && CONTROL_FIELDS.some((field) => (
@@ -302,6 +306,16 @@ function companyGuard(db, before, r, ctx) {
     const journal = record(db, 'account.journal', r[field]);
     if (!journal || journal.type !== type || (!shared(journal.company_id) && journal.company_id !== r.id)) {
       return `${label} must be a ${type} journal shared with or belonging to this company`;
+    }
+  }
+  for (const [field, use, label] of [
+    ['account_sale_tax_id', 'sale', 'Default Sales Tax'],
+    ['account_purchase_tax_id', 'purchase', 'Default Purchase Tax'],
+  ]) {
+    if (!r[field]) continue;
+    const tax = record(db, 'account.tax', r[field]);
+    if (!tax || tax.active === false || tax.type_tax_use !== use || (!shared(tax.company_id) && tax.company_id !== r.id)) {
+      return `${label} must be an active ${use} tax shared with or belonging to this company`;
     }
   }
   for (const [field, type, label] of [['account_default_receivable_id', 'asset_receivable', 'receivable'], ['account_default_payable_id', 'liability_payable', 'payable']]) {
