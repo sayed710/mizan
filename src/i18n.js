@@ -1626,6 +1626,16 @@ const ar = {
   'Category hierarchy cannot contain a cycle': 'لا يمكن أن يحتوي تسلسل الفئات على دورة',
   'Product Categories is required': 'فئات المنتجات مطلوبة',
   'Costing Method is required': 'طريقة التكلفة مطلوبة',
+  // Analytic Distribution Models (Odoo 20 parity)
+  'Accounts Prefixes': 'بادئات الحسابات',
+  'Conditions to meet': 'الشروط الواجب استيفاؤها',
+  'Distribution to apply': 'التوزيع المراد تطبيقه',
+  'Select a partner for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner, it will automatically take this as an analytic account)': 'اختر شريكاً يُستخدم له التوزيع التحليلي (مثلاً عند إنشاء فاتورة عميل جديدة أو أمر بيع، إذا اخترت هذا الشريك فسيأخذ هذا الحساب التحليلي تلقائياً)',
+  'Select a partner category for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner category, it will automatically take this as an analytic account)': 'اختر فئة شريك يُستخدم لها التوزيع التحليلي (مثلاً عند إنشاء فاتورة عميل جديدة أو أمر بيع، إذا اخترت فئة الشريك هذه فسيأخذ هذا الحساب التحليلي تلقائياً)',
+  'Select a product for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this product, it will automatically take this as an analytic account)': 'اختر منتجاً يُستخدم له التوزيع التحليلي (مثلاً عند إنشاء فاتورة عميل جديدة أو أمر بيع، إذا اخترت هذا المنتج فسيأخذ هذا الحساب التحليلي تلقائياً)',
+  'Select a product category which will use analytic account specified in analytic default (e.g. create new customer invoice or Sales order if we select this product, it will automatically take this as an analytic account)': 'اختر فئة منتج تستخدم الحساب التحليلي المحدد في الافتراضي التحليلي (مثلاً عند إنشاء فاتورة عميل جديدة أو أمر بيع، إذا اخترت هذا المنتج فسيأخذ هذا الحساب التحليلي تلقائياً)',
+  'This analytic distribution will apply to all financial accounts sharing the prefix specified.': 'سينطبق هذا التوزيع التحليلي على جميع الحسابات المالية التي تشترك في البادئة المحددة.',
+  'Analytic accounts in the distribution must belong to the model company': 'يجب أن تنتمي الحسابات التحليلية في التوزيع إلى شركة النموذج',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
