@@ -115,10 +115,19 @@ function renderGroups(groups, opts) {
   );
 }
 
-function SmartButtons({ db, rec, smart }) {
+function SmartButtons({ db, model, rec, smart }) {
   return (
     <div className="smart-buttons">
       {smart.map((s) => {
+        if (s.valueField) {
+          const field = model ? models[model]?.fields?.[s.valueField] : null;
+          const value = s.value ? s.value(db, rec) : rec[s.valueField];
+          const text = field ? display(db, field, value ?? 0, rec) : String(value ?? '');
+          const label = t(s.label ?? field?.label);
+          return s.target
+            ? <a key={s.label} className="smart" href={`#/${s.target}`}><b>{text}</b><span>{label}</span></a>
+            : <div key={s.label} className="smart"><b>{text}</b><span>{label}</span></div>;
+        }
         // `key`: match on one of this record's fields (e.g. same customer) instead of its id.
         const value = rec[s.key ?? 'id'];
         const recs = value == null ? [] : viewRecords(db, s.model).filter((r) => r[s.field] === value);
@@ -560,13 +569,18 @@ export function FormView({ leaf, id, base, params }) {
 
           <section className="sheet">
             {ribbon && <div className={`ribbon ribbon-${ribbon.toLowerCase()}`}>{t(ribbon)}</div>}
-            {!isNew && def.form.smart && <SmartButtons db={db} rec={current} smart={def.form.smart} />}
+            {!isNew && def.form.smart && <SmartButtons db={db} model={model} rec={current} smart={def.form.smart} />}
             {def.form.subtitle && <div className="subtitle">{t(def.form.subtitle(current))}</div>}
             <div className="title-field">
-              {titleField.readonly || titleField.compute
-                ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
-                : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
-                    value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
+              {Array.isArray(def.form.titleFields)
+                ? <div className="field-pair">{def.form.titleFields.map((f) => {
+                    const fd = def.fields[f];
+                    return <FieldInput key={f} db={db} model={model} fieldName={f} field={fd} value={current[f]} onChange={set(f)} id={`f-${f}`} readonly={locked || fieldReadonly(fd, current, db)} record={current} label={t(fd.label)} placeholder={t(fd.label)} />;
+                  })}</div>
+                : titleField.readonly || titleField.compute
+                  ? <h2>{isNew || current[def.form.title] === '/' ? t('Draft') : current[def.form.title]}</h2>
+                  : <input aria-label={t(titleField.label)} placeholder={t(titleField.label)} readOnly={locked}
+                      value={current[def.form.title] ?? ''} onChange={(e) => set(def.form.title)(e.target.value)} />}
             </div>
             {renderGroups(groups, { db, model, def, current, set, readonly: locked })}
             {def.form.outstandingCredits && !isNew && (

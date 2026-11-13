@@ -1379,6 +1379,10 @@ const ar = {
   'Zip To': 'الرمز البريدي إلى',
   'Product Account': 'حساب المنتج',
   'Account to use instead': 'الحساب البديل',
+  'Default Taxes': 'الضرائب الافتراضية',
+  'Select an existing default tax': 'اختر ضريبة افتراضية موجودة',
+  'Tax belongs to another company': 'الضريبة تتبع شركة أخرى',
+  'Archived accounts cannot be selected on journal items or invoice lines': 'لا يمكن اختيار حسابات مؤرشفة في بنود اليومية أو بنود الفواتير',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

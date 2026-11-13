@@ -216,15 +216,15 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
   return matches[0]?.id ?? null;
 }
 
-/** Line tax values for a product (sales or purchase side) after the fiscal position. */
-export function productTax(db, product, side, fpId, companyId = null) {
-  const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
-  // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
-  const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
-  if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
-  validateTaxCompany(db, [own], companyId, fpId);
-  const mapped = mapTax(db, fpId, own);
-  const remapped = mapped.length !== 1 || mapped[0] !== own;
+/** Map and snapshot explicit tax IDs (sales or purchase side) through the fiscal position. */
+export function mapTaxIds(db, sourceIds, fpId, companyId = null) {
+  const clean = (sourceIds ?? []).filter(Boolean);
+  if (!clean.length) return null;
+  validateTaxCompany(db, clean, companyId, fpId);
+  const mapped = [...new Set(clean.flatMap((id) => mapTax(db, fpId, id)))].filter(Boolean);
+  const single = clean.length === 1;
+  const own = single ? clean[0] : null;
+  const remapped = single && (mapped.length !== 1 || mapped[0] !== own);
   const source = remapped ? { tax_source_id: own } : {};
   if (mapped.length <= 1) {
     return { ...taxSnapshot(read(db, 'account.tax', mapped[0]), db, remapped ? null : fpId), ...source };
@@ -236,6 +236,24 @@ export function productTax(db, product, side, fpId, companyId = null) {
     tax_breakdown: expanded.map((t) => taxSnapshot(t)),
     ...source,
   };
+}
+
+/** Line tax values for a product (sales or purchase side) after the fiscal position. */
+export function productTax(db, product, side, fpId, companyId = null) {
+  const own = product?.[side === 'purchase' ? 'supplier_tax_id' : 'tax_id'];
+  // A product without a tax record carries only a plain percentage; it never borrows a tax record by matching rates.
+  const percent = product?.[side === 'purchase' ? 'purchase_tax' : 'sale_tax'];
+  if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
+  return mapTaxIds(db, [own], fpId, companyId);
+}
+
+/** Line tax values for an account's default taxes on `side`, mapped through `fpId`. */
+export function accountTax(db, account, side, fpId, companyId = null) {
+  const own = (account?.tax_ids ?? []).filter((id) => {
+    const tax = read(db, 'account.tax', id);
+    return tax && tax.active !== false && tax.type_tax_use === side;
+  });
+  return mapTaxIds(db, own, fpId, companyId);
 }
 
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */

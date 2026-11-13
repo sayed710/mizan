@@ -1,12 +1,12 @@
 import { create, postNote, read, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, outstandingAccount, paymentJournal, postEntry, postedBillLine, resolveDocumentJournal } from './ledger.js';
 import { creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDeleteGuard, moveGuard, moveInvariant, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
-import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
+import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, taxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -38,6 +38,34 @@ function accountCodeGuard(db, before, after) {
   if (codeOrCompanyChanged && (db.records['account.account'] ?? []).some((account) => account.id !== after.id
     && account.code === after.code && (account.company_id ?? null) === (after.company_id ?? null))) {
     return `Account code ${after.code} is already used for this company`;
+  }
+  return null;
+}
+
+const accountLineCounts = (lines = []) => {
+  const counts = new Map();
+  for (const line of lines) {
+    if (!line?.account_id || isSectionOrNote(line)) continue;
+    counts.set(line.account_id, (counts.get(line.account_id) ?? 0) + 1);
+  }
+  return counts;
+};
+
+function archivedLineAccountGuard(db, before, after) {
+  const invCounts = accountLineCounts(before?.invoice_line_ids);
+  for (const [accId, count] of accountLineCounts(after.invoice_line_ids)) {
+    if (count > (invCounts.get(accId) ?? 0) && read(db, 'account.account', accId)?.active === false) {
+      return 'Archived accounts cannot be selected on journal items or invoice lines';
+    }
+  }
+  // Posting a draft invoice materializes its journal items from invoice_line_ids.
+  const postingDraftInvoice = isInvoice(after) && before?.state === 'draft' && after.state === 'posted';
+  const beforeLineCounts = accountLineCounts(before?.line_ids);
+  for (const [accId, count] of accountLineCounts(after.line_ids)) {
+    const allowed = postingDraftInvoice ? Math.max(beforeLineCounts.get(accId) ?? 0, invCounts.get(accId) ?? 0) : (beforeLineCounts.get(accId) ?? 0);
+    if (count > allowed && read(db, 'account.account', accId)?.active === false) {
+      return 'Archived accounts cannot be selected on journal items or invoice lines';
+    }
   }
   return null;
 }
@@ -1252,9 +1280,16 @@ const invoiceLineField = {
   newLine: (move, db) => (isPurchase(move ?? {}) ? billLineBase : invoiceLineBase).newLine(move, db),
   onchange: (line, key, db, move) => {
     const moveWithJournal = move?.journal_id ? move : (move && db ? { ...move, journal_id: resolveDocumentJournal(db, move)?.id } : move);
-    const updated = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
-    return db && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(moveWithJournal?.move_type)
-      && ['product_id', 'account_id'].includes(key)
+    const base = (isPurchase(moveWithJournal ?? {}) ? billLineBase : invoiceLineBase).onchange(line, key, db, moveWithJournal);
+    const isDoc = db && ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(moveWithJournal?.move_type);
+    let updated = base;
+    if (isDoc && key === 'account_id' && !base.product_id && !isSectionOrNote(base)) {
+      const account = base.account_id ? read(db, 'account.account', base.account_id) : null;
+      const side = isPurchase(moveWithJournal) ? 'purchase' : 'sale';
+      const accTax = account ? (accountTax(db, account, side, moveWithJournal.fiscal_position_id, moveWithJournal.company_id) ?? taxSnapshot(null)) : null;
+      if (accTax) updated = { ...updated, tax_source_id: null, tax_ids: [], ...replaceTaxSnapshot(accTax) };
+    }
+    return isDoc && ['product_id', 'account_id'].includes(key)
       ? { ...updated, analytic_distribution: defaultDistributionForLine(db, updated, moveWithJournal) }
       : updated;
   },
@@ -1328,19 +1363,29 @@ export const accountingModels = {
     fields: {
       code: { type: 'char', label: 'Code', required: true },
       name: { type: 'char', label: 'Account Name', required: true },
+      display_name: { type: 'char', label: 'Display Name', compute: (r) => [r.code, r.name].filter(Boolean).join(' ') },
       account_type: { type: 'selection', label: 'Type', options: ACCOUNT_TYPES },
-      reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
-      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
-      asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Default Taxes', domain: (r, acc) => !r.company_id || r.company_id === acc?.company_id },
       fiscal_category_id: { type: 'many2one', relation: 'account.fiscal.category', label: 'Fiscal Category' },
+      tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
+      reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
+      active: { type: 'boolean', label: 'Active' },
+      asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
+      description: { type: 'text', label: 'Description' },
+      current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
     },
-    defaults: () => ({ account_type: 'expense' }),
+    defaults: () => ({ account_type: 'expense', active: true, tax_ids: [] }),
     guard: (db, before, after) => {
       const useError = accountTypeGuard(db, before, after);
       if (useError) return useError;
       const codeError = accountCodeGuard(db, before, after);
       if (codeError) return codeError;
       if ((after.tag_ids ?? []).some((id) => read(db, 'account.account.tag', id)?.applicability !== 'accounts')) return 'Select only account tags';
+      for (const taxId of after.tax_ids ?? []) {
+        const tax = read(db, 'account.tax', taxId);
+        if (!tax) return 'Select an existing default tax';
+        if (tax.company_id && tax.company_id !== after.company_id) return 'Tax belongs to another company';
+      }
       if (after.fiscal_category_id) {
         const category = read(db, 'account.fiscal.category', after.fiscal_category_id);
         if (!category) return 'Select an existing fiscal category';
@@ -1354,13 +1399,26 @@ export const accountingModels = {
       return null;
     },
     protectDelete: accountDeleteGuard,
+    sort: (a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')),
     groupBys: ['account_type'],
     kanban: { title: 'name', lines: ['code', 'account_type'] },
-    list: ['code', 'name', 'account_type'],
+    list: ['code', 'name', 'account_type', 'reconcile'],
+    editableList: ['reconcile'],
     views: ['list', 'kanban'],
     form: {
-      title: 'name',
-      groups: [['code', 'account_type', 'asset_model_id', 'fiscal_category_id'], ['reconcile', 'tag_ids']],
+      title: 'display_name',
+      titleFields: ['code', 'name'],
+      smart: [{ label: 'Balance', valueField: 'current_balance', value: (db, r) => accountBalance(db, r), target: 'accounting/journal-items' }],
+      tabs: [
+        {
+          label: 'Accounting',
+          groups: [
+            ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
+            ['asset_model_id'],
+            ['description'],
+          ],
+        },
+      ],
     },
   },
 
@@ -1475,7 +1533,7 @@ export const accountingModels = {
       if (['out_invoice', 'out_refund'].includes(before?.move_type) && counterpartBlocked && ((before?.state === 'posted' && after.state !== 'posted') || (before?.state !== 'cancel' && after.state === 'cancel'))) {
         return 'The inter-company bill is posted or paid; issue a credit note instead';
       }
-      return moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
+      return archivedLineAccountGuard(db, before, after) ?? moveGuard(db, before, after, ctx) ?? paymentGuard(db, before, after, ctx) ?? (after.state === 'posted' && badLineSign(after.line_ids) ? 'Debits and credits cannot be negative' : null);
     },
     invariant: (db, after, before, stored) => secureMoveInvariant(db, after, before) ?? lockedSettlementInvariant(db, after, before) ?? moveInvariant(db, after, before, stored),
     protectDelete: (db, m, staged) => moveDeleteGuard(db, m, staged) ?? settledByCreditNote(db, m) ?? (settlingEntries(db).has(m.id) || Number(m.amount_paid) > 0 ? 'Entries tied to a payment cannot be deleted' : null),
@@ -1509,9 +1567,11 @@ export const accountingModels = {
         const context = { ...r, ...fiscal, journal_id: journal };
         const linesUpdate = Array.isArray(r.invoice_line_ids)
           ? { invoice_line_ids: r.invoice_line_ids.map((line) => {
-            const remap = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && line.product_id && !['line_section', 'line_note'].includes(line.display_type);
-            const updated = remap ? invoiceLineField.onchange(line, 'product_id', db, context) : line;
-            return { ...updated, ...(remap ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
+            const remapKey = (key === 'fiscal_position_id' || partnerChange || key === 'company_id') && !['line_section', 'line_note'].includes(line.display_type)
+              ? (line.product_id ? 'product_id' : (line.account_id && (read(db, 'account.account', line.account_id)?.tax_ids ?? []).length ? 'account_id' : null))
+              : null;
+            const updated = remapKey ? invoiceLineField.onchange(line, remapKey, db, context) : line;
+            return { ...updated, ...(remapKey ? { price_unit: line.price_unit, qty: line.qty, discount: line.discount } : {}), analytic_distribution: defaultDistributionForLine(db, updated, context, line.analytic_distribution ?? {}) };
           }) }
           : {};
         return {

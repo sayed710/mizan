@@ -501,6 +501,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     if (!accId) throw new Error(`Account not found: ${l.account}`);
     const acc = read(db, 'account.account', accId);
     if (!acc) throw new Error(`Account not found: ${accId}`);
+    if (acc.active === false) throw new Error('Archived accounts cannot be selected on journal items or invoice lines');
     if (acc.company_id && company && acc.company_id !== company) throw new Error(`Account ${acc.code || acc.name} belongs to another company`);
 
     // Keep both columns non-negative: a negative debit is a credit and vice versa.
@@ -741,6 +742,14 @@ export function balances(db, items) {
   const map = new Map();
   for (const l of items) map.set(l.account_id, (map.get(l.account_id) ?? 0) + reportingBookedAmount(db, l, (Number(l.debit) || 0) - (Number(l.credit) || 0)));
   return [...map].map(([id, balance]) => ({ account: read(db, 'account.account', id), balance: round(balance) })).filter((b) => b.account);
+}
+
+/** Posted balance of `account` in its company currency (or the active company when shared). */
+export function accountBalance(db, account) {
+  if (!db || !account?.id) return 0;
+  const companyId = account.company_id ?? db.settings?.current_company_id ?? 1;
+  const scoped = (db.settings?.current_company_id ?? 1) === companyId ? db : { ...db, settings: { ...db.settings, current_company_id: companyId } };
+  return balances(scoped, journalItems(scoped, { company_id: companyId })).find((b) => b.account.id === account.id)?.balance ?? 0;
 }
 
 const lineNet = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
