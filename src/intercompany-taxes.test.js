@@ -71,10 +71,10 @@ test('a fixed price-included purchase tax is added back to the bought price, dis
 
 test('the seller contact\'s fiscal position stays on the purchase, so editing a line keeps the mapped tax', () => {
   const { db, saleTax, purchaseTax } = setup();
-  const other = create(db, 'account.tax', { name: 'Mapped purchase tax', amount_type: 'percent', amount: 7, type_tax_use: 'purchase' });
-  const fp = create(other.db, 'account.fiscal.position', { name: 'Seller position', tax_ids: [{ tax_src_id: purchaseTax.id, tax_dest_id: other.id }] });
-  const seller = read(fp.db, 'res.company', 1).partner_id;
-  const mapped = write(fp.db, 'res.partner', seller, { property_account_position_id: fp.id });
+  const fp = create(db, 'account.fiscal.position', { name: 'Seller position' });
+  const other = create(fp.db, 'account.tax', { name: 'Mapped purchase tax', amount_type: 'percent', amount: 7, type_tax_use: 'purchase', fiscal_position_ids: [fp.id], original_tax_ids: [purchaseTax.id] });
+  const seller = read(other.db, 'res.company', 1).partner_id;
+  const mapped = write(other.db, 'res.partner', seller, { property_account_position_id: fp.id });
   const line = { product_id: 2, qty: 1, price_unit: 100, discount: 0, tax_id: saleTax.id, tax: 14, tax_type: 'percent', tax_include: false };
   const po = sold(mapped, line);
   assert.equal(po.fiscal_position_id, fp.id);

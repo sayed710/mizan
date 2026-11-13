@@ -134,7 +134,7 @@ test('account.tax form shows one Tax Group, conditional Child Taxes, Definition 
   try {
     const topGroups = allFind(ctx.host, (n) => n.tagName === 'DIV' && hasClass(n, 'group')).slice(0, 2);
     assert.deepEqual(fieldLabelsOf(topGroups[0]), ['Tax Computation', 'Amount', 'Description']);
-    assert.deepEqual(fieldLabelsOf(topGroups[1]), ['Tax Type', 'Tax Scope']);
+    assert.deepEqual(fieldLabelsOf(topGroups[1]), ['Tax Type', 'Tax Scope', 'Fiscal Position', 'Replaces']);
     assert.equal(allFind(ctx.host, (n) => n.textContent?.trim() === 'Sequence').length, 0, 'Sequence leaves the form');
 
     // Switch Tax Computation to Group of Taxes -> Child Taxes appears in left header group.

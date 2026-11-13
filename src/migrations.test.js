@@ -111,3 +111,46 @@ test('the migrated data and its version are persisted', () => {
   assert.equal(migrate(again), again, 'nothing left to run after a restart');
   assert.deepEqual(again.records['documents.document'][0].tag_ids, db.records['documents.document'][0].tag_ids);
 });
+
+test('migration 37 moves fiscal position tax_ids onto destination taxes and notes empty-destination removals', () => {
+  const base = seed();
+  const vatSale = base.records['account.tax'].find((t) => t.name === 'VAT 14%' && t.type_tax_use === 'sale');
+  const zeroExport = base.records['account.tax'].find((t) => t.name === '0% Exports');
+  const stamp = base.records['account.tax'].find((t) => t.name === 'Stamp Duty');
+  const exportFp = base.records['account.fiscal.position'].find((f) => f.name === 'Export');
+  const legacy = {
+    ...base,
+    schema_version: 36,
+    records: {
+      ...base.records,
+      'account.tax': base.records['account.tax'].map((t) => ({ ...t, fiscal_position_ids: [], original_tax_ids: [] })),
+      'account.fiscal.position': base.records['account.fiscal.position'].map((fp) => (
+        fp.id === exportFp.id
+          ? {
+              ...fp,
+              tax_ids: [
+                { tax_src_id: vatSale.id, tax_dest_id: zeroExport.id },
+                { tax_src_id: stamp.id, tax_dest_id: null },
+              ],
+            }
+          : { ...fp, tax_ids: [] }
+      )),
+    },
+  };
+  const beforeNotes = (legacy.messages ?? []).filter((m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id).length;
+  const migrated = migrate(legacy);
+  const migratedZero = migrated.records['account.tax'].find((t) => t.id === zeroExport.id);
+  assert.deepEqual(migratedZero.fiscal_position_ids, [exportFp.id]);
+  assert.deepEqual(migratedZero.original_tax_ids, [vatSale.id]);
+  for (const fp of migrated.records['account.fiscal.position']) {
+    assert.equal('tax_ids' in fp, false);
+  }
+  const removalNotes = (migrated.messages ?? []).filter(
+    (m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id && m.body.includes('Stamp Duty'),
+  );
+  assert.equal(removalNotes.length, 1);
+  assert.equal(
+    (migrated.messages ?? []).filter((m) => m.model === 'account.fiscal.position' && m.res_id === exportFp.id).length - beforeNotes,
+    1,
+  );
+});

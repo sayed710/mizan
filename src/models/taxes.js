@@ -103,10 +103,17 @@ export const taxSnapshot = (tax, db = null, fpId = null) => {
 /** Replace all snapshot fields when merging a newly selected tax into a line. */
 export const replaceTaxSnapshot = (snapshot) => ({ tax_breakdown: [], tax_include_base_amount: false, tax_is_base_affected: true, tax_sequence: 1, invoice_repartition_line_ids: [], refund_repartition_line_ids: [], ...snapshot });
 
-/** The tax a fiscal position substitutes for `taxId` (the same tax when unmapped; null when mapped to no tax). */
+/** The taxes a fiscal position substitutes for `taxId` (a list of mapped tax IDs; `[taxId]` when unmapped/kept; `[]` when dropped). */
 export function mapTax(db, fpId, taxId) {
-  const rule = (read(db, 'account.fiscal.position', fpId)?.tax_ids ?? []).find((m) => m.tax_src_id === taxId);
-  return rule ? rule.tax_dest_id ?? null : taxId;
+  if (!taxId) return [];
+  if (!fpId || !db) return [taxId];
+  const replacements = search(db, 'account.tax')
+    .filter((t) => (t.fiscal_position_ids ?? []).includes(fpId) && (t.original_tax_ids ?? []).includes(taxId))
+    .sort((a, b) => (Number(a.sequence ?? 1) - Number(b.sequence ?? 1)) || ((a.id ?? 0) - (b.id ?? 0)));
+  if (replacements.length) return [...new Set(replacements.map((t) => t.id))];
+  const src = read(db, 'account.tax', taxId);
+  const fps = src?.fiscal_position_ids ?? [];
+  return !fps.length || fps.includes(fpId) ? [taxId] : [];
 }
 
 export function mapAccount(db, fpId, accountId) {
@@ -118,19 +125,22 @@ export function mapAccount(db, fpId, accountId) {
 export function expandTaxIds(db, taxIds = [], fpId = null) {
   if (!db) return [];
   const seen = new Set();
-  const flatten = (ids) => {
+  const flatten = (ids, map = Boolean(fpId)) => {
     const recs = ids
-      .map((id) => (fpId ? mapTax(db, fpId, id) : id))
       .filter(Boolean)
-      .map((id) => read(db, 'account.tax', id))
-      .filter(Boolean)
-      .sort((a, b) => (Number(a.sequence ?? 1) - Number(b.sequence ?? 1)) || ((a.id ?? 0) - (b.id ?? 0)));
+      .flatMap((id) => {
+        const mapped = map && fpId ? mapTax(db, fpId, id) : [id];
+        const remapped = mapped.length !== 1 || mapped[0] !== id;
+        return mapped.map((mId) => ({ tax: read(db, 'account.tax', mId), remapped }));
+      })
+      .filter((x) => x.tax)
+      .sort((a, b) => (Number(a.tax.sequence ?? 1) - Number(b.tax.sequence ?? 1)) || ((a.tax.id ?? 0) - (b.tax.id ?? 0)));
     const out = [];
-    for (const t of recs) {
+    for (const { tax: t, remapped } of recs) {
       if (t.amount_type === 'group') {
         if (seen.has(t.id)) continue;
         seen.add(t.id);
-        out.push(...flatten(t.children_tax_ids ?? []));
+        out.push(...flatten(t.children_tax_ids ?? [], map && !remapped));
       } else {
         out.push(t);
       }
@@ -174,14 +184,17 @@ export function validateTaxCompany(db, ids, companyId, fpId = null) {
     const tax = read(db, 'account.tax', id);
     if (!tax) throw new Error('Selected tax does not exist');
     if (tax.company_id && tax.company_id !== companyId) throw new Error('Tax belongs to another company');
-    const mapped = map && fpId ? mapTax(db, fpId, id) : id;
-    if (mapped !== id) { visit(mapped, false); return; }
-    for (const child of tax.children_tax_ids ?? []) visit(child);
+    const mapped = map && fpId ? mapTax(db, fpId, id) : [id];
+    if (mapped.length !== 1 || mapped[0] !== id) {
+      for (const m of mapped) visit(m, false);
+      return;
+    }
+    for (const child of tax.children_tax_ids ?? []) visit(child, map);
   };
   for (const id of ids) visit(id);
 }
 
-/** Fiscal position for a partner: its own one, else the first auto-applied position for its country. */
+/** Fiscal position for a partner: its own one, else the first auto-applied position for its country and zip range. */
 export function fiscalPositionFor(db, partnerId, companyId = null) {
   const p = read(db, 'res.partner', partnerId);
   if (!p) return null;
@@ -190,7 +203,15 @@ export function fiscalPositionFor(db, partnerId, companyId = null) {
     if (!companyId || !position?.company_id || position.company_id === companyId) return p.property_account_position_id;
   }
   const country = (p.country ?? '').trim().toLowerCase();
-  const matches = search(db, 'account.fiscal.position').filter((fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()));
+  const pZip = String(p.zip ?? '').trim();
+  const zipMatches = (fp) => {
+    const from = String(fp.zip_from ?? '').trim();
+    const to = String(fp.zip_to ?? '').trim();
+    if (!from && !to) return true;
+    if (!pZip) return false;
+    return (!from || pZip >= from) && (!to || pZip <= to);
+  };
+  const matches = search(db, 'account.fiscal.position').filter((fp) => (!companyId || !fp.company_id || fp.company_id === companyId) && fp.auto_apply && country && (fp.country ?? '').trim().toLowerCase() === country && (!fp.vat_required || String(p.vat ?? '').trim()) && zipMatches(fp));
   matches.sort((a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || a.id - b.id);
   return matches[0]?.id ?? null;
 }
@@ -203,7 +224,18 @@ export function productTax(db, product, side, fpId, companyId = null) {
   if (own == null) return percent != null ? { ...taxSnapshot(null), tax: Number(percent) || 0 } : null;
   validateTaxCompany(db, [own], companyId, fpId);
   const mapped = mapTax(db, fpId, own);
-  return { ...taxSnapshot(read(db, 'account.tax', mapped), db, fpId), ...(mapped !== own ? { tax_source_id: own } : {}) };
+  const remapped = mapped.length !== 1 || mapped[0] !== own;
+  const source = remapped ? { tax_source_id: own } : {};
+  if (mapped.length <= 1) {
+    return { ...taxSnapshot(read(db, 'account.tax', mapped[0]), db, remapped ? null : fpId), ...source };
+  }
+  const expanded = expandTaxIds(db, mapped);
+  return {
+    ...taxSnapshot(read(db, 'account.tax', mapped[0]), db),
+    tax_ids: mapped,
+    tax_breakdown: expanded.map((t) => taxSnapshot(t)),
+    ...source,
+  };
 }
 
 /** Name a tax goes by on journal items and in the tax return: the tax's own name, else its rate. */
@@ -476,6 +508,8 @@ export const taxModels = {
       description: { type: 'char', label: 'Description' },
       type_tax_use: { type: 'selection', label: 'Tax Type', options: TAX_TYPES },
       tax_scope: { type: 'selection', label: 'Tax Scope', options: [['consu', 'Goods'], ['service', 'Services']] },
+      fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
+      original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces' },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
       price_include: { type: 'boolean', label: 'Included in Price' },
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
@@ -492,6 +526,8 @@ export const taxModels = {
       amount_type: 'percent',
       amount: 14,
       children_tax_ids: [],
+      fiscal_position_ids: [],
+      original_tax_ids: [],
       type_tax_use: 'sale',
       tax_exigibility: 'on_invoice',
       price_include: false,
@@ -521,7 +557,7 @@ export const taxModels = {
       title: 'name',
       groups: (r) => [
         ['amount_type', 'amount', ...(r?.amount_type === 'group' ? ['children_tax_ids'] : []), 'description'],
-        ['type_tax_use', 'tax_scope'],
+        ['type_tax_use', 'tax_scope', 'fiscal_position_ids', 'original_tax_ids'],
       ],
       tabs: [
         {
@@ -550,26 +586,25 @@ export const taxModels = {
       sequence: { type: 'integer', label: 'Sequence' },
       auto_apply: { type: 'boolean', label: 'Detect Automatically' },
       vat_required: { type: 'boolean', label: 'VAT Required' },
+      foreign_vat: { type: 'char', label: 'Foreign Tax ID' },
       country: { type: 'char', label: 'Country' },
+      zip_from: { type: 'char', label: 'Zip From' },
+      zip_to: { type: 'char', label: 'Zip To' },
       note: { type: 'text', label: 'Legal Notes' },
-      tax_ids: {
-        type: 'one2many', label: 'Tax Mapping',
-        fields: { tax_src_id: { type: 'many2one', relation: 'account.tax', label: 'Tax on Product' }, tax_dest_id: { type: 'many2one', relation: 'account.tax', label: 'Tax to Apply' } },
-        newLine: () => ({ tax_src_id: null, tax_dest_id: null }),
-      },
       account_ids: {
         type: 'one2many', label: 'Account Mapping',
-        fields: { account_src_id: { type: 'many2one', relation: 'account.account', label: 'Account on Product' }, account_dest_id: { type: 'many2one', relation: 'account.account', label: 'Account to Use Instead' } },
+        fields: { account_src_id: { type: 'many2one', relation: 'account.account', label: 'Product Account' }, account_dest_id: { type: 'many2one', relation: 'account.account', label: 'Account to use instead' } },
         newLine: () => ({ account_src_id: null, account_dest_id: null }),
       },
     },
-    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, tax_ids: [], account_ids: [] }),
+    defaults: () => ({ sequence: 10, auto_apply: false, vat_required: false, account_ids: [] }),
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || (a.id ?? 0) - (b.id ?? 0),
     kanban: { title: 'name', lines: ['country'] },
     list: ['sequence', 'name', 'country', 'auto_apply'],
     form: {
       title: 'name',
-      groups: [['sequence', 'auto_apply', 'country', 'vat_required'], []],
-      tabs: [{ label: 'Tax Mapping', fields: ['tax_ids'] }, { label: 'Account Mapping', fields: ['account_ids'] }, { label: 'Legal Notes', fields: ['note'] }],
+      groups: [['auto_apply', 'vat_required', 'foreign_vat', 'country', { label: 'Zip Range', fields: ['zip_from', 'zip_to'] }], []],
+      tabs: [{ label: 'Account Mapping', fields: ['account_ids'] }, { label: 'Legal Notes', fields: ['note'] }],
       chatter: true,
     },
   },

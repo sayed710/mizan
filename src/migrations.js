@@ -991,6 +991,44 @@ MIGRATIONS.push({ version: 36, name: 'Explicit company currency from legacy sett
   { ...db, messages: db.messages ?? [], records: { ...db.records, 'res.company': companies } });
 } });
 
+MIGRATIONS.push({ version: 37, name: 'Move fiscal position tax mappings onto taxes', up: (db) => {
+  const taxesById = new Map((db.records['account.tax'] ?? []).map((t) => [t.id, {
+    ...t,
+    fiscal_position_ids: [...(t.fiscal_position_ids ?? [])],
+    original_tax_ids: [...(t.original_tax_ids ?? [])],
+  }]));
+  const removed = [];
+  const positions = (db.records['account.fiscal.position'] ?? []).map((fp) => {
+    for (const row of fp.tax_ids ?? []) {
+      if (row?.tax_dest_id) {
+        const dest = taxesById.get(row.tax_dest_id);
+        if (dest) {
+          if (!dest.fiscal_position_ids.includes(fp.id)) dest.fiscal_position_ids.push(fp.id);
+          if (row.tax_src_id && !dest.original_tax_ids.includes(row.tax_src_id)) dest.original_tax_ids.push(row.tax_src_id);
+        }
+      } else if (row?.tax_src_id) {
+        const src = taxesById.get(row.tax_src_id);
+        removed.push([fp.id, src?.name || `#${row.tax_src_id}`]);
+      }
+    }
+    const { tax_ids, ...rest } = fp;
+    return rest;
+  });
+  const next = {
+    ...db,
+    messages: db.messages ?? [],
+    records: {
+      ...db.records,
+      'account.tax': [...taxesById.values()],
+      'account.fiscal.position': positions,
+    },
+  };
+  return removed.reduce(
+    (acc, [fpId, srcName]) => postNote(acc, 'account.fiscal.position', fpId, `Upgrade: tax removal rule for "${srcName}" cannot be expressed in the new model; please redo it on the tax records.`),
+    next,
+  );
+} });
+
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
 /** Bring a database up to SCHEMA_VERSION. Returns the same object when nothing ran. */

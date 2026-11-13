@@ -213,9 +213,12 @@ export const productLines = (label, priceField, extraFields = {}) => ({
     const companyId = record?.company_id ?? 1;
     const company = db ? read(db, 'res.company', companyId) : null;
     const taxId = company ? (isPurch ? company.account_purchase_tax_id : company.account_sale_tax_id) : null;
-    const tax = db && taxId ? read(db, 'account.tax', mapTax(db, record?.fiscal_position_id, taxId)) : null;
-    const snap = tax ? taxSnapshot(tax, db, record?.fiscal_position_id) : taxSnapshot(null);
-    return { product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap };
+    const mapped = db && taxId ? mapTax(db, record?.fiscal_position_id, taxId) : [];
+    const remapped = mapped.length !== 1 || mapped[0] !== taxId;
+    const tax = db && mapped[0] ? read(db, 'account.tax', mapped[0]) : null;
+    const snap = tax ? taxSnapshot(tax, db, remapped ? null : record?.fiscal_position_id) : taxSnapshot(null);
+    const multi = mapped.length > 1 ? { tax_ids: mapped, tax_breakdown: expandTaxIds(db, mapped).map((t) => taxSnapshot(t)) } : {};
+    return { product_id: null, qty: 1, price_unit: 0, discount: 0, ...snap, ...multi };
   },
   // Product or quantity change re-prices the line; the parent record's pricelist (if any) applies.
   // The product's tax goes through the record's fiscal position; picking a tax by hand applies it as is.

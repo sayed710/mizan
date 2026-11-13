@@ -164,18 +164,17 @@ export function seed() {
       ...vals,
     });
   };
+  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', account_ids: [] });
+  const exportFp = add('account.fiscal.position', {
+    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.', account_ids: [],
+  });
   const vatSale = tax('VAT 14%', 'sale', 14, '251000');
   const vatPurchase = tax('VAT 14%', 'purchase', 14, '131000');
-  const zeroExport = tax('0% Exports', 'sale', 0, null);
-  const zeroImport = tax('0% Imports', 'purchase', 0, null);
+  tax('0% Exports', 'sale', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatSale] });
+  tax('0% Imports', 'purchase', 0, null, { fiscal_position_ids: [exportFp], original_tax_ids: [vatPurchase] });
   tax('VAT 14% Included', 'sale', 14, '251000', { price_include: true });
   tax('VAT 14% (Cash Basis)', 'sale', 14, '251000', { tax_exigibility: 'on_payment', cash_basis_transition_account_id: installedByCode['251100'] });
   tax('Stamp Duty', 'sale', 5, '251000', { amount_type: 'fixed', tax_group_id: stampGroupId });
-  add('account.fiscal.position', { name: 'Domestic', auto_apply: false, country: 'Egypt', tax_ids: [], account_ids: [] });
-  add('account.fiscal.position', {
-    name: 'Export', auto_apply: false, note: 'Export of goods: zero-rated VAT.',
-    tax_ids: [{ tax_src_id: vatSale, tax_dest_id: zeroExport }, { tax_src_id: vatPurchase, tax_dest_id: zeroImport }], account_ids: [],
-  });
   db = postEntry(db, {
     // Start of the year, but never after the seeded history (invoices go back 45 days).
     journal: 'MISC', date: [`${today().slice(0, 4)}-01-01`, addDays(today(), -60)].sort()[0], ref: 'Opening balance',

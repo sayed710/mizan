@@ -1372,6 +1372,13 @@ const ar = {
   'Days end of month on the': 'أيام بعد نهاية الشهر في يوم',
   'Enter the day of the next month (1-31) for Days end of month on the': 'أدخل يوم الشهر التالي (1-31) لخيار أيام بعد نهاية الشهر في يوم',
   'Outstanding account must belong to the payment company': 'يجب أن يتبع الحساب المعلق شركة الدفع',
+  'Replaces': 'يحل محل',
+  'Foreign Tax ID': 'الرقم الضريبي الأجنبي',
+  'Zip Range': 'نطاق الرمز البريدي',
+  'Zip From': 'الرمز البريدي من',
+  'Zip To': 'الرمز البريدي إلى',
+  'Product Account': 'حساب المنتج',
+  'Account to use instead': 'الحساب البديل',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
