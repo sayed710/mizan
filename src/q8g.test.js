@@ -68,8 +68,9 @@ test('Qodo 63: POS cash difference uses journal from used payment method even if
   const j1Acc = create(loss.db, 'account.account', { name: 'Drawer 1', code: '101411', account_type: 'asset_cash', company_id: 1 });
   const j2Acc = create(j1Acc.db, 'account.account', { name: 'Drawer 2', code: '101412', account_type: 'asset_cash', company_id: 1 });
 
-  const j1 = create(j2Acc.db, 'account.journal', { name: 'Cash Register 1', code: 'CSH1', type: 'cash', company_id: 1, default_account_id: j1Acc.id, profit_account_id: profit.id, loss_account_id: loss.id });
-  const j2 = create(j1.db, 'account.journal', { name: 'Cash Register 2', code: 'CSH2', type: 'cash', company_id: 1, default_account_id: j2Acc.id, profit_account_id: profit.id, loss_account_id: loss.id });
+  const suspenseId = search(j2Acc.db, 'account.account').find((a) => a.code === '101404').id;
+  const j1 = create(j2Acc.db, 'account.journal', { name: 'Cash Register 1', code: 'CSH1', type: 'cash', company_id: 1, default_account_id: j1Acc.id, suspense_account_id: suspenseId, profit_account_id: profit.id, loss_account_id: loss.id });
+  const j2 = create(j1.db, 'account.journal', { name: 'Cash Register 2', code: 'CSH2', type: 'cash', company_id: 1, default_account_id: j2Acc.id, suspense_account_id: suspenseId, profit_account_id: profit.id, loss_account_id: loss.id });
 
   const m1 = create(j2.db, 'pos.payment.method', { name: 'Cash 1', type: 'cash', journal_id: j1.id, company_id: 1 });
   const m2 = create(m1.db, 'pos.payment.method', { name: 'Cash 2', type: 'cash', journal_id: j2.id, company_id: 1 });

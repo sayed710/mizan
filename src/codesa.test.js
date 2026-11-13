@@ -21,7 +21,7 @@ test('bank reconciliation uses the selected journal suspense account', () => {
   const result = run(line.db, read(line.db, 'account.bank.statement.line', line.id)).db;
   const statement = read(result, 'account.bank.statement.line', line.id);
   assert.ok(read(result, 'account.move', statement.bank_move_id).line_ids.some((l) => l.account_id === account.id));
-  const missing = write(line.db, 'account.journal', journal.id, { suspense_account_id: null });
+  const missing = { ...line.db, records: { ...line.db.records, 'account.journal': line.db.records['account.journal'].map((rec) => (rec.id === journal.id ? { ...rec, suspense_account_id: null } : rec)) } };
   assert.throws(() => run(missing, read(missing, 'account.bank.statement.line', line.id)), /Configure the suspense account on journal Bank/);
 });
 
@@ -91,7 +91,7 @@ test('expense report posts to configured expense and tax accounts', () => {
   assert.ok(entry.line_ids.some((l) => l.account_id === taxAccount.id && l.debit === 14));
   const missingTax = write(db, 'hr.expense', expense.id, { tax_id: null });
   assert.throws(() => postSheet(missingTax, report.id, '2026-10-01'), /expense tax/i);
-  const missingAccount = write(db, 'account.journal', journal.id, { default_account_id: null });
+  const missingAccount = { ...db, records: { ...db.records, 'account.journal': db.records['account.journal'].map((rec) => (rec.id === journal.id ? { ...rec, default_account_id: null } : rec)) } };
   assert.throws(() => postSheet(missingAccount, report.id, '2026-10-01'), /expense account/i);
 });
 
@@ -100,11 +100,12 @@ test('migration maps only company-owned chart accounts by code and type', () => 
   const company = create(db, 'res.company', { name: 'Migration company' });
   const suspense = create(company.db, 'account.account', { name: 'Suspense', code: '101404', account_type: 'asset_current', company_id: company.id });
   const wrong = create(suspense.db, 'account.account', { name: 'Wrong type', code: '450000', account_type: 'expense', company_id: company.id });
-  const journal = create(wrong.db, 'account.journal', { name: 'Branch cash', code: 'BC', type: 'cash', company_id: company.id });
-  db = { ...journal.db, schema_version: 29 };
+  const seededJ = create(wrong.db, 'account.journal', { name: 'Branch cash', code: 'BC', type: 'cash', company_id: company.id, suspense_account_id: suspense.id });
+  const legacyJournals = seededJ.db.records['account.journal'].map((rec) => (rec.id === seededJ.id ? { ...rec, suspense_account_id: null } : rec));
+  db = { ...seededJ.db, schema_version: 29, records: { ...seededJ.db.records, 'account.journal': legacyJournals } };
   const migrated = migrate(db);
-  assert.equal(read(migrated, 'account.journal', journal.id).suspense_account_id, suspense.id);
-  assert.equal(read(migrated, 'account.journal', journal.id).profit_account_id ?? null, null);
+  assert.equal(read(migrated, 'account.journal', seededJ.id).suspense_account_id, suspense.id);
+  assert.equal(read(migrated, 'account.journal', seededJ.id).profit_account_id ?? null, null);
 });
 
 test('migration resolves a stored statement counterpart code to that company account', () => {

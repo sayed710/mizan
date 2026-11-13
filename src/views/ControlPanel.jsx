@@ -8,15 +8,16 @@ import { Icon, useDismiss } from '../ui.jsx';
 /** Search state: { terms: string[], filters: string[], groupBy: string[], rel: {field,id,label}|null } */
 export const emptySearch = (model, rel = null) => ({ terms: [], filters: models[model].defaultFilters ?? [], groupBy: [], rel, archived: false });
 
-const filterLabel = (model, id) => t((models[model].filters ?? []).flat().find((f) => f.id === id)?.label ?? id);
+const filterLabel = (model, id, filters = null) => t((filters ?? models[model].filters ?? []).flat().find((f) => f.id === id)?.label ?? id);
 
-function Facets({ model, search, setSearch }) {
-  const fields = models[model].fields;
+function Facets({ model, search, setSearch, filters = null, listLabels = null }) {
+  const def = models[model];
+  const fields = def.fields;
   const facets = [
     ...(search.rel ? [{ key: 'rel', icon: '⇢', label: `${t(search.rel.fieldLabel ?? fields[search.rel.field]?.label)}: ${search.rel.label}`, clear: { rel: null } }] : []),
-    ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
+    ...(search.filters.length ? [{ key: 'f', icon: <Icon name="filter" size={11} />, label: search.filters.map((id) => filterLabel(model, id, filters)).join(` ${t('or')} `), clear: { filters: [] } }] : []),
     ...(search.archived ? [{ key: 'a', icon: <Icon name="filter" size={11} />, label: t('Archived'), clear: { archived: false } }] : []),
-    ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => t(fields[g].label)).join(' › '), clear: { groupBy: [] } }] : []),
+    ...(search.groupBy.length ? [{ key: 'g', icon: '≡', label: search.groupBy.map((g) => t(listLabels?.[g] ?? def.groupByLabels?.[g] ?? fields[g].label)).join(' › '), clear: { groupBy: [] } }] : []),
     ...search.terms.map((term, i) => ({ key: `s${i}`, icon: t('Search'), label: term, clear: { terms: search.terms.filter((_, j) => j !== i) } })),
   ];
   return facets.map((f) => (
@@ -27,7 +28,7 @@ function Facets({ model, search, setSearch }) {
   ));
 }
 
-function SearchPanel({ model, search, setSearch, onClose }) {
+function SearchPanel({ model, search, setSearch, onClose, filters = null, groupBys = null, listLabels = null }) {
   const def = models[model];
   const fields = def.fields;
   const favorites = getDb().settings?.favorites?.[model] ?? [];
@@ -47,7 +48,7 @@ function SearchPanel({ model, search, setSearch, onClose }) {
     <div className="search-panel" role="dialog" aria-label={t('Filters')}>
       <section>
         <h3><Icon name="filter" size={14} /> {t('Filters')}</h3>
-        {(def.filters ?? []).map((group, i) => (
+        {(filters ?? def.filters ?? []).map((group, i) => (
           <ul key={i}>
             {group.map((f) => (
               <li key={f.id}>
@@ -65,9 +66,9 @@ function SearchPanel({ model, search, setSearch, onClose }) {
       <section>
         <h3>≡ {t('Group By')}</h3>
         <ul>
-          {(def.groupBys ?? []).map((g) => (
+          {(groupBys ?? def.groupBys ?? []).map((g) => (
             <li key={g}>
-              <button type="button" aria-pressed={search.groupBy.includes(g)} onClick={() => toggle('groupBy', g)}>{t(fields[g].label)}</button>
+              <button type="button" aria-pressed={search.groupBy.includes(g)} onClick={() => toggle('groupBy', g)}>{t(listLabels?.[g] ?? def.groupByLabels?.[g] ?? fields[g].label)}</button>
             </li>
           ))}
         </ul>
@@ -87,7 +88,7 @@ function SearchPanel({ model, search, setSearch, onClose }) {
   );
 }
 
-export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra }) {
+export function ControlPanel({ model, title, newHref, base, view, search, setSearch, extra, filters = null, groupBys = null, listLabels = null }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -114,7 +115,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
       <div className="search-wrap" ref={ref}>
         <div className="search" role="search">
           <span className="search-icon" aria-hidden="true">⌕</span>
-          <Facets model={model} search={search} setSearch={setSearch} />
+          <Facets model={model} search={search} setSearch={setSearch} filters={filters} listLabels={listLabels} />
           <input
             value={text}
             placeholder={t('Search...')}
@@ -130,7 +131,7 @@ export function ControlPanel({ model, title, newHref, base, view, search, setSea
             <Icon name="chevron" size={14} />
           </button>
         </div>
-        {open && <SearchPanel model={model} search={search} setSearch={setSearch} onClose={() => setOpen(false)} />}
+        {open && <SearchPanel model={model} search={search} setSearch={setSearch} onClose={() => setOpen(false)} filters={filters} groupBys={groupBys} listLabels={listLabels} />}
       </div>
       <div className="cp-right">
         {extra}

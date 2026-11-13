@@ -73,7 +73,7 @@ for (const [key, section, moveType, dateField] of [['invoices', 'Customers', 'ou
 test('importing a statement through an empty bank card of a company 2 journal creates company 2 lines (CSV and OFX)', async () => {
   const c2 = createCompany(seed(), { name: 'Branch Co', currency_id: read(seed(), 'res.company', 1).currency_id });
   const acc = create(c2.db, 'account.account', { code: '101477', name: 'Branch Bank', account_type: 'asset_cash', company_id: c2.id });
-  const journal = create(acc.db, 'account.journal', { name: 'Branch Bank J', code: 'BBJ', type: 'bank', company_id: c2.id, default_account_id: acc.id });
+  const journal = create(acc.db, 'account.journal', { name: 'Branch Bank J', code: 'BBJ', type: 'bank', company_id: c2.id, default_account_id: acc.id, suspense_account_id: acc.id });
   const { initStore, commit, getDb } = await import('./store.js');
   const { importModelFile } = await import('./views/importModelFile.js');
   await initStore();
@@ -106,9 +106,18 @@ test('the empty cash card Cash Transactions link opens entries of that journal o
 test('dashboard renders a misconfigured journal as an error card and every other card normally', async () => {
   const c2 = createCompany(seed(), { name: 'Second Co', currency_id: read(seed(), 'res.company', 1).currency_id });
   const bankAcc = create(c2.db, 'account.account', { code: '101496', name: 'Shared Bank Acc 3', account_type: 'asset_cash', company_id: null });
+  const sharedSusp = search(bankAcc.db, 'account.account').find((a) => a.code === '101404');
   const otherOut = create(bankAcc.db, 'account.account', { code: '101497', name: 'C2 Only Out 3', account_type: 'asset_current', company_id: c2.id });
-  const shared = create(otherOut.db, 'account.journal', { name: 'Broken Shared Bank', code: 'BRK', type: 'bank', company_id: null, default_account_id: bankAcc.id, outstanding_receipts_account_id: otherOut.id });
-  const db = { ...shared.db, settings: { ...shared.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] } };
+  const shared = create(otherOut.db, 'account.journal', { name: 'Broken Shared Bank', code: 'BRK', type: 'bank', company_id: null, default_account_id: bankAcc.id, suspense_account_id: sharedSusp.id });
+  // Simulate legacy misconfigured state directly since journal guards reject cross-company outstanding accounts on write.
+  const injectedJournals = shared.db.records['account.journal'].map((j) => (
+    j.id === shared.id ? { ...j, outstanding_receipts_account_id: otherOut.id } : j
+  ));
+  const db = {
+    ...shared.db,
+    records: { ...shared.db.records, 'account.journal': injectedJournals },
+    settings: { ...shared.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] },
+  };
   const cards = journalCards(db);
   const broken = cards.find((c) => c.journal.id === shared.id);
   assert.equal(broken.kind, 'error');

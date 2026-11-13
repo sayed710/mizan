@@ -3,6 +3,7 @@
 // Every function returns a new db; nothing is mutated.
 import { models } from './registry.js';
 import { distributionError } from './analytic_distribution.js';
+import { fieldRequired } from './field-metadata.js';
 
 export const emptyDb = () => ({ records: {}, seq: {}, messages: [], settings: { company: 'My Company', currency: 'USD', currency_unit: 'Dollars', currency_unit_currency: 'USD' } });
 
@@ -54,10 +55,17 @@ export function read(db, model, id) {
   return r && withComputed(models[model].fields, r, db);
 }
 
-/** @returns {string|null} error message when a required field is empty */
-export function validate(model, vals, db) {
+const isEmpty = (v) => v == null || v === '';
+
+/**
+ * @returns {string|null} error message when a required field is empty.
+ * A conditional (function) requirement is a form rule: an update that leaves an already-empty field untouched passes,
+ * so records stored before the condition existed keep working until a user edits that field.
+ */
+export function validate(model, vals, db, isNew = false, before = null) {
   const missing = Object.entries(models[model].fields).find(
-    ([k, f]) => f.required && (vals[k] == null || vals[k] === ''),
+    ([k, f]) => fieldRequired(f, vals, db, isNew) && isEmpty(vals[k])
+      && !(before && typeof f.required === 'function' && isEmpty(before[k])),
   );
   return missing ? `${missing[1].label} is required` : distributionError(models[model].fields, vals, db);
 }
@@ -115,7 +123,7 @@ export function create(db, model, vals, ctx = undefined) {
     ...stripComputed(model, vals),
     id,
   };
-  const err = validate(model, rec, db) ?? models[model].guard?.(db, null, rec, ctx);
+  const err = validate(model, rec, db, true) ?? models[model].guard?.(db, null, rec, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, rec);
   const res = {
@@ -160,7 +168,7 @@ function writeValues(db, model, before, vals) {
 /** Onchange, validation and guard for one write; returns the updated record and the values actually written. */
 function prepareWrite(db, model, before, vals, ctx = undefined) {
   const result = writeValues(db, model, before, vals);
-  const err = validate(model, result.after, db) ?? models[model].guard?.(db, before, result.after, ctx);
+  const err = validate(model, result.after, db, false, before) ?? models[model].guard?.(db, before, result.after, ctx);
   if (err) throw new Error(err);
   checkDeclared(model, result.after);
   return result;
@@ -191,7 +199,7 @@ export function writeManyAtomic(db, model, updates) {
   }
   let next = { ...db, records: { ...db.records, [model]: list.map((record) => changes.get(record.id)?.after ?? record) } };
   for (const { before, after } of changes.values()) {
-    const error = validate(model, after, next) ?? models[model].guard?.(next, before, after);
+    const error = validate(model, after, next, false, before) ?? models[model].guard?.(next, before, after);
     if (error) throw new Error(error);
     checkDeclared(model, after);
   }
@@ -291,6 +299,7 @@ export const updateSettings = (db, vals) => {
 const groupKey = (field, v) => {
   if (field.type === 'date' || field.type === 'datetime') return v ? v.slice(0, 7) : false;
   if (field.type === 'boolean') return !!v;
+  if (field.type === 'many2many') return Array.isArray(v) && v.length ? [...v].sort((a, b) => a - b).join(',') : false;
   return v ?? false;
 };
 
@@ -300,6 +309,10 @@ export function groupLabel(db, field, key) {
     case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
     case 'many2one': return read(db, field.relation, key)?.name ?? 'None';
+    case 'many2many': {
+      const names = String(key).split(',').map((id) => read(db, field.relation, Number(id))?.name).filter(Boolean);
+      return names.length ? names.join(', ') : 'None';
+    }
     case 'boolean': return 'Yes';
     default: return String(key);
   }
@@ -331,7 +344,7 @@ export function groupRecords(db, model, records, name, context = {}) {
         : [],
   );
   for (const r of records) {
-    let k = groupKey(field, r[name]);
+    let k = groupKey(field, field.compute ? field.compute(r, db) : r[name]);
     if (isStageRel && typeof k === 'string') {
       const match = stageList.find((s) => s.name.toLowerCase() === k.toLowerCase() || (k === 'won' && s.is_won));
       if (match) k = match.id;
@@ -349,19 +362,25 @@ export const aggregate = (records, measure) =>
   measure === '__count' ? records.length : records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
 
 /** Filters in the same group are OR-ed, groups are AND-ed (search-panel semantics). */
-export function applyFilters(model, records, activeIds) {
-  const groups = (models[model].filters ?? [])
+export function applyFilters(model, records, activeIds, db = null, filterGroups = null) {
+  const groups = (filterGroups ?? models[model].filters ?? [])
     .map((g) => g.filter((f) => activeIds.includes(f.id)))
     .filter((g) => g.length);
-  return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r))));
+  return records.filter((r) => groups.every((g) => g.some((f) => f.fn(r, db))));
 }
 
 /** Text search: every term must match some char/text/many2one display value. */
-export function matches(db, model, rec, terms) {
+export function matches(db, model, rec, terms, searchFields = null) {
   const fields = models[model].fields;
-  const haystack = Object.entries(fields)
-    .map(([k, f]) => {
-      if (f.type === 'many2one') return read(db, f.relation, rec[k])?.name ?? '';
+  const keys = searchFields ?? models[model].searchFields ?? Object.keys(fields);
+  const haystack = keys
+    .map((k) => {
+      const f = fields[k];
+      if (!f) return '';
+      if (f.type === 'many2one') {
+        const target = read(db, f.relation, rec[k]);
+        return `${target?.name ?? ''} ${target?.display_name ?? ''}`.trim();
+      }
       if (f.type === 'tags') return (rec[k] ?? []).join(' ');
       return ['char', 'text', 'selection'].includes(f.type) ? String(rec[k] ?? '') : '';
     })

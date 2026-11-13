@@ -272,7 +272,7 @@ export const nextName = (db, model, prefix, filter = () => true) => {
   return prefix + pad(Math.max(0, db.numbering?.[model]?.[prefix] ?? 0, ...used.filter(Number.isSafeInteger)) + 1);
 };
 
-export const monthFilters = (field) => [
-  { id: `${field}_month`, label: 'This Month', fn: (r) => r[field]?.slice(0, 7) === today().slice(0, 7) },
-  { id: `${field}_year`, label: 'This Year', fn: (r) => r[field]?.slice(0, 4) === today().slice(0, 4) },
+export const monthFilters = (field, labelPrefix = '', value = (r) => r[field]) => [
+  { id: `${field}_month`, label: labelPrefix ? `${labelPrefix}: This Month` : 'This Month', fn: (r) => value(r)?.slice(0, 7) === today().slice(0, 7) },
+  { id: `${field}_year`, label: labelPrefix ? `${labelPrefix}: This Year` : 'This Year', fn: (r) => value(r)?.slice(0, 4) === today().slice(0, 4) },
 ];

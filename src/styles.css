@@ -159,6 +159,10 @@ input.invalid { border-color: var(--danger); outline-color: var(--danger); }
 .list tr.selected { background: var(--brand-soft); }
 .list .num { text-align: end; }
 .list .check { width: 36px; }
+.list .handle-col { width: 28px; text-align: center; padding-inline: 6px; }
+.drag-handle { cursor: grab; color: var(--muted); user-select: none; display: inline-block; }
+.list tbody tr[draggable='true'] .drag-handle:active { cursor: grabbing; }
+.field-help { font-size: 12px; color: var(--muted); margin-top: 4px; white-space: pre-line; }
 .list tfoot td { font-weight: 700; border-bottom: 0; }
 .empty { text-align: center; color: var(--muted); padding: 32px !important; }
 .empty-help { white-space: normal; max-width: 480px; margin: 0 auto; }

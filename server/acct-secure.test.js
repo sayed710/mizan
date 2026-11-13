@@ -875,3 +875,12 @@ test('account.asset.model is a shared model (cross-company)', () => {
 });
 
 
+
+test('API model discovery reports conditional requirements as conditional', async () => {
+  const { handleApi } = await import('./api.js');
+  const { seed } = await import('../src/seed.js');
+  const res = handleApi({ method: 'GET', path: '/api/v1/models', query: new URLSearchParams(), body: null, db: seed(), user: { name: 'Admin', isAdmin: true } });
+  const journal = res.body.find((m) => m.model === 'account.journal');
+  assert.equal(journal.fields.suspense_account_id.required, 'conditional');
+  assert.equal(journal.fields.name.required, true);
+});

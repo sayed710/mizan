@@ -309,7 +309,7 @@ const describe = (name) => {
     model: name,
     label: models[name].label,
     fields: Object.fromEntries(Object.entries(models[name].fields).map(([k, f]) => [k, {
-      type: f.type, label: f.label, required: !!f.required, readonly: fieldReadonly(f, defaults), ...(f.relation ? { relation: f.relation } : {}), ...(f.options ? { options: f.options.map((o) => o[0]) } : {}),
+      type: f.type, label: f.label, required: typeof f.required === 'function' ? 'conditional' : Boolean(f.required), readonly: fieldReadonly(f, defaults), ...(f.relation ? { relation: f.relation } : {}), ...(f.options ? { options: f.options.map((o) => o[0]) } : {}),
     }])),
   };
 };

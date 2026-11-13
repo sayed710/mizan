@@ -7,6 +7,7 @@ import { toCompany } from './currency.js';
 import { applicationEffectiveDate } from './settlement.js';
 import { currentCompany } from './company.js';
 import { reportingBookedAmount } from './money.js';
+import { isLiquidityJournal } from './ledger.js';
 
 const netOf = (l) => (Number(l.debit) || 0) - (Number(l.credit) || 0);
 const accountIds = (db, type) => new Set(search(db, 'account.account', { includeArchived: true }).filter((a) => a.account_type === type).map((a) => a.id));
@@ -73,7 +74,7 @@ export function cashflowAnalysis(db, { from, to, company_id }) {
   for (const line of search(db, 'account.bank.statement.line')) {
     if (company_id != null && (line.company_id ?? 1) !== company_id) continue;
     const journal = read(db, 'account.journal', line.journal_id);
-    if (!journal || !['bank', 'cash'].includes(journal.type) || (journal.company_id && journal.company_id !== (line.company_id ?? 1))) continue;
+    if (!journal || !isLiquidityJournal(journal) || (journal.company_id && journal.company_id !== (line.company_id ?? 1))) continue;
     if (!line.date || line.date < from || line.date > to || !Number.isFinite(Number(line.amount))) continue;
     const month = line.date.slice(0, 7);
     if (!months.has(month)) months.set(month, new Map());

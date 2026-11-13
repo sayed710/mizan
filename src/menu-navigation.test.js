@@ -459,9 +459,10 @@ test('Cashflow Analysis menu groups statement amounts by month and pivots by jou
   await initStore();
   const initial = seed();
   const other = createCompany(initial, { name: 'Cashflow Other Company', currency_id: initial.records['res.company'][0].currency_id });
-  const bank = create(other.db, 'account.journal', { name: 'Analysis Bank', code: 'CFA', type: 'bank', company_id: 1 });
-  const cash = create(bank.db, 'account.journal', { name: 'Analysis Cash', code: 'CFC', type: 'cash', company_id: 1 });
-  const foreign = create(cash.db, 'account.journal', { name: 'Analysis Foreign Bank', code: 'CFB', type: 'bank', company_id: other.id });
+  const suspenseId = other.db.records['account.account'].find((a) => a.code === '101404').id;
+  const bank = create(other.db, 'account.journal', { name: 'Analysis Bank', code: 'CFA', type: 'bank', company_id: 1, suspense_account_id: suspenseId });
+  const cash = create(bank.db, 'account.journal', { name: 'Analysis Cash', code: 'CFC', type: 'cash', company_id: 1, suspense_account_id: suspenseId });
+  const foreign = create(cash.db, 'account.journal', { name: 'Analysis Foreign Bank', code: 'CFB', type: 'bank', company_id: other.id, suspense_account_id: suspenseId });
   let db = foreign.db;
   const line = (journal_id, company_id, date, amount, payment_ref) => { db = create(db, 'account.bank.statement.line', { journal_id, company_id, date, amount, payment_ref }).db; };
   line(bank.id, 1, '2026-02-01', 100, 'Bank in');

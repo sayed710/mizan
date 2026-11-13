@@ -267,7 +267,7 @@ test('empty customer invoice and vendor bill lists show Odoo empty-state help wi
   }
 });
 
-test('posted misc and bank entries show Posted badge while posted unpaid invoice shows Not Paid', async () => {
+test('Journal Entries shows the entry state badge for every move, as Odoo does, including posted unpaid invoices', async () => {
   const base = seed();
   let db = { ...base, records: { ...base.records, 'account.move': [] } };
   const journals = search(db, 'account.journal');
@@ -315,15 +315,14 @@ test('posted misc and bank entries show Posted badge while posted unpaid invoice
     const statusByRow = () => {
       const tbody = find(ctx.host, (n) => n.tagName === 'TBODY');
       return allFind(tbody, (n) => n.tagName === 'TR').map((tr) => {
-        const tds = allFind(tr, (n) => n.tagName === 'TD');
-        const badges = allFind(tds.at(-1), (n) => n.tagName === 'SPAN' && hasClass(n, 'badge'));
+        const badges = allFind(tr, (n) => n.tagName === 'SPAN' && hasClass(n, 'badge'));
         assert.equal(badges.length, 1);
         return badges[0].textContent.trim();
       });
     };
 
-    // Journal Entries list contains misc entry, bank entry, and unpaid invoice.
-    assert.deepEqual(statusByRow(), ['Posted', 'Posted', 'Not Paid']);
+    // Odoo 20 Journal Entries list: its Status column is the entry state (badge), not the payment state.
+    assert.deepEqual(statusByRow(), ['Posted', 'Posted', 'Posted']);
 
     await ctx.render(miscLeaf);
     assert.deepEqual(statusByRow(), ['Posted', 'Posted']);

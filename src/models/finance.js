@@ -3,7 +3,7 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
-import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, isPaymentMatched, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -1027,7 +1027,7 @@ export function journalCards(db, at = today()) {
         monthlyTotals,
       };
     }
-    if (['bank', 'cash'].includes(j.type)) {
+    if (isLiquidityJournal(j)) {
       const defaultItems = j.default_account_id ? items.filter((l) => l.account_id === j.default_account_id) : [];
       const balances = itemBalances(defaultItems);
       const balance = companySum(db, balances, 'balance', at);
@@ -1035,7 +1035,7 @@ export function journalCards(db, at = today()) {
       const miscBalances = itemBalances(miscItems);
       const miscCount = miscItems.length;
       const miscBalance = companySum(db, miscBalances, 'balance', at);
-      const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && l.journal_id === j.id) : [];
+      const toCheck = isStatementJournal(j) ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && l.journal_id === j.id) : [];
       const open = toCheck.map((line) => ({ company_id: line.company_id, balance: (line.amount < 0 ? -1 : 1) * (line.open_amount ?? bookedStatementAmount(db, line)) }));
       const outstandingByCompany = new Map();
       const outstandingIdsFor = (companyId) => {
@@ -1047,7 +1047,7 @@ export function journalCards(db, at = today()) {
         }
         return outstandingByCompany.get(companyId);
       };
-      const outstandingItems = j.type === 'bank'
+      const outstandingItems = isStatementJournal(j)
         ? items.filter((l) => {
             if (l.journal_id !== j.id || l.reconciled === true) return false;
             const payment = postedPaymentsByMove.get(l.move_id);
@@ -1057,7 +1057,7 @@ export function journalCards(db, at = today()) {
           })
         : [];
       const companyIds = j.company_id ? [j.company_id] : visibleCompanyIds;
-      const hasOutstandingAccounts = j.type === 'bank' && (
+      const hasOutstandingAccounts = isStatementJournal(j) && (
         outstandingItems.length > 0
         || companyIds.some((cid) => outstandingIdsFor(cid).length > 0)
       );

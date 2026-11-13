@@ -59,9 +59,11 @@ test('pcl: sale and purchase lock dates apply per side and per company', () => {
   db = c2.db;
   const company2Id = c2.id;
 
-  const saleJournalC2 = create(db, 'account.journal', { name: 'C2 Sales', code: 'C2S', type: 'sale', company_id: company2Id });
+  const incId = db.records['account.account'].find((a) => a.code === '400000').id;
+  const expId = db.records['account.account'].find((a) => a.code === '600000').id;
+  const saleJournalC2 = create(db, 'account.journal', { name: 'C2 Sales', code: 'C2S', type: 'sale', company_id: company2Id, default_account_id: incId });
   db = saleJournalC2.db;
-  const purchJournalC2 = create(db, 'account.journal', { name: 'C2 Purchases', code: 'C2P', type: 'purchase', company_id: company2Id });
+  const purchJournalC2 = create(db, 'account.journal', { name: 'C2 Purchases', code: 'C2P', type: 'purchase', company_id: company2Id, default_account_id: expId });
   db = purchJournalC2.db;
 
   // Set sale_lock_date on company 1 and purchase_lock_date on company 2.
@@ -287,7 +289,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   const migrated = migrate(legacyDb);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(migrated.schema_version, 39);
+  assert.equal(migrated.schema_version, 41);
 
   // Company 1 has migrated values
   const comp1 = read(migrated, 'res.company', 1);
@@ -325,7 +327,7 @@ test('pcl: migration 35 migrates legacy global settings to res.company with unpl
 
   // Migration is idempotent
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 39);
+  assert.equal(twice.schema_version, 41);
   assert.equal(read(twice, 'res.company', 1).lock_date, '2025-06-30');
   assert.equal(read(twice, 'res.company', 1).tax_lock_date, '2025-02-28');
 });

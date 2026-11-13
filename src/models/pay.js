@@ -1,7 +1,7 @@
 // Customer and vendor payments: posted with their own bank entry and applied to the partner's open invoices.
 import { create, postNote, read, search, write } from '../orm.js';
 import { monthFilters, nextName, sameCommercialPartner, today, validDate } from './common.js';
-import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, postEntry } from './ledger.js';
+import { invoiceCounterpartAccount, journalItemIdentity, journalId, outstandingAccount, partnerAccount, paymentJournal, paymentName, postEntry } from './ledger.js';
 import { applyCreditNote, isInvoice, liquidityForeignFields, payMove, releaseCashBasis, residual, settleWriteoff } from './accounting.js';
 import { datedLockDelete, datedLockGuard, lockedSettlementInvariant, recordLockDate, paymentInvariant, returnCompanies, settlementFxError, taxClosingSpec } from './finance.js';
 import { postAnalytic } from './analyticplus.js';
@@ -161,7 +161,9 @@ export function postPayment(db, p) {
   }
   if (currentPayment.invoice_id) return payMove(db, currentPayment.invoice_id, Number(currentPayment.amount), date, { paymentId: currentPayment.id, journalId: currentPayment.journal_id });
   const via = paymentJournal(db, currentPayment.journal_id, currentPayment.company_id ?? 1);
-  const name = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : nextName(db, 'account.payment', `P${via.code}/${date.slice(0, 4)}/`);
+  const journalRecord = read(db, 'account.journal', via.id);
+  const explicitName = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : null;
+  const preName = explicitName ?? paymentName(db, journalRecord, date);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
   const open = isTaxOrDirect
     ? []
@@ -221,7 +223,7 @@ export function postPayment(db, p) {
     docAmount: isForeignCurrency && liquidityCurrency === currentPayment.currency_id ? sign * foreignDocAmount : null,
   });
   const { db: booked, id: moveId } = postEntry(db, {
-    journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || name,
+    journal: via.code, journal_id: journal.id, date, ref: currentPayment.memo || preName,
     lines: inbound
       ? [{ account: liquidity, debit: amount, partner_id: currentPayment.partner_id, ...liquidityFx(1) },
          { account: counterpart, credit: amount, partner_id: currentPayment.partner_id, ...counterpartFx(-1) }]
@@ -231,6 +233,7 @@ export function postPayment(db, p) {
     is_tax_payment: Boolean(currentPayment.is_tax_payment || currentPayment.return_id),
     tax_return_id: currentPayment.return_id ?? null,
   });
+  const name = explicitName ?? paymentName(booked, journal, date, read(booked, 'account.move', moveId).name);
   // Register the source before allocations so all callers can derive its currency semantics.
   const registered = write(booked, 'account.payment', p.id, { name, state: 'posted', move_id: moveId, journal_id: via.id, outstanding_account_id: outstanding, unapplied: isTaxOrDirect ? 0 : amount });
   // Apply a company-currency payment against the recorded company balance of each document.

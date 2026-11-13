@@ -100,8 +100,8 @@ test('intercompany bill maps lines through buyer expense accounts, taxes, and fi
   const taxDest = create(fp.db, 'account.tax', { name: 'Buyer Exempt', amount: 0, type_tax_use: 'purchase', company_id: buyer.id, fiscal_position_ids: [fp.id], original_tax_ids: [taxSrc.id] });
   const partnerConfigured = write(taxDest.db, 'res.partner', sellerPartnerId, { property_account_position_id: fp.id });
 
-  // Buyer purchase journal (without default account to verify no fallback is used)
-  const journal = create(partnerConfigured, 'account.journal', { name: 'Buyer Purchases', code: 'BP', type: 'purchase', company_id: buyer.id });
+  // Buyer purchase journal (without default account fallback; configured for creation validation)
+  const journal = create(partnerConfigured, 'account.journal', { name: 'Buyer Purchases', code: 'BP', type: 'purchase', company_id: buyer.id, default_account_id: accDest.id });
   let db = write(journal.db, 'res.company', buyer.id, { intercompany_journal_id: journal.id });
 
   // Product with configured expense account and purchase tax

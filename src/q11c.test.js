@@ -413,7 +413,7 @@ test('Qodo 14: unapplied payments render as linked detail rows summing to aged p
 
   const bankAccount = create(db, 'account.account', { code: '101089', name: 'Aging Payment Bank', account_type: 'asset_cash', company_id: 1 });
   db = bankAccount.db;
-  const bankJournal = create(db, 'account.journal', { code: 'AGB88', name: 'Aging Payment Bank', type: 'bank', default_account_id: bankAccount.id, company_id: 1 });
+  const bankJournal = create(db, 'account.journal', { code: 'AGB88', name: 'Aging Payment Bank', type: 'bank', default_account_id: bankAccount.id, suspense_account_id: bankAccount.id, company_id: 1 });
   db = bankJournal.db;
 
   // Post an advance before the invoice exists, so the public payment workflow leaves it unapplied.

@@ -93,7 +93,8 @@ test('related candidates retain only the current foreign or archived value witho
 
 test('dashboard snapshot filters every model without changing the source database', () => {
   let db = fixture();
-  const journal = create(db, 'account.journal', { name: 'Shared sales', code: 'TEST', type: 'sale', company_id: null });
+  const inc = db.records['account.account'].find((a) => a.code === '400000');
+  const journal = create(db, 'account.journal', { name: 'Shared sales', code: 'TEST', type: 'sale', company_id: null, default_account_id: inc.id });
   db = journal.db;
   for (const company_id of [1, 2]) db = create(db, 'account.move', { company_id, journal_id: journal.id, move_type: 'out_invoice' }).db;
   db = setCompanies(db, { current: 2, allowed: [2] });

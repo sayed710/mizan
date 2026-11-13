@@ -37,7 +37,7 @@ test('credit limit warns while sale confirmation and invoice posting succeed', (
 test('statement import deduplicates within the bank journal and company', () => {
   const db = seed();
   const bank = search(db, 'account.journal').find((j) => j.code === 'BNK1');
-  const other = create(db, 'account.journal', { name: 'Other bank', code: 'BNK2', type: 'bank', company_id: 1 });
+  const other = create(db, 'account.journal', { name: 'Other bank', code: 'BNK2', type: 'bank', company_id: 1, suspense_account_id: bank.suspense_account_id });
   const file = '<OFX><BANKTRANLIST><STMTTRN><DTPOSTED>20250101<TRNAMT>100<FITID>123<NAME>Deposit</STMTTRN></BANKTRANLIST></OFX>';
   const first = importStatement(other.db, 'a.ofx', file, { journal_id: bank.id });
   const repeat = importStatement(first.db, 'a.ofx', file, { journal_id: bank.id });

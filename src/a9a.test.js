@@ -373,7 +373,8 @@ test('asset disposal: due depreciation is posted, the loss entry balances and th
 test('reprinting a check voids the old number, takes the next free one and never reuses a voided number', () => {
   let db = seed();
   const bank = search(db, 'account.account').find((account) => account.code === '101401');
-  const journal = create(db, 'account.journal', { name: 'Check journal', code: 'CHKR', type: 'bank', company_id: 1, default_account_id: bank.id, check_next_number: 700 });
+  const suspense = search(db, 'account.account').find((account) => account.code === '101404');
+  const journal = create(db, 'account.journal', { name: 'Check journal', code: 'CHKR', type: 'bank', company_id: 1, default_account_id: bank.id, suspense_account_id: suspense.id, check_next_number: 700 });
   db = journal.db;
   const issue = () => {
     const bill = create(db, 'account.move', { move_type: 'in_invoice', company_id: 1, partner_id: 7, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });

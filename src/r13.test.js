@@ -26,7 +26,8 @@ test('vendor bill counterpart uses the explicitly configured partner payable', (
 
 test('payment journal rejects an unconfigured liquidity account', () => {
   const db = seed();
-  const journal = create(db, 'account.journal', { name: 'Unconfigured', code: 'EMPTY', type: 'bank' });
+  const suspense = search(db, 'account.account').find((a) => a.code === '101404');
+  const journal = create(db, 'account.journal', { name: 'Unconfigured', code: 'EMPTY', type: 'bank', suspense_account_id: suspense.id });
   assert.equal(read(journal.db, 'account.journal', journal.id).default_account_id, undefined);
   assert.throws(() => paymentJournal(journal.db, journal.id), /account/i);
 });
@@ -36,7 +37,7 @@ test('company chart defaults resolve receivable, payable, and payment journal by
   const receivable = create(db, 'account.account', { code: '120100', name: 'Configured receivable', account_type: 'asset_receivable', company_id: 1 });
   const payable = create(receivable.db, 'account.account', { code: '210100', name: 'Configured payable', account_type: 'liability_payable', company_id: 1 });
   const bank = create(payable.db, 'account.account', { code: '101999', name: 'Configured bank', account_type: 'asset_cash' });
-  const journal = create(bank.db, 'account.journal', { name: 'Configured bank journal', code: 'CUSTOM', type: 'bank', default_account_id: bank.id });
+  const journal = create(bank.db, 'account.journal', { name: 'Configured bank journal', code: 'CUSTOM', type: 'bank', default_account_id: bank.id, suspense_account_id: bank.id });
   db = write(journal.db, 'res.company', 1, { account_default_receivable_id: receivable.id, account_default_payable_id: payable.id });
   const originalDefault = search(db, 'account.journal').find((j) => j.default_for_payments);
   db = write(db, 'account.journal', originalDefault.id, { default_for_payments: false });
@@ -79,7 +80,8 @@ test('POS posts the configured company receivable account', () => {
 
 test('bank reconciliation refuses a selected journal with no liquidity account', () => {
   const db = seed();
-  const journal = create(db, 'account.journal', { name: 'Unconfigured statement journal', code: 'EMPTY', type: 'bank' });
+  const suspense = search(db, 'account.account').find((a) => a.code === '101404');
+  const journal = create(db, 'account.journal', { name: 'Unconfigured statement journal', code: 'EMPTY', type: 'bank', suspense_account_id: suspense.id });
   const line = create(journal.db, 'account.bank.statement.line', {
     date: '2026-01-02', payment_ref: 'Bank transaction', amount: 20, journal_id: journal.id, counterpart: '450000',
   });

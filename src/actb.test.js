@@ -34,7 +34,7 @@ test('grouped regeneration refuses changed contributions without writing', () =>
 test('bank cards count only their own journal transactions', () => {
   let db = seed();
   const banks = search(db, 'account.journal').filter((j) => j.type === 'bank');
-  const second = create(db, 'account.journal', { name: 'Second bank', code: 'B2', type: 'bank', default_account_id: banks[0].default_account_id });
+  const second = create(db, 'account.journal', { name: 'Second bank', code: 'B2', type: 'bank', default_account_id: banks[0].default_account_id, suspense_account_id: banks[0].suspense_account_id });
   db = second.db;
   db = create(db, 'account.bank.statement.line', { journal_id: second.id, payment_ref: 'Payment', date: '2026-01-01', amount: 42, state: 'to_check' }).db;
   const cards = journalCards(db);

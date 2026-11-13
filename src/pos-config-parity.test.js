@@ -546,7 +546,7 @@ test('POS posts and closes in the session company using that company journals an
   }
   const journals = {};
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501']]) {
-    const created = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc] });
+    const created = create(db, 'account.journal', { name: `Branch ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc], ...(type === 'cash' ? { suspense_account_id: accounts[acc] } : {}) });
     db = created.db;
     journals[code] = created.id;
   }
@@ -783,7 +783,7 @@ test('automatically valued goods sold in a second company scope stock valuation 
   }
   const journals = {};
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    const created = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc] });
+    const created = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: accounts[acc], ...(type === 'cash' ? { suspense_account_id: accounts[acc] } : {}) });
     db = created.db;
     journals[code] = created.id;
   }
@@ -818,7 +818,7 @@ test('shared product POS valuation opens and consumes only the session company s
   const c2account = (code) => (db.records['account.account'] ?? []).find((a) => a.code === code && a.company_id === company.id);
   let c2PosJournalId;
   for (const [code, type, acc] of [['POSS', 'sale', '400000'], ['CSH1', 'cash', '101501'], ['MISC', 'general', '110100']]) {
-    const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id });
+    const journal = create(db, 'account.journal', { name: `C2 ${code}`, code, type, company_id: company.id, default_account_id: c2account(acc).id, ...(type === 'cash' ? { suspense_account_id: c2account(acc).id } : {}) });
     db = journal.db;
     if (code === 'POSS') c2PosJournalId = journal.id;
   }
@@ -1357,7 +1357,7 @@ test('refunds, return cancellations, and restaurant settlements validate company
     db = create(db, 'account.account', { code, name: `Branch ${code}`, account_type: type, company_id: c2.id }).db;
   }
   const account = (code) => search(db, 'account.account').find((a) => a.code === code && a.company_id === c2.id);
-  const c2Journal = create(db, 'account.journal', { name: 'Branch Cash Journal', code: 'BCSH', type: 'cash', company_id: c2.id, default_account_id: account('101501').id });
+  const c2Journal = create(db, 'account.journal', { name: 'Branch Cash Journal', code: 'BCSH', type: 'cash', company_id: c2.id, default_account_id: account('101501').id, suspense_account_id: account('101501').id });
   db = c2Journal.db;
   const c2PosJournal = create(db, 'account.journal', { name: 'Branch POS Journal', code: 'BPOS', type: 'sale', company_id: c2.id, default_account_id: account('400000').id });
   db = c2PosJournal.db;

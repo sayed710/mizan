@@ -41,7 +41,7 @@ test('outgoing payment uses company and journal outstanding defaults and unmatch
   const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Branch', currency_id: base.records['res.company'][0].currency_id });
   const bank = create(branch.db, 'account.account', { company_id: branch.id, code: '101401', name: 'Branch Bank', account_type: 'asset_cash' });
   const outstandingAccount = create(bank.db, 'account.account', { company_id: branch.id, code: '101403', name: 'Branch Outstanding', account_type: 'asset_current' });
-  const journal = create(outstandingAccount.db, 'account.journal', { company_id: branch.id, name: 'Branch Bank', code: 'BRB', type: 'bank', default_account_id: bank.id, outstanding_payments_account_id: outstandingAccount.id });
+  const journal = create(outstandingAccount.db, 'account.journal', { company_id: branch.id, name: 'Branch Bank', code: 'BRB', type: 'bank', default_account_id: bank.id, suspense_account_id: bank.id, outstanding_payments_account_id: outstandingAccount.id });
   const inv = create(journal.db, 'account.move', { company_id: branch.id, move_type: 'in_invoice', partner_id: 3, invoice_date: '2026-01-01', invoice_line_ids: [{ qty: 1, price_unit: 100, tax: 0 }] });
   const posted = postMove(inv.db, inv.id);
   const payment = create(posted, 'account.payment', { company_id: branch.id, journal_id: journal.id, invoice_id: inv.id, partner_id: 3, payment_type: 'outbound', partner_type: 'supplier', amount: 100, date: '2026-01-02' });

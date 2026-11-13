@@ -1,5 +1,6 @@
 // Bank statement files (OFX/QFX, CAMT.053) parsed into statement lines; re-importing the same transactions is a no-op.
 import { create, read, search } from '../orm.js';
+import { isLiquidityJournal } from './ledger.js';
 
 const ofxDate = (v) => (/^\d{8}/.test(v ?? '') ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : null);
 // OFX 1.x is SGML: tags may be left unclosed, so a value runs to the next "<".
@@ -42,7 +43,7 @@ export function statementImportJournalChoices(db, companyId = null) {
     : [companyId];
   const companyIds = new Set(visibleCompanies.map(Number));
   return search(db, 'account.journal').filter((journal) =>
-    ['bank', 'cash'].includes(journal.type) && companyIds.has(Number(journal.company_id ?? 1))
+    isLiquidityJournal(journal) && companyIds.has(Number(journal.company_id ?? 1))
   );
 }
 
@@ -70,7 +71,7 @@ export function importStatement(db, fileName, text, defaults = {}) {
   if (!defaults.journal_id) throw new Error('Bank Journal is required');
   const journal = read(db, 'account.journal', defaults.journal_id);
   if (!journal) throw new Error('The bank journal does not exist');
-  if (!['bank', 'cash'].includes(journal.type)) throw new Error('Choose a bank or cash journal');
+  if (!isLiquidityJournal(journal)) throw new Error('Choose a bank or cash journal');
   if (defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;

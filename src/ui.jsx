@@ -9,7 +9,7 @@ import { companyCurrencyRecord, documentCurrency, formatCurrency } from './money
 import { parseAmount } from './models/common.js';
 import { replaceTaxSnapshot, taxSnapshot } from './models/taxes.js';
 import { parseDistributionInput } from './analytic_distribution.js';
-import { fieldReadonly } from './field-metadata.js';
+import { fieldReadonly, fieldRequired } from './field-metadata.js';
 import { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
 
 export { HtmlEditor, SafeHtml, sanitizeHtml } from './HtmlEditor.jsx';
@@ -217,7 +217,8 @@ function o2mStorageKey(model, fieldName, field, id) {
   return `mizan-o2m-cols:${fieldName || id || field?.label || 'lines'}`;
 }
 
-function readOptionalCols(key) {
+export function readOptionalCols(key) {
+  if (!key) return {};
   try {
     const raw = globalThis.localStorage?.getItem(key);
     if (!raw) return {};
@@ -228,10 +229,63 @@ function readOptionalCols(key) {
   }
 }
 
-function writeOptionalCols(key, state) {
+export function writeOptionalCols(key, state) {
+  if (!key) return;
   try {
     globalThis.localStorage?.setItem(key, JSON.stringify(state));
   } catch { /* ignore disabled or full storage */ }
+}
+
+export function useOptionalColumns(storageKey) {
+  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
+  useEffect(() => {
+    setOptionalState(readOptionalCols(storageKey));
+  }, [storageKey]);
+  const isVisible = (key, defaultVisible = false) => optionalState[key] ?? defaultVisible;
+  const toggleCol = (key, defaultVisible = false) => {
+    const next = { ...optionalState, [key]: !(optionalState[key] ?? defaultVisible) };
+    setOptionalState(next);
+    writeOptionalCols(storageKey, next);
+  };
+  return [optionalState, isVisible, toggleCol];
+}
+
+export function OptionalColsMenu({ items, optionalState, onToggle }) {
+  const [colsOpen, setColsOpen] = useState(false);
+  const menuRef = useRef(null);
+  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
+  if (!items.length) return null;
+  return (
+    <div className="o2m-cols-menu" ref={menuRef}>
+      <button
+        type="button"
+        className="o2m-cols-toggle"
+        aria-label={t('Optional columns')}
+        aria-expanded={colsOpen}
+        aria-haspopup="menu"
+        onClick={() => setColsOpen((o) => !o)}
+      >⋯</button>
+      {colsOpen && (
+        <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
+          {items.map(({ key, label, defaultVisible = false }) => {
+            const checked = optionalState[key] ?? defaultVisible;
+            return (
+              <button
+                key={key}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={checked}
+                onClick={() => onToggle(key, defaultVisible)}
+              >
+                <span aria-hidden="true">{checked ? '✓' : ''}</span>
+                <span>{t(label)}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Editable one2many table driven by `field.fields`; `field.onchange` reacts to sub-field edits. */
@@ -239,27 +293,15 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
   const allCols = Object.entries(field.fields).filter(([, f]) => !f.hidden);
   const optionalCols = allCols.filter(([, f]) => f.optional === 'show' || f.optional === 'hide');
   const storageKey = o2mStorageKey(model, fieldName, field, id);
-  const [optionalState, setOptionalState] = useState(() => readOptionalCols(storageKey));
-  const [colsOpen, setColsOpen] = useState(false);
-  const menuRef = useRef(null);
-  useDismiss(colsOpen, () => setColsOpen(false), menuRef);
-  useEffect(() => {
-    setOptionalState(readOptionalCols(storageKey));
-    setColsOpen(false);
-  }, [storageKey]);
+  const [optionalState, isVisible, toggleCol] = useOptionalColumns(storageKey);
 
-  const cols = allCols.filter(([k, f]) => !f.optional || (optionalState[k] ?? f.optional !== 'hide'));
+  const cols = allCols.filter(([k, f]) => !f.optional || isVisible(k, f.optional !== 'hide'));
   const priced = 'price_unit' in field.fields;
   const displayOpts = field.fields?.display_type?.options || [];
   const hasSection = displayOpts.some(([v]) => v === 'line_section');
   const hasNote = displayOpts.some(([v]) => v === 'line_note');
   const hasActionCol = !readonly || optionalCols.length > 0;
 
-  const toggleCol = (k, defaultVisible) => {
-    const next = { ...optionalState, [k]: !(optionalState[k] ?? defaultVisible) };
-    setOptionalState(next);
-    writeOptionalCols(storageKey, next);
-  };
   const set = (i, key, v) => {
     const next = value.map((l, j) => (j === i ? { ...l, [key]: v } : l));
     onChange(next.map((l, j) => (j === i && field.onchange ? field.onchange(l, key, db, record) : l)));
@@ -278,38 +320,11 @@ function Lines({ db, model, fieldName, id, field, value = [], onChange, readonly
             {priced && <th className="num">{t('Subtotal')}</th>}
             {hasActionCol && (
               <th className="o2m-cols-th" aria-label={optionalCols.length > 0 ? undefined : t('Delete')}>
-                {optionalCols.length > 0 && (
-                  <div className="o2m-cols-menu" ref={menuRef}>
-                    <button
-                      type="button"
-                      className="o2m-cols-toggle"
-                      aria-label={t('Optional columns')}
-                      aria-expanded={colsOpen}
-                      aria-haspopup="menu"
-                      onClick={() => setColsOpen((o) => !o)}
-                    >⋯</button>
-                    {colsOpen && (
-                      <div className="o2m-cols-dropdown" role="menu" onKeyDown={menuKeys}>
-                        {optionalCols.map(([k, f]) => {
-                          const defaultVisible = f.optional !== 'hide';
-                          const checked = optionalState[k] ?? defaultVisible;
-                          return (
-                            <button
-                              key={k}
-                              type="button"
-                              role="menuitemcheckbox"
-                              aria-checked={checked}
-                              onClick={() => toggleCol(k, defaultVisible)}
-                            >
-                              <span aria-hidden="true">{checked ? '✓' : ''}</span>
-                              <span>{t(f.label)}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
+                <OptionalColsMenu
+                  items={optionalCols.map(([k, f]) => ({ key: k, label: f.label, defaultVisible: f.optional !== 'hide' }))}
+                  optionalState={optionalState}
+                  onToggle={toggleCol}
+                />
               </th>
             )}
           </tr>
@@ -422,8 +437,9 @@ function DistributionInput({ value, onChange, ...props }) {
   }} />;
 }
 
-export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, placeholder, record, label }) {
+export function FieldInput({ db, model, fieldName, field, value, onChange, id, readonly, placeholder, record, label, isNew = false }) {
   const isReadonly = readonly || fieldReadonly(field, record, db);
+  const isRequired = fieldRequired(field, record, db, isNew);
   if (field.type === 'one2many') return <Lines db={db} model={model} fieldName={fieldName} id={id} field={field} value={value} onChange={onChange} readonly={isReadonly} record={record} />;
   if (field.type === 'many2many' && field.openDirect && (isReadonly || field.compute)) {
     return <span className="readonly">{(Array.isArray(value) ? value : []).map((valId, i) => {
@@ -446,7 +462,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
             {!locked && <button type="button" aria-label={`${t('Remove')} ${name}`} onClick={() => onChange(ids.filter((i) => i !== item))}>×</button>}
           </span>;
         })}
-        {!locked && <select id={id} aria-label={label} aria-required={field.required || undefined} value="" onChange={(e) => {
+        {!locked && <select id={id} aria-label={label} aria-required={isRequired || undefined} value="" onChange={(e) => {
           const selected = Number(e.target.value);
           if (candidates.some((candidate) => candidate.id === selected)) onChange([...ids, selected]);
         }}>
@@ -461,7 +477,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     return <span className="readonly">{display(db, field, value, record)}</span>;
   }
   // aria-required rather than required: saving is validated by the app, not by native form validation.
-  const a11y = { id, 'aria-label': label, 'aria-required': field.required || undefined };
+  const a11y = { id, 'aria-label': label, 'aria-required': isRequired || undefined };
   const text = (type = 'text', extra = {}) => (
     <input {...a11y} type={type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} {...extra} />
   );
@@ -472,7 +488,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       if (sanitizeHtml('') === null) {
         return <textarea {...a11y} aria-label={htmlLabel} value={value ?? ''} placeholder={placeholder ?? t('Report content…')} onChange={(e) => onChange(e.target.value)} />;
       }
-      return <HtmlEditor id={id} label={htmlLabel} required={field.required} value={value} placeholder={placeholder} onChange={onChange} />;
+      return <HtmlEditor id={id} label={htmlLabel} required={isRequired} value={value} placeholder={placeholder} onChange={onChange} />;
     }
     case 'text': return <textarea {...a11y} value={value ?? ''} placeholder={placeholder ?? t('Add a description…')} onChange={(e) => onChange(e.target.value)} />;
     case 'integer': return <NumberInput {...a11y} value={value} onChange={onChange} integer />;
@@ -484,7 +500,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
     case 'selection':
       if (field.widget === 'radio') {
         return (
-          <div id={id} role="radiogroup" aria-label={label} className="radio-group">
+          <div id={id} role="radiogroup" aria-label={label} aria-required={isRequired || undefined} className="radio-group">
             {field.options.map(([k, l]) => (
               <label key={k} className="radio-option">
                 <input type="radio" name={id || fieldName} value={k} checked={value === k} onChange={() => onChange(k)} />
@@ -496,7 +512,7 @@ export function FieldInput({ db, model, fieldName, field, value, onChange, id, r
       }
       return (
         <select {...a11y} value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
-          {!field.required && <option value="" />}
+          {!isRequired && <option value="" />}
           {field.options.map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
         </select>
       );

@@ -337,7 +337,7 @@ test('tax return actions post closing and payment to the company chart when acco
     accounts[code] = created.id;
   }
   const bankJournal = create(db, 'account.journal', {
-    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'], default_for_payments: true,
+    name: 'Company tax bank', code: 'COMPANY-BANK', type: 'bank', company_id: company.id, default_account_id: accounts['101401'], suspense_account_id: accounts['101401'], default_for_payments: true,
   });
   db = bankJournal.db;
   const type = search(db, 'account.return.type').find((t) => t.company_id === company.id);
