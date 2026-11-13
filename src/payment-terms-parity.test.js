@@ -342,7 +342,7 @@ test('example inputs validate before writing and bad terms produce explicit prev
   assert.throws(() => formatTermPreview({ ...net, line_ids: [{ get value_type() { throw new TypeError('boom'); } }] }), /boom/);
 });
 
-test('migration 47 backfills active and display_on_invoice on existing payment terms', () => {
+test('migration 44 backfills active and display_on_invoice on existing payment terms', () => {
   const base = seed();
   const legacy = {
     ...base,
@@ -354,7 +354,7 @@ test('migration 47 backfills active and display_on_invoice on existing payment t
   };
   const migrated = migrate(legacy);
   assert.equal(migrated.schema_version, SCHEMA_VERSION);
-  assert.equal(SCHEMA_VERSION, 51);
+  assert.equal(SCHEMA_VERSION, 46);
   for (const term of migrated.records['account.payment.term']) {
     assert.equal(term.active, true);
     assert.equal(term.display_on_invoice, true);

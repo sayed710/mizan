@@ -1202,7 +1202,7 @@ MIGRATIONS.push({ version: 43, name: 'currency-parity', up(db) {
   return { ...db, records: { ...db.records, 'res.currency': nextCurrencies } };
 } });
 
-MIGRATIONS.push({ version: 47, name: 'payment-terms-parity', up(db) {
+MIGRATIONS.push({ version: 44, name: 'payment-terms-parity', up(db) {
   const terms = db.records['account.payment.term'] ?? [];
   if (!terms.length) return db;
   const nextTerms = terms.map((t) => ({
@@ -1214,7 +1214,7 @@ MIGRATIONS.push({ version: 47, name: 'payment-terms-parity', up(db) {
 } });
 
 /** Backfill company_id (from owning taxes, else main company) and sequence on tax groups, plus sequence/active/currency_ids on cash roundings. */
-MIGRATIONS.push({ version: 48, name: 'tax-groups-and-cash-rounding-parity', up(db) {
+MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(db) {
   const companies = db.records['res.company'] ?? [];
   const mainCompanyId = companies.find((c) => !c.parent_id)?.id ?? companies[0]?.id ?? 1;
   const taxes = db.records['account.tax'] ?? [];
@@ -1250,7 +1250,7 @@ MIGRATIONS.push({ version: 48, name: 'tax-groups-and-cash-rounding-parity', up(d
   };
 } });
 
-MIGRATIONS.push({ version: 51, name: 'analytic-plans-sequence-backfill', up(db) {
+MIGRATIONS.push({ version: 46, name: 'analytic-plans-sequence-backfill', up(db) {
   const plans = db.records['account.analytic.plan'] ?? [];
   if (!plans.length) return db;
   let nextSeq = Math.max(0, ...plans.map((p) => Number(p.sequence) || 0));

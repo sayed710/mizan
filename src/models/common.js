@@ -150,6 +150,9 @@ export function invoiceTaxAmount(r, db, roundingMethod = companyRoundingMethod(d
   return baseTax;
 }
 
+/** The cash rounding a document applies: like Odoo, a biggest-tax method does nothing when there is no tax to adjust. */
+export const appliedCashRounding = (rounding, hasTax) => (rounding && !(rounding.strategy === 'biggest_tax' && !hasTax) ? rounding : null);
+
 /** Total of an account.move (invoice, bill, refund, or manual entry). */
 export function total(r, db) {
   if (r.move_type === 'entry') return (r.line_ids ?? []).reduce((s, l) => s + (Number(l.debit) || 0), 0);
@@ -173,7 +176,11 @@ export function total(r, db) {
     const main = (r.line_ids ?? []).filter((l) => l.name === r.name);
     if (main.length) return main.some((l) => l.currency_id) ? Math.abs(main.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0)) : main.reduce((sum, l) => sum + (Number(l.debit) || 0) + (Number(l.credit) || 0), 0) || base;
   }
-  const rounding = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
+  const selected = db && r.invoice_cash_rounding_id ? read(db, 'account.cash.rounding', r.invoice_cash_rounding_id) : null;
+  const hasTax = selected?.strategy === 'biggest_tax' && (mixed
+    ? invoiceTaxGroups(db, r, roundingMethod).some((g) => g.document_amount !== 0)
+    : amounts(r.invoice_line_ids, docCurr, { roundingMethod, side }).tax !== 0);
+  const rounding = appliedCashRounding(selected, hasTax);
   if (rounding) return roundCurrency(cashRound(base, rounding.rounding, rounding.rounding_method), docCurr);
   return base;
 }

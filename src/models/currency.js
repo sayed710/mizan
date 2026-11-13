@@ -182,7 +182,8 @@ export const currencyModels = {
         ['symbol', 'currency_unit_label', 'currency_subunit_label', 'position'],
         { title: 'Price Accuracy', fields: ['rounding', 'decimal_places'] },
       ],
-      tabs: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id
+      // A company currency still needs base-relative rates when it is not the base currency.
+      tabs: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id && findBaseCurrency(db)?.id === r.id
         ? []
         : [{ label: 'Rates', fields: ['rate_ids'] }]),
       chatter: true,

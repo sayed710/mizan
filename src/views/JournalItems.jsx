@@ -148,7 +148,7 @@ function matchesItemSearch(line, rawQuery) {
     const c = Number(line.credit) || 0;
     if (Math.abs(d - parsedAmount) < 1e-9 || Math.abs(c - parsedAmount) < 1e-9) return true;
   }
-  return [line.name, line.ref, line.account, line._account?.display_name, line.partner, line.move_name]
+  return [line.name, line.ref, line.account, line._account?.display_name, line.partner, line.move_name, line.journal, line.product, line.taxes, line.company]
     .some((value) => String(value ?? '').toLowerCase().includes(q));
 }
 

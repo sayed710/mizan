@@ -412,7 +412,7 @@ test('archived cash roundings cannot be selected on new invoices or POS configs'
   );
 });
 
-test('migration 48 backfills tax group company_id from owning taxes (else main company) and sequence cleanly', () => {
+test('migration 45 backfills tax group company_id from owning taxes (else main company) and sequence cleanly', () => {
   let db = seed();
   const branch = createCompany(db, { name: 'Branch Co' });
   db = branch.db;
@@ -447,7 +447,7 @@ test('migration 48 backfills tax group company_id from owning taxes (else main c
 
   const legacy = {
     ...db,
-    schema_version: 47,
+    schema_version: 44,
     records: {
       ...db.records,
       'account.tax.group': (db.records['account.tax.group'] ?? []).map((g) => {
@@ -462,8 +462,8 @@ test('migration 48 backfills tax group company_id from owning taxes (else main c
   };
 
   const migrated = migrate(legacy);
-  assert.equal(SCHEMA_VERSION, 51);
-  assert.equal(migrated.schema_version, 51);
+  assert.equal(SCHEMA_VERSION, 46);
+  assert.equal(migrated.schema_version, 46);
 
   const migratedBranchGroup = read(migrated, 'account.tax.group', groupBranch.id);
   const migratedUnownedGroup = read(migrated, 'account.tax.group', groupUnowned.id);
@@ -478,7 +478,7 @@ test('migration 48 backfills tax group company_id from owning taxes (else main c
 
   // Idempotent rerun preserves assignments
   const twice = migrate(migrated);
-  assert.equal(twice.schema_version, 51);
+  assert.equal(twice.schema_version, 46);
   assert.deepEqual(read(twice, 'account.tax.group', groupBranch.id), migratedBranchGroup);
   assert.deepEqual(read(twice, 'account.cash.rounding', r.id), migratedRounding);
 });

@@ -6,13 +6,13 @@ import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning,
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { conversionRate, rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
-import { activeCashRoundingError, configuredAccount } from './configured-account.js';
+import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
 import { accountTax, cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, replaceTaxSnapshot, validateTaxCompany } from './taxes.js';
 import { discountTaxComputation, dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
 import { checkBillMatch, priceDifferenceLines, shouldBePaid } from './billcontrol.js';
-import { companyCurrencyRecord, documentCurrency, roundCurrency, round as round2 } from '../money.js';
+import { companyCurrencyRecord, documentCurrency, findCompanyCurrencyRecord, roundCurrency, round as round2 } from '../money.js';
 import { settlementCompanyAmount } from './settlement.js';
 import { analyzeJournalChains, secureEntries, secureMoveInvariant, secureHeadsGuard, postedBeforeSecuredChain, SECURED_ORDER_ERROR } from './hash_chain.js';
 import { t } from '../i18n.js';
@@ -1977,7 +1977,8 @@ export const accountingModels = {
     label: 'Invoices',
     actions: { postAutoPostMoves },
     guard: (db, before, after, ctx) => {
-      const roundingErr = activeCashRoundingError(db, after.invoice_cash_rounding_id, before?.invoice_cash_rounding_id);
+      const company = after.company_id ?? 1;
+      const roundingErr = cashRoundingError(db, after.invoice_cash_rounding_id, before?.invoice_cash_rounding_id, company, after.currency_id ?? findCompanyCurrencyRecord(db, company)?.id);
       if (roundingErr) return roundingErr;
       if (after.invoice_payment_term_id) {
         const term = read(db, 'account.payment.term', after.invoice_payment_term_id);
@@ -2063,7 +2064,10 @@ export const accountingModels = {
       payment_reference: { type: 'char', label: 'Payment Reference' },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency' },
       invoice_payment_term_id: { type: 'many2one', relation: 'account.payment.term', label: 'Payment Terms' },
-      invoice_cash_rounding_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding' },
+      invoice_cash_rounding_id: {
+        type: 'many2one', relation: 'account.cash.rounding', label: 'Cash Rounding',
+        domain: (r, move, db) => r.active !== false && cashRoundingApplies(r, move?.company_id ?? 1, move?.currency_id ?? findCompanyCurrencyRecord(db, move?.company_id ?? 1)?.id),
+      },
       fiscal_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       subscription_id: { type: 'many2one', relation: 'sale.subscription', label: 'Subscription', readonly: true },
       subscription_period: { type: 'date', label: 'Subscription Period', readonly: true },

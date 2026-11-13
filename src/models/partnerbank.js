@@ -5,10 +5,11 @@ export function sanitizeAccountNumber(val) {
   return String(val ?? '').replace(/\s+/g, '').toUpperCase();
 }
 
-const BIC_RE = /^(?:[A-Za-z0-9]{8}|[A-Za-z0-9]{11})$/;
+// ISO 9362: 4-character party prefix, 2-letter country code, 2-character location, optional 3-character branch.
+const BIC_RE = /^[A-Za-z0-9]{4}[A-Za-z]{2}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?$/;
 
 /**
- * Check whether a BIC/SWIFT string is empty or matches 8/11 alphanumeric characters.
+ * Check whether a BIC/SWIFT string is empty or a well-formed 8/11-character code with a letter country code.
  * @param {string|null|undefined} bic
  * @returns {boolean}
  */

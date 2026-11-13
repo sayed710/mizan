@@ -4,9 +4,9 @@ import { amounts } from './common.js';
 import { moreModels } from './more.js';
 import { openSession, payOrder, posOrderTotal, refundOrder, tendersOf, posPaymentMethods, resolvePosConfigAndPreset, orderCompany, resolvePosOrderCheckout } from './pos.js';
 import { applicablePrograms, applyCode, computeRewardLines, earnPoints, confirmProgramUsage, giftCardPay } from './loyalty.js';
-import { companyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { companyCurrencyRecord, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
 import { companyFilter } from './company.js';
-import { activeCashRoundingError, configuredAccount } from './configured-account.js';
+import { cashRoundingApplies, cashRoundingError, configuredAccount } from './configured-account.js';
 
 const baseOrder = moreModels['pos.order'];
 const methodOptions = [['cash', 'Cash'], ['bank', 'Bank / Card']];
@@ -503,7 +503,7 @@ export const posPlusModels = {
   },
   'pos.config': {
     label: 'Point of Sale',
-    guard: (db, before, after) => activeCashRoundingError(db, after.rounding_method_id, before?.rounding_method_id),
+    guard: (db, before, after) => cashRoundingError(db, after.rounding_method_id, before?.rounding_method_id, after.company_id ?? 1, findCompanyCurrencyRecord(db, after.company_id ?? 1)?.id),
     fields: {
       name: { type: 'char', label: 'Name', required: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
@@ -516,7 +516,10 @@ export const posPlusModels = {
       available_preset_ids: { type: 'many2many', relation: 'pos.preset', label: 'Presets' },
       default_preset_id: { type: 'many2one', relation: 'pos.preset', label: 'Default Preset' },
       cash_rounding: { type: 'boolean', label: 'Cash Rounding' },
-      rounding_method_id: { type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method' },
+      rounding_method_id: {
+        type: 'many2one', relation: 'account.cash.rounding', label: 'Rounding Method',
+        domain: (r, config, db) => r.active !== false && cashRoundingApplies(r, config?.company_id ?? 1, findCompanyCurrencyRecord(db, config?.company_id ?? 1)?.id),
+      },
       only_round_cash_method: { type: 'boolean', label: 'Only Round Cash' },
     },
     defaults: () => ({ company_id: 1, module_restaurant: false, iface_tipproduct: false, loyalty_enabled: false, available_preset_ids: [], cash_rounding: false, only_round_cash_method: false }),

@@ -418,11 +418,7 @@ test('Arabic translations exist for all res.partner.bank labels, helps, placehol
       'BIC/SWIFT must be 8 or 11 alphanumeric characters',
     ];
     for (const s of strings) {
-      if (s === 'BIC/SWIFT') {
-        assert.equal(t(s), 'BIC/SWIFT');
-      } else {
-        assert.notEqual(t(s), s, `missing Arabic translation for: ${s}`);
-      }
+      assert.notEqual(t(s), s, `missing Arabic translation for: ${s}`);
     }
   } finally {
     globalThis.localStorage = prevStorage;

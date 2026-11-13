@@ -1,6 +1,14 @@
 import { addDays, isoDate, today, validDate } from './common.js';
 import { currencyUnits, roundCurrency } from '../money.js';
 import { t } from '../i18n.js';
+import { read } from '../orm.js';
+
+/** Payment-term text printed on an invoice: the term's note, else its name; none when the term is hidden from invoices. */
+export function invoiceTermNote(db, move) {
+  const term = move?.invoice_payment_term_id ? read(db, 'account.payment.term', move.invoice_payment_term_id) : null;
+  if (!term || term.display_on_invoice === false) return null;
+  return term.note?.trim() || `${t('Payment Terms')}: ${term.name}`;
+}
 
 const money = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
