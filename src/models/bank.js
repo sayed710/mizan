@@ -528,6 +528,7 @@ export const bankModels = {
         invoice_id: { type: 'many2one', relation: 'account.move', label: 'Invoice' },
         payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry' },
         writeoff_move_id: { type: 'many2one', relation: 'account.move', label: 'Write-off Entry' },
+        reconcile_model_id: { type: 'many2one', relation: 'account.reconcile.model', label: 'Reconciliation Model' },
         amount: { type: 'monetary', label: 'Amount' },
       } },
       unique_import_id: { type: 'char', label: 'Import ID', readonly: true },

@@ -48,7 +48,12 @@ export function ruleMatches(rule, line) {
 function splitCounterparts(lines, balance, currency) {
   const amountOf = (l) => Number(l.amount) || 0;
   const fixed = lines.filter((l) => l.amount_type === 'fixed');
-  const rest = roundCurrency(balance - fixed.reduce((s, l) => s + roundCurrency(amountOf(l), currency), 0), currency);
+  const fixedTotal = roundCurrency(fixed.reduce((s, l) => s + roundCurrency(amountOf(l), currency), 0), currency);
+  const rest = roundCurrency(balance - fixedTotal, currency);
+  // A fixed amount above the balance can only be balanced by a negative percentage share, which would post
+  // a tax computed on the oversized amount beside a counterpart with the opposite sign. Reject it here,
+  // before the shares are computed, so the full-coverage adjustment stays a currency-rounding correction.
+  if (rest < 0) throw new Error('The fixed counterpart lines exceed the amount to reconcile');
   const variable = lines.filter((l) => l.amount_type !== 'fixed');
   const pct = variable.reduce((s, l) => s + amountOf(l), 0);
   const shares = pct === 100 && variable.length && rest > 0 ? allocateCents(rest, variable.map(amountOf), currency) : variable.map((l) => roundCurrency(rest * amountOf(l) / 100, currency));
@@ -152,11 +157,18 @@ function writeOff(db, rule, line) {
   const opposingSide = incoming ? 'debit' : 'credit';
   const counterpartTotal = roundCurrency(items.reduce((sum, item) => sum + (Number(item[counterpartSide]) || 0) - (Number(item[opposingSide]) || 0), 0), companyCurrency);
   const itemCurrency = roundCurrency(items.reduce((sum, item) => sum + (Number(item.amount_currency) || 0), 0), currency);
-  // Full coverage is decided on the split itself; company-currency rounding of a full split is absorbed below.
-  const fullCoverage = roundCurrency(split.reduce((sum, l) => sum + l.value, 0), currency) === balance;
+  const companyRemainder = roundCurrency(companyValue - counterpartTotal, companyCurrency);
+  // Full coverage: the split covers the whole journal-currency balance, or its company-currency remainder rounds to nothing.
+  const fullCoverage = roundCurrency(split.reduce((sum, l) => sum + l.value, 0), currency) === balance || companyRemainder <= 0;
   if (fullCoverage && items.length) {
-    const gap = roundCurrency(companyValue - counterpartTotal, companyCurrency);
-    if (gap) items[0][counterpartSide] = roundCurrency((Number(items[0][counterpartSide]) || 0) + gap, companyCurrency);
+    if (companyRemainder) items[0][counterpartSide] = roundCurrency((Number(items[0][counterpartSide]) || 0) + companyRemainder, companyCurrency);
+    // A coarse company increment can round a partial share up to the booked amount: absorb the journal units
+    // it cannot represent on the same counterpart, keeping the entry balanced in both currencies.
+    if (foreign) {
+      const sign = counterpartSide === 'debit' ? 1 : -1;
+      const currencyGap = roundCurrency(sign * balance - itemCurrency, currency);
+      if (currencyGap) items[0].amount_currency = roundCurrency((Number(items[0].amount_currency) || 0) + currencyGap, currency);
+    }
   }
   let current = db;
   let bankMoveId = line.bank_move_id ?? null;
@@ -168,7 +180,7 @@ function writeOff(db, rule, line) {
     const bookedBank = bookBankMovement(db, line, company, { date: line.date, openAmount: companyValue });
     current = bookedBank.db;
     bankMoveId = bookedBank.bankMoveId;
-    openAmount = roundCurrency(companyValue - counterpartTotal, companyCurrency);
+    openAmount = companyRemainder;
     allocated = counterpartTotal;
     entryLines = [{
       account: bookedBank.suspense,
@@ -186,7 +198,7 @@ function writeOff(db, rule, line) {
     move_id: id,
     bank_move_id: bankMoveId ?? id,
     open_amount: openAmount,
-    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: allocated }],
+    allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: allocated, reconcile_model_id: rule.id }],
   });
 }
 
@@ -217,15 +229,18 @@ const activeRules = (db) => search(db, 'account.reconcile.model').filter((r) => 
 /**
  * Reconcile every 'to_check' line with the first matching auto-validated active rule (by sequence).
  * Runs unattended on the server, so regex rules (user patterns could backtrack for ages) are left to manual use,
- * and a line that fails (locked period, bad rule) is skipped rather than stopping the run.
+ * and a line that fails (locked period, bad rule) is skipped rather than stopping the run. A rule that already
+ * allocated part of a line left the rest for another match, so it is not applied to that line again; other
+ * rules and manual matching remain available for the remainder.
  */
 export function autoReconcile(db) {
   const rules = activeRules(db).filter((r) => r.auto_reconcile && r.match_label !== 'match_regex');
   return search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check').reduce((acc, l) => {
-    const rule = rules.find((r) => ruleMatches(r, l));
+    const line = read(acc, 'account.bank.statement.line', l.id);
+    const rule = rules.find((r) => ruleMatches(r, line) && !(line.allocations ?? []).some((a) => a.reconcile_model_id === r.id));
     if (!rule) return acc;
     try {
-      return applyRule(acc, rule, read(acc, 'account.bank.statement.line', l.id));
+      return applyRule(acc, rule, line);
     } catch {
       return acc;
     }

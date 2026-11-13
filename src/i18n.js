@@ -599,6 +599,7 @@ const ar = {
   'Outstanding Receipts': 'المقبوضات المعلقة', 'Outstanding Payments': 'المدفوعات المعلقة', 'Existing Payment': 'دفعة موجودة', 'Existing Payments': 'مدفوعات موجودة', 'Batch Payment': 'دفعة مجمعة',
   'Bank Entry': 'القيد البنكي', 'Open Amount': 'المبلغ المتبقي', 'Matched Documents': 'المستندات المطابقة', 'Match Payment': 'مطابقة الدفعة',
   'Write-off Account': 'حساب الشطب', 'Write-off Label': 'وصف الشطب', 'Write-off Amount': 'مبلغ الشطب', 'Write-off Entry': 'قيد الشطب', 'Unreconcile': 'إلغاء التسوية',
+  'Reconciliation Model': 'نموذج التسوية',
   'Book to Account': 'ترحيل لحساب', Reconcile: 'تسوية', Match: 'مطابقة', 'To reconcile': 'للتسوية', Incoming: 'وارد', Outgoing: 'صادر',
   'Bank transactions without a journal': 'معاملات بنكية بدون دفتر يومية',
   Pricelists: 'قوائم الأسعار', Pricelist: 'قائمة الأسعار', 'Pricelist Name': 'اسم قائمة الأسعار', 'Price Rules': 'قواعد التسعير',
