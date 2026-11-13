@@ -1360,6 +1360,17 @@ const ar = {
   'Create a vendor bill': 'إنشاء فاتورة مورد',
   'Create invoices, register payments and keep track of the discussions with your customers.': 'أنشئ الفواتير وسجّل المدفوعات وتابع المناقشات مع عملائك.',
   'Create invoices, register payments and keep track of the discussions with your vendors.': 'أنشئ الفواتير وسجّل المدفوعات وتابع المناقشات مع مورديك.',
+  'Within (days)': 'خلال (أيام)',
+  'Reduced tax': 'تخفيض الضريبة',
+  'On early payment': 'عند السداد المبكر',
+  'Never': 'أبداً',
+  'Always (upon invoice)': 'دائماً (عند الفوترة)',
+  'Due': 'المستحق',
+  'After': 'بعد',
+  'On the': 'في يوم',
+  'Days after end of next month': 'أيام بعد نهاية الشهر التالي',
+  'Days end of month on the': 'أيام بعد نهاية الشهر في يوم',
+  'Enter the day of the next month (1-31) for Days end of month on the': 'أدخل يوم الشهر التالي (1-31) لخيار أيام بعد نهاية الشهر في يوم',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
