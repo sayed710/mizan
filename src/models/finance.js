@@ -3,9 +3,9 @@ import { installments } from './terms.js';
 import { models } from '../registry.js';
 import { postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
-import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, isPaymentMatched, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
-import { cashBasisTransitionAccounts, taxRepartitionLines } from './taxes.js';
+import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
@@ -852,7 +852,7 @@ export function taxesByGrid(db, period = {}) {
     if (!side) continue;
     const balance = (Number(line.debit) || 0) - (Number(line.credit) || 0);
     const value = side === 'sale' ? -balance : balance;
-    const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && !(move.line_ids ?? []).some((l) => l.tax_grid_base));
+    const isLegacyRelease = Boolean(line.tax_grid_release && move?.cash_basis_origin_move_id && isLegacyCashBasisRelease(move));
     for (const id of line.tax_tag_ids ?? []) {
       const tag = read(db, 'account.account.tag', id);
       if (!tag) continue;
@@ -974,6 +974,12 @@ export function journalCards(db, at = today()) {
   const journals = search(db, 'account.journal');
   const generalJournalIds = new Set(journals.filter((jr) => jr.type === 'general').map((jr) => jr.id));
   const companyByMove = new Map(moves.map((m) => [m.id, m.company_id]));
+  const postedPaymentsByMove = new Map(
+    search(db, 'account.payment')
+      .filter((p) => p.state === 'posted' && p.move_id)
+      .map((p) => [p.move_id, p]),
+  );
+  const visibleCompanyIds = search(db, 'res.company').map((c) => c.id);
   const items = journalItems(db);
   const itemBalances = (lines) => lines.map((l) => ({
     company_id: l.company_id ?? companyByMove.get(l.move_id),
@@ -998,6 +1004,7 @@ export function journalCards(db, at = today()) {
         journal: j,
         kind: j.type,
         entries: own.filter((m) => m.state === 'posted').length,
+        postedDocuments: posted.length,
         draft: drafts.length,
         draftAmount: companySum(db, drafts, 'amount_total', at),
         unpaid: unpaid.length,
@@ -1018,13 +1025,30 @@ export function journalCards(db, at = today()) {
       const miscBalance = companySum(db, miscBalances, 'balance', at);
       const toCheck = j.type === 'bank' ? search(db, 'account.bank.statement.line').filter((l) => l.state === 'to_check' && l.journal_id === j.id) : [];
       const open = toCheck.map((line) => ({ company_id: line.company_id, balance: (line.amount < 0 ? -1 : 1) * (line.open_amount ?? bookedStatementAmount(db, line)) }));
-      const companyId = j.company_id ?? db.settings?.current_company_id ?? 1;
-      const outstandingIds = j.type === 'bank'
-        ? [...new Set([true, false].map((inbound) => outstandingAccount(db, j, companyId, inbound)).filter(Boolean))]
+      const outstandingByCompany = new Map();
+      const outstandingIdsFor = (companyId) => {
+        if (!outstandingByCompany.has(companyId)) {
+          outstandingByCompany.set(
+            companyId,
+            [...new Set([true, false].map((inbound) => outstandingAccount(db, j, companyId, inbound)).filter(Boolean))],
+          );
+        }
+        return outstandingByCompany.get(companyId);
+      };
+      const outstandingItems = j.type === 'bank'
+        ? items.filter((l) => {
+            if (l.journal_id !== j.id || l.reconciled === true) return false;
+            const payment = postedPaymentsByMove.get(l.move_id);
+            if (!payment || isPaymentMatched(db, payment)) return false;
+            const paymentCompany = payment.company_id ?? l.company_id ?? 1;
+            return outstandingIdsFor(paymentCompany).includes(l.account_id);
+          })
         : [];
-      const outstandingItems = outstandingIds.length
-        ? items.filter((l) => l.journal_id === j.id && outstandingIds.includes(l.account_id) && l.reconciled !== true)
-        : [];
+      const companyIds = j.company_id ? [j.company_id] : visibleCompanyIds;
+      const hasOutstandingAccounts = j.type === 'bank' && (
+        outstandingItems.length > 0
+        || companyIds.some((cid) => outstandingIdsFor(cid).length > 0)
+      );
       const outstandingBalances = itemBalances(outstandingItems);
       const hasPosted = own.some((m) => m.state === 'posted') || defaultItems.length > 0 || outstandingItems.length > 0;
       return {
@@ -1035,7 +1059,7 @@ export function journalCards(db, at = today()) {
         unratedCount: unratedCount(db, [...balances, ...open, ...outstandingBalances, ...miscBalances], at),
         toReconcile: toCheck.length,
         toReconcileAmount: companySum(db, open, 'balance', at),
-        hasOutstandingAccounts: outstandingIds.length > 0,
+        hasOutstandingAccounts,
         outstandingCount: outstandingItems.length,
         outstandingBalance: companySum(db, outstandingBalances, 'balance', at),
         miscCount,

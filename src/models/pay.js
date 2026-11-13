@@ -437,6 +437,7 @@ export function reverseEntry(db, source, dateOrOptions = today(), extraOptions =
     ref,
     reversed_entry_id: source.id,
     ...(source.cash_basis_origin_move_id ? { cash_basis_origin_move_id: source.cash_basis_origin_move_id } : {}),
+    ...(source.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
     partner_id: source.partner_id ?? null,
     name: opts.scheduled ? '/' : nextName(db, 'account.move', `${code}/${date.slice(0, 4)}/`),
     company_id: companyId,
@@ -485,7 +486,11 @@ function reverseCashBasis(db, allocation, invoice, date) {
   }));
   const company = read(db, 'res.company', invoice.company_id ?? 1) ? (invoice.company_id ?? 1) : null;
   const reversal = postEntry(db, { journal: 'MISC', date, ref: `Cash basis taxes ${invoice.name}`, lines, company });
-  return write(reversal.db, 'account.move', reversal.id, { reversed_entry_id: original.id, cash_basis_origin_move_id: invoice.id });
+  return write(reversal.db, 'account.move', reversal.id, {
+    reversed_entry_id: original.id,
+    cash_basis_origin_move_id: invoice.id,
+    ...(original.cash_basis_base_grid ? { cash_basis_base_grid: true } : {}),
+  });
 }
 
 /** Reverse a write-off settlement without changing unrelated invoice applications. */

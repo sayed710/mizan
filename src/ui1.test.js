@@ -284,3 +284,14 @@ test('rendered dashboard shows empty states for journals with no posted entries 
   assert.doesNotMatch(html, new RegExp(`rel=journal_id:${emptyBank.id}[^>]*>.*Reconcile`));
   assert.doesNotMatch(html, new RegExp(`rel=journal_id:${emptyCash.id}[^>]*>.*Reconcile`));
 });
+
+test('sale journal with only a posted manual entry still shows Create your first invoice.', async () => {
+  let db = seed();
+  const emptySale = create(db, 'account.journal', { name: 'Manual Only Sale', code: 'MSAL', type: 'sale', invoice_sequence_prefix: 'MS/' });
+  db = postEntry(emptySale.db, {
+    journal: 'MSAL', journal_id: emptySale.id, date: today(), ref: 'Manual adjustment',
+    lines: [{ account_id: accountId(emptySale.db, '400000'), debit: 100 }, { account_id: accountId(emptySale.db, '301000'), credit: 100 }],
+  }).db;
+  const html = await renderDashboard(db);
+  assert.match(html, /Manual Only Sale[\s\S]*Create your first invoice\.[\s\S]*New Invoice/);
+});

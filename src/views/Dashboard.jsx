@@ -17,7 +17,7 @@ function JournalCard({ card }) {
   if (card.kind === 'sale' || card.kind === 'purchase') {
     const sale = card.kind === 'sale';
     const [actionLabel, actionHref] = sale ? ['New Invoice', '#/accounting/invoices/new'] : ['New Bill', '#/accounting/bills/new'];
-    const empty = !card.entries && !card.draft;
+    const empty = !card.postedDocuments && !card.draft;
     const rows = [
       ['To Validate', card.draft, card.draftAmount, `${list}&filter=draft`],
       [sale ? 'Unpaid' : 'To Pay', card.unpaid, card.unpaidAmount, `${list}&filter=unpaid`],

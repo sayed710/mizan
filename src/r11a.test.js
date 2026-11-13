@@ -59,3 +59,49 @@ test('report custom periods reach depreciation and archived analytic activity', 
     }
   } finally { await React.act(async () => root.unmount()); }
 });
+
+test('journal audit for cash-basis payment with tagged base keeps base items and excludes tax_grid_base from tax rows', async () => {
+  const { seed } = await import('./seed.js');
+  const { create, read, search } = await import('./orm.js');
+  const { postMove, payMove } = await import('./models/accounting.js');
+  const { accountId } = await import('./models/ledger.js');
+  const { taxSnapshot } = await import('./models/taxes.js');
+  let db = seed();
+  const baseTag = create(db, 'account.account.tag', { name: '+Box Audit Base', applicability: 'taxes', tax_negate: false });
+  const taxTag = create(baseTag.db, 'account.account.tag', { name: '+Box Audit Tax', applicability: 'taxes', tax_negate: false });
+  const tax = create(taxTag.db, 'account.tax', {
+    name: 'Audit CB 20%',
+    amount: 20,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: accountId(taxTag.db, '131100'),
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(taxTag.db, '131000'), tag_ids: [taxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [baseTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: accountId(taxTag.db, '131000'), tag_ids: [taxTag.id] },
+    ],
+  });
+  db = tax.db;
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2026-03-01',
+    company_id: 1,
+    invoice_line_ids: [{ name: 'Tagged expense', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', tax.id)) }],
+  });
+  db = postMove(bill.db, bill.id);
+  db = payMove(db, bill.id, 1200, '2026-03-05');
+
+  const groups = journalAudit(db, { from: '2026-03-05', to: '2026-03-05', companyId: 1 });
+  const misc = groups.find((g) => g.journal.code === 'MISC');
+  assert.ok(misc);
+  assert.ok(misc.items.some((item) => item.line.tax_grid_base));
+  assert.equal(misc.taxes.length, 1);
+  assert.deepEqual(misc.taxes[0], { name: 'Audit CB 20%', base: 1000, tax: 200 });
+});

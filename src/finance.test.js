@@ -417,3 +417,90 @@ test('bank and cash journal cards compute outstanding payments only when configu
   assert.equal(cashCard.miscBalance, 5200);
 });
 
+test('matched payments are excluded from bank card outstanding payments', async () => {
+  const { postPayment } = await import('./models/pay.js');
+  let db = seed();
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank' && j.code === 'BNK1');
+  db = write(db, 'res.company', 1, {
+    outstanding_receipts_account_id: accountId(db, '101402'),
+    outstanding_payments_account_id: accountId(db, '101403'),
+  });
+  const pmt = create(db, 'account.payment', {
+    partner_id: 3, company_id: 1, journal_id: bank.id, amount: 250, date: today(),
+    payment_type: 'inbound', partner_type: 'customer',
+  });
+  db = postPayment(pmt.db, read(pmt.db, 'account.payment', pmt.id));
+
+  const before = journalCards(db).find((c) => c.journal.id === bank.id);
+  assert.equal(before.outstandingCount, 1);
+  assert.equal(before.outstandingBalance, 250);
+
+  const stmt = create(db, 'account.bank.statement.line', {
+    journal_id: bank.id, company_id: 1, date: today(), payment_ref: 'Matched payment',
+    amount: 250, partner_id: 3, payment_id: pmt.id,
+  });
+  db = run(stmt.db, 'account.bank.statement.line', stmt.id, 'Match Payment');
+
+  const after = journalCards(db).find((c) => c.journal.id === bank.id);
+  assert.equal(after.outstandingCount, 0);
+  assert.equal(after.outstandingBalance, 0);
+});
+
+test('shared bank journal cards resolve company-level outstanding accounts per payment company', async () => {
+  const { postPayment } = await import('./models/pay.js');
+  const { createCompany } = await import('./models/company.js');
+  let db = seed();
+  const baseCurrencyId = db.records['res.company'][0].currency_id;
+  const c2 = createCompany(db, { name: 'Second Co', currency_id: baseCurrencyId });
+  db = c2.db;
+
+  const bankAcc = create(db, 'account.account', { code: '101490', name: 'Shared Bank Acc', account_type: 'asset_cash', company_id: null });
+  const suspenseAcc = create(bankAcc.db, 'account.account', { code: '101491', name: 'Shared Suspense', account_type: 'asset_current', company_id: null });
+  const outRec1 = create(suspenseAcc.db, 'account.account', { code: '101492', name: 'C1 Out Receipts', account_type: 'asset_current', company_id: 1 });
+  const outRec2 = create(outRec1.db, 'account.account', { code: '101493', name: 'C2 Out Receipts', account_type: 'asset_current', company_id: c2.id });
+  const rec2 = create(outRec2.db, 'account.account', { code: '121099', name: 'C2 Receivable', account_type: 'asset_receivable', reconcile: true, company_id: c2.id });
+  db = write(rec2.db, 'res.company', 1, { outstanding_receipts_account_id: outRec1.id });
+  db = write(db, 'res.company', c2.id, { outstanding_receipts_account_id: outRec2.id, account_default_receivable_id: rec2.id });
+
+  const sharedBank = create(db, 'account.journal', {
+    name: 'Shared Bank', code: 'SBNK', type: 'bank', company_id: null,
+    default_account_id: bankAcc.id, suspense_account_id: suspenseAcc.id,
+  });
+  db = sharedBank.db;
+
+  const p1 = create(db, 'account.payment', {
+    partner_id: 3, company_id: 1, journal_id: sharedBank.id, amount: 250, date: today(),
+    payment_type: 'inbound', partner_type: 'customer',
+  });
+  db = postPayment(p1.db, read(p1.db, 'account.payment', p1.id));
+
+  const p2 = create(db, 'account.payment', {
+    partner_id: 3, company_id: c2.id, journal_id: sharedBank.id, amount: 150, date: today(),
+    payment_type: 'inbound', partner_type: 'customer',
+  });
+  db = postPayment(p2.db, read(p2.db, 'account.payment', p2.id));
+
+  const dbWithC1 = { ...db, settings: { ...db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] } };
+  const card = journalCards(dbWithC1).find((c) => c.journal.id === sharedBank.id);
+  assert.equal(card.hasOutstandingAccounts, true);
+  assert.equal(card.outstandingCount, 2);
+  assert.equal(card.outstandingBalance, 400);
+});
+
+test('journalCards surfaces misconfigured outstanding account errors instead of swallowing them', async () => {
+  const { createCompany } = await import('./models/company.js');
+  let db = seed();
+  const baseCurrencyId = db.records['res.company'][0].currency_id;
+  const c2 = createCompany(db, { name: 'Second Co', currency_id: baseCurrencyId });
+  db = c2.db;
+
+  const bankAcc = create(db, 'account.account', { code: '101494', name: 'Shared Bank Acc 2', account_type: 'asset_cash', company_id: null });
+  const c2OutRec = create(bankAcc.db, 'account.account', { code: '101495', name: 'C2 Only Out', account_type: 'asset_current', company_id: c2.id });
+  const sharedBank = create(c2OutRec.db, 'account.journal', {
+    name: 'Misconfigured Shared Bank', code: 'MBNK', type: 'bank', company_id: null,
+    default_account_id: bankAcc.id, outstanding_receipts_account_id: c2OutRec.id,
+  });
+  db = { ...sharedBank.db, settings: { ...sharedBank.db.settings, current_company_id: 1, allowed_company_ids: [1, c2.id] } };
+  assert.throws(() => journalCards(db), /Outstanding account must belong to the payment company/);
+});
+

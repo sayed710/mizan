@@ -4,6 +4,9 @@ import { allocateCents, roundCurrency } from '../money.js';
 
 import { configuredAccount } from './configured-account.js';
 
+/** Whether a cash-basis release move pre-dates separate tax_grid_base lines. */
+export const isLegacyCashBasisRelease = (move) => Boolean(move && !move.cash_basis_base_grid && !(move.line_ids ?? []).some((l) => l.tax_grid_base));
+
 /** Cash basis uses the originating tax's explicit transition setting. */
 export function cashBasisTransitionAccount(db, taxId, company) {
   const tax = read(db, 'account.tax', taxId);

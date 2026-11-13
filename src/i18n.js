@@ -37,6 +37,7 @@ const ar = {
   'Debit Account': 'الحساب المدين',
   'Credit Account': 'الحساب الدائن',
   'Cash Basis Transition Account': 'الحساب الانتقالي للأساس النقدي',
+  'Cash Basis Base Grid': 'شبكة وعاء الأساس النقدي',
   'Default Payroll Structure': 'هيكل الرواتب الافتراضي',
   'Download CSV': 'تنزيل CSV',
   'Report not found': 'لم يتم العثور على التقرير',

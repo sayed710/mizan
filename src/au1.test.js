@@ -783,3 +783,164 @@ test('Finding 6: legacy cash-basis release move without base lines still contrib
   assert.equal(row.base, 1000);
   assert.equal(row.tax, 200);
 });
+
+test('final cash-basis payment after legacy partial release sharing base and tax tag counts invoice base once', () => {
+  let db = seed();
+  const sharedTag = create(db, 'account.account.tag', { name: '+Shared Box', applicability: 'taxes', tax_negate: false });
+  db = sharedTag.db;
+  const taxAcc = create(db, 'account.account', { name: 'VAT Shared CB', code: '131082', account_type: 'asset_current' });
+  db = taxAcc.db;
+  const transAcc = create(db, 'account.account', { name: 'VAT Shared Transition', code: '131182', account_type: 'asset_current' });
+  db = transAcc.db;
+
+  const tax = create(db, 'account.tax', {
+    name: '20% Shared Tag CB',
+    amount: 20,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [sharedTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [sharedTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [sharedTag.id] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [sharedTag.id] },
+    ],
+  });
+  db = tax.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [
+      { name: 'Expense Shared CB', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', tax.id)) },
+    ],
+  });
+  db = postMove(bill.db, bill.id);
+  const invoice = read(db, 'account.move', bill.id);
+
+  // Partial payment (600 of 1200 = 50%) released in legacy form without tax_grid_base lines
+  const pmtEntry = postEntry(db, {
+    journal: 'BNK1',
+    date: '2025-01-15',
+    ref: `Payment ${invoice.name}`,
+    company: 1,
+    lines: [
+      { account: '211000', debit: 600, partner_id: partner.id },
+      { account: '101401', credit: 600, partner_id: partner.id },
+    ],
+  });
+  db = pmtEntry.db;
+  const legacyRelease = postEntry(db, {
+    journal: 'MISC',
+    date: '2025-01-15',
+    ref: `Cash basis taxes ${invoice.name}`,
+    company: 1,
+    lines: [
+      {
+        account_id: taxAcc.id,
+        partner_id: partner.id,
+        tax_id: tax.id,
+        name: '20% Shared Tag CB',
+        tax_name: '20% Shared Tag CB',
+        debit: 100,
+        credit: 0,
+        tax_base: 500,
+        tax_side: 'purchase',
+        tax_tag_ids: [sharedTag.id],
+        tax_grid_release: true,
+      },
+      {
+        account_id: transAcc.id,
+        partner_id: partner.id,
+        name: 'Transition Counterpart',
+        debit: 0,
+        credit: 100,
+      },
+    ],
+  });
+  db = write(legacyRelease.db, 'account.move', legacyRelease.id, { cash_basis_origin_move_id: invoice.id });
+  db = write(db, 'account.move', invoice.id, {
+    amount_paid: 600,
+    payment_date: '2025-01-15',
+    payments: [{ date: '2025-01-15', amount: 600, company_amount: 600, move_id: pmtEntry.id }],
+  });
+
+  // Final payment (remaining 600) with current code
+  db = payMove(db, invoice.id, 600, '2025-01-20');
+
+  const grid = taxesByGrid(db, { from: '2025-01-01', to: '2025-01-31' });
+  const row = grid.find((r) => r.id === sharedTag.id);
+  assert.ok(row);
+  assert.equal(row.base, 1000);
+  assert.equal(row.tax, 200);
+});
+
+test('cash-basis release without base tags marks cash_basis_base_grid without a fake zero base line and stays non-legacy on reversal', async () => {
+  const { models } = await import('./models/index.js');
+  let db = seed();
+  const taxTag = create(db, 'account.account.tag', { name: '+Tax Only CB', applicability: 'taxes', tax_negate: false });
+  db = taxTag.db;
+  const taxAcc = create(db, 'account.account', { name: 'VAT Tax Only CB', code: '131083', account_type: 'asset_current' });
+  db = taxAcc.db;
+  const transAcc = create(db, 'account.account', { name: 'VAT Tax Only Transition', code: '131183', account_type: 'asset_current' });
+  db = transAcc.db;
+  const tax = create(db, 'account.tax', {
+    name: '20% Tax Only CB',
+    amount: 20,
+    amount_type: 'percent',
+    type_tax_use: 'purchase',
+    company_id: 1,
+    tax_exigibility: 'on_payment',
+    cash_basis_transition_account_id: transAcc.id,
+    invoice_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [taxTag.id] },
+    ],
+    refund_repartition_line_ids: [
+      { factor_percent: 100, repartition_type: 'base', tag_ids: [] },
+      { factor_percent: 100, repartition_type: 'tax', account_id: taxAcc.id, tag_ids: [taxTag.id] },
+    ],
+  });
+  db = tax.db;
+
+  const partner = search(db, 'res.partner')[0];
+  const bill = create(db, 'account.move', {
+    move_type: 'in_invoice',
+    partner_id: partner.id,
+    invoice_date: '2025-01-10',
+    company_id: 1,
+    invoice_line_ids: [{ name: 'Tax Only CB', qty: 1, price_unit: 1000, ...taxSnapshot(read(db, 'account.tax', tax.id)) }],
+  });
+  db = postMove(bill.db, bill.id);
+
+  const bank = search(db, 'account.journal').find((j) => j.type === 'bank' && (j.company_id ?? 1) === 1);
+  const payment = create(db, 'account.payment', {
+    partner_id: partner.id, invoice_id: bill.id, journal_id: bank.id, amount: 1200, date: '2025-01-15',
+    partner_type: 'supplier', payment_type: 'outbound',
+  });
+  db = models['account.payment'].form.buttons.find((b) => b.label === 'Confirm').run(payment.db, read(payment.db, 'account.payment', payment.id)).db;
+
+  const { isLegacyCashBasisRelease } = await import('./models/accounting.js');
+  const releaseId = read(db, 'account.move', bill.id).payments.at(-1).cash_basis_move_id;
+  const releaseMove = read(db, 'account.move', releaseId);
+  assert.equal(releaseMove.cash_basis_base_grid, true);
+  assert.equal(releaseMove.line_ids.some((l) => l.tax_grid_base), false);
+  assert.equal(isLegacyCashBasisRelease(releaseMove), false);
+
+  let row = taxesByGrid(db).find((r) => r.id === taxTag.id);
+  assert.deepEqual(row, { id: taxTag.id, name: '+Tax Only CB', base: 0, tax: 200 });
+
+  db = models['account.payment'].form.buttons.find((b) => b.label === 'Reverse').run(db, read(db, 'account.payment', payment.id)).db;
+  const reversal = search(db, 'account.move').find((m) => m.reversed_entry_id === releaseId);
+  assert.equal(reversal.cash_basis_base_grid, true);
+  assert.equal(isLegacyCashBasisRelease(reversal), false);
+  row = taxesByGrid(db).find((r) => r.id === taxTag.id);
+  assert.deepEqual(row, { id: taxTag.id, name: '+Tax Only CB', base: 0, tax: 0 });
+});

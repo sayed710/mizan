@@ -171,7 +171,7 @@ test('Qodo 11.2: a fixed taxed counterpart above the balance is rejected instead
       { account_id: feeId(db), label: 'Rest', amount_type: 'percentage', amount: 100 },
     ],
   });
-  const booked = applyRule(db, read(fitting.db, 'account.reconcile.model', fitting.id), read(fitting.db, LINE, line.id));
+  const booked = applyRule(fitting.db, read(fitting.db, 'account.reconcile.model', fitting.id), read(fitting.db, LINE, line.id));
   const applied = read(booked, LINE, line.id);
   assert.equal(applied.state, 'reconciled');
   const items = read(booked, 'account.move', applied.move_id).line_ids;

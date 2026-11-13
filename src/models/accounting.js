@@ -6,7 +6,7 @@ import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
 import { rateAt, toCompany } from './currency.js';
 import { bookedStatementAmount } from './bank.js';
 import { configuredAccount } from './configured-account.js';
-import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
+import { cashBasisTransitionAccount, cashBasisGroups, fiscalPositionFor, isLegacyCashBasisRelease, isSectionOrNote, mapAccount, productTax, validateTaxCompany } from './taxes.js';
 import { dueDate, earlyDiscount } from './terms.js';
 import { downPaymentOvercommitted, refreshAdvanceDeductions, syncInvoicedQty } from './sales.js';
 import { checkMandatoryPlans, defaultDistributionForLine, distributionOfLine, findAnalyticDistribution, normalizeDistribution, postAnalytic, removeAnalytic } from './analyticplus.js';
@@ -22,7 +22,7 @@ import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { recipientBankCompanyError } from './company.js';
 
-export { invoiceTaxAmount, total, applyPaymentCredit };
+export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
 function accountTypeGuard(db, before, after) {
   if (before && before.account_type !== after.account_type
@@ -794,14 +794,14 @@ const releasedTaxKey = (account, taxId, name, tags = []) => taxId != null
   ? JSON.stringify([account, taxId, [...tags].sort((a, b) => a - b)])
   : `${account}:${name ?? ''}${tags.length ? `:${[...tags].sort((a, b) => a - b).join(',')}` : ''}`;
 
-const releasedBaseKey = (account, tags = []) => JSON.stringify([account, [...(tags ?? [])].sort((a, b) => a - b)]);
-
 /** Tax and base already released for an invoice. */
 const releasedTaxes = (db, r) => {
   const taxes = new Map();
   const bases = new Map();
+  const legacyTagBases = new Map();
   for (const m of db.records['account.move'] ?? []) {
     if (m.cash_basis_origin_move_id !== r.id || (m.company_id ?? 1) !== (r.company_id ?? 1) || m.state !== 'posted') continue;
+    const isLegacyMove = isLegacyCashBasisRelease(m);
     for (const l of m.line_ids ?? []) {
       const code = l.account_id;
       const zeroTax = !(Number(l.debit) || Number(l.credit));
@@ -810,17 +810,24 @@ const releasedTaxes = (db, r) => {
       const base = (Number(l.tax_base) || 0) * ((l.tax_base_signed || zeroTax) && isRefund(r) ? -1 : 1)
         * (!l.tax_base_signed && !zeroTax && m.reversed_entry_id ? -1 : 1);
       if (l.tax_grid_base) {
-        const key = releasedBaseKey(code, l.tax_tag_ids);
-        bases.set(key, (bases.get(key) ?? 0) + base);
+        for (const tagId of l.tax_tag_ids ?? []) {
+          const key = `${code}:${tagId}`;
+          bases.set(key, (bases.get(key) ?? 0) + base);
+        }
       } else {
         const key = releasedTaxKey(code, l.tax_id, l.tax_name, l.tax_tag_ids);
         const previous = taxes.get(key) ?? { amount: 0, base: 0 };
         const amount = ((!isPurchase(r) !== isRefund(r)) ? 1 : -1) * ((Number(l.credit) || 0) - (Number(l.debit) || 0));
         taxes.set(key, { amount: previous.amount + amount, base: previous.base + base });
+        if (isLegacyMove && l.tax_grid_release && l.tax_name && !l.tax_zero && l.tax_side) {
+          for (const tagId of l.tax_tag_ids ?? []) {
+            legacyTagBases.set(tagId, (legacyTagBases.get(tagId) ?? 0) + base);
+          }
+        }
       }
     }
   }
-  return { taxes, bases };
+  return { taxes, bases, legacyTagBases };
 };
 
 /**
@@ -865,12 +872,32 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
       ? [{ account: transition, debit: value, partner_id: r.partner_id }, { ...tax, credit: value }]
       : [{ ...tax, debit: value }, { account: transition, credit: value, partner_id: r.partner_id }];
   });
-  const dueBases = baseGroups.map((bg) => {
-    const baseAccount = bg.account_id ?? (bg.tax_id ? cashBasisTransitionAccount(db, bg.tax_id, r.company_id) : null);
-    const tagged = final ? released.bases.get(releasedBaseKey(baseAccount, bg.tax_tag_ids)) : null;
-    const priorBase = tagged ?? 0;
-    return { ...bg, account_id: baseAccount, base: companyRound(final ? bg.base - priorBase : bg.base * share) };
-  }).filter((bg) => bg.base);
+  const remainingLegacyByTag = final ? new Map(released.legacyTagBases) : null;
+  const dueBases = final
+    ? baseGroups.flatMap((bg) => {
+        const baseAccount = bg.account_id ?? (bg.tax_id ? cashBasisTransitionAccount(db, bg.tax_id, r.company_id) : null);
+        const byAmount = new Map();
+        for (const tagId of bg.tax_tag_ids ?? []) {
+          const priorGrid = released.bases.get(`${baseAccount}:${tagId}`) ?? 0;
+          const remainingAfterGrid = companyRound(bg.base - priorGrid);
+          const legacyAvailable = remainingLegacyByTag.get(tagId) ?? 0;
+          const consumed = remainingAfterGrid > 0 && legacyAvailable > 0
+            ? Math.min(remainingAfterGrid, legacyAvailable)
+            : remainingAfterGrid < 0 && legacyAvailable < 0
+              ? Math.max(remainingAfterGrid, legacyAvailable)
+              : 0;
+          remainingLegacyByTag.set(tagId, companyRound(legacyAvailable - consumed));
+          const dueBase = companyRound(remainingAfterGrid - consumed);
+          if (!dueBase) continue;
+          if (!byAmount.has(dueBase)) byAmount.set(dueBase, []);
+          byAmount.get(dueBase).push(tagId);
+        }
+        return [...byAmount.entries()].map(([base, tax_tag_ids]) => ({ ...bg, account_id: baseAccount, tax_tag_ids, base }));
+      })
+    : baseGroups.map((bg) => {
+        const baseAccount = bg.account_id ?? (bg.tax_id ? cashBasisTransitionAccount(db, bg.tax_id, r.company_id) : null);
+        return { ...bg, account_id: baseAccount, base: companyRound(bg.base * share) };
+      }).filter((bg) => bg.base);
   if (!lines.length && !dueBases.length) return { db, id: null };
   const baseLines = dueBases.map((bg) => ({
     account_id: bg.account_id,
@@ -895,7 +922,7 @@ export function releaseCashBasis(db, r, share, date, { final = false } = {}) {
     company: read(db, 'res.company', r.company_id ?? 1) ? (r.company_id ?? 1) : null,
     system_generated: true,
   });
-  return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id }) };
+  return { ...posted, db: write(posted.db, 'account.move', posted.id, { cash_basis_origin_move_id: r.id, cash_basis_base_grid: true }) };
 }
 
 /** Draft, full refund, or full refund + new draft copy reversing a posted invoice or bill. */
@@ -1486,6 +1513,7 @@ export const accountingModels = {
       fx_payment_move_id: { type: 'many2one', relation: 'account.move', label: 'Payment Entry', readonly: true },
       fx_invoice_id: { type: 'many2one', relation: 'account.move', label: 'Settlement Invoice', readonly: true },
       cash_basis_origin_move_id: { type: 'many2one', relation: 'account.move', label: 'Journal Entry', readonly: true, hidden: true },
+      cash_basis_base_grid: { type: 'boolean', label: 'Cash Basis Base Grid', readonly: true, hidden: true },
       reversed_entry_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true },
       deferred_adjustment_of_id: { type: 'many2one', relation: 'account.move', label: 'Reversal of', readonly: true, hidden: true },
       // Set by fiscal closing and exchange revaluation only.
