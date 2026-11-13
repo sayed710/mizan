@@ -5,7 +5,9 @@ import { seed } from './seed.js';
 import { models } from './models/index.js';
 import { postMove } from './models/accounting.js';
 import { total } from './models/common.js';
-import { isBalanced } from './models/ledger.js';
+import { isBalanced, reconciledJournalItems } from './models/ledger.js';
+import { MIGRATIONS } from './migrations.js';
+import { handleApi } from '../server/api.js';
 import { isValidBankBic } from './models/partnerbank.js';
 import { invoiceTermNote } from './models/terms.js';
 import { createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
@@ -105,4 +107,61 @@ test('the base currency shows an implicit current rate of 1 against another comp
     records: { ...db.records, 'res.currency': db.records['res.currency'].map((c) => (c.id === base.id ? { ...c, rate_ids: [] } : c.id === own ? { ...ownRec, rate_ids: [{ date: '2020-01-01', rate: 4 }] } : c)) },
   };
   assert.equal(read(setup, 'res.currency', base.id).rate, 0.25);
+});
+
+test('a bank account saved with an old malformed BIC can still be edited without touching the BIC', () => {
+  let db = seed();
+  const bank = create(db, 'res.partner.bank', { partner_id: 1, account_number: 'OLD-BIC-1', bank_bic: 'DEUTDEFF' });
+  db = bank.db;
+  const legacy = { ...db, records: { ...db.records, 'res.partner.bank': db.records['res.partner.bank'].map((b) => (b.id === bank.id ? { ...b, bank_bic: 'DEUT DE FF' } : b)) } };
+  assert.doesNotThrow(() => write(legacy, 'res.partner.bank', bank.id, { allow_out_payment: true }));
+  assert.throws(() => write(legacy, 'res.partner.bank', bank.id, { bank_bic: 'AAAA12BB' }), /BIC\/SWIFT/);
+});
+
+test('migration 45 gives each company its own copy of a tax group their taxes shared', () => {
+  const db = seed();
+  const groupId = db.records['account.tax'][0].tax_group_id;
+  const legacy = {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': [...db.records['res.company'], { id: 2, name: 'Branch', parent_id: 1 }],
+      'account.tax.group': db.records['account.tax.group'].map((g) => (g.id === groupId ? { ...g, company_id: null } : g)),
+      'account.tax': db.records['account.tax'].map((t, i) => (i === 1 ? { ...t, tax_group_id: groupId, company_id: 2 } : t.tax_group_id === groupId ? { ...t, company_id: 1 } : t)),
+    },
+  };
+  const migrated = MIGRATIONS.find((m) => m.version === 45).up(legacy);
+  const branchTax = migrated.records['account.tax'][1];
+  const branchGroup = migrated.records['account.tax.group'].find((g) => g.id === branchTax.tax_group_id);
+  assert.notEqual(branchTax.tax_group_id, groupId);
+  assert.equal(branchGroup.company_id, 2);
+  assert.equal(migrated.records['account.tax.group'].find((g) => g.id === groupId).company_id, 1);
+  assert.equal(migrated.seq['account.tax.group'], branchTax.tax_group_id);
+});
+
+test('journal items of an invoice whose residual is unknown report an unknown residual too', () => {
+  let db = seed();
+  const move = create(db, 'account.move', { move_type: 'out_invoice', partner_id: 1, invoice_date: '2026-03-01', invoice_line_ids: [{ name: 'Item', qty: 1, price_unit: 100, tax_ids: [] }] });
+  db = postMove(move.db, move.id);
+  const unconfigured = write(db, 'res.company', 1, { currency_id: null });
+  const receivable = reconciledJournalItems(unconfigured, read(unconfigured, 'account.move', move.id))
+    .find((l) => read(unconfigured, 'account.account', l.account_id)?.account_type === 'asset_receivable');
+  assert.equal(receivable.amount_residual, null);
+});
+
+test('the API computes analytic balances only from the caller\'s companies', () => {
+  let db = seed();
+  const c2 = createCompanyWithDefaultInvoiceJournals(db, { name: 'Company Two' });
+  db = c2.db;
+  const plan = create(db, 'account.analytic.plan', { name: 'Shared plan' });
+  db = plan.db;
+  const account = create(db, 'account.analytic.account', { name: 'Shared', plan_id: plan.id, company_id: null });
+  db = account.db;
+  db = create(db, 'account.analytic.line', { name: 'Own', account_id: account.id, amount: 30, company_id: 1, date: '2026-03-01' }).db;
+  db = create(db, 'account.analytic.line', { name: 'Other', account_id: account.id, amount: 70, company_id: c2.id, date: '2026-03-01' }).db;
+  const user = { name: 'Limited', isAdmin: false };
+  const one = handleApi({ method: 'GET', path: `/api/v1/account.analytic.account/${account.id}`, query: new URLSearchParams(), db, user, companies: new Set([1]), company: 1 });
+  assert.equal(one.body.balance, 30);
+  const list = handleApi({ method: 'GET', path: '/api/v1/account.analytic.account', query: new URLSearchParams(), db, user, companies: new Set([1]), company: 1 });
+  assert.equal(list.body.records.find((r) => r.id === account.id).balance, 30);
 });

@@ -30,7 +30,7 @@ export function isValidBankBic(bic) {
 export function bankAccountGuard(db, before, r) {
   if (!r.partner_id) return 'Select a partner for the bank account';
   if (!r.account_number || !String(r.account_number).trim()) return 'Bank account number is required';
-  if (!isValidBankBic(r.bank_bic)) return 'BIC/SWIFT must be 8 or 11 alphanumeric characters';
+  if (r.bank_bic !== before?.bank_bic && !isValidBankBic(r.bank_bic)) return 'BIC/SWIFT must be 8 or 11 alphanumeric characters';
 
   const sanitized = sanitizeAccountNumber(r.account_number);
   const allBanks = db?.records?.['res.partner.bank'] ?? [];

@@ -192,6 +192,25 @@ export function scopeAuditChanges(model, changes, companies) {
 }
 
 /** The records of `db` a user limited to `companies` may see (everything for null), and the `model:id` keys left out. */
+/** A records view that filters each model to the user's companies only when that model is first read. */
+export function lazyRestrictedRecords(db, companies) {
+  const cache = new Map();
+  const view = (model) => {
+    if (!cache.has(model)) {
+      const list = db.records[model];
+      cache.set(model, list && list.filter((r) => visibleTo(companies, model, r, db)).map((r) => scopeNestedCompanyArrays(model, r, companies)));
+    }
+    return cache.get(model);
+  };
+  return new Proxy(db.records, {
+    get: (target, model) => (typeof model === 'string' && Object.hasOwn(target, model) ? view(model) : target[model]),
+    getOwnPropertyDescriptor: (target, model) => {
+      const desc = Reflect.getOwnPropertyDescriptor(target, model);
+      return desc && typeof model === 'string' ? { configurable: true, enumerable: desc.enumerable, writable: false, value: view(model) } : desc;
+    },
+  });
+}
+
 export function restrictRecords(db, companies) {
   if (!companies) return { records: db.records, hidden: new Set() };
   const records = {};

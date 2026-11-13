@@ -816,7 +816,11 @@ export function reconciledJournalItems(db, move) {
     let { amount_residual, amount_residual_currency } = base;
     if (amount_residual != null && move.state !== 'cancel' && !reconciled) {
       const counterpart = ['asset_receivable', 'liability_payable'].includes(account?.account_type);
-      if (document && counterpart && remainingByIndex.has(index)) {
+      if (document && counterpart && docResidual == null) {
+        // The document cannot price its residual, so its receivable/payable lines cannot either.
+        amount_residual = null;
+        amount_residual_currency = null;
+      } else if (document && counterpart && remainingByIndex.has(index)) {
         const lineDoc = docLineTotal(line);
         ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, lineDoc > 1e-9 ? remainingByIndex.get(index) / lineDoc : 0));
       } else if (posted && !document && payment?.unapplied != null && counterpart && Math.abs(amount_residual) > 1e-9) {

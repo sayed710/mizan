@@ -1222,14 +1222,24 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
   const roundings = db.records['account.cash.rounding'] ?? [];
 
   let nextGroupSeq = Math.max(0, ...groups.map((g) => Number(g.sequence) || 0));
-  const nextGroups = groups.map((g) => {
-    let companyId = g.company_id;
-    if (companyId == null) {
-      const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
-      companyId = owners.length === 1 ? owners[0] : mainCompanyId;
-    }
+  let nextGroupId = Math.max(0, db.seq?.['account.tax.group'] ?? 0, ...groups.map((g) => g.id ?? 0));
+  // A company-less group used by several companies' taxes becomes one group per company, so each keeps seeing its own.
+  const taxGroupFor = new Map();
+  const nextGroups = groups.flatMap((g) => {
     const sequence = g.sequence ?? (nextGroupSeq += 10);
-    return { ...g, company_id: companyId, sequence };
+    if (g.company_id != null) return [{ ...g, sequence }];
+    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
+    if (owners.length <= 1) return [{ ...g, company_id: owners[0] ?? mainCompanyId, sequence }];
+    const [keep, ...rest] = owners.includes(mainCompanyId) ? [mainCompanyId, ...owners.filter((c) => c !== mainCompanyId)] : owners;
+    return [{ ...g, company_id: keep, sequence }, ...rest.map((companyId) => {
+      const id = ++nextGroupId;
+      taxGroupFor.set(`${g.id}:${companyId}`, id);
+      return { ...g, id, company_id: companyId, sequence };
+    })];
+  });
+  const nextTaxes = taxes.map((t) => {
+    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id}`);
+    return id ? { ...t, tax_group_id: id } : t;
   });
 
   let nextRoundingSeq = Math.max(0, ...roundings.map((r) => Number(r.sequence) || 0));
@@ -1245,8 +1255,10 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
     records: {
       ...db.records,
       ...(groups.length ? { 'account.tax.group': nextGroups } : {}),
+      ...(taxGroupFor.size ? { 'account.tax': nextTaxes } : {}),
       ...(roundings.length ? { 'account.cash.rounding': nextRoundings } : {}),
     },
+    ...(taxGroupFor.size ? { seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId } } : {}),
   };
 } });
 
