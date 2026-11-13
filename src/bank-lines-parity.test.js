@@ -64,6 +64,7 @@ test('account.bank.statement.line list columns, optional columns, labels, badge,
   assert.equal(colLabel(fields, 'journal_id', def.listLabels), 'Journal');
   assert.equal(colLabel(fields, 'bank_move_id', def.listLabels), 'Journal Entry');
   assert.equal(colLabel(fields, 'running_balance', def.listLabels), 'Running Balance');
+  assert.equal(fields.running_balance.sum, false, 'a running balance is not added up in the list footer');
   assert.equal(colLabel(fields, 'payment_ref', def.listLabels), 'Label');
 
   // Drag handle renders draggable rows only when unsorted & ungrouped

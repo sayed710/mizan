@@ -54,10 +54,10 @@ export function visibleListColumns(def, db, optionalState = {}, { list = null, o
 
 const badgeClass = (map, value) => (map ? (map[value] ? `badge badge-${map[value]}` : 'badge') : null);
 
-// Footer sums use the active company's reporting currency for monetary fields.
+// Footer sums use the active company's reporting currency for monetary fields; `sum: false` opts a field out (running balances).
 const Totals = ({ db, cols, fields, records }) =>
   cols.map((f) => {
-    const monetary = fields[f].type === 'monetary';
+    const monetary = fields[f].type === 'monetary' && fields[f].sum !== false;
     const companyBooked = fields[f].currency === 'company';
     const unrated = monetary ? unratedCount(db, records, undefined, { field: f, companyBooked }) : 0;
     return (

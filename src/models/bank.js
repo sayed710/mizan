@@ -557,7 +557,7 @@ export const bankModels = {
       amount: { type: 'monetary', label: 'Amount', required: true },
       currency_id: { type: 'many2one', relation: 'res.currency', label: 'Currency', readonly: true },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', readonly: true },
-      running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, compute: computeRunningBalance },
+      running_balance: { type: 'monetary', label: 'Running Balance', readonly: true, sum: false, compute: computeRunningBalance },
       state: { type: 'selection', label: 'Status', tracking: true, optional: 'hide', badge: { to_check: 'info', reconciled: 'success' }, options: [['to_check', 'To Reconcile'], ['reconciled', 'Reconciled']] },
       journal_id: { type: 'many2one', relation: 'account.journal', label: 'Bank Journal', required: true, domain: (j) => isLiquidityJournal(j) },
       move_id: { type: 'many2one', relation: 'account.move', label: 'Matched with' },
