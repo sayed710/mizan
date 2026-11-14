@@ -1,0 +1,132 @@
+=== acct/t1-invariants.mjs
+{"tag":"after seed","postedMoves":8,"unbalancedMoves":[],"linesWithUnknownAccount":0,"sumDebit":190276,"sumCredit":190276,"diff":0,"trialBalanceTotals":{"initial":0,"debit":190276,"credit":190276,"end":0},"BS":{"assets":173810,"liabilities":10410,"equity":163400,"earnings":8400,"gap":0},"cashFlow":{"net":163366,"sections":163366,"gap":0},"receivable":{"GL":1210,"subledger":1210,"gap":0},"payable":{"GL":9234,"subledger":9234,"gap":0}}
+using SO S00001 draft
+invoice INV/2026/00003 total 9986.4 state posted
+after payments: paid 9986.400000000001 residual 0 paid
+credit note RINV/2026/00001 7866
+{"tag":"after sale->invoice->payment, credit note, bill payment","postedMoves":13,"unbalancedMoves":[],"linesWithUnknownAccount":0,"sumDebit":218214.8,"sumCredit":218214.8,"diff":0,"trialBalanceTotals":{"initial":0,"debit":218214.8,"credit":218214.8,"end":0},"BS":{"assets":175830.4,"liabilities":10570.4,"equity":165260,"earnings":10260,"gap":0},"cashFlow":{"net":173252.4,"sections":173252.4,"gap":0},"receivable":{"GL":-6656,"subledger":-6656,"gap":0},"payable":{"GL":9134,"subledger":9134,"gap":0}}
+=== acct/t10-audit.mjs
+honest diff carries 1 tracking message(s): [ 'Reference: undefined → PO-123' ]
+server messages for move after honest diff: 1 | after forged diff without messages: 0 | ref on server: PO-123
+s1 audit_trail true msg uom.uom
+audited message removable? no (kept)
+audit trail OFF: message removable? yes (removed)
+=== acct/t10b.mjs
+msg 9ca57f6c-0240-4d11-8674-0a5fb51e3391 account.move audited fn? function true settings.audit_trail true
+kept? true
+=== acct/t11-mc.mjs
+settings.currency USD | EU Sub currency EUR
+EUR 100 invoice in EUR-functional company booked as [["INV/2026/00003",108.7,0],["Sales",0,108.7]]
+consolidated AR in USD (expected 100/0.92 = 108.70): 120.78
+=== acct/t12-taxrep.mjs
+seed | journal output VAT 966 | per-tax table sale tax sum 966
++ EUR 1000 invoice @0.92 | journal output VAT 1118.17 | per-tax table sale tax sum 1106
++ unpaid cash-basis 1000 invoice | journal output VAT 1118.17 | per-tax table sale tax sum 1246
++ POS sale (dated today) | journal output VAT 1139.17 | per-tax table sale tax sum 1246
+=== acct/t2-forge.mjs
+target INV/2026/00002 date 2026-09-11 total 1710 paid 500 residual 1210
+ACCEPTED 1 set amount_paid=total on posted invoice
+   -> residual 0 paid | recv gap {"GL":1210,"subledger":0,"gap":1210}
+ACCEPTED 2 unbalance posted line_ids
+   -> debit-credit diff -1709 unbalanced [ 'INV/2026/00002' ] BS gap -1709 TB end total -1709
+ACCEPTED 3a state posted->cancel
+ACCEPTED 3b state posted->draft
+ACCEPTED 4 move posted invoice to 2019-01-01
+ACCEPTED 5 create posted one-sided entry (+1,000,000 bank)
+   -> sumD-sumC 1000000 BS gap 1000000 TB {"initial":0,"debit":1190276,"credit":190276,"end":1000000}
+REJECTED 6a sales-only user sets amount_paid -> No access to account.move
+ACCEPTED 6b inventory-only user sets amount_paid
+ACCEPTED 6c sales-only user retypes 121000 Receivable as income
+   -> BS gap 0 P&L/BS earnings 7190
+ACCEPTED 6d sales-only user changes VAT 14% to 0%
+ACCEPTED 7 archive posted invoice (active:false)
+   -> postedMoves visible 8 TB debit 188566 vs before 190276
+ACCEPTED 8 delete posted invoice (no lock, audit trail off)
+REJECTED 9a [hard lock 2026-12-31] change line_ids -> The period up to 2026-12-31 is locked
+ACCEPTED 9b [hard lock] set amount_paid=total
+ACCEPTED 9c [hard lock] archive active:false
+ACCEPTED 9d [hard lock] change company_id to 2
+ACCEPTED 9e [hard lock] change journal_id/fiscal_position_id/ref
+REJECTED 9f [hard lock] delete -> The period up to 2026-12-31 is locked
+ACCEPTED 9g [hard lock] non-admin clears hard_lock_date & lock_date via settings
+   -> lock_date 2026-12-31 hard 2026-12-31
+ACCEPTED 9h [hard lock] ADMIN clears lock_date & hard_lock_date
+   -> lock_date null hard 2026-12-31
+REJECTED 9i [hard lock] create posted entry dated 2026-06-30 -> The period up to 2026-12-31 is locked
+ACCEPTED 9j [hard lock] create posted unbalanced entry dated 2027-01-02
+REJECTED 9k [hard lock] upsert posted invoice WITHOUT invoice_date (and changed lines) -> The period up to 2026-12-31 is locked
+REJECTED 10a [audit trail] renumber posted -> Posted entries keep their number while the audit trail is active
+ACCEPTED 10b [audit trail] change line amounts
+REJECTED 10c [audit trail] delete numbered -> Numbered entries cannot be deleted while the audit trail is active; cancel them instead
+ACCEPTED 10d [audit trail] remove audit messages
+   -> messages kept 0 of 0
+ACCEPTED 10e [audit trail] inject backdated fake audit message
+   -> stored {"author":"mallory","date":"2020-01-01T00:00:00Z","body":"Status: Draft → Posted (approved by CFO)"}
+=== acct/t3-concurrency.mjs
+draft invoices in seed: [ '6:out_invoice' ]
+A) concurrent post -> INV/2026/00003 / INV/2026/00003
+B) payment move ids chosen by clients: A 12 BNK1/2026/00003  B 12 BNK1/2026/00003
+   server keeps move 12 BNK1/2026/00003 Payment BILL/2026/00001 | invoice INV/2026/00002 amount_paid 600
+   payments on server [ '3:PBNK1/2026/00003:200:move12' ]
+   invariants {"GL":1210,"subledger":1110,"gap":100} {"GL":9034,"subledger":9034,"gap":0}
+C) posted: INV/2026/00003 INV/2026/00004
+   after reset+delete+new post, INV names: [
+  'INV/2026/00001',
+  'INV/2026/00002',
+  'INV/2026/00004',
+  'INV/2026/00004'
+] duplicates: [ 'INV/2026/00004' ]
+D) after Reset to Draft: state draft name INV/2026/00003 line_ids kept 3
+=== acct/t4-rounding-fx.mjs
+1) amount_total 22.81 receivable line 22.82 -> mismatch 0.01
+   after full payment: payment_state paid residual 0 receivable GL left on this invoice 0.01
+2) EUR rates [{"date":"2026-08-27","rate":0.92},{"date":"2026-10-25","rate":0.9}]
+   EUR total 122.93 lines(company ccy) [["INV/2026/00003",133.62,0],["Sales",0,108.76],["Sales",0,8.45],["Taxes",0,16.41]]
+   after same-day full payment: state paid receivable GL residue 0
+2b) EUR 114 paid in 3 parts: state paid amount_paid 114 receivable GL residue 0
+3) tax-included 3x9.99: total 29.97 untaxed 26.29 tax 3.68 lines [["INV/2026/00003",29.97,0],["Sales",0,26.29],["Taxes",0,3.68]]
+4) invoice with net-negative account bucket: total -57 lines [[3,-57,0],[17,0,100],[18,0,-150],[9,0,-7]] balanced? true
+5) negative-total invoice posted: total -114 residual 0 payment_state paid lines [[3,-114,0],[17,0,-100],[9,0,-14]]
+6) cash-basis tax 14.00 paid in 3 parts -> residue on transition account 251100: 0.01
+{"assets":173924.01,"liabilities":10424,"equity":163500.01,"earnings":8500.01,"gap":0}
+=== acct/t4b-fx-search.mjs
+try 2 lines [[4,53.27],[2,75.21]] EUR total 414.39 state paid receivable residue (company ccy) 0.01
+try 5 lines [[4,5.39],[4,46.79]] EUR total 237.94 state paid receivable residue (company ccy) -0.01
+searched 5
+=== acct/t5-cn-bank.mjs
+CN RINV/2026/00001 residual 1140 | invoice INV/2026/00003 residual 1140 not_paid
+customer statement closing (GL, partner 5): 0
+aged receivable row partner 5: {"partner_id":5,"total":1140,"current":0,"1_30":0,"31_60":1140,"61_90":0,"older":0}
+follow-ups partner 5: ["INV/2026/00003"]
+credit-limit exposure partner 5 (receivableOf): 1140
+CN has Register Payment button? true | any button to apply CN to invoice? Confirm, Digitize Document, Register Payment, Send by Email, Credit Note, Print, Reset to Draft, Cancel
+Bank line 5000 matched to invoice residual 1210 -> line state reconciled | bank debit booked 1210
+Outgoing line -300 matched to customer invoice -> bank line {"account_id":1,"partner_id":3,"name":"Payment INV/2026/00002","debit":300,"credit":0} state reconciled
+Line 999 matched to already-paid invoice -> state reconciled | new moves 0
+Reset to Draft offered on payment entry? true
+After reset+cancel of payment entry: invoice amount_paid 600 | receivable {"GL":1210,"subledger":1110,"gap":100}
+=== acct/t6-misc.mjs
+REJECTED POS-only user: pay an order (creates POS journal entry) -> No access to account.move
+no draft payslip in seed
+postEntry with unknown code 24O000 -> posted posted lines [[23,500,0],[null,0,500]]
+   invariants {"tb":{"initial":0,"debit":190776,"credit":190276,"end":500},"bs":{"assets":173810,"liabilities":10410,"equity":162900,"earnings":7900,"gap":500},"unknown":1}
+Client after close: P&L net FY2026 = 8400 | closing move is_closing = true
+Server copy after /api/diff: P&L net FY2026 = 0 | closing move is_closing = undefined | lock_date 2026-12-31
+Non-admin accountant closes year: server lock_date = undefined | fiscal year state closed
+=== acct/t7-payroll.mjs
+REJECTED payroll confirm payslip -> No access to account.move
+REJECTED employees confirm payslip -> No access to account.move
+REJECTED expenses confirm payslip -> No access to hr.payslip
+=== acct/t8-consol.mjs
+full 100% -> lines [["CASH",425],["AR",0],["AP",0],["CAP",-250],["SALES",-125],["COST",0]] | sum of all group balances (should be 0): 50 | unmapped []
+full 60% -> lines [["CASH",425],["AR",0],["AP",0],["CAP",-250],["SALES",-125],["COST",0]] | sum of all group balances (should be 0): 50 | unmapped []
+proportional 60% -> lines [["CASH",275],["AR",0],["AP",0],["CAP",-150],["SALES",-95],["COST",0]] | sum of all group balances (should be 0): 30 | unmapped []
+equity 30% -> lines [["CASH",50],["AR",0],["AP",0],["CAP",0],["SALES",-50],["COST",0],["EQUITY:3",112.5]] | sum of all group balances (should be 0): 112.5 | unmapped []
+=== acct/t9-misc2.mjs
+(a) entry with account-less line posted: posted | TB {"initial":0,"debit":190976,"credit":190276,"end":700} BS gap 700
+(a2) entry with negative debit/credit posted: posted
+(b) invoice INV/2026/00001 total 7866 -> posted credit notes 3 credited total 23598
+(c) ACCEPTED sales user deletes 400000 -> TB {"initial":0,"debit":190276,"credit":181876,"end":8400} BS gap 8400 orphan lines 2
+(c2) ACCEPTED duplicate account code 121000 created by sales user; accounts with code 121000: 2
+(d) pay 1710 on residual 1210 -> bank debit 1210 | payment record amount 1210 | excess recorded anywhere? no
+(e) POS sale of product priced 114 incl. 14% VAT -> cash debit 129.96 revenue 114 VAT 15.96

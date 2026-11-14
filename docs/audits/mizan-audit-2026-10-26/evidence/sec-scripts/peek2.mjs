@@ -1,0 +1,10 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const db = seed();
+console.log('res.company', JSON.stringify(db.records['res.company']));
+const mv = db.records['account.move'];
+console.log(mv.map(m=>`${m.id}:${m.name}:${m.move_type}:${m.state}:${m.amount_paid}`).join(' | '));
+console.log(JSON.stringify(mv.find(m=>m.state==='posted' && m.move_type==='out_invoice')).slice(0,700));
+console.log('payslips', (db.records['hr.payslip']??[]).length, 'employees', JSON.stringify(db.records['hr.employee'][0]).slice(0,300));
+console.log('pickings', (db.records['stock.picking']??[]).map(p=>p.id+':'+p.state).join(','));
+console.log('seq', JSON.stringify(db.seq).slice(0,200));

@@ -1,0 +1,8 @@
+rental models sale.rental,rental.pricing,rental.deposit | sale.rental buttons Confirm,Pickup,Return,Create Invoice,Invoice Late Fee,Cancel
+required partner_id,product_id
+Confirm visible true
+Pickup visible true
+client product qty_available 133 qty_rented 2
+server product qty_rented undefined
+after server round trip, deliver 1 chair: Stock changed outside valuation; reconcile quantities first
+same on the client copy: ok

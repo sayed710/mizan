@@ -1,0 +1,18 @@
+const W = process.argv[2];
+const { seed } = await import(W + '/src/seed.js');
+const { models } = await import(W + '/src/models/index.js');
+const t0 = performance.now();
+const db = seed();
+const t1 = performance.now();
+const counts = Object.entries(db.records).map(([m, r]) => [m, r.length]).sort((a, b) => b[1] - a[1]);
+const total = counts.reduce((s, [, n]) => s + n, 0);
+console.log('seed() ms', (t1 - t0).toFixed(1), 'models in registry', Object.keys(models).length, 'models with records', counts.length, 'records', total, 'messages', db.messages.length);
+console.log('JSON chars', JSON.stringify(db).length);
+console.log('top', counts.slice(0, 8).map((x) => x.join(':')).join(' '));
+const am = db.records['account.move'] ?? [];
+console.log('account.move', am.length, am.slice(0, 5).map((m) => `${m.id}:${m.name}:${m.move_type}:${m.state}`).join(' | '));
+console.log('seq account.move', db.seq['account.move'], 'account.payment', db.seq['account.payment'], 'res.partner', db.seq['res.partner']);
+const guards = Object.entries(models).filter(([, m]) => m.guard).length, pd = Object.entries(models).filter(([, m]) => m.protectDelete).length;
+console.log('guard', guards, 'protectDelete', pd, 'onUnlink', Object.values(models).filter((m) => m.onUnlink).length, 'audited', Object.values(models).filter((m) => m.audited).length);
+console.log('protectDelete models:', Object.entries(models).filter(([, m]) => m.protectDelete).map(([k]) => k).join(','));
+console.log('audited models:', Object.entries(models).filter(([, m]) => m.audited).map(([k]) => k).join(','));
