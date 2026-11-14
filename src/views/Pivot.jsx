@@ -26,13 +26,13 @@ export function Pivot({ db, model, records, groupBy }) {
 
   const rows = rowField ? groupRecords(db, model, records, rowField).filter((g) => g.records.length) : [];
   const cols = colField ? groupRecords(db, model, records, colField).filter((g) => g.records.length) : [];
-  const cell = (recs) => fmt(aggregate(recs, measure));
+  const cell = (recs) => fmt(aggregate(recs, measure, model));
   const inCol = (recs, col) => recs.filter((r) => col.records.includes(r));
 
   const exportCsv = () => {
     const head = [t(models[model].fields[rowField]?.label ?? ''), ...cols.map((c) => t(c.label)), t('Total')];
-    const body = rows.map((r) => [t(r.label), ...cols.map((c) => aggregate(inCol(r.records, c), measure)), aggregate(r.records, measure)]);
-    const csv = [head, ...body].map((line) => line.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const body = rows.map((r) => [t(r.label), ...cols.map((c) => aggregate(inCol(r.records, c), measure, model)), aggregate(r.records, measure, model)]);
+    const csv = [head, ...body].map((line) => line.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
     a.download = `${model}-pivot.csv`;

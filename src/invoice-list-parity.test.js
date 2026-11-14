@@ -169,7 +169,7 @@ async function actClick(el) {
   await act(async () => props(el).onClick({ stopPropagation: () => {}, preventDefault: () => {} }));
 }
 
-test('credit notes and refunds show signed negative document-currency amounts, bold Number/Total, and net sum footers', async () => {
+test('credit notes and bills show signed negative and vendor refunds positive document-currency amounts, bold Number/Total, and net sum footers', async () => {
   let db = cleanMovesDb();
   let eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
   if (!eur) {
@@ -206,11 +206,17 @@ test('credit notes and refunds show signed negative document-currency amounts, b
   assert.equal(cnRec.amount_total_in_currency_signed, -44);
   assert.equal(cnRec.amount_residual_in_currency_signed, -44);
 
+  const billRec = read(db, 'account.move', bill.id);
+  assert.equal(billRec.amount_untaxed_in_currency_signed, -200);
+  assert.equal(billRec.amount_tax_in_currency_signed, -20);
+  assert.equal(billRec.amount_total_in_currency_signed, -220);
+  assert.equal(billRec.amount_residual_in_currency_signed, -220);
+
   const refundRec = read(db, 'account.move', refund.id);
-  assert.equal(refundRec.amount_untaxed_in_currency_signed, -50);
-  assert.equal(refundRec.amount_tax_in_currency_signed, -5);
-  assert.equal(refundRec.amount_total_in_currency_signed, -55);
-  assert.equal(refundRec.amount_residual_in_currency_signed, -55);
+  assert.equal(refundRec.amount_untaxed_in_currency_signed, 50);
+  assert.equal(refundRec.amount_tax_in_currency_signed, 5);
+  assert.equal(refundRec.amount_total_in_currency_signed, 55);
+  assert.equal(refundRec.amount_residual_in_currency_signed, 55);
 
   const ctx = await mountMoveList(leafFor('Customers', 'credit-notes'), db);
   try {

@@ -2,7 +2,7 @@
 import { read, search, write } from '../orm.js';
 import { monthFilters, shiftMonth, today } from './common.js';
 import { reverseEntry, reversePayment, reverseWriteoff } from './pay.js';
-import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount } from './ledger.js';
+import { bookedStatementAmount, ensureBankSuspense, invoiceCounterpartAccount, isLiquidityJournal, isPaymentMatched, paymentJournal, postEntry, statementCompanyAmount, statementPaymentIds } from './ledger.js';
 import { rateAt, toCompany } from './currency.js';
 import { payMove, settleWriteoff } from './accounting.js';
 import { applyRule, sameCommercialPartner, suggestRule } from './reconcile.js';
@@ -158,6 +158,7 @@ function resolveAndValidatePayments(db, line) {
     if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
     if (isPaymentMatched(db, payment, line.id)) throw new Error('Payment is already matched');
   }
+  if (new Set(payments.map((payment) => payment.move_id)).size !== payments.length) throw new Error('A payment can only be selected once');
 
   const via = paymentJournal(db, line.journal_id ?? payments[0].journal_id, company);
   const journal = read(db, 'account.journal', via.id);
@@ -182,7 +183,7 @@ function paymentOutstandingItem(db, payment, line, via) {
   const liquidity = (entry.line_ids ?? []).filter((l) => l.account_id === targetAccount && (incoming ? Number(l.debit) > 0 && !Number(l.credit) : Number(l.credit) > 0 && !Number(l.debit)));
   if (liquidity.length !== 1) throw new Error('Cannot identify the payment outstanding item');
   if (outstanding && outstanding === via.accountId) throw new Error('Outstanding and bank accounts must differ');
-  return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding };
+  return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding, currency_id: liquidity[0].currency_id ?? null };
 }
 
 function matchPayment(db, line) {
@@ -229,7 +230,7 @@ function matchPayment(db, line) {
         move_id: primaryMoveId,
         bank_move_id: primaryMoveId,
         open_amount: 0,
-        allocations: [{ payment_move_id: primaryMoveId, amount }],
+        allocations: payments.map((p, i) => ({ payment_move_id: p.move_id, amount: outstandingItems[i].amount })),
         payment_move_id: payments.length === 1 ? payments[0].move_id : null,
         payment_id: payments.length === 1 ? payments[0].id : null,
         payment_ids: payments.map((p) => p.id),
@@ -238,12 +239,34 @@ function matchPayment(db, line) {
     };
   }
   const fx = (value) => foreign ? { currency_id: journal.currency_id, amount_currency: value } : {};
-  const bankLine = incoming ? { account: via.accountId, debit: amount, ...fx(Math.abs(line.amount)) } : { account: via.accountId, credit: amount, ...fx(-Math.abs(line.amount)) };
-  const paymentLines = outstandingItems.map((item, i) => (incoming
+  // Direct payments already posted their liquidity lines to the bank account; net them with the statement line so only one liquidity delta line is posted.
+  const statementSigned = incoming ? amount : -amount;
+  const directOffset = round(outstandingItems.reduce((sum, item) => sum + (item.isDirect ? (incoming ? -item.amount : item.amount) : 0), 0));
+  const netLiquidity = round(statementSigned + directOffset);
+  const journalCurr = foreign ? read(db, 'res.currency', journal.currency_id) : null;
+  const netFx = foreign
+    ? roundCurrency(
+        (incoming ? Math.abs(line.amount) : -Math.abs(line.amount))
+          + outstandingItems.reduce((sum, item, i) => sum + (item.isDirect ? (incoming ? -fxAmounts[i] : fxAmounts[i]) : 0), 0),
+        journalCurr,
+      )
+    : 0;
+  const includeBankFx = foreign && (
+    netFx !== 0
+    || !outstandingItems.some((item) => item.isDirect)
+    || outstandingItems.some((item) => item.isDirect && item.currency_id === journal.currency_id)
+  );
+  const bankFx = includeBankFx ? { currency_id: journal.currency_id, amount_currency: netFx } : {};
+  const bankLines = netLiquidity
+    ? [netLiquidity > 0
+        ? { account: via.accountId, debit: netLiquidity, ...bankFx }
+        : { account: via.accountId, credit: -netLiquidity, ...bankFx }]
+    : [];
+  const paymentLines = outstandingItems.flatMap((item, i) => (item.isDirect ? [] : [incoming
     ? { account: item.account, credit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(-fxAmounts[i]) }
-    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }));
+    : { account: item.account, debit: item.amount, partner_id: item.partner_id, name: item.name, ...fx(fxAmounts[i]) }]));
 
-  const lines = incoming ? [bankLine, ...paymentLines] : [...paymentLines, bankLine];
+  const lines = incoming ? [...bankLines, ...paymentLines] : [...paymentLines, ...bankLines];
   const writeoff = needsWriteoff ? (foreign ? statementCompanyAmount(db, line, foreignDifference) : difference) : 0;
   if (needsWriteoff) {
     const companyNet = incoming ? writeoff : -writeoff;
@@ -377,7 +400,7 @@ export function unreconcile(db, line, reversalDate = null) {
   const bankId = target.bank_move_id ?? (target.payment_id ? target.move_id : null);
   if (!bankId) throw new Error('Cannot unreconcile a transaction without its bank entry link');
   const allocations = target.allocations ?? [];
-  const date = reversalDate ?? [today(), target.date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
+  const date = reversalDate ?? [today(), target.date ?? '', read(db, 'account.move', bankId)?.invoice_date ?? '', ...allocations.map((a) => read(db, 'account.move', a.payment_move_id)?.invoice_date ?? '')].sort().at(-1);
 
   let current = db;
   const isDirectPayment = (moveId) => (db.records['account.payment'] ?? []).some((p) => p.move_id === moveId && !p.outstanding_account_id);
@@ -407,6 +430,98 @@ export function unreconcile(db, line, reversalDate = null) {
     allocations: [],
   });
   return { db: current };
+}
+
+/** Validate the booked bank entry and payment allocations against the statement line amount and journal. */
+function bankEntryGuardError(db, after, { company, round, referenceAmount, via, bankAccount, allocations }) {
+  const bankEntry = read(db, 'account.move', after.bank_move_id);
+  const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
+  const incoming = after.amount > 0;
+  const sign = incoming ? 1 : -1;
+  const signedNet = (lines) => round(sign * lines.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0));
+
+  const linkedPayments = statementPaymentIds(db, after).map((id) => read(db, 'account.payment', id));
+  const directPayments = linkedPayments.filter((p) => p && !p.outstanding_account_id);
+  const directMoveIds = new Set(directPayments.map((p) => p.move_id).filter(Boolean));
+  const isDirectMatch = directPayments.length > 0
+    && after.state === 'reconciled'
+    && allocations.every((a) => !a.invoice_id && !a.reconcile_model_id);
+
+  if (isDirectMatch) {
+    if (linkedPayments.some((p) => !p || p.state !== 'posted' || (p.company_id ?? 1) !== company || (p.payment_type === 'inbound') !== incoming || !p.move_id)) {
+      return 'The linked payment belongs to another company or does not exist';
+    }
+    if (directMoveIds.size !== directPayments.length) return 'A payment can only be selected once';
+    let directSum = 0;
+    const directBookedByMove = new Map();
+    const directCurrencyLines = [];
+    for (const payment of directPayments) {
+      const entry = read(db, 'account.move', payment.move_id);
+      const entryBankLines = (entry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
+      const amt = signedNet(entryBankLines);
+      if (entry?.state !== 'posted' || (entry.company_id ?? 1) !== company || entryBankLines.length !== 1 || !(amt > 0)) {
+        return 'The bank entry must book the transaction amount once';
+      }
+      directBookedByMove.set(payment.move_id, amt);
+      directCurrencyLines.push(entryBankLines[0]);
+      directSum = round(directSum + amt);
+    }
+    if (referenceAmount !== statementCompanyAmount(db, after)) {
+      return 'The bank entry must book the transaction amount once';
+    }
+    if (directMoveIds.has(after.bank_move_id)) {
+      if (linkedPayments.length !== directPayments.length || allocations.length !== directPayments.length) {
+        return 'Bank transaction allocations must match its amount';
+      }
+      for (const allocation of allocations) {
+        if (!directBookedByMove.has(allocation.payment_move_id) || round(allocation.amount) !== directBookedByMove.get(allocation.payment_move_id)) {
+          return 'Bank transaction allocations must match its amount';
+        }
+      }
+      const journalCurrId = read(db, 'account.journal', after.journal_id)?.currency_id;
+      if (journalCurrId && directCurrencyLines.every((l) => l.currency_id === journalCurrId)) {
+        const curr = read(db, 'res.currency', journalCurrId);
+        const sumFx = directCurrencyLines.reduce((sum, l) => sum + (Number(l.amount_currency) || 0), 0);
+        if (roundCurrency(sumFx, curr) !== roundCurrency(after.amount, curr)) {
+          return 'The bank entry must book the transaction amount once';
+        }
+      }
+      return null;
+    }
+    const expectedDelta = round(referenceAmount - directSum);
+    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id)) {
+      return 'The bank entry must book the transaction amount once';
+    }
+    if (expectedDelta === 0 ? bankLines.length !== 0 : (bankLines.length !== 1 || signedNet(bankLines) !== expectedDelta)) {
+      return 'The bank entry must book the transaction amount once';
+    }
+    if (allocations.length !== 1 || allocations[0].payment_move_id !== after.bank_move_id || round(allocations[0].amount) !== referenceAmount) {
+      return 'Bank transaction allocations must match its amount';
+    }
+    return null;
+  }
+
+  if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(incoming ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) {
+    return 'The bank entry must book the transaction amount once';
+  }
+  const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
+  for (const allocation of allocations) {
+    const entry = read(db, 'account.move', allocation.payment_move_id);
+    if (allocation.invoice_id && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((p) => p.move_id === allocation.payment_move_id && !p.reversed)) return 'The matched document must link to its settlement entry';
+    if (allocation.writeoff_move_id) {
+      const invoice = read(db, 'account.move', allocation.invoice_id);
+      const writeoff = read(db, 'account.move', allocation.writeoff_move_id);
+      const account = read(db, 'account.account', after.writeoff_account_id);
+      const items = (writeoff?.line_ids ?? []).filter((l) => l.account_id === after.writeoff_account_id && l.name === after.writeoff_label && l.partner_id === invoice?.partner_id);
+      if (after.writeoff_move_id !== allocation.writeoff_move_id || !(invoice?.payments ?? []).some((p) => p.move_id === allocation.writeoff_move_id && !p.reversed) || !account || (account.company_id && account.company_id !== company) || writeoff?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(incoming ? items[0].debit : items[0].credit) !== statementCompanyAmount(db, after, Number(after.writeoff_amount))) return 'The matched document must link to its write-off entry';
+    }
+    if (allocation.payment_move_id !== after.bank_move_id) {
+      const items = (entry?.line_ids ?? []).filter((l) => l.account_id === suspense);
+      if (entry?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(incoming ? items[0].debit : items[0].credit) !== round(allocation.amount)) return 'The settlement must clear the bank suspense amount';
+    }
+  }
+  if (after.writeoff_move_id && !allocations.some((a) => a.writeoff_move_id === after.writeoff_move_id)) return 'The matched document must link to its write-off entry';
+  return null;
 }
 
 /** A reconciled line must point at a posted entry, and is frozen afterwards (amount, sign, date, partner, label, link). */
@@ -448,28 +563,9 @@ function lineGuard(db, before, after) {
     const allocations = after.allocations ?? [];
     const allocated = allocations.reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
     if (allocations.some((a) => !(Number(a.amount) > 0) || !a.payment_move_id) || new Set(allocations.map((a) => a.payment_move_id)).size !== allocations.length || round(allocated + Number(after.open_amount)) !== referenceAmount) return 'Bank transaction allocations must match its amount';
-    const bankEntry = read(db, 'account.move', after.bank_move_id);
     const via = paymentJournal(db, after.journal_id, company);
-    const bankAccount = via.accountId;
-    const bankLines = (bankEntry?.line_ids ?? []).filter((l) => l.account_id === bankAccount);
-    if (bankEntry?.state !== 'posted' || (after.journal_id && bankEntry.journal_id !== after.journal_id) || bankLines.length !== 1 || round(after.amount > 0 ? bankLines[0].debit : bankLines[0].credit) !== referenceAmount || (bankLines[0].currency_id && roundCurrency(bankLines[0].amount_currency, read(db, 'res.currency', bankLines[0].currency_id)) !== roundCurrency(after.amount, read(db, 'res.currency', bankLines[0].currency_id)))) return 'The bank entry must book the transaction amount once';
-    const suspense = allocations.some((a) => a.payment_move_id !== after.bank_move_id) ? ensureBankSuspense(db, company, via.id).id : null;
-    for (const allocation of allocations) {
-      const entry = read(db, 'account.move', allocation.payment_move_id);
-      if (allocation.invoice_id && !(read(db, 'account.move', allocation.invoice_id)?.payments ?? []).some((p) => p.move_id === allocation.payment_move_id && !p.reversed)) return 'The matched document must link to its settlement entry';
-      if (allocation.writeoff_move_id) {
-        const invoice = read(db, 'account.move', allocation.invoice_id);
-        const writeoff = read(db, 'account.move', allocation.writeoff_move_id);
-        const account = read(db, 'account.account', after.writeoff_account_id);
-        const items = (writeoff?.line_ids ?? []).filter((l) => l.account_id === after.writeoff_account_id && l.name === after.writeoff_label && l.partner_id === invoice?.partner_id);
-        if (after.writeoff_move_id !== allocation.writeoff_move_id || !(invoice?.payments ?? []).some((p) => p.move_id === allocation.writeoff_move_id && !p.reversed) || !account || (account.company_id && account.company_id !== company) || writeoff?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(after.amount > 0 ? items[0].debit : items[0].credit) !== statementCompanyAmount(db, after, Number(after.writeoff_amount))) return 'The matched document must link to its write-off entry';
-      }
-      if (allocation.payment_move_id !== after.bank_move_id) {
-        const items = (entry?.line_ids ?? []).filter((l) => l.account_id === suspense);
-        if (entry?.journal_id !== bankEntry.journal_id || items.length !== 1 || round(after.amount > 0 ? items[0].debit : items[0].credit) !== round(allocation.amount)) return 'The settlement must clear the bank suspense amount';
-      }
-    }
-    if (after.writeoff_move_id && !allocations.some((a) => a.writeoff_move_id === after.writeoff_move_id)) return 'The matched document must link to its write-off entry';
+    const bankError = bankEntryGuardError(db, after, { company, round, referenceAmount, via, bankAccount: via.accountId, allocations });
+    if (bankError) return bankError;
   }
   if (after.state === 'reconciled' && after.open_amount > 0) return 'A reconciled bank transaction cannot have an open amount';
   if (after.state !== 'reconciled' && !after.bank_move_id) return null;

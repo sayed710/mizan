@@ -2,13 +2,13 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { read, search, write } from '../orm.js';
 import { today } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
-import { balanceSheet, filterByAnalytic, journalItems, profitAndLoss } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { filterByAnalytic, journalItems } from '../models/ledger.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
-import { companyViewDb, scopeAuditRows } from '../companyView.js';
+import { scopeAuditRows } from '../companyView.js';
 import { currentCompany } from '../models/company.js';
 import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
 import { auditSummary } from '../audit.js';
@@ -19,31 +19,19 @@ import { money } from '../ui.jsx';
 import { downloadCsv, tableToRows } from '../csv.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
-import { balanceAnalyticColumns, balanceColumns, cashflowColumns, periodsFor, pnlAnalyticColumns, pnlColumns, supportsHorizontalGroupComparison } from './reportCompare.js';
-import { DEFAULT_REPORT_PERIOD, reportPage } from './reportNavigation.js';
+import { cashflowColumns, periodsFor } from './reportCompare.js';
+import { DEFAULT_REPORT_PERIOD, PERIODS, reportPage } from './reportNavigation.js';
+export { PERIODS };
 import { UnrealizedCurrencies } from './UnrealizedCurrencies.jsx';
 import { SalesReview } from './SalesReview.jsx';
 import { JournalItems } from './JournalItems.jsx';
 import { LoansAnalysis } from './LoansAnalysis.jsx';
 import { Checks } from './Checks.jsx';
 import { CashflowAnalysis } from './CashflowAnalysis.jsx';
+import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 import { ConfigurableReportPage } from './ConfigurableReport.jsx';
 
-// Periods cover the whole month/quarter/year (entries dated later in the period, e.g. month-end payroll, count).
-const monthEnd = (y, m) => `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
-export const PERIODS = {
-  month: () => {
-    const d = new Date();
-    return { from: today().slice(0, 7) + '-01', to: monthEnd(d.getFullYear(), d.getMonth() + 1) };
-  },
-  quarter: () => {
-    const d = new Date();
-    const q = Math.floor(d.getMonth() / 3) * 3;
-    return { from: `${d.getFullYear()}-${String(q + 1).padStart(2, '0')}-01`, to: monthEnd(d.getFullYear(), q + 3) };
-  },
-  year: () => ({ from: today().slice(0, 4) + '-01-01', to: today().slice(0, 4) + '-12-31' }),
-  all: () => ({ from: '', to: '9999-12-31' }),
-};
+// Periods are defined in reportNavigation.js and re-exported above.
 
 function ComparisonCells({ values, variance, showVariance = true }) {
   const cells = values.map((value, i) => <td key={i} className="num">{money(value)}</td>);
@@ -76,45 +64,11 @@ const Total = ({ label, value, strong, values, variance, showVariance = true }) 
   <tr className={`rep-total ${strong ? 'strong' : ''}`}><td>{t(label)}</td>{values ? <ComparisonCells values={values} variance={variance} showVariance={showVariance} /> : <td className="num">{money(value)}</td>}</tr>
 );
 
-function Comparison({ data, report }) {
+function Comparison({ data }) {
   const showVariance = Boolean(data.variance);
   const section = (i) => <Section key={data.sections[i].title} {...data.sections[i]} variance={data.variance?.[i]} showVariance={showVariance} />;
   const total = (i) => <Total key={data.totals[i].label} {...data.totals[i]} variance={data.variance?.[data.sections.length + i]} showVariance={showVariance} />;
-  return <tbody>{report === 'pnl'
-    ? [section(0), section(1), total(0), section(2), total(1), section(3), section(4), total(2)]
-    : report === 'balance'
-      ? [section(0), total(0), section(1), section(2), section(3), total(1)]
-      : [...data.sections.map((_, i) => section(i)), ...data.totals.map((_, i) => total(i))]}</tbody>;
-}
-
-function Pnl({ db, period, analyticAccountIds }) {
-  const p = profitAndLoss(db, period, { analyticAccountIds });
-  return (
-    <tbody>
-      <Section title="Revenue" total={p.revenue} rows={p.detail.revenue} />
-      <Section title="Cost of Revenue" total={p.cost} rows={p.detail.cost} />
-      <Total label="Gross Profit" value={p.gross} />
-      <Section title="Expenses" total={p.expense} rows={p.detail.expense} />
-      <Total label="Net Operating Income" value={p.operating} />
-      <Section title="Other Income" total={p.otherIncome} rows={p.detail.otherIncome} />
-      <Section title="Other Expenses" total={p.otherExpense} rows={p.detail.otherExpense} />
-      <Total label="Net Income" value={p.net} strong />
-    </tbody>
-  );
-}
-
-function Balance({ db, period, analyticAccountIds }) {
-  const b = balanceSheet(db, period.to, { analyticAccountIds });
-  return (
-    <tbody>
-      <Section title="Assets" total={b.totalAssets} rows={b.assets} />
-      <Total label="Total Assets" value={b.totalAssets} strong />
-      <Section title="Liabilities" total={b.totalLiabilities} rows={b.liabilities} />
-      <Section title="Equity" total={b.totalEquity - b.earnings} rows={b.equity} />
-      <Section title="Current Year Earnings" total={b.earnings} rows={b.earningsAccount ? [{ account: b.earningsAccount, balance: b.earnings }] : []} />
-      <Total label="Liabilities + Equity" value={b.totalLiabilities + b.totalEquity} strong />
-    </tbody>
-  );
+  return <tbody>{[...data.sections.map((_, i) => section(i)), ...data.totals.map((_, i) => total(i))]}</tbody>;
 }
 
 function Ledger({ db, period, analyticAccountIds }) {
@@ -229,8 +183,8 @@ const Aged = (kind) => function AgedBody({ db, period, companyId }) {
 
 function FollowUpActions({ db, reminder, companyId }) {
   const email = read(db, 'res.partner', reminder.partner_id)?.email?.trim();
-  const channel = followUpLevel(db, reminder)?.channel;
-  const manualChannel = ['phone', 'letter'].includes(channel) ? channel : 'email';
+  const channel = levelChannel(followUpLevel(db, reminder));
+  const manualChannel = ['sms', 'phone', 'letter'].includes(channel) ? channel : 'email';
   const options = { scope: db, reminder, companyId };
   return <>
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}
@@ -541,8 +495,8 @@ const REPORTS = {
   followups: { title: 'Follow-up Reports', Body: FollowUps, cols: ['Oldest Due', 'Overdue'] },
   budget: { title: 'Budget vs Actual', Body: Budget, cols: ['Planned', 'Actual', 'Committed', 'Variance', 'Achievement'] },
   analytic: { title: 'Analytic Report', Body: Analytic, cols: ['Balance'] },
-  pnl: { title: 'Profit and Loss', Body: Pnl, cols: ['Balance'] },
-  balance: { title: 'Balance Sheet', Body: Balance, cols: ['Balance'] },
+  pnl: { title: 'Profit and Loss', cols: ['Balance'] },
+  balance: { title: 'Balance Sheet', cols: ['Balance'] },
   ledger: { title: 'General Ledger', Body: Ledger, cols: ['Debit', 'Credit', 'Balance'] },
   journalAudit: { title: 'Journal Audit', Body: JournalAudit, firstCol: 'Date', cols: ['Number', 'Partner', 'Account', 'Label', 'Debit', 'Credit'] },
   inalterability: { title: 'Data Inalterability Check', Body: InalterabilityCheck, firstCol: 'Journal', cols: ['First Secured Entry', 'Last Secured Entry', 'Status'] },
@@ -551,6 +505,9 @@ const REPORTS = {
 /** Financial reports computed live from posted journal items. */
 export function Reports({ leaf, id }) {
   if (leaf.report === 'configurable') return <ConfigurableReportPage id={id} />;
+  if (leaf.report === 'pnl' || leaf.report === 'balance') {
+    return <ConfigurableReportPage key={leaf.report} statementKind={leaf.report} title={REPORTS[leaf.report].title} />;
+  }
   const component = ['journalItems', 'unreconciledItems'].includes(leaf.report) ? JournalItems
     : leaf.report === 'unrealizedCurrencies' ? UnrealizedCurrencies
     : leaf.report === 'checks' ? Checks
@@ -562,13 +519,10 @@ export function Reports({ leaf, id }) {
 
 function ReportPage({ leaf }) {
   const sourceDb = useDb();
-  const allowed = sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)];
-  const allowedSet = new Set(allowed);
-  const companyDb = companyViewDb(sourceDb);
-  const companies = companiesOf(sourceDb).filter((company) => allowedSet.has(company.id));
+  const [companyId, setCompanyId] = useState('all');
+  const { companyDb, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId, { allowAll: leaf.report !== 'customerStatement' });
   const [periodKey, setPeriodKey] = useState(DEFAULT_REPORT_PERIOD);
   const [comparison, setComparison] = useState('none');
-  const [companyId, setCompanyId] = useState('all');
   const [ledgerId, setLedgerId] = useState('');
   const [journalId, setJournalId] = useState('');
   const [horizontalGroupId, setHorizontalGroupId] = useState('');
@@ -593,29 +547,19 @@ function ReportPage({ leaf }) {
         },
       }
     : companyDb;
-  const selectedCompany = leaf.report === 'customerStatement' && (companyId === 'all' || !allowedSet.has(Number(companyId)))
-    ? String(currentCompany(sourceDb))
-    : (companyId === 'all' || allowedSet.has(Number(companyId)) ? companyId : 'all');
   const [customPeriod, setCustomPeriod] = useState({ from: today().slice(0, 4) + '-01-01', to: today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
   const period = periodKey === 'custom' ? customPeriod : PERIODS[periodKey]();
   const comparable = ['pnl', 'balance', 'cashflow'].includes(leaf.report) && !['all', 'custom'].includes(periodKey);
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive'].includes(leaf.report);
-  const horizontalGroups = comparable && supportsHorizontalGroupComparison(leaf.report) ? search(companyDb, 'account.report.horizontal.group').filter((g) =>
-    (g.company_id ?? 1) === (selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany))
-  ) : [];
-  const horizontalGroup = comparable ? horizontalGroups.find((g) => g.id === Number(horizontalGroupId)) : null;
+  const horizontalGroups = [];
   const periods = comparable && comparison !== 'none' ? periodsFor(periodKey, comparison, today()) : null;
   const analyticAccounts = showAnalyticFilter ? search(companyDb, 'account.analytic.account') : [];
-  const data = horizontalGroup
-    ? (leaf.report === 'pnl'
-      ? pnlAnalyticColumns(db, horizontalGroup, period, { analyticAccountIds })
-      : balanceAnalyticColumns(db, horizontalGroup, period, { analyticAccountIds }))
-    : periods
-      ? ({ pnl: pnlColumns, balance: balanceColumns, cashflow: cashflowColumns }[leaf.report])(db, periods, {
-        analyticAccountIds, ...(leaf.report === 'cashflow' && selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
-      })
-      : null;
+  const data = periods && leaf.report === 'cashflow'
+    ? cashflowColumns(db, periods, {
+      analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
+    })
+    : null;
   const tableRef = useRef(null);
   const exportCsv = () => {
     downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
@@ -647,14 +591,8 @@ function ReportPage({ leaf }) {
             {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
           </select>
         </label>}
-        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? companiesOf(sourceDb).length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
-          <label className="inline-select">
-            {t('Company')}
-            <select aria-label={t('Company')} value={selectedCompany} onChange={(e) => setCompanyId(e.target.value)}>
-              {leaf.report !== 'customerStatement' && <option value="all">{t('All Companies')}</option>}
-              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </label>
+        {(['journalAudit', 'inalterability', 'cashflow', 'depreciation'].includes(leaf.report) ? availableCompanies.length > 1 : leaf.report === 'customerStatement' && companies.length > 1) && (
+          <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll={leaf.report !== 'customerStatement'} />
         )}
         {showAnalyticFilter && analyticAccounts.length > 0 && (
           <label className="inline-select">

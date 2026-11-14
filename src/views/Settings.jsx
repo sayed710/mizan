@@ -220,6 +220,35 @@ function validateCompanySettingWrite(db, company, vals) {
   if (vals.invoice_qr !== undefined && vals.invoice_qr !== null && !['zatca', 'epc'].includes(vals.invoice_qr)) {
     return 'Select a valid payment QR format';
   }
+  for (const field of ['deferred_revenue_journal_id', 'deferred_expense_journal_id']) {
+    if (vals[field] === undefined || vals[field] === null) continue;
+    const journal = (db.records['account.journal'] ?? []).find((x) => x.id === vals[field]);
+    if (!journal || journal.active === false || journal.type !== 'general' || (journal.company_id && journal.company_id !== company.id)) {
+      return 'Select an active general journal belonging to this company';
+    }
+  }
+  for (const field of ['deferred_revenue_account_id', 'deferred_expense_account_id']) {
+    if (vals[field] === undefined || vals[field] === null) continue;
+    const account = (db.records['account.account'] ?? []).find((x) => x.id === vals[field]);
+    if (!account || account.active === false || (account.company_id && account.company_id !== company.id)) {
+      return 'Select an active deferred account belonging to this company';
+    }
+  }
+  for (const field of ['generate_deferred_revenue_entries_method', 'generate_deferred_expense_entries_method']) {
+    if (vals[field] !== undefined && vals[field] !== null && !['on_validation', 'manual'].includes(vals[field])) {
+      return 'Select a valid deferred entry generation method';
+    }
+  }
+  for (const field of ['deferred_revenue_amount_computation_method', 'deferred_expense_amount_computation_method']) {
+    if (vals[field] !== undefined && vals[field] !== null && !['day', 'month', 'full_months'].includes(vals[field])) {
+      return 'Select a valid deferred amount computation method';
+    }
+  }
+  for (const field of ['deferred_revenue_periodicity', 'deferred_expense_periodicity']) {
+    if (vals[field] !== undefined && vals[field] !== null && !['month', 'year'].includes(vals[field])) {
+      return 'Select a valid deferred periodicity';
+    }
+  }
   for (const dateField of ['tax_start_date', 'lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date']) {
     if (vals[dateField] !== undefined && vals[dateField] !== null && !DATE_RE.test(vals[dateField])) {
       return 'Enter a valid date';
@@ -241,6 +270,44 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
   const showFiscalPeriods = ['lock_date', 'sale_lock_date', 'purchase_lock_date', 'tax_lock_date', 'hard_lock_date', 'audit_trail'].some(hasField);
   const roundingOptions = fields.tax_calculation_rounding_method?.options ?? [['round_per_line', 'Round per Line'], ['round_globally', 'Round Globally']];
   const periodicityOptions = fields.tax_periodicity?.options ?? [['monthly', 'Monthly'], ['trimester', 'Trimester'], ['semester', 'Semester'], ['year', 'Year']];
+  const generalJournals = (db.records['account.journal'] ?? [])
+    .filter((j) => j.active !== false && j.type === 'general' && (!j.company_id || !company || j.company_id === company.id));
+  const companyAccounts = (db.records['account.account'] ?? [])
+    .filter((a) => a.active !== false && (!a.company_id || !company || a.company_id === company.id));
+  const deferredBlocks = [
+    {
+      block: 'deferred_revenues',
+      title: 'Deferred Revenues',
+      journalField: 'deferred_revenue_journal_id',
+      journalLabel: 'Deferred Revenue Journal',
+      journalDesc: 'Journal used for deferred revenue recognition entries.',
+      accountField: 'deferred_revenue_account_id',
+      accountLabel: 'Deferred Revenue Account',
+      accountDesc: 'Default account where deferred revenues are booked until recognition.',
+      generateField: 'generate_deferred_revenue_entries_method',
+      generateDesc: 'Choose whether deferred revenue entries are generated on invoice validation or manually in grouped batches.',
+      computationField: 'deferred_revenue_amount_computation_method',
+      computationDesc: 'Choose how deferred revenue amounts are prorated across recognition periods.',
+      periodicityField: 'deferred_revenue_periodicity',
+      periodicityDesc: 'Periodicity used for deferred revenue boards and grouped entry generation.',
+    },
+    {
+      block: 'deferred_expenses',
+      title: 'Deferred Expenses',
+      journalField: 'deferred_expense_journal_id',
+      journalLabel: 'Deferred Expense Journal',
+      journalDesc: 'Journal used for deferred expense recognition entries.',
+      accountField: 'deferred_expense_account_id',
+      accountLabel: 'Deferred Expense Account',
+      accountDesc: 'Default account where prepaid expenses are booked until recognition.',
+      generateField: 'generate_deferred_expense_entries_method',
+      generateDesc: 'Choose whether deferred expense entries are generated on bill validation or manually in grouped batches.',
+      computationField: 'deferred_expense_amount_computation_method',
+      computationDesc: 'Choose how deferred expense amounts are prorated across recognition periods.',
+      periodicityField: 'deferred_expense_periodicity',
+      periodicityDesc: 'Periodicity used for deferred expense boards and grouped entry generation.',
+    },
+  ];
 
   return (
     <section className="settings-accounting" aria-label={t('Accounting')}>
@@ -372,6 +439,61 @@ function AccountingSection({ db, company, readOnly, onWriteCompany }) {
           )}
         </div>
       )}
+
+      {deferredBlocks.map((cfg) => {
+        const showBlock = [cfg.journalField, cfg.accountField, cfg.generateField, cfg.computationField, cfg.periodicityField].some(hasField);
+        if (!showBlock) return null;
+        const generateOptions = fields[cfg.generateField]?.options ?? [];
+        const computationOptions = fields[cfg.computationField]?.options ?? [];
+        const deferredPeriodicityOptions = fields[cfg.periodicityField]?.options ?? [];
+        return (
+          <div key={cfg.block} className="settings-block" data-block={cfg.block}>
+            <h3>{t(cfg.title)}</h3>
+            {hasField(cfg.journalField) && (
+              <SettingRow id={cfg.journalField} label={cfg.journalLabel} description={cfg.journalDesc}>
+                <select id={cfg.journalField} disabled={readOnly || !company} value={company?.[cfg.journalField] ?? ''}
+                  onChange={(e) => onWriteCompany({ [cfg.journalField]: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">{t('None')}</option>
+                  {generalJournals.map((j) => <option key={j.id} value={j.id}>{j.name}</option>)}
+                </select>
+              </SettingRow>
+            )}
+            {hasField(cfg.accountField) && (
+              <SettingRow id={cfg.accountField} label={cfg.accountLabel} description={cfg.accountDesc}>
+                <select id={cfg.accountField} disabled={readOnly || !company} value={company?.[cfg.accountField] ?? ''}
+                  onChange={(e) => onWriteCompany({ [cfg.accountField]: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">{t('None')}</option>
+                  {companyAccounts.map((a) => <option key={a.id} value={a.id}>{a.code ? `${a.code} ${a.name}` : a.name}</option>)}
+                </select>
+              </SettingRow>
+            )}
+            {hasField(cfg.generateField) && (
+              <SettingRow id={cfg.generateField} label="Generate Entries" description={cfg.generateDesc}>
+                <select id={cfg.generateField} disabled={readOnly || !company} value={company?.[cfg.generateField] ?? ''}
+                  onChange={(e) => onWriteCompany({ [cfg.generateField]: e.target.value || null })}>
+                  {generateOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+                </select>
+              </SettingRow>
+            )}
+            {hasField(cfg.computationField) && (
+              <SettingRow id={cfg.computationField} label="Amount Computation" description={cfg.computationDesc}>
+                <select id={cfg.computationField} disabled={readOnly || !company} value={company?.[cfg.computationField] ?? ''}
+                  onChange={(e) => onWriteCompany({ [cfg.computationField]: e.target.value || null })}>
+                  {computationOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+                </select>
+              </SettingRow>
+            )}
+            {hasField(cfg.periodicityField) && (
+              <SettingRow id={cfg.periodicityField} label="Periodicity" description={cfg.periodicityDesc}>
+                <select id={cfg.periodicityField} disabled={readOnly || !company} value={company?.[cfg.periodicityField] ?? ''}
+                  onChange={(e) => onWriteCompany({ [cfg.periodicityField]: e.target.value || null })}>
+                  {deferredPeriodicityOptions.map(([val, label]) => <option key={val} value={val}>{t(label)}</option>)}
+                </select>
+              </SettingRow>
+            )}
+          </div>
+        );
+      })}
     </section>
   );
 }

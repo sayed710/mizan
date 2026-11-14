@@ -180,6 +180,8 @@ test('account.account form renders Balance header, code+name title, and Accounti
       'Tags',
       'Allow Reconciliation',
       'Active',
+      'Deferred',
+      'Deferred Account',
       'Depreciation Model',
       'Description',
     ]);

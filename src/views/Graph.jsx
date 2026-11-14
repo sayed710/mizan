@@ -13,8 +13,11 @@ export const measuresOf = (model) => [
   ...Object.entries(models[model].fields).filter(([, f]) => ['monetary', 'float'].includes(f.type) && !f.hidden).map(([k, f]) => [k, f.label]),
 ];
 
-export const formatMeasure = (model, measure, v) =>
-  measure !== '__count' && models[model].fields[measure]?.type === 'monetary' ? money(v) : Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
+/** Format a numeric measure value, rendering unavailable (null/undefined) aggregates as an em dash. */
+export const formatMeasure = (model, measure, v) => {
+  if (v == null) return '—';
+  return measure !== '__count' && models[model].fields[measure]?.type === 'monetary' ? money(v) : Number(v).toLocaleString('en-US', { maximumFractionDigits: 2 });
+};
 
 export function MeasureSelect({ model, value, onChange, label = 'Measure' }) {
   return (
@@ -41,7 +44,7 @@ function Cartesian({ data, kind, fmt, onPick, compact = false }) {
   const L = compact ? 4 : 70;
   const B = compact ? 22 : 40;
   const T = compact ? 8 : 16;
-  const max = niceMax(Math.max(0, ...data.map((d) => d.value)));
+  const max = niceMax(Math.max(0, ...data.map((d) => d.value ?? 0)));
   const step = (W - L - 10) / Math.max(1, data.length);
   const x = (i) => L + step * i + step / 2;
   const y = (v) => T + (H - T - B) * (1 - v / max);
@@ -57,22 +60,22 @@ function Cartesian({ data, kind, fmt, onPick, compact = false }) {
           </g>
         ))}
         {kind === 'line' && data.length > 0 && (
-          <polyline fill="none" stroke={SERIES[0]} strokeWidth="2" points={data.map((d, i) => `${x(i)},${y(d.value)}`).join(' ')} />
+          <polyline fill="none" stroke={SERIES[0]} strokeWidth="2" points={data.map((d, i) => (d.value == null ? null : `${x(i)},${y(d.value)}`)).filter(Boolean).join(' ')} />
         )}
         {data.map((d, i) => (
           <g key={d.label} data-month={d.label} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} onClick={() => onPick?.(d)} className="mark">
             <title>{`${d.label}: ${fmt(d.value)}`}</title>
             <rect x={x(i) - step / 2} y={T} width={step} height={H - T - B} fill="transparent" />
             {kind === 'bar'
-              ? <path d={barPath(x(i) - barW / 2, y(d.value), barW, y(0) - y(d.value))} fill={SERIES[0]} opacity={hover == null || hover === i ? 1 : 0.55} />
-              : <circle cx={x(i)} cy={y(d.value)} r={hover === i ? 6 : 4} fill={SERIES[0]} stroke="var(--surface)" strokeWidth="2" />}
+              ? (d.value != null && <path d={barPath(x(i) - barW / 2, y(d.value), barW, y(0) - y(d.value))} fill={SERIES[0]} opacity={hover == null || hover === i ? 1 : 0.55} />)
+              : (d.value != null && <circle cx={x(i)} cy={y(d.value)} r={hover === i ? 6 : 4} fill={SERIES[0]} stroke="var(--surface)" strokeWidth="2" />)}
             <text x={x(i)} y={H - B + (compact ? 14 : 18)} textAnchor="middle" className="axis">{compact ? (d.shortLabel ?? d.label) : truncate(d.label, step / 7)}</text>
           </g>
         ))}
         <line x1={L} x2={W - 10} y1={y(0)} y2={y(0)} className="baseline" />
       </svg>
       {hover != null && (
-        <div className="tooltip" style={{ insetInlineStart: `${(x(hover) / W) * 100}%`, top: `${(y(data[hover].value) / H) * 100}%` }}>
+        <div className="tooltip" style={{ insetInlineStart: `${(x(hover) / W) * 100}%`, top: `${(y(data[hover].value ?? 0) / H) * 100}%` }}>
           <b>{data[hover].label}</b>
           <span>{fmt(data[hover].value)}</span>
         </div>
@@ -140,8 +143,8 @@ export function Graph({ db, model, records, groupBy, onPickGroup, data: external
   const [showTable, setShowTable] = useState(false);
   const by = groupBy?.[0] ?? def.groupBy;
   const data = externalData ?? (by
-    ? groupRecords(db, model, records, by).filter((g) => g.records.length).map((g) => ({ key: g.key, label: t(g.label), value: aggregate(g.records, measure) }))
-    : [{ key: null, label: t('Total'), value: aggregate(records, measure) }]);
+    ? groupRecords(db, model, records, by).filter((g) => g.records.length).map((g) => ({ key: g.key, label: t(g.label), value: aggregate(g.records, measure, model) }))
+    : [{ key: null, label: t('Total'), value: aggregate(records, measure, model) }]);
   const fmt = formatValue ?? ((v) => formatMeasure(model, measure, v));
   if (compact) return <Cartesian data={data} kind="bar" fmt={fmt} compact />;
   return (

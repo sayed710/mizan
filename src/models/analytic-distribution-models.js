@@ -18,6 +18,12 @@ export const categoryHierarchy = (db, initialCat) => {
   return categories;
 };
 
+/** Split a comma- or semicolon-separated account prefix string into non-empty trimmed prefixes. */
+export function parseAccountPrefixes(value) {
+  if (value == null) return [];
+  return String(value).split(/[,;]/).map((prefix) => prefix.trim()).filter(Boolean);
+}
+
 /** Find the most specific matching analytic distribution model for line context. */
 export function findAnalyticDistribution(db, { partner_id, partner_category_id, product_id, product_categ_id, account_id, account_code, company_id } = {}, fallback = {}) {
   const models = search(db, 'account.analytic.distribution.model');
@@ -45,9 +51,11 @@ export function findAnalyticDistribution(db, { partner_id, partner_category_id, 
       const modelCat = toCategoryId(model.product_categ_id);
       if (!modelCat || !categories.has(modelCat)) continue;
     }
-    if (model.account_prefix && (!code || !code.startsWith(model.account_prefix))) continue;
+    const prefixes = parseAccountPrefixes(model.account_prefix);
+    if (prefixes.length && (!code || !prefixes.some((prefix) => code.startsWith(prefix)))) continue;
 
-    const score = ['partner_id', 'product_id', 'partner_category_id', 'product_categ_id', 'account_prefix', 'company_id'].filter((field) => model[field]).length;
+    const score = ['partner_id', 'product_id', 'partner_category_id', 'product_categ_id', 'company_id'].filter((field) => model[field]).length
+      + (prefixes.length ? 1 : 0);
     matched.push({ model, score, sequence: Number(model.sequence ?? 10) });
   }
 

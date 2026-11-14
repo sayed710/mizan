@@ -38,7 +38,7 @@ test('follow-up reminder logs only the selected company invoices and level for a
     await React.act(async () => props(confirm).onClick());
     const saved = getDb();
     const note = saved.messages.at(-1).body;
-    assert.match(note, /Gentle/); assert.match(note, /VISIBLE-INV/); assert.doesNotMatch(note, /FOREIGN-INV|Final/);
+    assert.match(note, /0 days after/); assert.match(note, /VISIBLE-INV/); assert.doesNotMatch(note, /FOREIGN-INV|30 days after/);
     assert.equal(saved.records['res.partner'].find((p) => p.id === partner.id).followup_lines.find((line) => line.company_id === 1)?.followup_level_delay, 0);
     assert.ok(saved.records['account.move'].some((move) => move.name === 'FOREIGN-INV'));
   } finally { await React.act(async () => root.unmount()); }
@@ -318,7 +318,7 @@ test('follow-up report with several companies selected shows separate sections w
     await React.act(async () => props(confirm1).onClick());
     let saved = getDb();
     let note1 = saved.messages.at(-1).body;
-    assert.match(note1, /Final Notice/);
+    assert.match(note1, /30 days after/);
     assert.match(note1, /COMP1-INV/);
     assert.doesNotMatch(note1, /COMP2-INV/);
     let p = saved.records['res.partner'].find((x) => x.id === partner.id);
@@ -334,9 +334,9 @@ test('follow-up report with several companies selected shows separate sections w
     await React.act(async () => props(confirm2).onClick());
     saved = getDb();
     let note2 = saved.messages.at(-1).body;
-    assert.match(note2, /Gentle/);
+    assert.match(note2, /0 days after/);
     assert.match(note2, /COMP2-INV/);
-    assert.doesNotMatch(note2, /COMP1-INV|Final Notice/);
+    assert.doesNotMatch(note2, /COMP1-INV|30 days after/);
     p = saved.records['res.partner'].find((x) => x.id === partner.id);
     let line2 = p.followup_lines.find((l) => l.company_id === 2);
     assert.equal(line2?.followup_level_delay, 0, 'Company 2 gets 0-day level (5 days overdue)');

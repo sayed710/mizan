@@ -51,7 +51,9 @@ test('cancel cancels draft counterpart; posted or paid counterpart blocks reset 
   const base = seed();
   const buyer = createCompany(base, { name: 'Buyer', currency_id: read(base, 'res.company', 1).currency_id, intercompany_rule: 'invoice_bill' });
   const expense = create(buyer.db, 'account.account', { name: 'Buyer expense', code: 'BUY-EXP', account_type: 'expense', company_id: buyer.id });
-  const journal = create(expense.db, 'account.journal', { name: 'Buyer purchases', code: 'BP', type: 'purchase', company_id: buyer.id, default_account_id: expense.id, invoice_sequence_prefix: 'BP-INV/', invoice_sequence_next_number: 1 });
+  const cash = create(expense.db, 'account.account', { name: 'Buyer bank', code: 'BUY-BNK', account_type: 'asset_cash', company_id: buyer.id });
+  const bankJournal = create(cash.db, 'account.journal', { name: 'Buyer bank journal', code: 'BBK', type: 'bank', company_id: buyer.id, default_account_id: cash.id, suspense_account_id: cash.id, default_for_payments: true });
+  const journal = create(bankJournal.db, 'account.journal', { name: 'Buyer purchases', code: 'BP', type: 'purchase', company_id: buyer.id, default_account_id: expense.id, invoice_sequence_prefix: 'BP-INV/', invoice_sequence_next_number: 1 });
   const configured = write(write(journal.db, 'res.company', buyer.id, { intercompany_journal_id: journal.id }), 'product', 5, { property_account_expense_id: expense.id });
   const invoice = create(configured, 'account.move', { company_id: 1, move_type: 'out_invoice', partner_id: read(configured, 'res.company', buyer.id).partner_id, invoice_date: '2026-01-01', invoice_line_ids: [{ product_id: 5, qty: 1, price_unit: 100, tax: 0 }] });
   const posted = postMove(invoice.db, invoice.id);
@@ -157,7 +159,9 @@ test('server sync validates genuine counterpart and rejects client-forged counte
   const base = seed();
   const buyer = createCompany(base, { name: 'Buyer', currency_id: read(base, 'res.company', 1).currency_id, intercompany_rule: 'invoice_bill' });
   const expense = create(buyer.db, 'account.account', { name: 'Buyer expense', code: 'BUY-EXP', account_type: 'expense', company_id: buyer.id });
-  const journal = create(expense.db, 'account.journal', { name: 'Buyer purchases', code: 'BP', type: 'purchase', company_id: buyer.id, default_account_id: expense.id, invoice_sequence_prefix: 'BP-INV/', invoice_sequence_next_number: 1 });
+  const cash = create(expense.db, 'account.account', { name: 'Buyer bank', code: 'BUY-BNK', account_type: 'asset_cash', company_id: buyer.id });
+  const bankJournal = create(cash.db, 'account.journal', { name: 'Buyer bank journal', code: 'BBK', type: 'bank', company_id: buyer.id, default_account_id: cash.id, suspense_account_id: cash.id, default_for_payments: true });
+  const journal = create(bankJournal.db, 'account.journal', { name: 'Buyer purchases', code: 'BP', type: 'purchase', company_id: buyer.id, default_account_id: expense.id, invoice_sequence_prefix: 'BP-INV/', invoice_sequence_next_number: 1 });
   const configured = write(write(journal.db, 'res.company', buyer.id, { intercompany_journal_id: journal.id }), 'product', 5, { property_account_expense_id: expense.id });
 
   const invoice = create(configured, 'account.move', {

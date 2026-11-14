@@ -29,10 +29,19 @@ const withComputed = (fields, r, db) => {
   return computed.length ? { ...r, ...Object.fromEntries(computed.map(([k, f]) => [k, f.compute(r, db)])) } : r;
 };
 
+/** Source records for a model, computing virtual report rows when declared by `models[model].records`. */
+const rawRecords = (db, model, def = models[model]) => (def?.records ? def.records(db) : (db.records[model] ?? []));
+
+/** Guard write operations against read-only virtual models. */
+function assertWritable(model) {
+  if (models[model]?.readonly) throw new Error(`${models[model].label ?? model} is read-only`);
+}
+
 /** Records of a model in the active company, with computed fields. Archived (active === false) hidden by default. */
 export function search(db, model, { includeArchived = false } = {}) {
-  const fields = models[model].fields;
-  return (db.records[model] ?? [])
+  const def = models[model];
+  const fields = def.fields;
+  return rawRecords(db, model, def)
     .filter((r) => (includeArchived || r.active !== false) && inCompany(model, r))
     .map((r) => withComputed(fields, r, db));
 }
@@ -55,8 +64,9 @@ function locate(list, id) {
 
 /** One record by id regardless of company (cross-company links still display). */
 export function read(db, model, id) {
-  const r = locate(db.records[model] ?? [], id);
-  return r && withComputed(models[model].fields, r, db);
+  const def = models[model];
+  const r = locate(rawRecords(db, model, def), id);
+  return r && withComputed(def.fields, r, db);
 }
 
 const isEmpty = (v) => v == null || v === '';
@@ -117,6 +127,7 @@ const message = (model, resId, body, kind, record, source) => ({
 });
 
 export function create(db, model, vals, ctx = undefined) {
+  assertWritable(model);
   const prepared = models[model].prepareCreate?.(db, vals);
   if (prepared) ({ db, vals } = prepared);
   const id = nextId(db, model);
@@ -179,6 +190,7 @@ function prepareWrite(db, model, before, vals, ctx = undefined) {
 }
 
 export function write(db, model, id, vals, ctx = undefined) {
+  assertWritable(model);
   const before = (db.records[model] ?? []).find((r) => r.id === id);
   if (!before) throw new Error(`${model} #${id} not found`);
   const { after, clean } = prepareWrite(db, model, before, vals, ctx);
@@ -192,6 +204,7 @@ export function write(db, model, id, vals, ctx = undefined) {
 
 /** Validate simultaneous updates against their complete final state, then apply them immutably. */
 export function writeManyAtomic(db, model, updates) {
+  assertWritable(model);
   if (!updates.size) return db;
   const list = db.records[model] ?? [];
   const byId = new Map(list.map((record) => [record.id, record]));
@@ -220,6 +233,7 @@ export function writeManyAtomic(db, model, updates) {
  * batch jobs stay linear instead of copying everything per record.
  */
 export function writeMany(db, model, updates) {
+  assertWritable(model);
   if (!updates.size) return db;
   const list = db.records[model] ?? [];
   const byId = new Map(list.map((r) => [r.id, r]));
@@ -265,6 +279,7 @@ export function referenceTo(db, model, ids) {
 }
 
 export function unlink(db, model, ids) {
+  assertWritable(model);
   const drop = new Set(ids);
   const blocked = (db.records[model] ?? []).filter((r) => drop.has(r.id)).map((r) => models[model].protectDelete?.(db, r)).find(Boolean);
   if (blocked) throw new Error(blocked);
@@ -312,7 +327,10 @@ export function groupLabel(db, field, key) {
   switch (field.type) {
     case 'date': case 'datetime': return new Date(key + '-01T00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
     case 'selection': return field.options.find((o) => o[0] === key)?.[1] ?? key;
-    case 'many2one': return read(db, field.relation, key)?.name ?? 'None';
+    case 'many2one': {
+      const rec = read(db, field.relation, key);
+      return rec?.display_name ?? rec?.name ?? 'None';
+    }
     case 'many2many': {
       const names = String(key).split(',').map((id) => read(db, field.relation, Number(id))?.name).filter(Boolean);
       return names.length ? names.join(', ') : 'None';
@@ -361,9 +379,17 @@ export function groupRecords(db, model, records, name, context = {}) {
   return groups.sort((a, b) => rank(a).localeCompare(rank(b)));
 }
 
-/** Sum of a numeric field, or the record count for the pseudo-measure "__count". */
-export const aggregate = (records, measure) =>
-  measure === '__count' ? records.length : records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
+/** Aggregate a numeric field (sum, or mean of available numeric values when `groupOperator: 'avg'`), or the record count for "__count". */
+export function aggregate(records, measure, model = null) {
+  if (measure === '__count') return records.length;
+  if (model && models[model]?.fields?.[measure]?.groupOperator === 'avg') {
+    const values = records
+      .map((r) => r[measure])
+      .filter((v) => v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v)));
+    return values.length ? values.reduce((s, v) => s + Number(v), 0) / values.length : null;
+  }
+  return records.reduce((s, r) => s + (Number(r[measure]) || 0), 0);
+}
 
 /** Filters in the same group are OR-ed, groups are AND-ed (search-panel semantics). */
 export function applyFilters(model, records, activeIds, db = null, filterGroups = null) {

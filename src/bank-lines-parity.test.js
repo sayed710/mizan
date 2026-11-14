@@ -173,7 +173,7 @@ test('search fields, Cash In/Out, Bank/Cash/Credit, Date/Last 12 Months filters,
 
   const co2 = createCompany(db, { name: 'Second Co' }); db = co2.db;
   const co2Acc = create(db, 'account.account', { code: '101401', name: 'Bank Co2', account_type: 'asset_cash', company_id: co2.id }); db = co2Acc.db;
-  const co2Suspense = ensureBankSuspense(db, co2.id); db = co2Suspense.db;
+  const co2Suspense = create(db, 'account.account', { code: '101404', name: 'Bank Suspense Co2', account_type: 'asset_current', company_id: co2.id }); db = co2Suspense.db;
   const co2Bank = create(db, 'account.journal', { name: 'Co2 Bank', code: 'B2', type: 'bank', default_account_id: co2Acc.id, suspense_account_id: co2Suspense.id, company_id: co2.id }); db = co2Bank.db;
 
   const now = today();

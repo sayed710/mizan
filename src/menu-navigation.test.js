@@ -580,9 +580,9 @@ test('analytic distribution model menu scopes rules and defaults new forms to th
   const container = setupDom();
   const React = await import('react');
   const { createRoot } = await import('react-dom/client');
-  const { initStore, commit } = await import('./store.js');
+  const { initStore, commit, getDb } = await import('./store.js');
   const { seed } = await import('./seed.js');
-  const { create, updateSettings } = await import('./orm.js');
+  const { create, search, updateSettings } = await import('./orm.js');
   const { createCompany } = await import('./models/company.js');
   await initStore();
   const company = createCompany(seed(), { name: 'Distribution company two' });
@@ -600,9 +600,15 @@ test('analytic distribution model menu scopes rules and defaults new forms to th
     assert.ok(!container.textContent.includes('HIDDEN-FIRST'));
     await React.act(async () => { location.hash = '#/accounting/analytic-distribution-models/new'; window.dispatchEvent(new Event('hashchange')); });
     const main = find(container, (n) => n.tagName === 'MAIN');
-    const companySelect = find(main, (n) => n.tagName === 'SELECT' && props(n)?.id === 'f-company_id');
-    assert.ok(companySelect, `new rule offers selected company: ${main.textContent}`);
-    assert.equal(Number(props(companySelect).value), company.id);
+    assert.equal(find(main, (n) => props(n)?.id === 'f-company_id'), null, 'company_id is hidden on the distribution model form');
+    const prefixInput = find(main, (n) => n.tagName === 'INPUT' && props(n)?.id === 'f-account_prefix');
+    assert.ok(prefixInput, `new rule renders account prefix input: ${main.textContent}`);
+    await React.act(async () => props(prefixInput).onChange({ target: { value: 'SAVED-FOR-COMPANY' } }));
+    const saveBtn = find(main, (n) => n.tagName === 'BUTTON' && n.textContent.trim() === 'Save');
+    await React.act(async () => props(saveBtn).onClick());
+    const saved = search(getDb(), 'account.analytic.distribution.model').find((r) => r.account_prefix === 'SAVED-FOR-COMPANY');
+    assert.ok(saved, 'new rule is saved from the form');
+    assert.equal(saved.company_id, company.id);
   } finally { await React.act(async () => root.unmount()); }
 });
 

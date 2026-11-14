@@ -1,26 +1,34 @@
 import { useState } from 'react';
-import { companyViewDb } from '../companyView.js';
 import { t } from '../i18n.js';
 import { isoDate, today } from '../models/common.js';
 import { cashflowAnalysis } from '../models/reports.js';
 import { useDb } from '../store.js';
 import { money } from '../ui.jsx';
+import { CompanySelect, reportCompanyScope } from './reportCompany.jsx';
 
 const measures = ['Inflow', 'Outflow', 'Net'];
 
+/** Cashflow Analysis report view with date range, company filter, and journal pivot toggle. */
 export function CashflowAnalysis() {
-  const db = companyViewDb(useDb());
+  const sourceDb = useDb();
+  const [companyId, setCompanyId] = useState('all');
+  const { companyDb: db, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId);
   const [to, setTo] = useState(today);
   const [from, setFrom] = useState(() => {
     const date = new Date();
     return isoDate(new Date(date.getFullYear(), date.getMonth() - 11, 1));
   });
   const [pivot, setPivot] = useState(false);
-  const { rows, journals } = cashflowAnalysis(db, { from, to });
+  const { rows, journals } = cashflowAnalysis(db, {
+    from,
+    to,
+    ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}),
+  });
   return <main className="action report-page">
     <div className="control-panel"><h1 className="cp-title">{t('Cashflow Analysis')}</h1>
       <label>{t('From')} <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
       <label>{t('To')} <input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+      {availableCompanies.length > 1 && <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} />}
       <button type="button" className="btn sm" onClick={() => setPivot(!pivot)}>{t(pivot ? 'Monthly Summary' : 'Pivot by Journal')}</button>
     </div>
     <div className="list-wrap"><table className="list report">

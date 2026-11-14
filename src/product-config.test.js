@@ -14,7 +14,7 @@ import { applyDiff } from './sync.js';
 
 test('category paths and product policy overrides', () => {
   let db = seed();
-  const root = create(db, 'product.category', { name: 'All', property_cost_method: 'fifo', property_account_income_id: 1 }); db = root.db;
+  const root = create(db, 'product.category', { name: 'All', property_cost_method: 'fifo', property_account_income_categ_id: 1 }); db = root.db;
   const child = create(db, 'product.category', { name: 'Office', parent_id: root.id }); db = child.db;
   const p = create(db, 'product', { name: 'Test', categ_id: child.id, cost_method: null }); db = p.db;
   assert.equal(categoryPath(db, child.id), 'All / Office');
@@ -61,7 +61,7 @@ test('inherited accounting and periodic valuation drive the existing posting flo
   let db = seed();
   const income = db.records['account.account'].find((a) => a.code === '400000');
   const stock = db.records['account.account'].find((a) => a.code === '151000');
-  const cat = create(db, 'product.category', { name: 'Policy', property_valuation: 'periodic', property_account_income_id: income.id, property_stock_valuation_account_id: stock.id }); db = cat.db;
+  const cat = create(db, 'product.category', { name: 'Policy', property_valuation: 'periodic', property_account_income_categ_id: income.id, property_stock_valuation_account_id: stock.id }); db = cat.db;
   const p = create(db, 'product', { name: 'Policy product', categ_id: cat.id, cost: 4 }); db = p.db;
   const entries = invoiceLines(db, { move_type: 'out_invoice', invoice_line_ids: [{ product_id: p.id, qty: 1, price_unit: 10 }] });
   assert.ok(entries.some((l) => l.account_id === income.id && l.credit === 10));

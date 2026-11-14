@@ -155,7 +155,7 @@ function buildRichJournalItemsDb() {
   });
   db = postMove(splitInvRes.db, splitInvRes.id);
 
-  // Pay only 120 so installment 1 (half of total) is fully covered (residual = 0) while invoice & installment 2 stay unreconciled.
+  // Pay exact halfAmt (114) so installment 1 + payment form a closed matching group (full_reconcile_id set in Odoo 20), leaving only installment 2 unreconciled.
   const invTotal = read(db, 'account.move', splitInvRes.id).amount_total;
   const halfAmt = Number((invTotal / 2).toFixed(2));
   const halfPayRes = create(db, 'account.payment', {
@@ -168,6 +168,37 @@ function buildRichJournalItemsDb() {
     date: dateNow,
   });
   db = postPayment(halfPayRes.db, read(halfPayRes.db, 'account.payment', halfPayRes.id));
+
+  // 1b. Split-term invoice (150 + 150) with a single bridging payment of 200: installment 1 has amount_residual = 0,
+  // yet both AR lines share the same partial matching group with installment 2 still open (full_reconcile_id = False).
+  const bridgedInvRes = create(db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    journal_id: saleJ.id,
+    date: dateNow,
+    invoice_date: dateNow,
+    invoice_payment_term_id: splitTermRes.id,
+    ref: 'INV-BRIDGE-REF',
+    invoice_line_ids: [{
+      name: 'Bridged Advisory',
+      account_id: inc,
+      qty: 1,
+      price_unit: 300,
+      tax: 0,
+      tax_ids: [],
+    }],
+  });
+  db = postMove(bridgedInvRes.db, bridgedInvRes.id);
+  const bridgedPayRes = create(db, 'account.payment', {
+    payment_type: 'inbound',
+    partner_type: 'customer',
+    partner_id: partner.id,
+    journal_id: bankJ.id,
+    invoice_id: bridgedInvRes.id,
+    amount: 200,
+    date: dateNow,
+  });
+  db = postPayment(bridgedPayRes.db, read(bridgedPayRes.db, 'account.payment', bridgedPayRes.id));
 
   // 2. Foreign-currency posted invoice in EUR (not paid yet, overdue due date).
   const fxInvRes = create(db, 'account.move', {
@@ -261,7 +292,7 @@ function buildRichJournalItemsDb() {
   });
   db = draftRes.db;
 
-    return { db, splitInvId: splitInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
+    return { db, splitInvId: splitInvRes.id, bridgedInvId: bridgedInvRes.id, fxInvId: fxInvRes.id, billId: billRes.id, miscMoveId: miscMoveRes.id, draftMoveId: draftRes.id, halfPayId: halfPayRes.id, halfAmt, eur, partner, vendor, tagId: tagRes.id, incName: read(db, 'account.account', inc).name };
 }
 
 test('Journal Items list columns match Odoo 20 order, optional state, multi-company and multi-currency gating', async () => {
@@ -442,16 +473,26 @@ test('Journal Items filters distinguish Unreconciled vs With residual, Not Secur
     assert.ok(!notSecuredTexts.some((txt) => txt.includes('Secured Office Supply')), 'Secured posted entry excluded by Not Secured');
     await clickFilter('Not Secured');
 
-    // Unreconciled vs With residual: split-term invoice has 2 AR lines, first paid in full (residual = 0, move still not fully reconciled).
+    // Unreconciled vs With residual:
+    // 1) splitInvId has 2 AR lines (114 + 114) and a single payment of exact halfAmt (114). In Odoo 20, the payment matches
+    //    only installment 1, closing {AR1, payment} with a full_reconcile_id; only installment 2 stays Unreconciled and With residual.
     const splitMoveName = read(fixture.db, 'account.move', fixture.splitInvId).name;
+    // 2) bridgedInvId has 2 AR lines (150 + 150) and one bridging payment of 200. Installment 1 has amount_residual = 0,
+    //    but shares the partial matching group {AR1, payment, AR2} while AR2 still owes 100, so both AR lines stay Unreconciled (full_reconcile_id = False)
+    //    while only AR2 matches With residual (amount_residual != 0).
+    const bridgedMoveName = read(fixture.db, 'account.move', fixture.bridgedInvId).name;
     await clickFilter('Unreconciled');
     const unreconciledSplitRows = itemRows().filter((tr) => tr.textContent.includes(splitMoveName));
-    assert.equal(unreconciledSplitRows.length, 2, 'Both split-term AR lines remain Unreconciled until entire invoice is settled');
+    assert.equal(unreconciledSplitRows.length, 1, 'Exact first-installment payment closes its matching group in Odoo 20, leaving only installment 2 Unreconciled');
+    const unreconciledBridgedRows = itemRows().filter((tr) => tr.textContent.includes(bridgedMoveName));
+    assert.equal(unreconciledBridgedRows.length, 2, 'Both AR lines remain Unreconciled when one payment bridges installment 1 into open installment 2');
     await clickFilter('Unreconciled');
 
     await clickFilter('With residual');
     const residualSplitRows = itemRows().filter((tr) => tr.textContent.includes(splitMoveName));
     assert.equal(residualSplitRows.length, 1, 'Only the unpaid second installment matches With residual');
+    const residualBridgedRows = itemRows().filter((tr) => tr.textContent.includes(bridgedMoveName));
+    assert.equal(residualBridgedRows.length, 1, 'Only the partially unpaid second installment matches With residual');
     await clickFilter('With residual');
 
     // Invoice Date: This Month excludes prior-month vendor bill.

@@ -164,7 +164,7 @@ test('runFollowUps resets follow-up level to Level 1 after prior overdue balance
   // Level 1 (delay 15) fires on 2026-01-16 for the 300 installment due 2026-01-01.
   db = runFollowUps(db, '2026-01-16', deliver);
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].subject, 'First reminder');
+  assert.equal(sent[0].subject, '15 days after');
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay, 15);
 
   // Customer pays 300 on 2026-01-18, clearing all overdue balance before 700 becomes due on 2026-01-31.
@@ -173,7 +173,7 @@ test('runFollowUps resets follow-up level to Level 1 after prior overdue balance
   // On 2026-02-15 (15 days after 2026-01-31), runFollowUps resets prior progress and sends Level 1 again for 700.
   db = runFollowUps(db, '2026-02-15', deliver);
   assert.equal(sent.length, 2);
-  assert.equal(sent[1].subject, 'First reminder');
+  assert.equal(sent[1].subject, '15 days after');
   assert.match(sent[1].text, /700\.00/);
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_date, '2026-02-15');
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay, 15);
@@ -198,7 +198,7 @@ test('runFollowUps does not reset the follow-up level when a second overdue invo
   // Level 1 (delay 15) fires on 2026-01-16 for inv1 due 2026-01-01.
   db = runFollowUps(db, '2026-01-16', deliver);
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].subject, 'First reminder');
+  assert.equal(sent[0].subject, '15 days after');
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay, 15);
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_oldest_date, '2026-01-01');
 
@@ -220,7 +220,7 @@ test('runFollowUps does not reset the follow-up level when a second overdue invo
   // At 2026-01-31 (30 days after 2026-01-01), it escalates directly to Level 2.
   db = runFollowUps(db, '2026-01-31', deliver);
   assert.equal(sent.length, 2);
-  assert.equal(sent[1].subject, 'Second reminder');
+  assert.equal(sent[1].subject, '30 days after');
   assert.equal(partnerFollowUp(read(db, 'res.partner', partner.id), 1)?.followup_level_delay, 30);
 });
 

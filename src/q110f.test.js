@@ -10,7 +10,7 @@ import { register } from 'node:module';
 import { setupDom, find } from './test-support/dom.js';
 
 const run = (db, model, id, label) => models[model].form.buttons.find((b) => b.label === label).run(db, read(db, model, id)).db;
-const bankJournalId = (db) => search(db, 'account.journal').find((j) => j.type === 'bank').id;
+const bankJournalId = (db, companyId = 1) => search(db, 'account.journal').find((j) => j.type === 'bank' && j.company_id === companyId).id;
 
 function invoice(db, company, amount) {
   const move = create(db, 'account.move', { company_id: company, move_type: 'out_invoice', partner_id: 3, invoice_date: '2025-01-01', invoice_line_ids: [{ qty: 1, price_unit: amount, tax: 0 }] });
@@ -25,7 +25,7 @@ test('journal-less inbound batch matches a statement in its payments company', (
   const batch = create(inv.db, 'account.batch.payment', { batch_type: 'inbound', date: '2025-01-02', lines: [{ move_id: inv.id, amount: 100 }] });
   db = run(batch.db, 'account.batch.payment', batch.id, 'Validate');
   assert.equal(read(db, 'account.batch.payment', batch.id).journal_id, undefined);
-  const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db), company_id: branch.id, date: '2025-01-03', amount: 100, payment_ref: 'Branch receipt' });
+  const statement = create(db, 'account.bank.statement.line', { journal_id: bankJournalId(db, branch.id), company_id: branch.id, date: '2025-01-03', amount: 100, payment_ref: 'Branch receipt' });
   db = write(statement.db, 'account.bank.statement.line', statement.id, { batch_payment_id: batch.id });
   db = run(db, 'account.bank.statement.line', statement.id, 'Match Payment');
   assert.equal(read(db, 'account.bank.statement.line', statement.id).state, 'reconciled');

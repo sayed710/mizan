@@ -14,22 +14,26 @@ const applicableRate = (currency, date, companyId = null) => {
 // Raw lookup: read() would compute this currency's own rate fields, which call back into here.
 const findBaseCurrency = (db) => (db?.settings?.base_currency_id ? (db.records?.['res.currency'] ?? []).find((c) => c.id === db.settings.base_currency_id) ?? null : null);
 
+/** Base-relative rate and effective date for `currency` on `date`: the base currency is always 1 with no rate row. */
+const baseRateInfo = (currency, date, baseId, companyId = null) => {
+  if (currency.id === baseId) return { rate: 1, date: null };
+  const row = applicableRate(currency, date, companyId);
+  return row ? { rate: Number(row.rate), date: row.date } : { rate: null, date: null };
+};
+
 /** Effective rate and date today for `currency` in the current company, without throwing when unconfigured. */
 function currentRateInfo(currency, db) {
   const companyId = db?.settings?.current_company_id ?? 1;
   const own = findCompanyCurrencyRecord(db, companyId);
-  const date = today();
-  const row = applicableRate(currency, date, companyId);
   // The company currency is the unit of every rate: Odoo shows it at 1 with no rate date.
   if (own?.id === currency.id) return { rate: 1, date: null };
   const base = findBaseCurrency(db);
-  // The base currency's rate is implicitly 1 when it has no rate row, as in conversions.
-  const rate = row ? Number(row.rate) : base?.id === currency.id ? 1 : null;
+  const date = today();
+  const { rate, date: rateDate } = baseRateInfo(currency, date, base?.id, companyId);
   if (rate == null) return { rate: null, date: null };
-  const rateDate = row?.date ?? null;
   if (!own || !base || own.id === base.id) return { rate, date: rateDate };
-  const ownRow = applicableRate(own, date, companyId);
-  return ownRow ? { rate: rate / Number(ownRow.rate), date: rateDate } : { rate: null, date: null };
+  const ownInfo = baseRateInfo(own, date, base.id, companyId);
+  return ownInfo.rate ? { rate: rate / ownInfo.rate, date: rateDate } : { rate: null, date: null };
 }
 
 export function baseCurrency(db) {
@@ -49,12 +53,11 @@ export function conversionRate(db, sourceId, targetId, date, companyId = null) {
   return targetRate == null || sourceRate == null ? null : targetRate / sourceRate;
 }
 
+/** Base-relative exchange rate for `currencyId` on `date`, throwing if the currency does not exist. */
 function baseRate(db, currencyId, date, baseId, companyId = null) {
   const c = currencyId ? read(db, 'res.currency', currencyId) : null;
   if (!c) throw new Error('Select an existing currency before converting an amount');
-  if (currencyId === baseId) return 1;
-  const rate = applicableRate(c, date, companyId);
-  return rate ? Number(rate.rate) : null;
+  return baseRateInfo(c, date, baseId, companyId).rate;
 }
 
 /** The currency a company keeps its books in. */
@@ -185,8 +188,8 @@ export const currencyModels = {
         ['symbol', 'currency_unit_label', 'currency_subunit_label', 'position'],
         { title: 'Price Accuracy', fields: ['rounding', 'decimal_places'] },
       ],
-      // A company currency still needs base-relative rates when it is not the base currency.
-      tabs: (r, db) => (r?.id && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id && findBaseCurrency(db)?.id === r.id
+      // The base currency's rate is implicitly 1 and any stored rows on it are ignored, so hide its Rates tab even when the company uses another currency.
+      tabs: (r, db) => (r?.id && (findBaseCurrency(db)?.id === r.id || (!findBaseCurrency(db) && findCompanyCurrencyRecord(db, db?.settings?.current_company_id ?? 1)?.id === r.id))
         ? []
         : [{ label: 'Rates', fields: ['rate_ids'] }]),
       chatter: true,

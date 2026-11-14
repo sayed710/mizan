@@ -7,18 +7,19 @@ import { postEntry } from './models/ledger.js';
 import { applyDiff, diffDb } from './sync.js';
 import { saveFormRecord } from './views/formSave.js';
 import { createCompany } from './models/company.js';
+import { withDefaultBankJournal } from './test-support/accounting-company.js';
 
 let sharedBankId;
 function fixture(lockedCompany) {
   let db = seed();
-  const company = createCompany(db, { name: 'Second company', currency_id: db.settings.base_currency_id }); db = company.db;
+  const company = createCompany(db, { name: 'Second company', currency_id: db.settings.base_currency_id }); db = withDefaultBankJournal(company.db, company.id);
   const sharedBank = create(db, 'account.journal', { name: 'Shared Bank', code: 'SBNK', type: 'bank', company_id: null, default_account_id: db.records['account.account'].find((a) => a.code === '101401').id, suspense_account_id: db.records['account.account'].find((a) => a.code === '101404').id });
   db = sharedBank.db;
   sharedBankId = sharedBank.id;
   const partner = db.records['res.partner'][0].id;
   const entries = {};
   for (const companyId of [1, company.id]) {
-    const entry = postEntry(db, { journal: 'BNK1', company: companyId, date: '2026-01-15', ref: 'Payment', lines: [
+    const entry = postEntry(db, { journal: companyId === 1 ? 'BNK1' : `BNK${companyId}`, company: companyId, date: '2026-01-15', ref: 'Payment', lines: [
       { account: '101401', debit: 100, partner_id: partner }, { account: '121000', credit: 100, partner_id: partner },
     ] });
     db = entry.db; entries[companyId] = entry.id;
