@@ -60,11 +60,11 @@ test('Accounting Settings renders Odoo block order with descriptions, currency l
     const blocks = collect(accountingSection, (n) => props(n)?.['data-block']);
     assert.deepEqual(
       blocks.map((b) => props(b)['data-block']),
-      ['taxes', 'currencies', 'customer_payments', 'vendor_bills', 'fiscal_periods'],
+      ['taxes', 'currencies', 'customer_payments', 'vendor_bills', 'fiscal_periods', 'deferred_revenues', 'deferred_expenses'],
     );
     assert.deepEqual(
       blocks.map((b) => find(b, (n) => n.tagName === 'H3')?.textContent),
-      ['Taxes', 'Currencies', 'Customer Payments', 'Vendor Bills', 'Fiscal Periods'],
+      ['Taxes', 'Currencies', 'Customer Payments', 'Vendor Bills', 'Fiscal Periods', 'Deferred Revenues', 'Deferred Expenses'],
     );
 
     const rows = collect(accountingSection, (n) => props(n)?.['data-setting']);

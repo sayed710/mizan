@@ -88,10 +88,10 @@ test('automatic reminders log each reached level once per customer', async () =>
   const { db } = invoice(seed(), { partner_id: 5, invoice_date: addDays(today(), -60), invoice_date_due: addDays(today(), -20) });
   const first = runFollowUps(db, today(), () => {});
   assert.equal(partnerFollowUp(read(first, 'res.partner', 5), 1)?.followup_level_delay, 15);
-  assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
+  assert.ok(messagesOf(first, 'res.partner', 5).some((m) => /15 days after/.test(m.body)));
   assert.ok(messagesOf(first, 'res.partner', 5).some((m) => m.body.includes('overdue \u2014 ')));
   const synced = applyDiff(db, diffDb(db, first));
-  assert.ok(messagesOf(synced, 'res.partner', 5).some((m) => /First reminder: .* overdue — /.test(m.body)));
+  assert.ok(messagesOf(synced, 'res.partner', 5).some((m) => /15 days after: .* overdue — /.test(m.body)));
   assert.equal(runFollowUps(first).messages.length, first.messages.length);
   const later = runFollowUps(first, addDays(today(), 12), () => {});
   assert.equal(partnerFollowUp(read(later, 'res.partner', 5), 1)?.followup_level_delay, 30);
@@ -244,9 +244,9 @@ test('manual reminders work per company: two companies with 40-day and 5-day ove
 
   assert.ok(note1, 'chatter note for company 1');
   assert.ok(note2, 'chatter note for company 2');
-  assert.match(note1.body, /Second reminder/);
+  assert.match(note1.body, /30 days after/);
   assert.doesNotMatch(note1.body, new RegExp(group2.invoices[0].name));
-  assert.doesNotMatch(note2.body, /Second reminder|First reminder/);
+  assert.doesNotMatch(note2.body, /30 days after|15 days after/);
   assert.doesNotMatch(note2.body, new RegExp(group1.invoices[0].name));
 });
 
@@ -264,7 +264,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
   const run1 = runFollowUps(inv1.db, today(), () => {});
   const p1 = read(run1, 'res.partner', 5);
   assert.equal(partnerFollowUp(p1, 1)?.followup_level_delay, 30);
-  assert.ok(messagesOf(run1, 'res.partner', 5).some((m) => /Second reminder/.test(m.body)));
+  assert.ok(messagesOf(run1, 'res.partner', 5).some((m) => /30 days after/.test(m.body)));
 
   // 2. Partner catches up (invoice paid in full: residual = 0)
   const paidDb = payWithDiscount(run1, inv1.id, 1140);
@@ -284,7 +284,7 @@ test('a partner that catches up and then gets a new overdue invoice starts again
   const run2 = runFollowUps(inv2.db, today(), () => {});
   const p2 = read(run2, 'res.partner', 5);
   assert.equal(partnerFollowUp(p2, 1)?.followup_level_delay, 15, 'restarts at first level (delay 15)');
-  assert.ok(messagesOf(run2, 'res.partner', 5).some((m) => /First reminder/.test(m.body)));
+  assert.ok(messagesOf(run2, 'res.partner', 5).some((m) => /15 days after/.test(m.body)));
 });
 
 test('manual reminder before first level clears progress through catch-up after payment', async () => {

@@ -9,15 +9,39 @@ export function categoryPath(db, id) {
   return names.join(' / ');
 }
 
-export function productProperty(db, product, key, companyId = null) {
-  const productKey = key === 'property_cost_method' ? 'cost_method' : key === 'property_valuation' ? 'valuation' : key;
-  if (product?.[productKey] != null && product[productKey] !== '') return product[productKey];
+const PRODUCT_KEY_MAP = {
+  property_cost_method: 'cost_method',
+  property_valuation: 'valuation',
+};
+
+const CATEGORY_KEY_MAP = {
+  property_account_income_id: 'property_account_income_categ_id',
+  property_account_expense_id: 'property_account_expense_categ_id',
+};
+
+/**
+ * Walk `product.category` upward from `categoryId` along `parent_id` and return the first set value for `key`.
+ * Categories belonging to a different company are skipped when `companyId` is provided.
+ */
+export function categoryProperty(db, categoryId, key, companyId = null) {
+  const categoryKey = CATEGORY_KEY_MAP[key] ?? key;
   const seen = new Set();
-  for (let c = read(db, 'product.category', product?.categ_id); c && !seen.has(c.id); c = read(db, 'product.category', c.parent_id)) {
+  for (let c = read(db, 'product.category', categoryId); c && !seen.has(c.id); c = read(db, 'product.category', c.parent_id)) {
     seen.add(c.id);
-    if ((companyId == null || c.company_id == null || c.company_id === companyId) && c[key] != null && c[key] !== '') return c[key];
+    if (companyId == null || c.company_id == null || c.company_id === companyId) {
+      // Preserve a conflicting legacy account kept during upgrade until the category is reconciled explicitly.
+      if (categoryKey !== key && c[key] != null && c[key] !== '') return c[key];
+      if (c[categoryKey] != null && c[categoryKey] !== '') return c[categoryKey];
+    }
   }
   return null;
+}
+
+/** Resolve a product property value, falling back to inherited settings on its category hierarchy. */
+export function productProperty(db, product, key, companyId = null) {
+  const productKey = PRODUCT_KEY_MAP[key] ?? key;
+  if (product?.[productKey] != null && product[productKey] !== '') return product[productKey];
+  return categoryProperty(db, product?.categ_id, key, companyId);
 }
 
 export function migrateProductCategories(db) {

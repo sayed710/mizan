@@ -89,8 +89,11 @@ export function ActionView({ leaf, base, params }) {
   const records = def.sort ? [...filtered].sort(def.sort) : filtered;
   // The "how to start" help belongs to a truly empty list, not to a search or filter that matched nothing.
   const narrowed = search.terms.length > 0 || search.filters.length > 0 || search.archived;
-  const open = (id) => { location.hash = `${base}/${id}?view=${view}${relQ}`; };
-  const newHref = `${base}/new?view=${view}${relQ}`;
+  const open = (id) => {
+    const target = def.openHash?.(records.find((r) => r.id === id));
+    location.hash = target ?? `${base}/${id}?view=${view}${relQ}`;
+  };
+  const newHref = def.readonly ? null : `${base}/new?view=${view}${relQ}`;
   const defaults = { ...leaf.defaults, ...(search.rel && models[model].fields[search.rel.field] ? { [search.rel.field]: search.rel.id } : {}) };
   const statementImport = model === 'account.bank.statement.line' && !!def.importFile;
   const importJournals = statementImport && !defaults.journal_id
@@ -171,8 +174,8 @@ export function ActionView({ leaf, base, params }) {
           {importJournals.map((journal) => <option key={journal.id} value={journal.id}>{journal.name}</option>)}
         </select>
       </label>}
-      <label className="btn sm">⬆ {t('Import')}<input type="file" accept={importAccept(model)} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>
-      {selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
+      {!def.readonly && <label className="btn sm">⬆ {t('Import')}<input type="file" accept={importAccept(model)} hidden onChange={(e) => { if (e.target.files[0]) importCsv(e.target.files[0]); e.target.value = ''; }} /></label>}
+      {!def.readonly && selected.size > 0 && <button type="button" className="btn danger" onClick={deleteSelected}>{t('Delete')} ({selected.size})</button>}
       {pager}
     </>
   ) : pager;

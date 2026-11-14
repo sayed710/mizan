@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -21,7 +21,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
-import { recipientBankCompanyError } from './company.js';
+import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
@@ -189,7 +189,8 @@ const exchangeLines = (db, companyId, difference) => {
 };
 
 export const isInvoice = (r) => Boolean(r && r.move_type !== 'entry');
-const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
+/** Whether a move is a customer credit note or vendor refund. */
+export const isRefund = (r) => ['out_refund', 'in_refund'].includes(r?.move_type);
 export const isPurchase = (r) => ['in_invoice', 'in_refund'].includes(r?.move_type);
 /** Money comes in for customer invoices and vendor refunds, goes out for bills and credit notes. */
 export const isInbound = (r) => ['out_invoice', 'in_refund'].includes(r?.move_type);
@@ -204,7 +205,8 @@ export const residual = (r, db) => {
   }
   return db ? Math.max(0, roundCurrency(total(r, db) - (Number(r.amount_paid) || 0), curr)) : (r.amount_residual ?? round2(total(r) - (Number(r.amount_paid) || 0)));
 };
-const paymentState = (r, db) => {
+/** Payment status (`paid`, `partial`, `not_paid`, or `unavailable`) of an invoice or bill. */
+export const paymentState = (r, db) => {
   if (r.state !== 'posted' || !isInvoice(r)) return 'not_paid';
   const res = residual(r, db);
   // Without a resolvable currency the open amount is unknown; say so rather than guess paid or partial.
@@ -229,10 +231,30 @@ const untaxedAmount = (r, db) => {
   return amounts(r.invoice_line_ids, curr, { roundingMethod: companyRoundingMethod(db, r?.company_id), side }).untaxed;
 };
 
-/** Sign a document-currency amount: credit notes and vendor refunds show as negative, avoiding -0. */
+/** Sign a document-currency amount with the same inbound/outbound convention as signedCompanyTotal, avoiding -0. */
 const signedDocumentAmount = (r, value) => {
   if (value == null) return null;
-  return value === 0 ? 0 : (isRefund(r) ? -1 : 1) * value;
+  if (value === 0) return 0;
+  if (!r || r.move_type === 'entry' || !r.move_type) return value;
+  return (isInbound(r) ? 1 : -1) * value;
+};
+
+const moveByIdCache = new WeakMap();
+const paymentByMoveCache = new WeakMap();
+
+/** Build and cache a Map over an immutable records array once per array instance. */
+const recordIndex = (cache, records, keyOf) => {
+  if (!records?.length) return null;
+  let index = cache.get(records);
+  if (!index) {
+    index = new Map();
+    for (const rec of records) {
+      const key = keyOf(rec);
+      if (key != null) index.set(key, rec);
+    }
+    cache.set(records, index);
+  }
+  return index;
 };
 
 /**
@@ -249,15 +271,15 @@ export const statusInPayment = (r, db) => {
   if (payState === 'paid') {
     const active = (r.payments ?? []).filter((p) => !p.reversed);
     if (db && active.length) {
-      const moveById = new Map((db.records['account.move'] ?? []).map((m) => [m.id, m]));
-      const paymentByMove = new Map((db.records['account.payment'] ?? []).filter((p) => p.move_id).map((p) => [p.move_id, p]));
+      const moveById = recordIndex(moveByIdCache, db.records?.['account.move'], (m) => m.id);
+      const paymentByMove = recordIndex(paymentByMoveCache, db.records?.['account.payment'], (p) => p.move_id || null);
       const allReversals = active.every((p) => {
-        const m = moveById.get(p.move_id);
+        const m = moveById?.get(p.move_id);
         return m && isRefund(m) && m.reversed_entry_id === r.id;
       });
       if (allReversals) return 'reversed';
       const hasOutstanding = active.some((p) => {
-        const payment = paymentByMove.get(p.payment_move_id ?? p.move_id);
+        const payment = paymentByMove?.get(p.payment_move_id ?? p.move_id);
         return payment && payment.state === 'posted' && payment.outstanding_account_id && !isPaymentMatched(db, payment);
       });
       if (hasOutstanding) return 'in_payment';
@@ -385,7 +407,7 @@ const RECURRING_EXCLUDED_FIELDS = new Set([
   'fx_payment_move_id', 'fx_invoice_id', 'reversed_entry_id', 'reversal_move_id', 'correction_of_id', 'debit_origin_id',
   'inalterable_hash', 'inalterable_hash_version', 'secure_sequence_number', 'auto_post_origin_id',
   'is_closing', 'is_tax_closing', 'is_tax_payment', 'tax_return_id', 'revaluation_date',
-  'deferral_date', 'deferral_kind', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
+  'deferral_date', 'deferral_kind', 'deferred_entry_type', 'is_deferred_grouped', 'deferred_contributions', 'force_post',
   'intercompany_move_id', // each occurrence gets its own counterpart bill (Qodo 6)
 ]);
 function recurringReversalDate(origin, nextDate) {
@@ -489,9 +511,11 @@ export function intercompanyBill(db, move) {
     if (!account || (account.company_id && account.company_id !== buyer.id)) {
       throw new Error(`Configure an expense account for ${product.name}`);
     }
+    const sourceUntaxed = !line.tax_id && !line.tax_ids?.length && !(Number(line.tax) || 0);
     let tax;
     try {
       tax = productTax(db, product, 'purchase', fpId, buyer.id);
+      if (sourceUntaxed && !tax?.tax_id && !tax?.tax_ids?.length) tax = { tax: 0 };
       if (tax?.tax_id) validateTaxCompany(db, [tax.tax_id, ...(tax.tax_ids ?? [])], buyer.id);
     } catch {
       throw new Error(`Configure purchase taxes for ${buyer.name} on ${product.name}`);
@@ -739,7 +763,7 @@ function creditCheck(db, note) {
 }
 
 /** Apply an open credit note (reversed_entry_id-linked or standalone) against an open invoice or bill. */
-export function applyCreditNote(db, noteId, invoiceId, date = null, amount = null) {
+export function applyCreditNote(db, noteId, invoiceId, date = null, amount = null, { lineIndex = null } = {}) {
   const note = read(db, 'account.move', noteId);
   const invoice = read(db, 'account.move', invoiceId);
   const pairError = creditNotePairError(db, note, invoice);
@@ -761,10 +785,10 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
   const notePortion = settlementCompanyAmount(db, note, value);
   const invRelease = releaseCashBasis(db, invoice, value / total(invoice, db), appDate, { final: value >= invResidual });
   const noteRelease = releaseCashBasis(invRelease.db, note, value / total(note, invRelease.db), appDate, { final: value >= noteResidual });
-  const settle = (next, r, other, cashBasisMoveId) => write(next, 'account.move', r.id, {
-    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: cashBasisMoveId }],
+  const settle = (next, r, other, cashBasisMoveId, targetIndex = null) => write(next, 'account.move', r.id, {
+    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: cashBasisMoveId, ...(Number.isInteger(targetIndex) ? { line_index: targetIndex } : {}) }],
   });
-  let next = settle(settle(noteRelease.db, invoice, note, invRelease.id), note, invoice, noteRelease.id);
+  let next = settle(settle(noteRelease.db, invoice, note, invRelease.id, lineIndex), note, invoice, noteRelease.id);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
   const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
@@ -936,7 +960,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
-export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal } = {}) {
+export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice, db)) throw new Error('Write-off exceeds the remaining invoice');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
@@ -959,7 +983,7 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
       ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
       : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
   const release = releaseCashBasis(booked.db, invoice, amount / total(invoice, db), date, { final: amount >= residual(invoice, db) });
-  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id }];
+  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id, ...(Number.isInteger(lineIndex) ? { line_index: lineIndex } : {}) }];
   return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
@@ -1705,6 +1729,20 @@ export const accountingModels = {
       tag_ids: { type: 'many2many', relation: 'account.account.tag', label: 'Tags', domain: (r) => r.applicability === 'accounts' },
       reconcile: { type: 'boolean', label: 'Allow Reconciliation' },
       active: { type: 'boolean', label: 'Active' },
+      is_deferred: {
+        type: 'boolean',
+        label: 'Deferred',
+        help: 'Check to enable deferred accounting, deferred dates will be required on invoice / bill',
+        hideWhen: (r) => !isIncomeOrExpenseAccount(r),
+      },
+      deferred_account_id: {
+        type: 'many2one',
+        relation: 'account.account',
+        label: 'Deferred Account',
+        help: 'Account automatically used for deferred entries on this account.',
+        domain: (candidate, acc) => candidate.active !== false && candidate.id !== acc?.id && (!acc?.company_id || !candidate.company_id || candidate.company_id === acc.company_id),
+        hideWhen: (r) => !isIncomeOrExpenseAccount(r),
+      },
       asset_model_id: { type: 'many2one', relation: 'account.asset.model', label: 'Depreciation Model' },
       description: { type: 'text', label: 'Description' },
       current_balance: { type: 'monetary', label: 'Balance', currency: 'company', readonly: true },
@@ -1731,6 +1769,12 @@ export const accountingModels = {
         if (!model) return 'Select an existing asset model';
         if (model.company_id && model.company_id !== after.company_id) return 'Asset model must belong to the account company';
       }
+      if (after.deferred_account_id) {
+        const defAcc = read(db, 'account.account', after.deferred_account_id);
+        if (!defAcc || defAcc.active === false) return 'Select an active deferred account';
+        if (after.id && defAcc.id === after.id) return 'An account cannot defer to itself';
+        if (after.company_id && defAcc.company_id && defAcc.company_id !== after.company_id) return 'Deferred account must belong to the account company';
+      }
       return null;
     },
     protectDelete: accountDeleteGuard,
@@ -1749,7 +1793,7 @@ export const accountingModels = {
           label: 'Accounting',
           groups: [
             ['account_type', 'tax_ids', 'fiscal_category_id', 'tag_ids', 'reconcile', 'active'],
-            ['asset_model_id'],
+            ['is_deferred', 'deferred_account_id', 'asset_model_id'],
             ['description'],
           ],
         },
@@ -1892,16 +1936,18 @@ export const accountingModels = {
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
     }),
-    createDefaults: (_db, vals = {}) => ({
+    createDefaults: (db, vals = {}) => ({
+      ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
       ...(vals.refund_sequence === undefined ? derivedRefundSequence(vals) : {}),
       ...(vals.type === 'bank' && vals.bank_statements_source === undefined ? { bank_statements_source: 'undefined' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_type === undefined ? { invoice_reference_type: 'invoice' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_model === undefined ? { invoice_reference_model: 'odoo' } : {}),
     }),
-    onchange: (r, key) => {
+    onchange: (r, key, db) => {
       if (key === 'type') {
         return {
+          ...(isLiquidityJournal(r) && !r.company_id ? { company_id: db ? currentCompany(db) : 1 } : {}),
           ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),
@@ -2161,6 +2207,7 @@ export const accountingModels = {
       revaluation_date: { type: 'date', label: 'Revaluation Date', readonly: true },
       deferral_date: { type: 'date', label: 'Deferral Date', readonly: true },
       deferral_kind: { type: 'selection', label: 'Deferral Kind', readonly: true, options: [['revenue', 'Deferred Revenue'], ['expense', 'Deferred Expense']] },
+      deferred_entry_type: { type: 'selection', label: 'Deferred Entry Type', readonly: true, hidden: true, options: [['expense', 'Expense'], ['revenue', 'Revenue'], ['misc', 'Misc']] },
       is_deferred_grouped: { type: 'boolean', label: 'Grouped Deferral Entry', readonly: true, hidden: true },
       reversal_move_id: { type: 'many2one', relation: 'account.move', label: 'Reversal Entry', readonly: true },
       auto_reverse: { type: 'boolean', label: 'Reverse Automatically' },

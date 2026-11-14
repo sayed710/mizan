@@ -6,7 +6,7 @@ import { ensureMainCompany } from './models/company.js';
 import { ensureMainWarehouse } from './models/warehouse.js';
 import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
-import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, postEntry } from './models/ledger.js';
+import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
@@ -130,6 +130,7 @@ export function seed() {
       code: journal.code, name: journal.name, type: journal.type,
       sequence: (idx + 1) * 10, active: true,
       default_account_id: journal.account ? installedByCode[journal.account] : null,
+      ...(isLiquidityJournal(journal) ? { company_id: 1 } : {}),
       ...(['bank', 'cash', 'credit'].includes(journal.type) ? { suspense_account_id: installedByCode['101404'] } : {}),
       ...(journal.type === 'cash' ? { profit_account_id: installedByCode['450000'], loss_account_id: installedByCode['690000'] } : {}),
       default_for_payments: journal.default_for_payments === true,
@@ -203,6 +204,8 @@ export function seed() {
     default_sale_journal_id: companyJournals.sales,
     default_purchase_journal_id: companyJournals.purchases,
     default_general_journal_id: companyJournals.general,
+    deferred_revenue_journal_id: companyJournals.general,
+    deferred_expense_journal_id: companyJournals.general,
   });
   db = write(db, 'res.company', mainCompanyId, { account_sale_tax_id: vatSale, account_purchase_tax_id: vatPurchase });
   const taxAuthorityId = add('res.partner', { name: 'Tax Authority', is_company: true, email: 'tax@authority.example', country: 'Egypt' });
@@ -521,8 +524,8 @@ export function seed() {
   set('res.partner', 1, { credit_limit: 100000 });
   const assembly = add('mrp.workcenter', { name: 'Assembly Line', code: 'ASM', capacity: 2, costs_hour: 25 });
   (db.records['mrp.bom'] ?? []).forEach((b) => set('mrp.bom', b.id, { operations: [{ name: 'Cut and assemble', workcenter_id: assembly, duration: 45 }, { name: 'Quality check', workcenter_id: assembly, duration: 10 }] }));
-  add('account.followup.level', { name: 'First reminder', delay: 15, channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
-  add('account.followup.level', { name: 'Second reminder', delay: 30, channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
+  add('account.followup.level', { display_delay: 15, reminder_timing: 'after', delay: 15, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Friendly reminder: please settle the amount below.' });
+  add('account.followup.level', { display_delay: 30, reminder_timing: 'after', delay: 30, send_email: true, send_sms: false, create_activity: false, activity_default_responsible_type: 'followup', channel: 'email', message: 'Your account is overdue; please pay within 7 days.' });
   const support = add('helpdesk.team', { name: 'Customer Care', email: 'support@mizan.example', assignment: 'balanced', use_sla: true, use_fsm: true });
   (db.records['appointment.type'] ?? []).forEach((a) => set('appointment.type', a.id, { is_published: true }));
   add('helpdesk.sla', { name: 'Standard: 3 days', team_id: support, priority: '0', days: 3 });

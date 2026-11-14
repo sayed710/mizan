@@ -12,12 +12,14 @@ import { sanitizeAccountNumber } from './models/partnerbank.js';
 import { migrateOrderpoints } from './models/orderpoint.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { today, validDate } from './models/common.js';
-import { CHART, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
+import { CHART, isLiquidityJournal, journalId, STOCK_CHART_ROLES } from './models/ledger.js';
 import { INCOTERMS_2020 } from './models/accounting.js';
 import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
-import { returnTaxLock } from './models/finance.js';
+import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
+import { ensureStatementReports } from './models/statementReports.js';
+import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeDeferredComputationMethod } from './models/deferred.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1228,7 +1230,7 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
   const nextGroups = groups.flatMap((g) => {
     const sequence = g.sequence ?? (nextGroupSeq += 10);
     if (g.company_id != null) return [{ ...g, sequence }];
-    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id && t.company_id != null).map((t) => t.company_id))];
+    const owners = [...new Set(taxes.filter((t) => t.tax_group_id === g.id).map((t) => t.company_id ?? 1))];
     if (owners.length <= 1) return [{ ...g, company_id: owners[0] ?? mainCompanyId, sequence }];
     const [keep, ...rest] = owners.includes(mainCompanyId) ? [mainCompanyId, ...owners.filter((c) => c !== mainCompanyId)] : owners;
     return [{ ...g, company_id: keep, sequence }, ...rest.map((companyId) => {
@@ -1238,7 +1240,7 @@ MIGRATIONS.push({ version: 45, name: 'tax-groups-and-cash-rounding-parity', up(d
     })];
   });
   const nextTaxes = taxes.map((t) => {
-    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id}`);
+    const id = taxGroupFor.get(`${t.tax_group_id}:${t.company_id ?? 1}`);
     return id ? { ...t, tax_group_id: id } : t;
   });
 
@@ -1275,6 +1277,269 @@ MIGRATIONS.push({ version: 46, name: 'analytic-plans-sequence-backfill', up(db) 
     ...db,
     records: { ...db.records, 'account.analytic.plan': nextPlans },
   };
+} });
+
+MIGRATIONS.push({ version: 47, name: 'followup-levels-parity', up(db) {
+  const levels = db.records['account.followup.level'] ?? [];
+  if (!levels.length) return db;
+  const nextLevels = levels.map((l) => {
+    const rawDelay = Number(l.delay) || 0;
+    const displayDelay = l.display_delay != null ? Math.max(0, Math.trunc(Number(l.display_delay) || 0)) : Math.abs(Math.trunc(rawDelay));
+    const timing = l.reminder_timing ?? (rawDelay < 0 ? 'before' : 'after');
+    return {
+      ...l,
+      display_delay: displayDelay,
+      reminder_timing: timing,
+      delay: l.delay != null ? Math.trunc(rawDelay) : followUpSignedDelay(displayDelay, timing),
+      send_email: l.send_email ?? (l.channel === 'email'),
+      send_sms: l.send_sms ?? false,
+      create_activity: l.create_activity ?? false,
+      activity_default_responsible_type: l.activity_default_responsible_type ?? 'followup',
+    };
+  });
+  return {
+    ...db,
+    records: { ...db.records, 'account.followup.level': nextLevels },
+  };
+} });
+
+const LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE = 'Upgrade: both legacy and canonical income/expense accounts were set on this category; both values were kept so you can choose which account to retain.';
+
+/** Migrate legacy product.category income/expense fields while preserving differing values with a chatter note. */
+function migrateCategoryAccounts(db) {
+  const categories = db.records['product.category'] ?? [];
+  if (!categories.length) return db;
+  const byId = new Map(categories.map((c) => [c.id, c]));
+  const inheritedCosting = (cat) => {
+    const seen = new Set();
+    for (let cur = cat; cur && !seen.has(cur.id); cur = byId.get(cur.parent_id)) {
+      seen.add(cur.id);
+      if (cur.property_cost_method) return cur.property_cost_method;
+    }
+    return 'standard';
+  };
+  const conflictIds = [];
+  const nextCategories = categories.map((c) => {
+    const {
+      property_account_income_id: legacyIncome,
+      property_account_expense_id: legacyExpense,
+      ...rest
+    } = c;
+    const incomeConflict = legacyIncome != null && c.property_account_income_categ_id != null && c.property_account_income_categ_id !== legacyIncome;
+    const expenseConflict = legacyExpense != null && c.property_account_expense_categ_id != null && c.property_account_expense_categ_id !== legacyExpense;
+    if (incomeConflict || expenseConflict) conflictIds.push(c.id);
+    return {
+      ...rest,
+      property_cost_method: c.property_cost_method || inheritedCosting(byId.get(c.parent_id)),
+      ...(c.property_account_income_categ_id == null && legacyIncome != null ? { property_account_income_categ_id: legacyIncome } : {}),
+      ...(c.property_account_expense_categ_id == null && legacyExpense != null ? { property_account_expense_categ_id: legacyExpense } : {}),
+      ...(incomeConflict ? { property_account_income_id: legacyIncome } : {}),
+      ...(expenseConflict ? { property_account_expense_id: legacyExpense } : {}),
+    };
+  });
+  let next = {
+    ...db,
+    records: { ...db.records, 'product.category': nextCategories },
+  };
+  if (conflictIds.length) {
+    next = { ...next, messages: next.messages ?? [] };
+    for (const id of conflictIds) {
+      const alreadyNoted = next.messages.some((m) => m.model === 'product.category' && m.res_id === id && m.body === LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE);
+      if (!alreadyNoted) next = postNote(next, 'product.category', id, LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE);
+    }
+  }
+  return next;
+}
+
+MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up: migrateCategoryAccounts });
+
+const JOURNAL_ACCOUNT_FIELDS = [
+  'default_account_id',
+  'suspense_account_id',
+  'non_deductible_account_id',
+  'profit_account_id',
+  'loss_account_id',
+  'outstanding_receipts_account_id',
+  'outstanding_payments_account_id',
+];
+
+const UNRESOLVED_JOURNAL_COMPANY_NOTE = 'Upgrade: this journal\'s company could not be proved from its accounts or posted entries; set the company on the journal.';
+
+/** Derive a unique owning company for an unscoped journal from its accounts and posted moves, or null if ambiguous or contradicted. */
+function provableJournalCompany(journal, accountById, postedMoves, companyIds) {
+  const soleCompany = companyIds.size === 1 ? [...companyIds][0] : null;
+  const accountCompanies = new Set();
+  for (const field of JOURNAL_ACCOUNT_FIELDS) {
+    const acc = accountById.get(journal[field]);
+    if (acc?.company_id != null) accountCompanies.add(acc.company_id);
+  }
+  if (accountCompanies.size > 1) return null;
+  const fromAccounts = accountCompanies.size === 1 ? [...accountCompanies][0] : null;
+  const hasUnscopedMove = postedMoves.some((m) => m.company_id == null);
+  const moveCompanies = new Set(postedMoves.map((m) => m.company_id).filter((id) => id != null));
+  if (soleCompany != null) {
+    if (fromAccounts != null && fromAccounts !== soleCompany) return null;
+    if ([...moveCompanies].some((id) => id !== soleCompany)) return null;
+    return soleCompany;
+  }
+  if (postedMoves.length && (hasUnscopedMove || moveCompanies.size !== 1)) return null;
+  const fromMoves = postedMoves.length ? [...moveCompanies][0] : null;
+  if (fromAccounts != null && fromMoves != null && fromAccounts !== fromMoves) return null;
+  const resolved = fromAccounts ?? fromMoves;
+  if (resolved == null) return null;
+  return !companyIds.size || companyIds.has(resolved) ? resolved : null;
+}
+
+/** Resolve provable company ownership for unscoped liquidity journals and post a chatter note on ambiguous ones. */
+function resolveLiquidityJournalsCompany(db) {
+  const journals = db.records['account.journal'] ?? [];
+  if (!journals.length) return db;
+  const accountById = new Map((db.records['account.account'] ?? []).map((a) => [a.id, a]));
+  const postedMovesByJournal = new Map();
+  for (const move of db.records['account.move'] ?? []) {
+    if (move.state !== 'posted' || move.journal_id == null) continue;
+    const list = postedMovesByJournal.get(move.journal_id) ?? [];
+    list.push(move);
+    postedMovesByJournal.set(move.journal_id, list);
+  }
+  const companyIds = new Set((db.records['res.company'] ?? []).map((c) => c.id));
+  const unresolvedIds = [];
+  let changed = false;
+  const nextJournals = journals.map((j) => {
+    if (j.company_id != null || !isLiquidityJournal(j)) return j;
+    const resolved = provableJournalCompany(j, accountById, postedMovesByJournal.get(j.id) ?? [], companyIds);
+    if (resolved == null) {
+      unresolvedIds.push(j.id);
+      return j;
+    }
+    changed = true;
+    return { ...j, company_id: resolved };
+  });
+  let next = changed ? { ...db, records: { ...db.records, 'account.journal': nextJournals } } : db;
+  if (unresolvedIds.length) {
+    next = { ...next, messages: next.messages ?? [] };
+    for (const id of unresolvedIds) {
+      const alreadyNoted = next.messages.some((m) => m.model === 'account.journal' && m.res_id === id && m.body === UNRESOLVED_JOURNAL_COMPANY_NOTE);
+      if (!alreadyNoted) next = postNote(next, 'account.journal', id, UNRESOLVED_JOURNAL_COMPANY_NOTE);
+    }
+  }
+  return next;
+}
+
+/** Bank, cash and credit journals belong to one company; shared document journals stay shared. */
+MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', up: resolveLiquidityJournalsCompany });
+
+MIGRATIONS.push({ version: 50, name: 'seed-standard-statement-reports', up: (db) => ensureStatementReports(db) });
+MIGRATIONS.push({ version: 51, name: 'per-kind-deferred-settings', up: (db) => {
+  const journalsById = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
+  const companies = (db.records['res.company'] ?? []).map((c) => {
+    const mappedGen = c.deferred_generation_method === 'manual'
+      ? null
+      : (mapLegacyDeferredGenerationMethod(c.deferred_generation_method) ?? 'on_validation');
+    const mappedComp = normalizeDeferredComputationMethod(c.deferred_amount_computation_method || 'days');
+    const defGen = c.default_general_journal_id ? journalsById.get(c.default_general_journal_id) : null;
+    const defaultJournalId = defGen && defGen.active !== false && defGen.type === 'general' && (!defGen.company_id || defGen.company_id === c.id)
+      ? defGen.id
+      : null;
+    return {
+      ...c,
+      generate_deferred_revenue_entries_method: c.generate_deferred_revenue_entries_method !== undefined ? c.generate_deferred_revenue_entries_method : mappedGen,
+      generate_deferred_expense_entries_method: c.generate_deferred_expense_entries_method !== undefined ? c.generate_deferred_expense_entries_method : mappedGen,
+      deferred_revenue_amount_computation_method: c.deferred_revenue_amount_computation_method ?? mappedComp,
+      deferred_expense_amount_computation_method: c.deferred_expense_amount_computation_method ?? mappedComp,
+      deferred_revenue_periodicity: c.deferred_revenue_periodicity ?? 'month',
+      deferred_expense_periodicity: c.deferred_expense_periodicity ?? 'month',
+      deferred_revenue_journal_id: c.deferred_revenue_journal_id ?? defaultJournalId,
+      deferred_expense_journal_id: c.deferred_expense_journal_id ?? defaultJournalId,
+    };
+  });
+  const kindByMoveId = new Map();
+  for (const d of db.records['account.deferral'] ?? []) {
+    const kind = d.kind;
+    if (!kind) continue;
+    for (const line of d.board ?? []) {
+      if (line.move_id) kindByMoveId.set(line.move_id, kind);
+      if (line.reversal_move_id) kindByMoveId.set(line.reversal_move_id, kind);
+    }
+    for (const adj of d.credit_adjustments ?? []) {
+      for (const mid of adj.move_ids ?? []) kindByMoveId.set(mid, kind);
+    }
+  }
+  let movesChanged = false;
+  const moves = (db.records['account.move'] ?? []).map((m) => {
+    if (m.deferred_entry_type) return m;
+    const kind = m.deferral_kind || kindByMoveId.get(m.id);
+    if (!kind) return m;
+    movesChanged = true;
+    return { ...m, deferred_entry_type: deferredEntryTypeForKind(kind) };
+  });
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'res.company': companies,
+      ...(movesChanged ? { 'account.move': moves } : {}),
+    },
+  };
+} });
+
+/** Copy tax groups for any tax whose tax_group_id points to another company's group after an older v45 migration. */
+MIGRATIONS.push({ version: 52, name: 'repair-tax-group-company-splits', up(db) {
+  const taxes = db.records['account.tax'] ?? [];
+  const groups = db.records['account.tax.group'] ?? [];
+  if (!taxes.length || !groups.length) return db;
+  const groupById = new Map(groups.map((g) => [g.id, g]));
+  let nextGroupId = Math.max(0, db.seq?.['account.tax.group'] ?? 0, ...groups.map((g) => g.id ?? 0));
+  let nextGroupSeq = Math.max(0, ...groups.map((g) => Number(g.sequence) || 0));
+  const copyFor = new Map();
+  const extraGroups = [];
+  const nextTaxes = taxes.map((t) => {
+    const group = t.tax_group_id ? groupById.get(t.tax_group_id) : null;
+    const taxCompanyId = t.company_id ?? 1;
+    if (!group?.company_id || group.company_id === taxCompanyId) return t;
+    const key = `${group.id}:${taxCompanyId}`;
+    let copyId = copyFor.get(key);
+    if (!copyId) {
+      copyId = ++nextGroupId;
+      copyFor.set(key, copyId);
+      extraGroups.push({
+        ...group,
+        id: copyId,
+        company_id: taxCompanyId,
+        sequence: group.sequence ?? (nextGroupSeq += 10),
+      });
+    }
+    return { ...t, tax_group_id: copyId };
+  });
+  if (!copyFor.size) return db;
+  return {
+    ...db,
+    records: {
+      ...db.records,
+      'account.tax.group': [...groups, ...extraGroups],
+      'account.tax': nextTaxes,
+    },
+    seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId },
+  };
+} });
+
+/** Single-company journal scoping, conflicting legacy category notes, and in_refund analytic category alignment. */
+MIGRATIONS.push({ version: 53, name: 'qodo-117-upgrade-fixes', up(db) {
+  let next = migrateCategoryAccounts(db);
+  next = resolveLiquidityJournalsCompany(next);
+  const moveTypes = new Map((next.records['account.move'] ?? []).map((m) => [m.id, m.move_type]));
+  const analyticLines = next.records['account.analytic.line'] ?? [];
+  let analyticChanged = false;
+  const nextAnalyticLines = analyticLines.map((line) => {
+    if (line.move_id && line.category === 'invoice' && moveTypes.get(line.move_id) === 'in_refund') {
+      analyticChanged = true;
+      return { ...line, category: 'vendor_bill' };
+    }
+    return line;
+  });
+  return analyticChanged
+    ? { ...next, records: { ...next.records, 'account.analytic.line': nextAnalyticLines } }
+    : next;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

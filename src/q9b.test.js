@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import './models/index.js';
 import { create, read, search, write } from './orm.js';
 import { seed } from './seed.js';
-import { accountingCompany, createCompanyWithDefaultInvoiceJournals } from './test-support/accounting-company.js';
+import { accountingCompany, createCompanyWithDefaultInvoiceJournals, withDefaultBankJournal } from './test-support/accounting-company.js';
 import { payMove, postMove } from './models/accounting.js';
 import { cashFlow } from './models/reports.js';
 import { reversePayment } from './models/pay.js';
@@ -62,8 +62,9 @@ test('legacy bank counterpart migration falls back to unique shared accounts and
   const base = seed();
   const shared = create(base, 'account.account', { name: 'Shared expense', code: 'Q9B-SHARED', account_type: 'expense', company_id: null });
   const company = create(shared.db, 'res.company', { name: 'Other company', currency_id: shared.db.settings.base_currency_id });
-  const journal = search(company.db, 'account.journal').find((j) => j.type === 'bank');
-  const line = create(company.db, 'account.bank.statement.line', { journal_id: journal.id, company_id: company.id, date: '2025-01-02', payment_ref: 'Legacy', amount: -15 });
+  const ownBank = withDefaultBankJournal(company.db, company.id);
+  const journal = search(ownBank, 'account.journal').find((j) => j.type === 'bank' && j.company_id === company.id);
+  const line = create(ownBank, 'account.bank.statement.line', { journal_id: journal.id, company_id: company.id, date: '2025-01-02', payment_ref: 'Legacy', amount: -15 });
   const legacy = { ...line.db, schema_version: 29, records: { ...line.db.records,
     'account.bank.statement.line': line.db.records['account.bank.statement.line'].map((row) => row.id === line.id ? { ...row, counterpart: 'Q9B-SHARED', counterpart_account_id: null } : row) } };
   assert.equal(read(migrate(legacy), 'account.bank.statement.line', line.id).counterpart_account_id, shared.id);

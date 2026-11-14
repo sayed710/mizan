@@ -22,7 +22,7 @@ const openBill = (db) => search(db, 'account.move').find((m) => m.move_type === 
 test('bank reconciliation enforces company for entries, payment entries, journals and accounts locally and on sync', () => {
   const base = seed();
   const branch = createCompanyWithDefaultInvoiceJournals(base, { name: 'Other company', currency_id: base.records['res.company'][0].currency_id });
-  const makeEntry = (db, company) => postEntry(db, { journal: 'BNK1', company, lines: [{ account: '101401', debit: 10 }, { account: '450000', credit: 10 }] });
+  const makeEntry = (db, company) => postEntry(db, { journal: company === 1 ? 'BNK1' : `BNK${company}`, company, lines: [{ account: '101401', debit: 10 }, { account: '450000', credit: 10 }] });
   const own = makeEntry(branch.db, 1);
   const foreign = makeEntry(own.db, branch.id);
   const line = addLine(foreign.db, { company_id: 1, amount: 10 });

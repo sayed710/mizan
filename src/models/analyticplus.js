@@ -137,15 +137,23 @@ export function checkMandatoryPlans(db, move, { systemGenerated = false } = {}) 
   }
 }
 
+/** Return the analytic line category used for an accounting move. */
+export function analyticMoveCategory(move) {
+  if (move?.move_type === 'entry') return 'journal_entry';
+  if (['in_invoice', 'in_refund'].includes(move?.move_type)) return 'vendor_bill';
+  return 'invoice';
+}
+
 /** Build untaxed analytic allocations for a customer invoice or vendor bill. */
 export function analyticLinesForMove(db, move, { historical = false } = {}) {
+  const category = analyticMoveCategory(move);
   if (move.move_type === 'entry') return (move.line_ids ?? []).flatMap((line) => {
     const base = (Number(line.credit) || 0) - (Number(line.debit) || 0);
     return allocatedShares(db, distributionOfLine(line), base).map(([id, amount]) => ({
     name: line.name || move.name || '/', date: move.date || move.invoice_date || today(), account_id: Number(id),
     amount,
     general_account: read(db, 'account.account', line.account_id)?.code || '', move_id: move.id,
-    partner_id: line.partner_id ?? move.partner_id ?? null, category: 'journal_entry', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+    partner_id: line.partner_id ?? move.partner_id ?? null, category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
     }));
   });
   if (!['out_invoice', 'in_invoice', 'out_refund', 'in_refund'].includes(move.move_type)) return [];
@@ -170,7 +178,7 @@ export function analyticLinesForMove(db, move, { historical = false } = {}) {
         account_id: Number(id), amount: round(amount * (purchase !== refund ? -1 : 1)),
         general_account: read(db, 'account.account', account)?.code || '',
         move_id: move.id, partner_id: move.partner_id ?? null, product_id: line.product_id ?? null,
-        category: purchase ? 'vendor_bill' : 'invoice', employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
+        category, employee_id: null, unit_amount: 0, company_id: move.company_id ?? 1,
       };
     });
   });
@@ -181,8 +189,9 @@ export function postAnalytic(db, moveId) {
   const move = read(db, 'account.move', moveId);
   if (!move) throw new Error('Invoice or bill not found');
   if (move.state !== 'posted') throw new Error('Post the invoice or bill before creating analytic lines');
-  const category = move.move_type === 'entry' ? 'journal_entry' : move.move_type === 'in_invoice' ? 'vendor_bill' : 'invoice';
-  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && r.category === category)) return db;
+  const category = analyticMoveCategory(move);
+  const categories = move.move_type === 'in_refund' ? [category, 'invoice'] : [category];
+  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && categories.includes(r.category))) return db;
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }
 
@@ -383,6 +392,20 @@ export function planHierarchyError(db, plan) {
   return null;
 }
 
+/** Reject distribution models whose analytic accounts belong to a different company than the model. */
+export function distributionModelCompanyError(db, record) {
+  if (!record?.company_id || !record.analytic_distribution || typeof record.analytic_distribution !== 'object' || Array.isArray(record.analytic_distribution)) {
+    return null;
+  }
+  for (const id of Object.keys(record.analytic_distribution)) {
+    const account = read(db, 'account.analytic.account', Number(id));
+    if (account?.company_id && account.company_id !== record.company_id) {
+      return 'Analytic accounts in the distribution must belong to the model company';
+    }
+  }
+  return null;
+}
+
 const analyticStat = (db, rec, key) => (db && rec?.id ? analyticBalance(db, rec.id)[key] : 0);
 
 export const analyticPlusModels = {
@@ -504,25 +527,67 @@ export const analyticPlusModels = {
     label: 'Analytic Distribution Models',
     fields: {
       analytic_distribution: { type: 'distribution', label: 'Analytic Distribution', required: true },
-      sequence: { type: 'integer', label: 'Sequence' },
-      partner_id: { type: 'many2one', relation: 'res.partner', label: 'Partner' },
-      partner_category_id: { type: 'char', label: 'Partner Category' },
-      product_id: { type: 'many2one', relation: 'product', label: 'Product' },
-      product_categ_id: { type: 'many2one', relation: 'product.category', label: 'Product Category' },
-      account_prefix: { type: 'char', label: 'Accounts Prefix' },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
+      partner_id: {
+        type: 'many2one',
+        relation: 'res.partner',
+        label: 'Partner',
+        help: 'Select a partner for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner, it will automatically take this as an analytic account)',
+      },
+      partner_category_id: {
+        type: 'char',
+        label: 'Partner Category',
+        help: 'Select a partner category for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this partner category, it will automatically take this as an analytic account)',
+      },
+      product_id: {
+        type: 'many2one',
+        relation: 'product',
+        label: 'Product',
+        help: 'Select a product for which the analytic distribution will be used (e.g. create new customer invoice or Sales order if we select this product, it will automatically take this as an analytic account)',
+      },
+      product_categ_id: {
+        type: 'many2one',
+        relation: 'product.category',
+        label: 'Product Category',
+        help: 'Select a product category which will use analytic account specified in analytic default (e.g. create new customer invoice or Sales order if we select this product, it will automatically take this as an analytic account)',
+      },
+      account_prefix: {
+        type: 'char',
+        label: 'Accounts Prefix',
+        help: 'This analytic distribution will apply to all financial accounts sharing the prefix specified.',
+      },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company' },
     },
     defaults: () => ({ sequence: 10, analytic_distribution: {} }),
     createDefaults: (db) => ({ company_id: currentCompany(db) }),
-    list: ['sequence', 'partner_id', 'product_id', 'account_prefix', 'analytic_distribution'],
-    kanban: { title: 'sequence', lines: ['partner_id', 'product_id', 'account_prefix'] },
+    guard: (db, _before, after) => distributionModelCompanyError(db, after),
+    sort: (a, b) => (Number(a.sequence ?? 10) - Number(b.sequence ?? 10)) || (b.id - a.id),
+    views: ['list'],
+    searchFields: ['partner_id', 'product_id', 'account_prefix'],
+    list: ['sequence', 'account_prefix', 'partner_id', 'partner_category_id', 'product_id', 'product_categ_id', 'analytic_distribution'],
+    listLabels: { account_prefix: 'Accounts Prefixes' },
+    listFields: {
+      account_prefix: { optional: 'show' },
+      partner_id: { optional: 'show' },
+      partner_category_id: { optional: 'hide' },
+      product_id: { optional: 'show' },
+      product_categ_id: { optional: 'hide' },
+      analytic_distribution: { optional: 'show' },
+    },
     form: {
       title: 'sequence',
+      hideTitle: true,
       groups: [
-        ['partner_id', 'partner_category_id', 'product_id', 'product_categ_id'],
-        ['account_prefix', 'company_id', 'sequence', 'analytic_distribution'],
+        {
+          title: 'Conditions to meet',
+          fields: ['partner_id', 'partner_category_id', { field: 'account_prefix', label: 'Accounts Prefixes' }],
+        },
+        ['product_id', 'product_categ_id'],
+        {
+          title: 'Distribution to apply',
+          fields: ['analytic_distribution'],
+        },
       ],
-      chatter: true,
     },
   },
 };

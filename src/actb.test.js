@@ -19,15 +19,21 @@ test('cancellation blocks posted recognition until explicitly handled', () => {
   assert.equal(read(db, 'account.deferral', made.id).state, 'running');
 });
 
-test('grouped regeneration refuses changed contributions without writing', () => {
+test('grouped regeneration posts only the delta for newly added schedules without modifying earlier entries', () => {
   let db = write(seed(), 'res.company', 1, { deferred_generation_method: 'manual_grouped' });
   const first = schedule(db);
   db = button('account.deferral', 'Compute', first.db, first.id);
   db = generateGroupedEntries(db, { company_id: 1, kind: 'revenue', date: '2026-01-31' });
   assert.equal(generateGroupedEntries(db, { company_id: 1, kind: 'revenue', date: '2026-01-31' }), db);
+  const firstGroup = search(db, 'account.move').find((m) => m.is_deferred_grouped && !m.reversed_entry_id);
   const second = schedule(db);
   db = button('account.deferral', 'Compute', second.db, second.id);
-  assert.throws(() => generateGroupedEntries(db, { company_id: 1, kind: 'revenue', date: '2026-01-31' }), /contributions changed/i);
+  db = generateGroupedEntries(db, { company_id: 1, kind: 'revenue', date: '2026-01-31' });
+  const groupedMoves = search(db, 'account.move').filter((m) => m.is_deferred_grouped && !m.reversed_entry_id && m.deferral_date === '2026-01-31');
+  assert.equal(groupedMoves.length, 2);
+  assert.deepEqual(read(db, 'account.move', firstGroup.id), firstGroup);
+  assert.deepEqual(groupedMoves[1].deferred_contributions.map((c) => c.schedule_id), [second.id]);
+  assert.equal(generateGroupedEntries(db, { company_id: 1, kind: 'revenue', date: '2026-01-31' }), db);
   assert.throws(() => button('account.deferral', 'Cancel', db, first.id), /reverse.*recognition/i);
 });
 

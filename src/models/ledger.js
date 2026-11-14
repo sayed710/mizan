@@ -15,7 +15,9 @@ import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
-export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+/** Whether `account` belongs to the income or expense account type family. */
+export const isIncomeOrExpenseAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_depreciation', 'expense_other'].includes(account?.account_type);
+export const analyticEligibleAccount = isIncomeOrExpenseAccount;
 /** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
 export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
 let analyticPostingHooks = null;
@@ -27,7 +29,7 @@ export function registerAnalyticPostingHooks(hooks) {
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
   ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['liability_non_current', 'Non-current Liabilities'], ['liability_credit_card', 'Credit Card'], ['equity', 'Equity'], ['equity_unaffected', 'Current Year Earnings'], ['off_balance', 'Off-Balance Sheet'],
-  ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_other', 'Other Expenses'],
+  ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_depreciation', 'Depreciation'], ['expense_other', 'Other Expenses'],
 ];
 
 /** Default chart of accounts (codes follow a common 6-digit layout). */
@@ -251,10 +253,11 @@ export function invoiceBaseGroups(db, move, roundingMethod = companyRoundingMeth
       throw new Error('No valid account for the invoice company');
     }
     const original = resolved;
-    const deferred = l.deferred_start_date || l.deferred_end_date;
+    const originalAccount = read(db, 'account.account', original);
+    const deferred = Boolean(l.deferred_start_date || l.deferred_end_date || originalAccount?.is_deferred);
     if (deferred && (!l.deferred_start_date || !l.deferred_end_date || l.deferred_start_date > l.deferred_end_date)) throw new Error('Set valid deferred start and end dates');
     const company = read(db, 'res.company', move.company_id ?? 1);
-    const account = deferred ? company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id'] : original;
+    const account = deferred ? (originalAccount?.deferred_account_id || company?.[sale ? 'deferred_revenue_account_id' : 'deferred_expense_account_id']) : original;
     if (deferred && !account) throw new Error(`Configure the deferred ${sale ? 'revenue' : 'expense'} account on the company`);
     const selected = read(db, 'account.account', account);
     if (deferred && (!selected || (selected.company_id && selected.company_id !== (move.company_id ?? 1)))) throw new Error('Deferred account must belong to the document company');
@@ -540,7 +543,7 @@ export function postedBillLine(move, index) {
  * Tax lines may carry `tax_name` and `tax_base` (company currency) for the tax return.
  * @param {{journal: string, date?: string, ref?: string, lines: {account_id: number, debit?: number, credit?: number, partner_id?: number, name?: string, tax_name?: string, tax_base?: number}[]}} spec
  */
-export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
+export function postEntry(db, { journal, journal_id = null, date = today(), ref = '', lines, company = null, fx_payment_move_id = null, fx_invoice_id = null, is_tax_payment = false, tax_return_id = null, deferred_adjustment_of_id = null, deferred_entry_type = null, system_generated = false, archivedOriginIds = [], includeCashBasisTargets = false }) {
   if (fx_payment_move_id || fx_invoice_id) throw new Error('Exchange provenance cannot be supplied to postEntry');
   if (company && !read(db, 'res.company', company)) throw new Error('Company does not exist');
   const jId = journal_id ?? (typeof journal === 'number' ? journal : (journalId(db, journal, company) ?? journalId(db, journal)));
@@ -612,6 +615,7 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
     ...(is_tax_payment ? { is_tax_payment: true } : {}),
     ...(tax_return_id ? { tax_return_id } : {}),
     ...(deferred_adjustment_of_id ? { deferred_adjustment_of_id } : {}),
+    ...(deferred_entry_type ? { deferred_entry_type } : {}),
     ...(system_generated ? { system_generated: true } : {}),
   }, { archivedOriginIds, includeCashBasisTargets });
   if (analyticPostingHooks?.postAnalytic) return { ...made, db: analyticPostingHooks.postAnalytic(made.db, made.id) };
@@ -621,20 +625,22 @@ export function postEntry(db, { journal, journal_id = null, date = today(), ref 
 
 /** Resolve the unique payment default or an explicitly selected liquidity journal. */
 export function paymentJournal(db, selectedJournalId = null, companyId = 1) {
+  const company = companyId ?? 1;
   let journal = selectedJournalId ? read(db, 'account.journal', selectedJournalId) : null;
   if (selectedJournalId && !journal) throw new Error('Selected payment journal does not exist');
   if (!selectedJournalId) {
-    const configured = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true);
-    const own = configured.filter((candidate) => candidate.company_id === companyId);
-    const defaults = own.length ? own : configured.filter((candidate) => !candidate.company_id);
+    const companies = db.records['res.company'] ?? [];
+    const singleCompany = companies.length <= 1 && (!companies.length || companies[0].id === company);
+    const defaults = search(db, 'account.journal').filter((candidate) => candidate.default_for_payments === true
+      && (candidate.company_id === company || (singleCompany && candidate.company_id == null)));
     if (!defaults.length) throw new Error('Select a payment journal or configure one default bank or cash journal');
     if (defaults.length !== 1) throw new Error('Configure exactly one default payment journal for this company');
     [journal] = defaults;
   }
   if (journal.active === false) throw new Error('The selected payment journal is archived');
   if (!isLiquidityJournal(journal)) throw new Error('Payment journal must be a bank or cash journal');
-  if (companyId && journal.company_id && journal.company_id !== companyId) throw new Error('Payment journal belongs to another company');
-  const id = assertCompanyAccount(db, journal.default_account_id, companyId, journal.type === 'credit' ? 'liability_credit_card' : 'asset_cash', 'The selected journal liquidity account');
+  if (journal.company_id && journal.company_id !== company) throw new Error('Payment journal belongs to another company');
+  const id = assertCompanyAccount(db, journal.default_account_id, company, journal.type === 'credit' ? 'liability_credit_card' : 'asset_cash', 'The selected journal liquidity account');
   const account = read(db, 'account.account', id);
   return { id: journal.id, code: journal.code, accountId: id, account_id: id, account: account.code };
 }
@@ -666,14 +672,40 @@ export function statementCompanyAmount(db, line, amount = Math.abs(Number(line.a
   return toCompany(db, currency, amount, line.date ?? today(), company);
 }
 
+/** IDs of active payments linked to a bank statement line (batch, multi-select, or single). */
+export function statementPaymentIds(db, line) {
+  if (!line) return [];
+  if (line.batch_payment_id) {
+    return [...new Set((read(db, 'account.batch.payment', line.batch_payment_id)?.lines ?? [])
+      .filter((l) => !l.cancelled && l.payment_id)
+      .map((l) => l.payment_id))];
+  }
+  if (Array.isArray(line.payment_ids) && line.payment_ids.length > 0) {
+    return [...new Set(line.payment_ids.filter(Boolean))];
+  }
+  return line.payment_id ? [line.payment_id] : [];
+}
+
 /** Company amount of a statement line: what its bank entry booked, or a fresh conversion before booking. */
 export function bookedStatementAmount(db, line) {
   if (!line.bank_move_id) return statementCompanyAmount(db, line);
   const company = line.company_id ?? 1;
-  const entry = read(db, 'account.move', line.bank_move_id);
   const account = paymentJournal(db, line.journal_id, company).accountId;
-  const item = (entry?.line_ids ?? []).find((l) => l.account_id === account);
-  return roundCurrency(line.amount > 0 ? item?.debit : item?.credit, companyCurrencyRecord(db, company));
+  const sign = line.amount > 0 ? 1 : -1;
+  const directMoves = line.state === 'reconciled' && (line.allocations ?? []).every((a) => !a.invoice_id && !a.reconcile_model_id)
+    ? statementPaymentIds(db, line)
+        .map((id) => read(db, 'account.payment', id))
+        .filter((p) => p && !p.outstanding_account_id && p.move_id)
+        .map((p) => p.move_id)
+    : [];
+  const moveIds = new Set([line.bank_move_id, ...directMoves]);
+  const total = [...moveIds].reduce((sum, moveId) => {
+    const entry = read(db, 'account.move', moveId);
+    return sum + (entry?.line_ids ?? [])
+      .filter((l) => l.account_id === account)
+      .reduce((s, l) => s + sign * ((Number(l.debit) || 0) - (Number(l.credit) || 0)), 0);
+  }, 0);
+  return roundCurrency(total, companyCurrencyRecord(db, company));
 }
 
 /** Check whether a payment is already matched by an active allocation or a reconciled statement line. */
@@ -757,15 +789,78 @@ export function journalItemResidual(db, move, line, { reconciled = false, ownCur
   return { amount_residual: lineBalance, amount_residual_currency: foreign ? lineAmountCurr : 0 };
 }
 
-/** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
-export function reconciledJournalItems(db, move) {
-  const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = reconcileIndex(db);
-  const applications = byMove.get(move.id) ?? [];
-  const payment = payments.get(move.id);
-  const posted = move.state === 'posted';
-  const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type);
-  const ownCurrency = findCompanyCurrencyRecord(db, move.company_id ?? 1);
-  const rawLines = move.line_ids ?? [];
+/**
+ * Distribute targeted (`line_index`-scoped) and untargeted (earliest due date first) settlement amounts
+ * across counterpart items, returning remaining balances per index, untargeted-touched indices, and
+ * bipartite settlement edges between installment indices and source keys.
+ */
+export function distributeInstallmentSettlements(items, targetedAdjustments, untargeted, { roundAmount = (v) => round(v) } = {}) {
+  const remaining = new Map(items.map((item) => [item.index, item.total]));
+  const sourcesByIndex = new Map();
+  const indicesBySource = new Map();
+  const addEdge = (idx, key) => {
+    if (!key) return;
+    if (!sourcesByIndex.has(idx)) sourcesByIndex.set(idx, new Set());
+    sourcesByIndex.get(idx).add(key);
+    if (!indicesBySource.has(key)) indicesBySource.set(key, new Set());
+    indicesBySource.get(key).add(idx);
+  };
+  const untargetedEntries = [];
+  for (const entry of targetedAdjustments) {
+    const [index, amount, key = null] = entry;
+    if (!remaining.has(index) || !(amount > 0)) {
+      const overflow = Math.max(0, Number(amount) || 0);
+      if (overflow > 0) untargetedEntries.push({ key, amount: overflow });
+      continue;
+    }
+    const current = remaining.get(index);
+    const applied = Math.min(current, Number(amount) || 0);
+    remaining.set(index, roundAmount(current - applied));
+    if (applied > 1e-9) addEdge(index, key);
+    if (amount > applied) untargetedEntries.push({ key, amount: roundAmount(amount - applied) });
+  }
+  if (typeof untargeted === 'number') {
+    if (untargeted > 0) untargetedEntries.push({ key: null, amount: untargeted });
+  } else {
+    for (const entry of untargeted ?? []) {
+      if ((entry?.amount ?? 0) > 0) untargetedEntries.push({ key: entry.key ?? null, amount: entry.amount });
+    }
+  }
+  const untargetedTouched = new Set();
+  const byDueDate = [...items].sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.index - b.index);
+  for (const entry of untargetedEntries) {
+    let left = Math.max(0, roundAmount(entry.amount));
+    for (const item of byDueDate) {
+      if (!(left > 1e-9)) break;
+      const current = remaining.get(item.index);
+      if (!(current > 1e-9)) continue;
+      const applied = Math.min(current, left);
+      left = roundAmount(left - applied);
+      remaining.set(item.index, roundAmount(current - applied));
+      if (applied > 1e-9) {
+        untargetedTouched.add(item.index);
+        addEdge(item.index, entry.key);
+      }
+    }
+  }
+  return { remaining, untargetedTouched, sourcesByIndex, indicesBySource };
+}
+
+const DOCUMENT_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
+const localSettlementCache = new WeakMap();
+
+function localInstallmentSettlement(db, move) {
+  let byMove = localSettlementCache.get(db.records);
+  if (!byMove) {
+    byMove = new Map();
+    localSettlementCache.set(db.records, byMove);
+  }
+  const cached = move?.id != null ? byMove.get(move.id) : null;
+  if (cached) return cached;
+  const document = DOCUMENT_TYPES.includes(move?.move_type);
+  const ownCurrency = findCompanyCurrencyRecord(db, move?.company_id ?? 1);
+  const docCurr = document ? (move.currency_id ? read(db, 'res.currency', move.currency_id) : ownCurrency) : ownCurrency;
+  const rawLines = move?.line_ids ?? [];
   const docResidual = document ? models['account.move'].fields.amount_residual.compute(move, db) : null;
   const docLineTotal = (l) => {
     const bal = (Number(l.debit) || 0) - (Number(l.credit) || 0);
@@ -773,18 +868,154 @@ export function reconciledJournalItems(db, move) {
     return Math.abs(foreign ? (Number(l.amount_currency) || 0) : bal);
   };
   const isCounterpart = (l) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type);
-  // The paid part of a document settles its installments earliest due date first.
-  const remainingByIndex = new Map();
-  if (document && docResidual != null) {
-    const counterparts = rawLines.map((l, index) => ({ l, index })).filter(({ l }) => isCounterpart(l))
-      .sort((a, b) => String(a.l.date_maturity ?? move.invoice_date_due ?? move.date ?? '').localeCompare(String(b.l.date_maturity ?? move.invoice_date_due ?? move.date ?? '')));
-    let paidLeft = Math.max(0, counterparts.reduce((sum, { l }) => sum + docLineTotal(l), 0) - docResidual);
-    for (const { l, index } of counterparts) {
-      const applied = Math.min(docLineTotal(l), paidLeft);
-      paidLeft -= applied;
-      remainingByIndex.set(index, docLineTotal(l) - applied);
+  if (!document || docResidual == null) {
+    const empty = {
+      docResidual, docCurr, docLineTotal, isCounterpart,
+      remainingByIndex: new Map(), untargetedTouched: new Set(),
+      sourcesByIndex: new Map(), indicesBySource: new Map(),
+    };
+    if (move?.id != null) byMove.set(move.id, empty);
+    return empty;
+  }
+  const counterparts = rawLines.map((l, index) => ({
+    l,
+    index,
+    total: docLineTotal(l),
+    date: String(l.date_maturity ?? move.invoice_date_due ?? move.date ?? ''),
+  })).filter(({ l }) => isCounterpart(l));
+  const totalPaid = Math.max(0, counterparts.reduce((sum, { total }) => sum + total, 0) - docResidual);
+  const activeRows = (move.payments ?? []).filter((p) => !p.reversed);
+  const lineIndexByPayMove = new Map(activeRows.filter((r) => !r.discount && Number.isInteger(r.line_index)).map((r) => [r.move_id, r.line_index]));
+  const counterpartIndices = new Set(counterparts.map((c) => c.index));
+  const targetedEntries = [];
+  const untargetedRows = [];
+  let targetedTotal = 0;
+  activeRows.forEach((row, rowIdx) => {
+    const targetIndex = Number.isInteger(row.line_index) ? row.line_index : (row.discount ? lineIndexByPayMove.get(row.payment_move_id) : null);
+    const amt = Number(row.amount) || 0;
+    const sourceMoveId = row.discount ? (row.payment_move_id ?? row.move_id) : row.move_id;
+    const key = sourceMoveId != null ? `move:${sourceMoveId}` : `row:${rowIdx}`;
+    if (Number.isInteger(targetIndex) && counterpartIndices.has(targetIndex) && amt > 0) {
+      targetedEntries.push([targetIndex, amt, key]);
+      targetedTotal += amt;
+    } else if (amt > 0) {
+      untargetedRows.push({ key, amount: amt });
+    }
+  });
+  const roundAmount = (v) => cleanSignedZero(docCurr ? roundCurrency(v, docCurr) : round(v));
+  let untargetedBudget = Math.max(0, roundAmount(totalPaid - targetedTotal));
+  const untargetedEntries = [];
+  for (const entry of untargetedRows) {
+    if (!(untargetedBudget > 1e-9)) break;
+    const take = Math.min(entry.amount, untargetedBudget);
+    untargetedBudget = roundAmount(untargetedBudget - take);
+    if (take > 1e-9) untargetedEntries.push({ key: entry.key, amount: take });
+  }
+  if (untargetedBudget > 1e-9) {
+    untargetedEntries.push({ key: 'legacy', amount: untargetedBudget });
+  }
+  const {
+    remaining: remainingByIndex,
+    untargetedTouched,
+    sourcesByIndex,
+    indicesBySource,
+  } = distributeInstallmentSettlements(counterparts, targetedEntries, untargetedEntries, { roundAmount });
+  const result = {
+    docResidual, docCurr, docLineTotal, isCounterpart,
+    remainingByIndex, untargetedTouched, sourcesByIndex, indicesBySource,
+  };
+  if (move?.id != null) byMove.set(move.id, result);
+  return result;
+}
+
+/** True iff `startIndex` and its entire connected reconciliation group (Odoo full_reconcile_id semantics) are settled. */
+function isInstallmentGroupSettled(db, move, startLocal, startIndex) {
+  if ((startLocal.remainingByIndex.get(startIndex) ?? 0) > 1e-9) return false;
+  if (!(startLocal.sourcesByIndex.get(startIndex)?.size)) return startLocal.docResidual === 0;
+  const { applications, payments } = reconcileIndex(db);
+  const visitedInstallments = new Set([`${move.id}:${startIndex}`]);
+  const visitedSources = new Set();
+  const queue = [{ kind: 'installment', move, local: startLocal, index: startIndex }];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (cur.kind === 'installment') {
+      if ((cur.local.remainingByIndex.get(cur.index) ?? 0) > 1e-9) return false;
+      for (const srcKey of cur.local.sourcesByIndex.get(cur.index) ?? []) {
+        if (!visitedSources.has(srcKey)) {
+          visitedSources.add(srcKey);
+          queue.push({ kind: 'source', srcKey });
+        }
+      }
+      continue;
+    }
+    const { srcKey } = cur;
+    if (!srcKey.startsWith('move:')) continue;
+    const srcMoveId = Number(srcKey.slice(5));
+    const srcPay = payments.get(srcMoveId);
+    const srcMove = read(db, 'account.move', srcMoveId);
+    // payMove excess splits out a separate 'Outstanding credit' line, so the matched line itself has no open residual.
+    const hasSplitExcessLine = (srcMove?.line_ids ?? []).some((l) => l.name === 'Outstanding credit');
+    if (srcPay && !hasSplitExcessLine && Number(srcPay.unapplied) > 1e-9) return false;
+    if (DOCUMENT_TYPES.includes(srcMove?.move_type)) {
+      const srcRes = models['account.move'].fields.amount_residual.compute(srcMove, db);
+      if (srcRes == null || srcRes > 1e-9) return false;
+    }
+    for (const { invoice: otherInv, row } of applications.get(srcMoveId) ?? []) {
+      if (row.reversed || row.unapplied || !DOCUMENT_TYPES.includes(otherInv?.move_type)) continue;
+      const otherLocal = localInstallmentSettlement(db, otherInv);
+      const touched = otherLocal.indicesBySource.get(srcKey);
+      if (!touched?.size) {
+        if (otherLocal.docResidual == null || otherLocal.docResidual > 1e-9) return false;
+        continue;
+      }
+      for (const otherIdx of touched) {
+        const key = `${otherInv.id}:${otherIdx}`;
+        if (!visitedInstallments.has(key)) {
+          visitedInstallments.add(key);
+          queue.push({ kind: 'installment', move: otherInv, local: otherLocal, index: otherIdx });
+        }
+      }
     }
   }
+  return true;
+}
+
+/**
+ * Compute per-line remaining amounts, untargeted-touched indices, and full matching-group reconciliation flags.
+ * @param {object} db
+ * @param {object} move
+ * @returns {{ docResidual: number|null, docCurr: object|null, docLineTotal: (l: object) => number, isCounterpart: (l: object) => boolean, remainingByIndex: Map<number, number>, untargetedTouched: Set<number>, fullyReconciledByIndex: Map<number, boolean> }}
+ */
+export function installmentSettlementState(db, move) {
+  const local = localInstallmentSettlement(db, move);
+  const fullyReconciledByIndex = new Map();
+  if (DOCUMENT_TYPES.includes(move?.move_type) && local.docResidual != null) {
+    for (const idx of local.remainingByIndex.keys()) {
+      fullyReconciledByIndex.set(idx, isInstallmentGroupSettled(db, move, local, idx));
+    }
+  }
+  return {
+    docResidual: local.docResidual,
+    docCurr: local.docCurr,
+    docLineTotal: local.docLineTotal,
+    isCounterpart: local.isCounterpart,
+    remainingByIndex: local.remainingByIndex,
+    untargetedTouched: local.untargetedTouched,
+    fullyReconciledByIndex,
+  };
+}
+
+/** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
+export function reconciledJournalItems(db, move) {
+  const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = reconcileIndex(db);
+  const applications = byMove.get(move.id) ?? [];
+  const payment = payments.get(move.id);
+  const posted = move.state === 'posted';
+  const document = DOCUMENT_TYPES.includes(move.move_type);
+  const ownCurrency = findCompanyCurrencyRecord(db, move.company_id ?? 1);
+  const rawLines = move.line_ids ?? [];
+  // Targeted installment rows settle their specific line; untargeted payments settle earliest due date first.
+  const { docResidual, docLineTotal, remainingByIndex, fullyReconciledByIndex } = installmentSettlementState(db, move);
   const roundOwn = (v) => cleanSignedZero(ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   /** Scale a line's residuals by the share still open, rounded in each amount's own currency. */
   const scaleResidual = (line, residual, residualCurrency, ratio) => {
@@ -804,7 +1035,7 @@ export function reconciledJournalItems(db, move) {
     if (posted) {
       if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
         reconciled = document
-          ? docResidual === 0
+          ? (fullyReconciledByIndex.get(index) ?? (docResidual === 0))
           : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
             && (invoice.company_id ?? 1) === (move.company_id ?? 1)
             && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
@@ -981,7 +1212,7 @@ export function analyticDistributionForLines(lines, analyticAccountIds) {
 }
 
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
-const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
+export const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
 /** Journal items allocated to the selected analytic accounts; no selection keeps every item. */
 export function filterByAnalytic(items, analyticAccountIds) {
@@ -1035,14 +1266,14 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
   const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
-  const expense = sumTypes(rows, ['expense']);
+  const expense = sumTypes(rows, ['expense', 'expense_depreciation']);
   const otherIncome = sumTypes(rows, ['income_other'], -1);
   const otherExpense = sumTypes(rows, ['expense_other']);
   const lines = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   return {
     revenue, cost, gross: round(revenue - cost), expense, operating: round(revenue - cost - expense),
     otherIncome, otherExpense, net: round(revenue - cost - expense + otherIncome - otherExpense),
-    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense'], 1), otherIncome: lines(['income_other'], -1), otherExpense: lines(['expense_other'], 1) },
+    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense', 'expense_depreciation'], 1), otherIncome: lines(['income_other'], -1), otherExpense: lines(['expense_other'], 1) },
   };
 }
 

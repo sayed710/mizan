@@ -1,9 +1,11 @@
 // Credit limits, lock date, audit trail, tax report, aged balances, follow-ups, analytic accounting and budgets.
 import { installments } from './terms.js';
 import { models } from '../registry.js';
-import { postNote, read, search, write } from '../orm.js';
+import { create, postNote, read, search, write } from '../orm.js';
 import { addDays, sameCommercialPartner, today, total, validDate } from './common.js';
-import { bookedStatementAmount, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
+import { ACTIVITY_TYPES } from './mail.js';
+import { currentActor, employeeFor } from './actor.js';
+import { bookedStatementAmount, distributeInstallmentSettlements, invoiceCounterpartAccount, isBalanced, isLiquidityJournal, isPaymentMatched, isStatementJournal, journalItems, outstandingAccount, partnerAccount, paymentJournal, postEntry, resolveDocumentJournal } from './ledger.js';
 import { toCompany } from './currency.js';
 import { cashBasisTransitionAccounts, isLegacyCashBasisRelease, isNonZeroBaseGridLine, taxRepartitionLines } from './taxes.js';
 import { companySum, reportingBookedAmount, unratedCount } from './money.js';
@@ -885,31 +887,48 @@ function openInstallments(db, m, kind, at, { includeBlocked = true } = {}) {
   const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, m.company_id));
   const payments = m.payments ?? [];
   const accountType = kind === 'receivable' ? 'asset_receivable' : 'liability_payable';
-  const allItems = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === accountType);
-  const items = allItems;
-  const counterpart = items.reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+  const items = (m.line_ids ?? [])
+    .map((l, index) => ({ l, index }))
+    .filter(({ l }) => read(db, 'account.account', l.account_id)?.account_type === accountType);
+  const counterpart = items.reduce((sum, { l }) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
   const booked = Math.abs(counterpart) || Number(m.amount_total) || 0;
   const active = payments.filter((p) => !p.reversed).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const legacy = Math.max(0, (Number(m.amount_paid) || 0) - active);
-  const allocations = settlementCompanyAllocations(db, m);
-  let paid = (m.payment_date && m.payment_date <= at ? companyRound(booked * legacy / (Number(m.amount_total) || 1)) : 0) + allocations.filter(({ row: p }) => applicationActiveAt(db, p, m, at)).reduce((sum, allocation) => sum + allocation.value, 0);
-  let dues = items.map((l) => ({ date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date, amount: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)), blocked: l.blocked }));
+  const legacyPaid = m.payment_date && m.payment_date <= at ? companyRound(booked * legacy / (Number(m.amount_total) || 1)) : 0;
+  const allocations = settlementCompanyAllocations(db, m).filter(({ row: p }) => applicationActiveAt(db, p, m, at));
+  let dues = items.map(({ l, index }) => ({
+    index,
+    date: l.date_maturity ?? m.invoice_date_due ?? m.invoice_date,
+    total: Math.abs((Number(l.debit) || 0) - (Number(l.credit) || 0)),
+    blocked: l.blocked,
+  }));
   if (!items.length) {
     const term = read(db, 'account.payment.term', m.invoice_payment_term_id);
     const docDues = term?.line_ids?.length ? installments(term, m.amount_total, m.invoice_date, documentCurrency(db, m)) : [{ date: m.invoice_date_due ?? m.invoice_date, amount: m.amount_total }];
     let assigned = 0;
     dues = docDues.map((d, i) => {
-      const amount = i === docDues.length - 1 ? companyRound(booked - assigned) : companyRound(booked * d.amount / (Number(m.amount_total) || 1));
-      assigned = companyRound(assigned + amount);
-      return { ...d, amount };
+      const total = i === docDues.length - 1 ? companyRound(booked - assigned) : companyRound(booked * d.amount / (Number(m.amount_total) || 1));
+      assigned = companyRound(assigned + total);
+      return { index: i, date: d.date, total, blocked: d.blocked };
     });
   }
-  dues.sort((a, b) => a.date.localeCompare(b.date));
-  return dues.map((due) => {
-    const applied = Math.min(paid, due.amount);
-    paid -= applied;
-    return { date: due.date, amount: companyRound(due.amount - applied), blocked: due.blocked };
-  }).filter((due) => due.amount > 0 && (includeBlocked || !due.blocked));
+  const dueIndices = new Set(dues.map((d) => d.index));
+  const lineIndexByPayMove = new Map(payments.filter((p) => !p.reversed && !p.discount && Number.isInteger(p.line_index)).map((p) => [p.move_id, p.line_index]));
+  const targeted = new Map();
+  let untargetedAlloc = 0;
+  for (const { row, value } of allocations) {
+    const targetIndex = Number.isInteger(row.line_index) ? row.line_index : (row.discount ? lineIndexByPayMove.get(row.payment_move_id) : null);
+    if (Number.isInteger(targetIndex) && dueIndices.has(targetIndex)) {
+      targeted.set(targetIndex, companyRound((targeted.get(targetIndex) ?? 0) + value));
+    } else {
+      untargetedAlloc = companyRound(untargetedAlloc + value);
+    }
+  }
+  const { remaining } = distributeInstallmentSettlements(dues, targeted, companyRound(legacyPaid + untargetedAlloc), { roundAmount: companyRound });
+  return dues
+    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.index - b.index)
+    .map((due) => ({ date: due.date, amount: companyRound(remaining.get(due.index) ?? 0), blocked: due.blocked }))
+    .filter((due) => due.amount > 0 && (includeBlocked || !due.blocked));
 }
 
 /** Add the open installments of posted invoices and refunds. */
@@ -1104,35 +1123,117 @@ function followUpSummary(invoices) {
 }
 
 
+/**
+ * Derive the signed day offset (`delay`) from non-negative `display_delay`
+ * and `reminder_timing` (`'before'` -> negative, `'after'` -> positive, `0` -> `0`).
+ */
+export function followUpSignedDelay(displayDelay, reminderTiming = 'after') {
+  const days = Math.max(0, Math.trunc(Number(displayDelay) || 0));
+  if (days === 0) return 0;
+  return reminderTiming === 'before' ? -days : days;
+}
+
+/**
+ * Compute the Odoo display name (`"<display_delay> days <before|after>"`) for a follow-up level.
+ */
+export function followUpLevelName(level) {
+  if (!level) return '';
+  const hasDisplayDelay = level.display_delay != null && level.display_delay !== '';
+  const days = Math.max(0, Math.trunc(hasDisplayDelay ? Number(level.display_delay) : Math.abs(Number(level.delay) || 0)));
+  const timing = level.reminder_timing === 'before' || (!level.reminder_timing && Number(level.delay) < 0)
+    ? 'before'
+    : 'after';
+  return `${days} days ${timing}`;
+}
+
+export function levelChannel(level) {
+  if (!level) return null;
+  if (level.send_email) return 'email';
+  if (level.channel && level.channel !== 'email') return level.channel;
+  if (level.send_sms) return 'sms';
+  return null;
+}
+
+function resolveFollowUpActivityUser(db, partner, companyId, part, responsibleType = 'followup') {
+  const fallbackUserId = employeeFor(db, currentActor()?.login)?.id ?? null;
+  if (responsibleType === 'salesperson') {
+    const invoiceUser = part.invoices
+      .map((inv) => inv.invoice_user_id ?? read(db, 'account.move', inv.id)?.invoice_user_id)
+      .find(Boolean);
+    return invoiceUser ?? fallbackUserId;
+  }
+  if (responsibleType === 'account_manager') {
+    return partner?.user_id ?? fallbackUserId;
+  }
+  return partnerFollowUp(partner, companyId)?.followup_responsible_id ?? partner?.followup_responsible_id ?? fallbackUserId;
+}
+
 const oldestOverdueDate = (invoices) => invoices.filter((m) => Number(m.amount_residual) > 0).map((m) => m.invoice_date_due).sort()[0];
 
-/** Partners with overdue invoices (netted by open receivable credits), for payment reminders. */
+/** Partners with overdue invoices (or upcoming invoices matching a "before" reminder), netted by open receivable credits. */
 export function followUps(db, at = today(), { ignoreNextActionDate = false, companyId = null } = {}) {
-  const overdue = search(db, 'account.move').filter((m) => (companyId == null || (m.company_id ?? 1) === companyId) && m.state === 'posted' && m.move_type === 'out_invoice' && (!m.invoice_date || m.invoice_date <= at)).flatMap((m) => {
-    if (m.exclude_from_followup) return [];
-    const partner = read(db, 'res.partner', m.partner_id);
-    if (!partner) return [];
-    const compLine = partnerFollowUp(partner, m.company_id ?? 1);
-    if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') return [];
-    if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) return [];
-
-    if (!m.invoice_date || !(m.line_ids ?? []).length) return m.amount_residual > 0 && m.invoice_date_due < at ? [{ row: m, companyAmount: Number(m.amount_residual) }] : [];
-    const dues = openInstallments(db, m, 'receivable', at, { includeBlocked: false }).filter((due) => due.date < at);
-    if (!dues.length) return [];
-    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
-    const companyAmount = dues.reduce((sum, due) => sum + due.amount, 0);
-    const amount = roundCurrency(companyAmount * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), documentCurrency(db, m));
-    return [{ row: { ...m, invoice_date_due: dues[0].date, amount_residual: amount }, companyAmount }];
-  });
+  const levels = search(db, 'account.followup.level');
+  const minNegative = levels.reduce((min, l) => Math.min(min, Number(l.delay) || 0), 0);
+  const beforeCutoff = minNegative < 0 ? addDays(at, -minNegative) : null;
+  const classifyDue = (dueDate) => {
+    if (!dueDate) return null;
+    if (dueDate < at) return 'overdue';
+    return beforeCutoff && dueDate <= beforeCutoff ? 'upcoming' : null;
+  };
 
   const groups = new Map();
-  for (const { row, companyAmount } of overdue) {
-    const key = `${row.partner_id}:${row.company_id ?? 1}`;
-    const group = groups.get(key) ?? { partnerId: row.partner_id, companyId: row.company_id ?? 1, debits: [], credits: new Map(), companyNet: 0 };
-    group.debits.push({ ...row, followup_currency: documentCurrency(db, row) });
-    group.companyNet += companyAmount;
-    groups.set(key, group);
+  const ensureGroup = (partnerId, compId) => {
+    const key = `${partnerId}:${compId}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { partnerId, companyId: compId, overdueDebits: [], upcomingDebits: [], credits: new Map(), overdueNet: 0, upcomingNet: 0 };
+      groups.set(key, group);
+    }
+    return group;
+  };
+
+  for (const m of search(db, 'account.move')) {
+    const compId = m.company_id ?? 1;
+    if ((companyId != null && compId !== companyId) || m.state !== 'posted' || m.move_type !== 'out_invoice') continue;
+    if (m.invoice_date && m.invoice_date > at) continue;
+    if (m.exclude_from_followup) continue;
+    const partner = read(db, 'res.partner', m.partner_id);
+    if (!partner) continue;
+    const compLine = partnerFollowUp(partner, compId);
+    if (compLine?.no_followup || compLine?.followup_status === 'no_action_needed') continue;
+    if (!ignoreNextActionDate && compLine?.followup_next_action_date && compLine.followup_next_action_date > at) continue;
+
+    if (!m.invoice_date || !(m.line_ids ?? []).length) {
+      const bucket = m.amount_residual > 0 ? classifyDue(m.invoice_date_due) : null;
+      if (!bucket) continue;
+      const group = ensureGroup(m.partner_id, compId);
+      const companyAmount = Number(m.amount_residual);
+      const row = { ...m, followup_currency: documentCurrency(db, m), ...(bucket === 'upcoming' ? { upcoming: true } : {}) };
+      if (bucket === 'overdue') { group.overdueDebits.push(row); group.overdueNet += companyAmount; }
+      else { group.upcomingDebits.push(row); group.upcomingNet += companyAmount; }
+      continue;
+    }
+
+    const openDues = openInstallments(db, m, 'receivable', at, { includeBlocked: false });
+    const overdueDues = openDues.filter((due) => due.date < at);
+    const upcomingDues = openDues.filter((due) => classifyDue(due.date) === 'upcoming');
+    if (!overdueDues.length && !upcomingDues.length) continue;
+    const booked = (m.line_ids ?? []).filter((l) => read(db, 'account.account', l.account_id)?.account_type === 'asset_receivable').reduce((sum, l) => sum + (Number(l.debit) || 0) - (Number(l.credit) || 0), 0);
+    const docCurr = documentCurrency(db, m);
+    const scaleAmount = (amt) => roundCurrency(amt * (Number(m.amount_total) || 0) / (Math.abs(booked) || Number(m.amount_total) || 1), docCurr);
+    const group = ensureGroup(m.partner_id, compId);
+    if (overdueDues.length) {
+      const companyAmount = overdueDues.reduce((sum, due) => sum + due.amount, 0);
+      group.overdueDebits.push({ ...m, invoice_date_due: overdueDues[0].date, amount_residual: scaleAmount(companyAmount), followup_currency: docCurr });
+      group.overdueNet += companyAmount;
+    }
+    if (upcomingDues.length) {
+      const companyAmount = upcomingDues.reduce((sum, due) => sum + due.amount, 0);
+      group.upcomingDebits.push({ ...m, invoice_date_due: upcomingDues[0].date, amount_residual: scaleAmount(companyAmount), followup_currency: docCurr, upcoming: true });
+      group.upcomingNet += companyAmount;
+    }
   }
+
   if (groups.size) {
     const scopeMoves = search(db, 'account.move').filter((m) => companyId == null || (m.company_id ?? 1) === companyId);
     const addCredit = (partner, date, amount, document = null) => {
@@ -1140,7 +1241,8 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
       const cId = document.company_id ?? 1;
       const group = groups.get(`${partner}:${cId}`);
       if (!group) return;
-      group.companyNet += amount;
+      if (group.overdueDebits.length) group.overdueNet += amount;
+      else group.upcomingNet += amount;
       const prev = group.credits.get(document.id) ?? { document, date, companyAmount: 0 };
       prev.companyAmount += amount;
       group.credits.set(document.id, prev);
@@ -1152,7 +1254,17 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
   const by = new Map();
   for (const group of groups.values()) {
     const compCurr = companyCurrencyRecord(db, group.companyId);
-    if (!(roundCurrency(group.companyNet, compCurr) > 0)) continue;
+    const hasOverdue = group.overdueDebits.length > 0;
+    const debits = hasOverdue ? group.overdueDebits : group.upcomingDebits;
+    const companyNet = hasOverdue ? group.overdueNet : group.upcomingNet;
+    if (!debits.length || !(roundCurrency(companyNet, compCurr) > 0)) continue;
+    if (!hasOverdue) {
+      const oldestUpcoming = debits.map((d) => d.invoice_date_due).sort()[0];
+      const days = Math.floor((new Date(at) - new Date(oldestUpcoming)) / 864e5);
+      const hasBeforeLevel = levels.some((l) => (l.reminder_timing === 'before' || Number(l.delay) < 0)
+        && days >= (Number(l.delay) || 0));
+      if (!hasBeforeLevel) continue;
+    }
     const creditRows = [...group.credits.values()].map(({ document, date, companyAmount }) => {
       const creditAbs = -companyAmount;
       if (document.move_type === 'out_refund') {
@@ -1163,9 +1275,13 @@ export function followUps(db, at = today(), { ignoreNextActionDate = false, comp
       }
       return { ...document, partner_id: group.partnerId, company_id: group.companyId, invoice_date_due: date, amount_residual: -roundCurrency(creditAbs, compCurr), followup_currency: compCurr };
     });
-    (by.get(group.partnerId) ?? by.set(group.partnerId, []).get(group.partnerId)).push(...group.debits, ...creditRows);
+    (by.get(group.partnerId) ?? by.set(group.partnerId, []).get(group.partnerId)).push(...debits, ...creditRows);
   }
-  return [...by].map(([partner_id, invoices]) => ({ partner_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices) }));
+  return [...by].map(([partner_id, invoices]) => {
+    const upcoming = invoices.some((m) => Number(m.amount_residual) > 0 && m.upcoming)
+      && !invoices.some((m) => Number(m.amount_residual) > 0 && !m.upcoming);
+    return { partner_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices), ...(upcoming ? { upcoming: true } : {}) };
+  });
 }
 
 // A shared contact can have invoices in several companies; never combine their private notes.
@@ -1176,9 +1292,11 @@ export const followUpCompanies = (f) => {
     if (!groups.has(cId)) groups.set(cId, []);
     groups.get(cId).push(invoice);
   }
-  return [...groups.entries()].map(([company_id, invoices]) => ({
-    ...f, company_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices),
-  }));
+  return [...groups.entries()].map(([company_id, invoices]) => {
+    const upcoming = invoices.some((m) => Number(m.amount_residual) > 0 && m.upcoming)
+      && !invoices.some((m) => Number(m.amount_residual) > 0 && !m.upcoming);
+    return { ...f, company_id, invoices, ...followUpSummary(invoices), oldest: oldestOverdueDate(invoices), ...(upcoming ? { upcoming: true } : {}) };
+  });
 };
 const reminderSource = (f) => ({ model: 'account.move', id: f.invoices[0].id, company_id: f.company_id ?? f.invoices[0].company_id ?? 1 });
 
@@ -1202,11 +1320,13 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_date: vals.followup_date !== undefined ? vals.followup_date : current?.followup_date ?? null,
     followup_oldest_date: vals.followup_oldest_date !== undefined ? vals.followup_oldest_date : current?.followup_oldest_date ?? null,
     followup_level: vals.followup_level !== undefined ? vals.followup_level : current?.followup_level ?? null,
+    followup_activity_level: vals.followup_activity_level !== undefined ? vals.followup_activity_level : current?.followup_activity_level ?? null,
     followup_last_level: vals.followup_last_level !== undefined ? vals.followup_last_level : current?.followup_last_level ?? null,
     followup_channel: vals.followup_channel !== undefined ? vals.followup_channel : current?.followup_channel ?? null,
     followup_delivery_state: vals.followup_delivery_state !== undefined ? vals.followup_delivery_state : current?.followup_delivery_state ?? null,
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
     followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
+    followup_responsible_id: vals.followup_responsible_id !== undefined ? vals.followup_responsible_id : current?.followup_responsible_id ?? null,
     no_followup: vals.no_followup !== undefined ? vals.no_followup : current?.no_followup ?? false,
   };
   if (idx >= 0) existing[idx] = updated;
@@ -1224,6 +1344,81 @@ function reminderDetails(levels, level, date, channel, oldest = null) {
   return { followup_last_level: level?.id ?? null, followup_channel: channel, followup_next_action_date: next ? (oldest ? addDays(oldest, Number(next.delay)) : addDays(date, Number(next.delay) - delay)) : null };
 }
 
+/** Create a configured follow-up activity once per partner, company, level and oldest-invoice cycle. */
+function ensureFollowUpActivity(db, partnerId, part, level, at) {
+  if (!level?.create_activity) return db;
+  const partner = read(db, 'res.partner', partnerId);
+  if (!partner) return db;
+  const cId = part.company_id;
+  const progress = partnerFollowUp(partner, cId);
+  const oldest = part.oldest ?? null;
+  const sameCycle = (progress?.followup_oldest_date ?? null) === oldest;
+  if (sameCycle && level.id != null && (progress?.followup_activity_level === level.id || progress?.followup_level === level.id)) {
+    return db;
+  }
+  const assignedUserId = resolveFollowUpActivityUser(db, partner, cId, part, level.activity_default_responsible_type);
+  const withActivity = create(db, 'mail.activity', {
+    res_model: 'res.partner',
+    res_id: partnerId,
+    res_name: partner.name ?? '',
+    activity_type: level.activity_type_id || 'todo',
+    summary: level.activity_summary ?? '',
+    note: level.activity_note ?? '',
+    date_deadline: at,
+    company_id: cId,
+    user_id: assignedUserId,
+  }).db;
+  const currentPartner = read(withActivity, 'res.partner', partnerId) ?? partner;
+  return write(withActivity, 'res.partner', partnerId, {
+    followup_lines: updatePartnerFollowUp(currentPartner, cId, {
+      followup_activity_level: level.id ?? null,
+      followup_oldest_date: oldest,
+    }).followup_lines,
+  });
+}
+
+function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate) {
+  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
+  let nextDb = db;
+
+  for (const part of groups) {
+    const cId = part.company_id;
+    const level = followUpLevel(scope, part, at);
+    const levelName = level ? followUpLevelName(level) : 'Payment reminder';
+
+    const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
+    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
+    const summaryAmount = part.total == null ? 'Amounts' : round(part.total);
+    const dueWord = part.upcoming || (part.oldest && part.oldest >= at) ? 'due' : 'overdue';
+    const detail = `${levelName}: ${summaryAmount} ${dueWord} — ${invoices}. ${level?.message ?? ''}`.trim();
+    const channelText = channel ? `sent by ${channel}` : 'processed';
+    const noteBody = `Payment reminder ${channelText}${level ? ` (${levelName})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
+    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
+    nextDb = ensureFollowUpActivity(nextDb, partnerId, part, level, at);
+
+    const partner = read(nextDb, 'res.partner', partnerId);
+    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
+    const updatedPartner = (level && (previous == null || Number(level.delay) > Number(previous)))
+      ? updatePartnerFollowUp(partner, cId, {
+        followup_level_delay: Number(level.delay),
+        followup_date: at,
+        followup_oldest_date: part.oldest ?? null,
+        followup_level: level.id,
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+      })
+      : updatePartnerFollowUp(partner, cId, {
+        followup_date: at,
+        followup_oldest_date: part.oldest ?? null,
+        followup_delivery_state: 'sent',
+        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
+      });
+    nextDb = write(nextDb, 'res.partner', partnerId, { followup_lines: updatedPartner.followup_lines });
+  }
+
+  return nextDb;
+}
+
 /**
  * Automatic reminders: for each overdue customer, the highest follow-up level reached by its oldest overdue
  * invoice is logged on the contact once (the contact remembers the last level sent).
@@ -1239,7 +1434,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
   for (const partner of partners.values()) {
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
-      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_delivery_state != null;
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null;
       if (!hasProgress) continue;
       const activeGroup = activeLateMap.get(`${partner.id}:${line.company_id}`) ?? null;
       const oldestChanged = Boolean(activeGroup && line.followup_oldest_date && activeGroup.oldest !== line.followup_oldest_date);
@@ -1247,7 +1442,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
         const current = read(nextDb, 'res.partner', partner.id) ?? partner;
         nextDb = write(nextDb, 'res.partner', partner.id, {
           followup_lines: updatePartnerFollowUp(current, line.company_id, {
-            followup_level_delay: null, followup_level: null, followup_date: null, followup_oldest_date: null,
+            followup_level_delay: null, followup_level: null, followup_activity_level: null, followup_date: null, followup_oldest_date: null,
             followup_last_level: null, followup_channel: null, followup_delivery_state: null,
             followup_next_action_date: null,
           }).followup_lines,
@@ -1267,18 +1462,25 @@ export function runFollowUps(db, at = today(), deliver = null) {
 
     const currentPartner = read(nextDb, 'res.partner', partner.id) ?? partner;
     const progress = partnerFollowUp(currentPartner, companyId);
-    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -1;
+    const currentDelay = progress?.followup_level_delay != null ? Number(progress.followup_level_delay) : -Infinity;
 
     if (currentDelay >= Number(level.delay)) return nextDb;
-    const channel = level.channel;
+    const channel = levelChannel(level);
+    const levelName = followUpLevelName(level);
     const canDeliverEmail = channel === 'email' && Boolean(partner.email?.trim()) && Boolean(deliver);
-    if (!canDeliverEmail && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const hasPendingActivity = Boolean(level.create_activity && (
+      (progress?.followup_oldest_date ?? null) !== (f.oldest ?? null)
+      || progress?.followup_activity_level !== level.id
+    ));
+    if (!canDeliverEmail && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
 
+    const dueWord = f.upcoming || (f.oldest && f.oldest >= at) ? 'due' : 'overdue';
     const recordFailure = (reason) => {
+      nextDb = ensureFollowUpActivity(nextDb, partner.id, f, level, at);
       const deliveryState = channel ? 'not_sent' : 'not_configured';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(nextDb, 'res.partner', partner.id,
-        `${level.name}: ${formatFollowUpTotals(f)} overdue — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
+        `${levelName}: ${formatFollowUpTotals(f)} ${dueWord} — ${invoiceList}. ${reason} The follow-up level was not advanced.`, reminderSource(f));
       const current = read(nextDb, 'res.partner', partner.id) ?? currentPartner;
       const updated = updatePartnerFollowUp(current, companyId, {
         followup_date: at,
@@ -1290,9 +1492,9 @@ export function runFollowUps(db, at = today(), deliver = null) {
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
     };
     if (channel === 'email' && partner.email?.trim() && deliver) {
-      const message = { to: partner.email.trim(), subject: level.name, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
+      const message = { to: partner.email.trim(), subject: levelName, text: `${level.message ?? ''}\n${followUpText(nextDb, f)}`.trim() };
       // Validate the bookkeeping before attempting an irreversible delivery.
-      const sent = logManualFollowUp(nextDb, partner.id, at, { scope: nextDb, reminder: f, companyId, channel, nextLevelBaseDate: f.oldest });
+      const sent = applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, channel, f.oldest);
       try {
         const result = deliver(message);
         if (result && typeof result.then === 'function') return result.then(() => sent, (error) => recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`));
@@ -1300,6 +1502,9 @@ export function runFollowUps(db, at = today(), deliver = null) {
       } catch (error) {
         return recordFailure(`Email delivery failed: ${error?.message ?? String(error)}`);
       }
+    }
+    if (!channel && level.create_activity) {
+      return applyFollowUpReminder(nextDb, nextDb, partner.id, [f], at, null, f.oldest);
     }
     const reason = !channel
       ? 'No delivery action is configured for this follow-up level.'
@@ -1315,7 +1520,10 @@ export function runFollowUps(db, at = today(), deliver = null) {
 
 export function followUpLevel(db, reminder, at = today()) {
   const days = Math.floor((new Date(at) - new Date(reminder.oldest)) / 864e5);
-  return search(db, 'account.followup.level').filter((level) => days >= (Number(level.delay) || 0))
+  const isUpcoming = Boolean(reminder?.upcoming || (reminder?.oldest && reminder.oldest >= at));
+  return search(db, 'account.followup.level')
+    .filter((level) => (!isUpcoming || level.reminder_timing === 'before' || Number(level.delay) < 0)
+      && days >= (Number(level.delay) || 0))
     .sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0))[0];
 }
 
@@ -1349,50 +1557,12 @@ export function openManualFollowUp(db, partnerId, at = today(), { scope = db, re
 
 /** Record a reminder confirmed sent by hand. */
 export function logManualFollowUp(db, partnerId, at = today(), { scope = db, reminder = null, companyId = null, channel = 'email', nextLevelBaseDate = null } = {}) {
-  if (!['email', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
+  if (!['email', 'sms', 'phone', 'letter'].includes(channel)) throw new Error('Invalid reminder channel');
   if (channel === 'email' && !read(db, 'res.partner', partnerId)?.email?.trim()) {
     throw new Error('A customer email address is required to send an email reminder');
   }
   const groups = manualFollowUpGroups(db, scope, partnerId, at, reminder, companyId);
-  const levels = search(scope, 'account.followup.level').sort((a, b) => (Number(b.delay) || 0) - (Number(a.delay) || 0));
-
-  let nextDb = db;
-  let partner = read(db, 'res.partner', partnerId);
-
-  for (const part of groups) {
-    const cId = part.company_id;
-    const level = followUpLevel(scope, part, at);
-
-    const invoices = part.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
-    // Mixed-currency groups have no single total; the invoice amounts below carry the detail (Qodo 42).
-    const overdue = part.total == null ? 'Amounts' : round(part.total);
-    const detail = `${level?.name ?? 'Payment reminder'}: ${overdue} overdue — ${invoices}. ${level?.message ?? ''}`.trim();
-    const noteBody = `Payment reminder sent by ${channel}${level ? ` (${level.name})` : ''}:\n${followUpText(scope, part)}\n${detail}`;
-    nextDb = postNote(nextDb, 'res.partner', partnerId, noteBody, reminderSource(part));
-
-    const previous = partnerFollowUp(partner, cId)?.followup_level_delay;
-    if (level && (previous == null || Number(level.delay) > Number(previous))) {
-      partner = updatePartnerFollowUp(partner, cId, {
-        followup_level_delay: Number(level.delay),
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_level: level.id,
-        followup_delivery_state: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
-      });
-    } else {
-      partner = updatePartnerFollowUp(partner, cId, {
-        followup_date: at,
-        followup_oldest_date: part.oldest ?? null,
-        followup_delivery_state: 'sent',
-        ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
-      });
-    }
-  }
-
-  return write(nextDb, 'res.partner', partnerId, {
-    followup_lines: partner.followup_lines,
-  });
+  return applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLevelBaseDate);
 }
 
 
@@ -1426,10 +1596,12 @@ export function analyticActuals(db, period = {}) {
 export const financeModels = {
   'account.journal.group': {
     label: 'Multi-Ledger',
+    emptyHelp: { title: 'Ledger group allows managing multiple accounting standards.' },
+    views: ['list'],
     fields: {
-      name: { type: 'char', label: 'Name', required: true },
-      sequence: { type: 'integer', label: 'Sequence' },
-      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true },
+      name: { type: 'char', label: 'Ledger group', placeholder: 'e.g. CONSO, IFRS, ...', required: true },
+      sequence: { type: 'integer', label: 'Sequence', widget: 'handle', hidden: true },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', required: true, hidden: true },
       journal_ids: { type: 'many2many', relation: 'account.journal', label: 'Included Journals', domain: (journal, record) => !journal.company_id || journal.company_id === record.company_id },
     },
     defaults: () => ({ sequence: 10, journal_ids: [] }),
@@ -1438,21 +1610,175 @@ export const financeModels = {
       const journal = read(db, 'account.journal', id);
       return !journal || (journal.company_id && journal.company_id !== record.company_id);
     }) ? 'Select journals belonging to this company or shared journals' : null,
-    list: ['name', 'sequence', 'company_id', 'journal_ids'],
-    form: { title: 'name', groups: [['sequence', 'company_id'], ['journal_ids']] },
+    sort: (a, b) => (a.sequence ?? 10) - (b.sequence ?? 10) || a.id - b.id,
+    list: ['sequence', 'name', 'journal_ids'],
+    listFields: {
+      sequence: { widget: 'handle', label: '' },
+      journal_ids: { widget: 'many2many_tags', optional: 'show' },
+    },
+    searchFields: ['name'],
+    form: { title: 'name', hideTitle: true, groups: [['name', 'journal_ids']] },
   },
   'account.followup.level': {
     label: 'Follow-up Levels',
+    views: ['list', 'kanban'],
     fields: {
-      name: { type: 'char', label: 'Level', required: true },
-      delay: { type: 'integer', label: 'Days Overdue' },
-      channel: { type: 'selection', label: 'Automatic Delivery', options: [['email', 'Email'], ['phone', 'Phone'], ['letter', 'Letter']] },
-      message: { type: 'text', label: 'Message' },
+      display_name: { type: 'char', label: 'Level', hidden: true, compute: (r) => followUpLevelName(r) },
+      display_delay: {
+        type: 'integer',
+        label: 'Due Days',
+        required: true,
+        help: 'The number of days after or before the due date of the invoice to wait before sending the reminder.',
+      },
+      reminder_timing: {
+        type: 'selection',
+        label: 'Reminder Timing',
+        required: true,
+        options: [['before', 'before'], ['after', 'after']],
+        help: 'Indicates whether the reminder should be sent before or after the invoice due date.',
+      },
+      delay: { type: 'integer', label: 'Days Overdue', hidden: true },
+      send_email: { type: 'boolean', label: 'Email' },
+      send_sms: { type: 'boolean', label: 'SMS' },
+      create_activity: { type: 'boolean', label: 'Schedule Activity' },
+      activity_default_responsible_type: {
+        type: 'selection',
+        label: 'Responsible',
+        required: true,
+        options: [
+          ['followup', 'Reminder Responsible'],
+          ['salesperson', 'Salesperson'],
+          ['account_manager', 'Account Manager'],
+        ],
+        hideWhen: (r) => !r?.create_activity,
+        help: 'Determine who will be assigned to the activity:\n- Follow-up Responsible (default)\n- Salesperson: Sales Person defined on the invoice\n- Account Manager: Sales Person defined on the customer',
+      },
+      activity_type_id: {
+        type: 'selection',
+        label: 'Activity Type',
+        options: ACTIVITY_TYPES,
+        required: (r) => Boolean(r?.create_activity),
+        hideWhen: (r) => !r?.create_activity,
+      },
+      activity_summary: {
+        type: 'char',
+        label: 'Summary',
+        required: (r) => Boolean(r?.create_activity),
+        hideWhen: (r) => !r?.create_activity,
+      },
+      activity_note: {
+        type: 'text',
+        label: 'Note',
+        placeholder: 'Activity Notes',
+        hideWhen: (r) => !r?.create_activity,
+      },
+      company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
+      // Legacy stored fields kept for compatibility with existing records and follow-up channel/body readers.
+      name: { type: 'char', label: 'Level', hidden: true, readonly: true },
+      channel: { type: 'selection', label: 'Automatic Delivery', options: [['email', 'Email'], ['sms', 'SMS'], ['phone', 'Phone'], ['letter', 'Letter']], hidden: true },
+      message: {
+        type: 'text',
+        label: 'Email Message',
+        placeholder: 'Optional email reminder message',
+        hideWhen: (r) => !r?.send_email,
+      },
     },
-    defaults: () => ({ delay: 15 }),
-    kanban: { title: 'name', lines: ['delay'] },
-    list: ['delay', 'name', 'channel'],
-    form: { title: 'name', groups: [['delay', 'channel'], []], tabs: [{ label: 'Message', fields: ['message'] }] },
+    defaults: () => ({
+      display_delay: 15,
+      reminder_timing: 'after',
+      delay: 15,
+      send_email: true,
+      send_sms: false,
+      create_activity: false,
+      activity_default_responsible_type: 'followup',
+    }),
+    createDefaults: (db) => ({ company_id: db.settings?.current_company_id ?? 1 }),
+    prepareCreate(db, vals) {
+      const next = { ...vals };
+      if (next.display_delay === undefined && next.delay != null) {
+        const raw = Number(next.delay) || 0;
+        next.display_delay = Math.abs(Math.trunc(raw));
+        if (next.reminder_timing === undefined) next.reminder_timing = raw < 0 ? 'before' : 'after';
+      }
+      if (next.send_email === undefined && next.channel !== undefined) {
+        next.send_email = next.channel === 'email';
+      }
+      if (next.send_sms === undefined && next.channel === 'sms') {
+        next.send_sms = true;
+      }
+      const effectiveSendEmail = next.send_email !== undefined ? next.send_email : true;
+      if (next.channel === undefined) {
+        if (effectiveSendEmail) next.channel = 'email';
+        else if (next.send_sms) next.channel = 'sms';
+      }
+      const effDays = next.display_delay !== undefined ? next.display_delay : 15;
+      const effTiming = next.reminder_timing ?? 'after';
+      if (next.delay === undefined || 'display_delay' in vals || 'reminder_timing' in vals) {
+        next.delay = followUpSignedDelay(effDays, effTiming);
+      }
+      return { db, vals: next };
+    },
+    onchange(rec, field) {
+      if (field === 'display_delay' || field === 'reminder_timing') {
+        return { delay: followUpSignedDelay(rec.display_delay, rec.reminder_timing) };
+      }
+      if (field === 'delay') {
+        const raw = Number(rec.delay) || 0;
+        return {
+          display_delay: Math.abs(Math.trunc(raw)),
+          reminder_timing: raw < 0 ? 'before' : 'after',
+        };
+      }
+      if (field === 'send_email' || field === 'send_sms') {
+        return { channel: rec.send_email ? 'email' : rec.send_sms ? 'sms' : (['email', 'sms'].includes(rec.channel) ? null : rec.channel) };
+      }
+      return null;
+    },
+    guard: (db, before, record) => {
+      if (record.display_delay == null || Number(record.display_delay) < 0 || !Number.isInteger(Number(record.display_delay))) {
+        return 'Due Days must be a non-negative integer';
+      }
+      if (record.create_activity && (!record.activity_type_id || !String(record.activity_summary ?? '').trim())) {
+        return 'Activity Type and Summary are required when Schedule Activity is enabled';
+      }
+      return null;
+    },
+    sort: (a, b) => (Number(a.delay) || 0) - (Number(b.delay) || 0) || a.id - b.id,
+    kanban: { title: 'display_name', lines: ['send_email', 'send_sms', 'create_activity'] },
+    list: ['display_delay', 'reminder_timing', 'send_email', 'send_sms', 'activity_type_id', 'company_id'],
+    listLabels: { activity_type_id: 'Activity' },
+    searchFields: ['display_name', 'activity_summary', 'activity_note'],
+    filters: [[
+      { id: 'email', label: 'Email', fn: (r) => Boolean(r.send_email) },
+      { id: 'sms', label: 'SMS', fn: (r) => Boolean(r.send_sms) },
+      { id: 'activity', label: 'Schedule Activity', fn: (r) => Boolean(r.create_activity) },
+    ]],
+    groupBys: ['reminder_timing', 'company_id'],
+    form: {
+      title: 'display_name',
+      hideTitle: true,
+      groups: [
+        [{ label: 'Remind', fields: ['display_delay', 'reminder_timing'], joins: ['days'], inline: true }],
+        ['company_id'],
+      ],
+      tabs: [
+        {
+          label: 'Notification',
+          groups: [
+            { title: 'Actions', fields: ['send_email', 'send_sms'] },
+            { fullWidth: true, fields: ['message'] },
+          ],
+        },
+        {
+          label: 'Activity',
+          groups: [
+            ['create_activity', 'activity_default_responsible_type'],
+            ['activity_type_id', 'activity_summary'],
+            { fullWidth: true, fields: ['activity_note'] },
+          ],
+        },
+      ],
+    },
   },
 
   'account.analytic.account': {

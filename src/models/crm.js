@@ -124,6 +124,8 @@ export const crmModels = {
       property_account_position_id: { type: 'many2one', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       property_account_receivable_id: { type: 'many2one', relation: 'account.account', label: 'Receivable Account' },
       property_account_payable_id: { type: 'many2one', relation: 'account.account', label: 'Payable Account' },
+      user_id: { type: 'many2one', relation: 'hr.employee', label: 'Salesperson', hidden: true },
+      followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible', hidden: true },
       followup_lines: {
         type: 'one2many',
         label: 'Follow-up Progress',
@@ -139,6 +141,7 @@ export const crmModels = {
           followup_delivery_state: { type: 'selection', label: 'Delivery State', options: [['sent', 'Sent'], ['not_sent', 'Not Sent'], ['not_configured', 'Not Configured']], hidden: true },
           followup_next_action_date: { type: 'date', label: 'Next Action Date', hidden: true },
           followup_status: { type: 'selection', label: 'Status', options: [['in_need_of_action', 'In need of action'], ['with_overdue_invoices', 'With overdue invoices'], ['no_action_needed', 'No action needed']], hidden: true },
+          followup_responsible_id: { type: 'many2one', relation: 'hr.employee', label: 'Follow-up Responsible', hidden: true },
           no_followup: { type: 'boolean', label: 'Exclude from Follow-ups', hidden: true },
         },
       },
