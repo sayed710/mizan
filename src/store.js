@@ -272,8 +272,11 @@ export async function listAuditAll(modelsList = []) {
   const pageSize = 1000;
   const all = [];
   let before = null;
-  const modelsParam = Array.isArray(modelsList) && modelsList.length
-    ? `models=${encodeURIComponent(modelsList.join(','))}&`
+  const normalizedModels = Array.isArray(modelsList)
+    ? [...new Set(modelsList.map((m) => String(m ?? '').trim()).filter(Boolean))]
+    : [];
+  const modelsParam = normalizedModels.length
+    ? `models=${encodeURIComponent(normalizedModels.join(','))}&`
     : '';
   while (true) {
     const beforeParam = before != null ? `&before=${before}` : '';

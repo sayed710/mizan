@@ -239,9 +239,9 @@ const invoiceAfterPayment = (move, date) => Boolean(move.invoice_date && move.in
 
 /**
  * Post a draft payment. With an invoice it pays that invoice; otherwise one entry is booked for the whole amount
- * and applied to the partner's open documents, oldest due first. Any rest stays as an outstanding credit.
+ * and, when `autoAllocate` is true (default), applied to the partner's open documents, oldest due first. Any rest stays as an outstanding credit.
  */
-export function postPayment(db, p) {
+export function postPayment(db, p, { autoAllocate = true } = {}) {
   if (p.state !== 'draft') throw new Error('Only draft payments can be confirmed');
   if (!p.partner_id) throw new Error('Set the partner');
   if (!Number.isFinite(Number(p.amount)) || !(Number(p.amount) > 0)) throw new Error('The amount must be a finite positive number');
@@ -269,7 +269,7 @@ export function postPayment(db, p) {
   const explicitName = currentPayment.name && currentPayment.name !== '/' ? currentPayment.name : null;
   const preName = explicitName ?? paymentName(db, journalRecord, date);
   const isTaxOrDirect = currentPayment.is_tax_payment || currentPayment.return_id || currentPayment.destination_account_id || currentPayment.destination_account_code;
-  const open = isTaxOrDirect
+  const open = !autoAllocate || isTaxOrDirect
     ? []
     : search(db, 'account.move')
         .filter((m) => m.state === 'posted' && m.partner_id === currentPayment.partner_id && (m.company_id ?? 1) === (currentPayment.company_id ?? 1) && m.invoice_date <= date && m.amount_residual > 0 && SETTLES[currentPayment.partner_type]?.[currentPayment.payment_type]?.includes(m.move_type)

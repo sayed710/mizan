@@ -689,3 +689,49 @@ test('audit history of shared records is visible across companies and contact pa
   }
 });
 
+test('GET /api/audit filters by models list with before pagination and rejects invalid or excessive models', async () => {
+  const { url, stop } = await startServer();
+  try {
+    const admin = client(url);
+    assert.equal((await admin('POST', '/api/login', { login: 'admin', password: PASSWORD })).status, 200);
+    const snapshot = (await admin('GET', '/api/db')).body;
+
+    let next = create(snapshot, 'crm.lead', { name: 'Audit Lead 1', company_id: 1 }).db;
+    next = create(next, 'res.partner', { name: 'Audit Partner 1', company_id: 1 }).db;
+    next = create(next, 'account.move', { move_type: 'entry', company_id: 1, ref: 'Audit Move Exclude' }).db;
+    next = create(next, 'crm.lead', { name: 'Audit Lead 2', company_id: 1 }).db;
+    next = create(next, 'res.partner', { name: 'Audit Partner 2', company_id: 1 }).db;
+
+    const saved = await admin('POST', '/api/diff', diffDb(snapshot, next));
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+
+    const page1 = await admin('GET', '/api/audit?models=crm.lead,res.partner&limit=2');
+    assert.equal(page1.status, 200, JSON.stringify(page1.body));
+    assert.equal(page1.body.length, 2);
+    assert.ok(page1.body.every((r) => r.model === 'crm.lead' || r.model === 'res.partner'));
+
+    const page2 = await admin('GET', `/api/audit?models=crm.lead,res.partner&limit=2&before=${page1.body.at(-1).id}`);
+    assert.equal(page2.status, 200, JSON.stringify(page2.body));
+    assert.equal(page2.body.length, 2);
+    assert.ok(page2.body.every((r) => (r.model === 'crm.lead' || r.model === 'res.partner') && r.id < page1.body.at(-1).id));
+
+    const allFiltered = await admin('GET', '/api/audit?models=crm.lead,res.partner&limit=100');
+    assert.equal(allFiltered.status, 200);
+    assert.ok(allFiltered.body.every((r) => r.model === 'crm.lead' || r.model === 'res.partner'));
+    assert.ok(!allFiltered.body.some((r) => r.model === 'account.move'));
+
+    const auditModels = await admin('GET', '/api/audit?models=account.move,account.payment,account.account,account.tax,res.company&limit=1000&selected=1');
+    assert.equal(auditModels.status, 200, JSON.stringify(auditModels.body));
+    assert.ok(auditModels.body.some((r) => r.model === 'account.move'));
+
+    assert.equal((await admin('GET', '/api/audit?models=')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?models=crm.lead,,res.partner')).status, 400);
+    assert.equal((await admin('GET', '/api/audit?models=crm.lead,not.a.registered.model')).status, 400);
+
+    const manyModels = Object.keys(models).slice(0, 25).join(',');
+    assert.equal((await admin('GET', `/api/audit?models=${encodeURIComponent(manyModels)}`)).status, 400);
+  } finally {
+    await stop();
+  }
+});
+

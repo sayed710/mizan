@@ -1398,6 +1398,7 @@ export function updatePartnerFollowUp(partner, companyId, vals) {
     followup_last_level: vals.followup_last_level !== undefined ? vals.followup_last_level : current?.followup_last_level ?? null,
     followup_channel: vals.followup_channel !== undefined ? vals.followup_channel : current?.followup_channel ?? null,
     followup_delivery_state: vals.followup_delivery_state !== undefined ? vals.followup_delivery_state : current?.followup_delivery_state ?? null,
+    followup_delivery_outcome: vals.followup_delivery_outcome !== undefined ? vals.followup_delivery_outcome : current?.followup_delivery_outcome ?? null,
     followup_next_action_date: vals.followup_next_action_date !== undefined ? vals.followup_next_action_date : current?.followup_next_action_date ?? null,
     followup_status: vals.followup_status !== undefined ? vals.followup_status : current?.followup_status ?? null,
     followup_responsible_id: vals.followup_responsible_id !== undefined ? vals.followup_responsible_id : current?.followup_responsible_id ?? null,
@@ -1482,12 +1483,14 @@ function applyFollowUpReminder(db, scope, partnerId, groups, at, channel, nextLe
         followup_oldest_date: part.oldest ?? null,
         followup_level: level.id,
         followup_delivery_state: 'sent',
+        followup_delivery_outcome: 'sent',
         ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       })
       : updatePartnerFollowUp(partner, cId, {
         followup_date: at,
         followup_oldest_date: part.oldest ?? null,
         followup_delivery_state: 'sent',
+        followup_delivery_outcome: 'sent',
         ...reminderDetails(levels, level, at, channel, nextLevelBaseDate),
       });
     nextDb = write(nextDb, 'res.partner', partnerId, { followup_lines: updatedPartner.followup_lines });
@@ -1518,7 +1521,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
   for (const partner of partners.values()) {
     const lines = partner.followup_lines ?? [];
     for (const line of lines) {
-      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null;
+      const hasProgress = line.followup_level_delay != null || line.followup_date != null || line.followup_level != null || line.followup_activity_level != null || line.followup_delivery_state != null || line.followup_delivery_outcome != null;
       if (!hasProgress) continue;
       const activeGroup = activeLateMap.get(`${partner.id}:${line.company_id}`) ?? null;
       const oldestChanged = Boolean(activeGroup && line.followup_oldest_date && activeGroup.oldest !== line.followup_oldest_date);
@@ -1527,7 +1530,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
         nextDb = write(nextDb, 'res.partner', partner.id, {
           followup_lines: updatePartnerFollowUp(current, line.company_id, {
             followup_level_delay: null, followup_level: null, followup_activity_level: null, followup_date: null, followup_oldest_date: null,
-            followup_last_level: null, followup_channel: null, followup_delivery_state: null,
+            followup_last_level: null, followup_channel: null, followup_delivery_state: null, followup_delivery_outcome: null,
             followup_next_action_date: null,
           }).followup_lines,
         });
@@ -1557,11 +1560,18 @@ export function runFollowUps(db, at = today(), deliver = null) {
       || progress?.followup_activity_level !== level.id
     ));
     if (!canDeliverEmail && !hasPendingActivity && progress?.followup_delivery_state !== 'sent' && progress?.followup_date === at) return nextDb;
+    const sameDayOutboxOnly = Boolean(
+      !hasPendingActivity
+      && progress?.followup_delivery_state !== 'sent'
+      && progress?.followup_delivery_outcome === 'outbox_only'
+      && progress?.followup_date === at,
+    );
 
     const dueWord = f.upcoming || (f.oldest && f.oldest >= at) ? 'due' : 'overdue';
     const recordFailure = (reason, meta = { delivery_state: 'outbox_only', delivery_error: reason }) => {
       nextDb = ensureFollowUpActivity(nextDb, partner.id, f, level, at);
       const deliveryState = channel ? 'not_sent' : 'not_configured';
+      const deliveryOutcome = meta?.delivery_state === 'failed' ? 'failed' : 'outbox_only';
       const invoiceList = f.invoices.map((move) => `${move.name} (${move.invoice_date_due}): ${round(move.amount_residual)}`).join('; ');
       nextDb = postNote(
         nextDb,
@@ -1577,6 +1587,7 @@ export function runFollowUps(db, at = today(), deliver = null) {
         followup_oldest_date: f.oldest ?? null,
         followup_channel: channel ?? null,
         followup_delivery_state: deliveryState,
+        followup_delivery_outcome: deliveryOutcome,
         followup_next_action_date: null,
       });
       return write(nextDb, 'res.partner', partner.id, { followup_lines: updated.followup_lines });
@@ -1591,6 +1602,8 @@ export function runFollowUps(db, at = today(), deliver = null) {
         if (result && typeof result === 'object') {
           if (result.status === 'sent') return sent;
           if (result.status === 'outbox_only' && typeof result.reason === 'string' && result.reason.trim()) {
+            // Suppress duplicate outbox-only notes within the same day while still keeping state not_sent so live SMTP sends later.
+            if (sameDayOutboxOnly) return nextDb;
             const reason = result.reason.trim();
             return recordFailure(reason, { delivery_state: 'outbox_only', delivery_error: reason });
           }

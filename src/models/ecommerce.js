@@ -1,5 +1,6 @@
 // eCommerce: website categories, payment providers, and the website fields added to existing models.
 import { read } from '../orm.js';
+import { documentCurrency, roundCurrency } from '../money.js';
 import { isLiquidityJournal } from './ledger.js';
 import { crmModels } from './crm.js';
 import { logisticsModels } from './logistics.js';
@@ -38,10 +39,30 @@ function paymentTransactionGuard(db, before, rec) {
   } else if (rec.state !== before.state && !(before.state === 'pending' && ['done', 'cancel', 'error'].includes(rec.state))) {
     return 'Invalid payment transaction status transition';
   }
+  if (rec.state !== 'done' && rec.payment_id) {
+    return 'Only completed payment transactions can link a payment';
+  }
   if (rec.state === 'done') {
     const payment = rec.payment_id ? (db.records['account.payment'] ?? []).find((p) => p.id === rec.payment_id) : null;
     if (!payment || payment.state !== 'posted' || (payment.company_id ?? 1) !== txCompany) {
       return 'Completed payment transactions require a posted payment of the same company';
+    }
+    if (payment.payment_type !== 'inbound' || payment.partner_type !== 'customer') {
+      return 'Completed payment transactions require an inbound customer payment';
+    }
+    if (payment.partner_id !== move.partner_id) {
+      return 'Completed payment transaction payment must belong to the invoice partner';
+    }
+    if (payment.invoice_id && payment.invoice_id !== rec.move_id) {
+      return 'Completed payment transaction payment cannot belong to another invoice';
+    }
+    if ((db.records['payment.transaction'] ?? []).some((t) => t.id !== rec.id && t.payment_id === rec.payment_id)) {
+      return 'Payment is already linked to another payment transaction';
+    }
+    const txCurrency = documentCurrency(db, rec);
+    const payCurrency = documentCurrency(db, payment);
+    if (!txCurrency || !payCurrency || payCurrency.id !== txCurrency.id || roundCurrency(payment.amount, txCurrency) !== roundCurrency(rec.amount, txCurrency)) {
+      return 'Completed payment transaction payment must match the transaction currency and amount';
     }
   }
   return null;
