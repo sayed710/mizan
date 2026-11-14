@@ -12,6 +12,7 @@ import { intercompanyBill, journalInvoiceSequence, postedInvoiceLines } from './
 import { checkMandatoryPlans } from './models/analyticplus.js';
 import { companyCurrencyRecord, roundCurrency } from './money.js';
 import { isRevaluationMovePair } from './models/closing.js';
+import { isAuditTrackingMessage } from './models/auditRules.js';
 
 const byId = (list = []) => new Map(list.map((r) => [r.id, r]));
 const same = (v) => JSON.stringify(v ?? null);
@@ -822,6 +823,7 @@ export function applyDiff(db, d, { author, isAdmin = false, allowed = null, logi
   const known = new Set(db.messages.map((m) => m.id));
   const auditRecords = new Map();
   const kept = new Set(db.messages.filter((m) => {
+    if (isAuditTrackingMessage(m) && (m.model !== 'account.move' || !isAdmin)) return true;
     if (!models[m.model]?.audited) return false;
     if (!auditRecords.has(m.model)) auditRecords.set(m.model, byId(db.records[m.model]));
     const record = auditRecords.get(m.model).get(m.res_id);

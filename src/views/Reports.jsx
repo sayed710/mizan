@@ -6,17 +6,18 @@ import { filterByAnalytic, journalItems } from '../models/ledger.js';
 import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
+import { currentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
-import { scopeAuditRows } from '../companyView.js';
-import { currentCompany } from '../models/company.js';
-import { commit, companiesOf, getDb, isServer, listAudit, useDb } from '../store.js';
-import { auditSummary } from '../audit.js';
+import { commit, companiesOf, getDb, isServer, listAuditAll, useDb } from '../store.js';
+import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/auditTrail.js';
+import { PAGE_SIZE, pageWindow } from './paging.js';
 import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, TrialBalance } from './FinanceReports.jsx';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
-import { downloadCsv, tableToRows } from '../csv.js';
+import { downloadCsv, downloadXml, tableToRows } from '../csv.js';
+import { taxReturnToCsv, taxReturnToXml } from '../models/taxExport.js';
 import { AgedDetailRow } from './aged-detail-row.js';
 import { budgetCurrency, BudgetMoneyCell } from './budget-currency.js';
 import { cashflowColumns, periodsFor } from './reportCompare.js';
@@ -118,9 +119,16 @@ function Ledger({ db, period, analyticAccountIds }) {
 
 const partnerName = (db, id) => read(db, 'res.partner', id)?.name ?? '—';
 
-export function TaxReportTable({ db, period }) {
+export function TaxReportTable({ db, period, returnRecord = null }) {
+  const safeBase = String(returnRecord?.name || 'tax-return').replace(/[^a-zA-Z0-9_-]+/g, '-');
   return (
     <div className="list-wrap">
+      {returnRecord && (
+        <div className="row" style={{ marginBottom: 8 }}>
+          <button type="button" className="btn sm" onClick={() => downloadCsv(`${safeBase}.csv`, taxReturnToCsv(db, returnRecord))}>{t('Export CSV')}</button>
+          <button type="button" className="btn sm" onClick={() => downloadXml(`${safeBase}.xml`, taxReturnToXml(db, returnRecord))}>{t('Export XML')}</button>
+        </div>
+      )}
       <table className="list report">
         <thead>
           <tr>
@@ -352,32 +360,9 @@ function Analytic({ db, period }) {
   );
 }
 
-const AUDIT_ROWS = 500;
-
-const inPeriod = (date, period) => (!period.from || date.slice(0, 10) >= period.from) && date.slice(0, 10) <= period.to;
-
-function AuditTrail({ db, sourceDb, period }) {
-  // With a server, the trail is the server's change log (its time and user), not messages the browser wrote.
-  const [serverLog, setServerLog] = useState(undefined);
-  const selectedCompanies = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [currentCompany(sourceDb)]);
-  useEffect(() => {
-    let active = true;
-    if (isServer()) {
-      setServerLog(undefined);
-      listAudit('account.move').then((rows) => { if (active) setServerLog(rows); });
-    }
-    return () => { active = false; };
-  }, [selectedCompanies]);
-  if (isServer()) {
-    if (serverLog === undefined) return <tbody><tr><td className="muted">{t('Loading…')}</td></tr></tbody>;
-    if (serverLog === null) return <tbody><tr><td className="muted">{t('Only administrators can read the audit trail')}</td></tr></tbody>;
-    const rows = scopeAuditRows(sourceDb, serverLog).filter((e) => inPeriod(e.at, period)).slice(0, AUDIT_ROWS)
-      .map((e) => ({ id: e.id, res_id: e.res_id, body: auditSummary(e), author: e.actor, date: e.at }));
-    return <AuditRows db={db} rows={rows} />;
-  }
-  const rows = db.messages
-    .filter((m) => m.model === 'account.move' && inPeriod(m.date, period))
-    .sort((a, b) => b.date.localeCompare(a.date)).slice(0, AUDIT_ROWS);
+function AuditTrail({ db, rows, loading, denied }) {
+  if (loading) return <tbody><tr><td className="muted">{t('Loading…')}</td></tr></tbody>;
+  if (denied) return <tbody><tr><td className="muted">{t('Only administrators can read the audit trail')}</td></tr></tbody>;
   return <AuditRows db={db} rows={rows} />;
 }
 
@@ -386,9 +371,9 @@ function AuditRows({ db, rows }) {
     <tbody>
       {rows.map((m) => (
         <tr key={m.id} className="rep-detail">
-          <td><a href={`#/open/account.move/${m.res_id}`}>{read(db, 'account.move', m.res_id)?.name ?? `#${m.res_id}`}</a> <span className="muted">{m.body}</span></td>
+          <td><a href={`#/open/${m.model || 'account.move'}/${m.res_id}`}>{m.recordName ?? read(db, m.model || 'account.move', m.res_id)?.name ?? `#${m.res_id}`}</a> <span className="muted">{m.body}</span></td>
           <td className="num">{m.author}</td>
-          <td className="num">{m.date.slice(0, 16).replace('T', ' ')}</td>
+          <td className="num">{String(m.date ?? '').slice(0, 16).replace('T', ' ')}</td>
         </tr>
       ))}
     </tbody>
@@ -561,7 +546,30 @@ function ReportPage({ leaf }) {
     })
     : null;
   const tableRef = useRef(null);
+  const isAudit = leaf.report === 'audit';
+  const [serverAuditLog, setServerAuditLog] = useState(undefined);
+  const [auditPage, setAuditPage] = useState({ key: '', offset: 0 });
+  const auditScopeKey = JSON.stringify(sourceDb.settings?.allowed_company_ids ?? [sourceDb.settings?.current_company_id ?? 1]);
+  useEffect(() => {
+    let active = true;
+    if (isAudit && isServer()) {
+      setServerAuditLog(undefined);
+      listAuditAll(AUDIT_MODELS).then((rows) => { if (active) setServerAuditLog(rows); });
+    }
+    return () => { active = false; };
+  }, [isAudit, auditScopeKey]);
+  const auditAllRows = isAudit && (!isServer() || Array.isArray(serverAuditLog))
+    ? collectAuditTrailRows(db, sourceDb, period, isServer() ? serverAuditLog : null)
+    : [];
+  const auditPageKey = `${auditScopeKey}:${periodKey}:${period.from ?? ''}:${period.to ?? ''}`;
+  const auditOffset = auditPage.key === auditPageKey ? auditPage.offset : 0;
+  const auditWin = pageWindow(auditAllRows.length, auditOffset, PAGE_SIZE);
+  const auditPagedRows = auditAllRows.slice(auditWin.start, auditWin.end);
   const exportCsv = () => {
+    if (isAudit) {
+      downloadCsv('audit.csv', auditTrailToCsv(auditAllRows));
+      return;
+    }
     downloadCsv(`${leaf.report || 'report'}.csv`, tableToRows(tableRef.current));
   };
   return (
@@ -623,13 +631,20 @@ function ReportPage({ leaf }) {
         </label>}
         <span className="muted">{leaf.report === 'inalterability' ? t('Chain verification always covers all secured entries.') : (period.from ? `${period.from} → ${period.to}` : `≤ ${period.to}`)}</span>
         <span className="spacer" />
+        {isAudit && (
+          <span className="pager" role="group" aria-label={t('Pager')}>
+            <span aria-live="polite">{auditWin.label} / {auditWin.total}</span>
+            <button type="button" className="btn sm" aria-label={t('Previous page')} disabled={auditWin.prev == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.prev })}>‹</button>
+            <button type="button" className="btn sm" aria-label={t('Next page')} disabled={auditWin.next == null} onClick={() => setAuditPage({ key: auditPageKey, offset: auditWin.next })}>›</button>
+          </span>
+        )}
         <button type="button" className="btn sm" onClick={() => window.print()}>{t('Print')}</button>
         <button type="button" className="btn sm" onClick={exportCsv}>{t('Download CSV')}</button>
       </div>
       <div className="list-wrap">
         <table className="list report" ref={tableRef}>
           <thead><tr><th>{t(firstCol ?? '')}</th>{(data ? [...data.headers, ...(data.variance ? ['Variance', '%'] : [])] : cols).map((c) => <th key={c} className="num">{data ? c.split(' ').map((part) => t(part)).join(' ') : t(c)}</th>)}</tr></thead>
-          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} />}
+          {data ? <Comparison key={leaf.report} data={data} report={leaf.report} /> : isAudit ? <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} /> : <Body db={db} sourceDb={sourceDb} period={period} companyId={selectedCompany} analyticAccountIds={analyticAccountIds} />}
         </table>
       </div>
     </main>

@@ -549,6 +549,7 @@ export const taxModels = {
   },
   'account.tax': {
     label: 'Taxes',
+    auditDelete: true,
     guard: (db, before, after) => {
       // An on-payment tax cannot post without its transition account, so it is required when saving.
       if (after.cash_basis_transition_account_id || after.tax_exigibility === 'on_payment') {
@@ -581,14 +582,14 @@ export const taxModels = {
       return null;
     },
     fields: {
-      name: { type: 'char', label: 'Tax Name', required: true },
+      name: { type: 'char', label: 'Tax Name', required: true, tracking: true },
       sequence: { type: 'integer', label: 'Sequence', widget: 'handle' },
-      amount_type: { type: 'selection', label: 'Tax Computation', options: [['percent', 'Percentage'], ['fixed', 'Fixed'], ['group', 'Group of Taxes']] },
-      amount: { type: 'float', label: 'Amount' },
+      amount_type: { type: 'selection', label: 'Tax Computation', tracking: true, options: [['percent', 'Percentage'], ['fixed', 'Fixed'], ['group', 'Group of Taxes']] },
+      amount: { type: 'float', label: 'Amount', tracking: true },
       children_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Child Taxes' },
       description: { type: 'char', label: 'Description', optional: 'show' },
-      type_tax_use: { type: 'selection', label: 'Tax Type', options: TAX_TYPES },
-      tax_scope: { type: 'selection', label: 'Tax Scope', options: [['consu', 'Goods'], ['service', 'Services']] },
+      type_tax_use: { type: 'selection', label: 'Tax Type', tracking: true, options: TAX_TYPES },
+      tax_scope: { type: 'selection', label: 'Tax Scope', tracking: true, options: [['consu', 'Goods'], ['service', 'Services']] },
       fiscal_position_ids: { type: 'many2many', relation: 'account.fiscal.position', label: 'Fiscal Position' },
       original_tax_ids: { type: 'many2many', relation: 'account.tax', label: 'Replaces', optional: 'hide' },
       fiscal_position_mapping_ids: {
@@ -601,16 +602,16 @@ export const taxModels = {
         newLine: () => ({ fiscal_position_id: null, original_tax_ids: [] }),
       },
       invoice_label: { type: 'char', label: 'Label on Invoices' },
-      price_include: { type: 'boolean', label: 'Included in Price' },
+      price_include: { type: 'boolean', label: 'Included in Price', tracking: true },
       include_base_amount: { type: 'boolean', label: 'Affect Base of Subsequent Taxes' },
       is_base_affected: { type: 'boolean', label: 'Base Affected by Previous Taxes' },
-      tax_exigibility: { type: 'selection', label: 'Tax Exigibility', options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
+      tax_exigibility: { type: 'selection', label: 'Tax Exigibility', tracking: true, options: [['on_invoice', 'Based on Invoice'], ['on_payment', 'Based on Payment']] },
       cash_basis_transition_account_id: { type: 'many2one', relation: 'account.account', label: 'Cash Basis Transition Account' },
       tax_group_id: { type: 'many2one', relation: 'account.tax.group', label: 'Tax Group', domain: (g, tax) => !g.company_id || g.company_id === (tax?.company_id ?? 1) },
       company_id: { type: 'many2one', relation: 'res.company', label: 'Company', multiCompanyOnly: true },
       invoice_repartition_line_ids: repartitionField('Distribution for Invoices'),
       refund_repartition_line_ids: repartitionField('Distribution for Refunds'),
-      active: { type: 'boolean', label: 'Active' },
+      active: { type: 'boolean', label: 'Active', tracking: true },
     },
     defaults: () => ({
       sequence: 1,

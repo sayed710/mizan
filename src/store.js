@@ -266,6 +266,28 @@ export async function listAudit(model, limit = 500) {
   const r = await api(`/api/audit?model=${encodeURIComponent(model)}&limit=${limit}&selected=1`);
   return r.ok ? r.data : null;
 }
+
+/** Complete paginated server change log across one or more models (admins only); null when forbidden. */
+export async function listAuditAll(modelsList = []) {
+  const pageSize = 1000;
+  const all = [];
+  let before = null;
+  const modelsParam = Array.isArray(modelsList) && modelsList.length
+    ? `models=${encodeURIComponent(modelsList.join(','))}&`
+    : '';
+  while (true) {
+    const beforeParam = before != null ? `&before=${before}` : '';
+    const r = await api(`/api/audit?${modelsParam}limit=${pageSize}&selected=1${beforeParam}`);
+    if (!r.ok) return null;
+    const batch = Array.isArray(r.data) ? r.data : [];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    const lastId = batch.at(-1)?.id;
+    if (lastId == null || (before != null && lastId >= before)) break;
+    before = lastId;
+  }
+  return all;
+}
 export const revokeKey = (created) => fetch(`/api/keys?created=${Number(created)}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' } });
 export async function createKey(name) {
   const r = await api('/api/keys', { name });

@@ -32,6 +32,7 @@ The server reads these environment variables. The list lives in `server/config.j
 | `MIZAN_TWILIO_FROM` | text |  | Twilio sender number. |
 | `MIZAN_SHIPPING_TOKEN` | secret |  | Token for carrier rate APIs. |
 | `MIZAN_MARKETPLACE_TOKEN` | secret |  | Token for marketplace order feeds. |
+| `MIZAN_PAYMENT_WEBHOOK_SECRET` | secret |  | HMAC-SHA256 shared secret used to sign and verify payment provider webhooks. |
 | `MIZAN_DIST` | path |  | Built client folder (default `dist`). |
 | `MIZAN_ALLOW_RESET` | flag |  | `1` allows "Reset demo" (wipe back to demo data; needs RESET typed, previous data saved first). Off by default, also under `npm start` and Docker; with `NODE_ENV=development` it is on unless `0`. |
 | `MIZAN_FORCE_TAKEOVER` | flag |  | `1` takes the database over from a crashed server (otherwise wait 30 seconds). |

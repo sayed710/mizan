@@ -756,13 +756,11 @@ export const leavesOf = (app) => {
 };
 
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
-/** Accounting, HR and company records: only an app that shows them in its menus may change them. */
+/** Accounting, HR and company records: only an app that shows them in its menus (or owns them below) may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
-/** Protected models without a dedicated menu entry, keyed to their owning apps. */
-const PROTECTED_APPS = {
-  'account.partial.reconcile': ['accounting'],
-};
+  'account.bank.statement.line', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'payment.transaction', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+/** Protected models without their own menu, explicitly owned by an app. */
+const OWNED_PROTECTED = { accounting: ['account.partial.reconcile', 'payment.transaction'] };
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
 /** Private employee fields, and the menu models whose users may see them. */
 const PRIVATE_FIELDS = {
@@ -796,8 +794,8 @@ export function menuModelsForApps(appIds) {
 export function writableModelsForApps(appIds) {
   const base = menuModelsForApps(appIds);
   if (base.has('account.online.link')) base.add('account.online.account');
-  const owned = (m) => base.has(m) || (PROTECTED_APPS[m]?.some((a) => appIds.includes(a)) ?? false);
-  return new Set([...modelsForApps(appIds)].filter((m) => owned(m) || !PROTECTED.includes(m)));
+  const owned = new Set(appIds.flatMap((id) => OWNED_PROTECTED[id] ?? []));
+  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || owned.has(m) || !PROTECTED.includes(m)));
 }
 
 /** `db` without the private employee fields the apps in `appIds` may not see. */
@@ -818,8 +816,7 @@ export function modelsForApps(appIds) {
   const out = new Set(base);
   // Barcode counts update located stock through the same quantity path as inventory operations.
   if (appIds.includes('barcode')) out.add('stock.quant');
-  // Partial reconciliations have no menu entry; Accounting owns and reads them directly.
-  if (appIds.includes('accounting')) out.add('account.partial.reconcile');
+  for (const id of appIds) for (const m of OWNED_PROTECTED[id] ?? []) out.add(m);
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
       if (f.relation) out.add(f.relation);

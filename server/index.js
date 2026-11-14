@@ -24,7 +24,8 @@ import { cacheControl, encodeBody, isImmutable } from './compress.js';
 import { handleApi, publicApply, publicBook, publicCart, publicOrder, publicOrderStatus, publicRegister, publicSite, publicSlots } from './api.js';
 import { migrate } from '../src/migrations.js';
 import { createVisitTracker, visitKey, publicAnswer, publicAsk, publicBlogPost, publicBlogSite, publicForumThread, publicVote } from './blog.js';
-import { smtpConfig, sendMail } from './smtp.js';
+import { smtpConfig } from './smtp.js';
+import { createMailTransport } from './mailTransport.js';
 import { livechatInfo, livechatMessage, livechatPoll, livechatRate, livechatStart } from './livechat.js';
 import { recordSent, sendDocument, sendMailing } from './mail.js';
 import { deliver, deliverMailing, resumeQueued, trackingResponse } from './mailtrack.js';
@@ -35,6 +36,7 @@ import { checkPagePassword, resolveUrl, robots, sitemap } from '../src/models/we
 import { SHARED_MODELS, read, search } from '../src/orm.js';
 import { countProduct } from '../src/models/valuation.js';
 import { createPortal } from './portal.js';
+import { handlePaymentWebhook } from './paymentWebhook.js';
 import { createSigning, publicOrigin, remindSigners, sendSignRequest } from './signing.js';
 import { sharePage, smsInbound, SMS_PATH, SMS_WRITE } from './inbound.js';
 
@@ -691,6 +693,11 @@ async function api(req, res, path) {
     if (out.denied) recordFailure(`orderstatus:${ip}`);
     return send(res, out.status, out.body);
   }
+  const payWebhook = /^\/api\/payment\/webhook\/([a-z0-9_-]{1,32})$/.exec(path);
+  if (payWebhook) {
+    if (tooMany(`payhook:${ip}`)) return send(res, 429, { error: 'Too many requests, try again later' });
+    return handlePaymentWebhook({ req, res, providerCode: payWebhook[1], getDb: () => db, commitDb, readRaw, env: ENV, log, onRejected: () => recordFailure(`payhook:${ip}`) });
+  }
   if (path.startsWith('/api/v1/')) {
     // Bearer-token API: no cookies involved, so no CSRF exposure; rate-limit failed keys like logins.
     if (tooMany(`key:${ip}`)) return send(res, 429, { error: 'Too many attempts, try again later' });
@@ -831,10 +838,12 @@ async function api(req, res, path) {
     const granted = companiesFor(user);
     const selected = q.get('selected') === '1' ? selectionFor(user).allowed_company_ids.filter((company) => !granted || granted.has(company)) : user.companies;
     const filterCompanies = granted ? (selected ? new Set(selected) : granted) : null;
+    const modelList = q.get('models') ? q.get('models').split(',').map((m) => m.trim()).filter(Boolean) : [];
+    const modelClause = modelList.length ? `AND model IN (${modelList.map(() => '?').join(',')})` : '';
     const rows = sql.prepare(`SELECT id, at, actor, model, res_id, action, changes, company_id FROM audit_log
-      WHERE (?1 IS NULL OR model = ?1) AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
+      WHERE (?1 IS NULL OR model = ?1) ${modelClause} AND (?2 IS NULL OR res_id = ?2) AND (?4 IS NULL OR id < ?4)
         AND audit_visible(company_id, model, res_id, changes, ?5) = 1 ORDER BY id DESC LIMIT ?3`)
-      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected));
+      .all(q.get('model'), id, limit, before, selected === null ? null : JSON.stringify(selected), ...modelList);
     return send(res, 200, rows.map((r) => {
       const parsed = JSON.parse(r.changes);
       const changes = filterCompanies ? scopeAuditChanges(r.model, parsed, filterCompanies) : parsed;
@@ -1107,7 +1116,7 @@ const runJobs = async () => {
       base = db;
       return db;
     };
-    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: SMTP ? (message) => sendMail(SMTP, message) : null, commitFollowUps });
+    const next = await runScheduledJobs(base, undefined, { onError: (job, error) => log('error', 'scheduled job failed', { job, error }), deliverFollowUp: createMailTransport({ smtp: SMTP }), commitFollowUps });
     if (next !== base) commitDb(applyDiff(db, diffDb(base, next), { author: 'Scheduler', isAdmin: true }), { actor: 'scheduler' });
   } catch (e) {
     log('error', 'scheduled job failed', { error: e });
