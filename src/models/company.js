@@ -4,6 +4,7 @@ import { postCompanyDeferrals } from './deferred.js';
 import { companyRoundingMethod, today, validDate } from './common.js';
 import { companyCurrencyRecord, documentCurrency } from '../money.js';
 import { ensureReturnTypes } from './taxreturn.js';
+import { ensureStatementReports } from './statementReports.js';
 import { defaultPayrollRules } from './payroll.js';
 import { STOCK_CHART_ROLES } from './stock-accounts.js';
 import { returnCompanies, returnTaxLock } from './finance.js';
@@ -437,7 +438,7 @@ export function createCompany(db, vals) {
     next = structure.db;
     accounts.default_payroll_structure_id = structure.id;
   }
-  return { ...res, db: ensureReturnTypes(write(next, 'res.company', res.id, accounts)) };
+  return { ...res, db: ensureStatementReports(ensureReturnTypes(write(next, 'res.company', res.id, accounts)), res.id) };
 }
 
 /** Create a business record with database-local company defaults using the current ORM. */
@@ -447,14 +448,14 @@ export function createForCompany(db, model, vals) {
 
 /** Initialize the demo's main company once; call after seed to preserve existing IDs. */
 export function ensureMainCompany(db, accounts = {}) {
-  if (record(db, 'res.company', 1)) return ensureReturnTypes(db);
+  if (record(db, 'res.company', 1)) return ensureStatementReports(ensureReturnTypes(db), 1);
   if ((db.seq['res.company'] ?? 0) !== 0) throw new Error('Cannot initialize main company: company ID 1 is already reserved');
   const currencyId = accounts.currency_id ?? db.settings?.base_currency_id;
   const currency = currencyId ? (db.records['res.currency'] ?? []).find((c) => c.id === currencyId) : null;
   if (!currency) throw new Error('Configure the base currency before initializing the company');
   const configured = updateSettings(db, { base_currency_id: currency.id });
   const created = createCompany(configured, { name: 'Mizan Demo Co', currency_id: currency.id, ...accounts }).db;
-  return ensureReturnTypes(created);
+  return ensureStatementReports(ensureReturnTypes(created), 1);
 }
 
 /** Rename a company; the main company's name is mirrored into the legacy setting older screens still read. */

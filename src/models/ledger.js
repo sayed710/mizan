@@ -15,7 +15,7 @@ import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
-export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_other'].includes(account?.account_type);
+export const analyticEligibleAccount = (account) => ['income', 'income_other', 'expense', 'expense_direct_cost', 'expense_depreciation', 'expense_other'].includes(account?.account_type);
 /** Whether journal items on `account` participate in reconciliation (AR, AP, or `reconcile` flag). */
 export const isReconcilableAccount = (account) => Boolean(account?.reconcile === true || ['asset_receivable', 'liability_payable'].includes(account?.account_type));
 let analyticPostingHooks = null;
@@ -27,7 +27,7 @@ export function registerAnalyticPostingHooks(hooks) {
 export const ACCOUNT_TYPES = [
   ['asset_receivable', 'Receivable'], ['asset_cash', 'Bank and Cash'], ['asset_current', 'Current Assets'], ['asset_non_current', 'Non-current Assets'], ['asset_prepayments', 'Prepayments'], ['asset_fixed', 'Fixed Assets'],
   ['liability_payable', 'Payable'], ['liability_current', 'Current Liabilities'], ['liability_non_current', 'Non-current Liabilities'], ['liability_credit_card', 'Credit Card'], ['equity', 'Equity'], ['equity_unaffected', 'Current Year Earnings'], ['off_balance', 'Off-Balance Sheet'],
-  ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_other', 'Other Expenses'],
+  ['income', 'Income'], ['income_other', 'Other Income'], ['expense_direct_cost', 'Cost of Revenue'], ['expense', 'Expenses'], ['expense_depreciation', 'Depreciation'], ['expense_other', 'Other Expenses'],
 ];
 
 /** Default chart of accounts (codes follow a common 6-digit layout). */
@@ -1006,7 +1006,7 @@ export function analyticDistributionForLines(lines, analyticAccountIds) {
 }
 
 /** Scale each item's debit and credit by an optional share (default 1), e.g. for a horizontal group column. */
-const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
+export const weighted = (items, weight) => weight ? items.map((l) => { const w = weight(l); return { ...l, debit: (Number(l.debit) || 0) * w, credit: (Number(l.credit) || 0) * w }; }) : items;
 
 /** Journal items allocated to the selected analytic accounts; no selection keeps every item. */
 export function filterByAnalytic(items, analyticAccountIds) {
@@ -1060,14 +1060,14 @@ export function profitAndLoss(db, period, { includeClosing = false, weight, anal
   const rows = balances(db, weighted(items, weight));
   const revenue = sumTypes(rows, ['income'], -1);
   const cost = sumTypes(rows, ['expense_direct_cost']);
-  const expense = sumTypes(rows, ['expense']);
+  const expense = sumTypes(rows, ['expense', 'expense_depreciation']);
   const otherIncome = sumTypes(rows, ['income_other'], -1);
   const otherExpense = sumTypes(rows, ['expense_other']);
   const lines = (types, sign) => rows.filter((r) => types.includes(r.account.account_type)).map((r) => ({ ...r, balance: round(sign * r.balance) }));
   return {
     revenue, cost, gross: round(revenue - cost), expense, operating: round(revenue - cost - expense),
     otherIncome, otherExpense, net: round(revenue - cost - expense + otherIncome - otherExpense),
-    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense'], 1), otherIncome: lines(['income_other'], -1), otherExpense: lines(['expense_other'], 1) },
+    detail: { revenue: lines(['income'], -1), cost: lines(['expense_direct_cost'], 1), expense: lines(['expense', 'expense_depreciation'], 1), otherIncome: lines(['income_other'], -1), otherExpense: lines(['expense_other'], 1) },
   };
 }
 

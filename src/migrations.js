@@ -18,6 +18,7 @@ import { migrateLegacyRentalBilling } from './models/rentalbilling.js';
 import { followUpSignedDelay, returnTaxLock } from './models/finance.js';
 import { defaultCashFlowActivity } from './models/reports.js';
 import { normalizeReconcileRule } from './models/reconcile.js';
+import { ensureStatementReports } from './models/statementReports.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -1395,6 +1396,8 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
   }
   return next;
 } });
+
+MIGRATIONS.push({ version: 50, name: 'seed-standard-statement-reports', up: (db) => ensureStatementReports(db) });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 
