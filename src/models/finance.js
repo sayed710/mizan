@@ -263,7 +263,32 @@ function settlementCapacity(db, entry, inv) {
 /** Whether entry `id` records a posted payment or settles another entry, so resetting or deleting it would orphan them. */
 function backsSettlement(db, id) {
   return (db.records['account.payment'] ?? []).some((p) => p.state === 'posted' && p.move_id === id)
+    || (db.records['account.partial.reconcile'] ?? []).some((g) => g && g.active !== false && !g.reversed && (g.debit_move_id === id || g.credit_move_id === id))
     || (db.records['account.move'] ?? []).some((m) => m.id !== id && (m.payments ?? []).some((p) => p?.move_id === id || p?.payment_fx_move_id === id));
+}
+
+/** Whether a document `payments` row is backed by an existing `account.partial.reconcile` record whose moves and amount agree. */
+function hasMatchingPartialLink(db, doc, row, { reversed = false } = {}) {
+  if (row?.partial_reconcile_id == null) return false;
+  const link = read(db, 'account.partial.reconcile', row.partial_reconcile_id);
+  if (!link) return false;
+  if (reversed ? (!link.reversed || link.active !== false) : (link.reversed || link.active === false)) return false;
+  if (reversed && row.reversal_date && link.reversal_date && row.reversal_date !== link.reversal_date) return false;
+  if ((link.company_id ?? 1) !== (doc.company_id ?? 1)) return false;
+  const matchesPair = row.move_id !== doc.id && (
+    (link.debit_move_id === doc.id && link.credit_move_id === row.move_id)
+    || (link.credit_move_id === doc.id && link.debit_move_id === row.move_id)
+  );
+  if (!matchesPair) return false;
+  if (read(db, 'account.move', row.move_id)?.state !== 'posted') return false;
+  const docLineIndex = link.debit_move_id === doc.id ? link.debit_line_index : link.credit_line_index;
+  if (doc.line_ids?.[docLineIndex]?.account_id !== link.account_id) return false;
+  if (row.line_index != null && row.line_index !== docLineIndex) return false;
+  const ownCurrency = companyCurrencyRecord(db, doc.company_id);
+  const companyRound = (n) => roundCurrency(n, ownCurrency);
+  const companyStep = Number(ownCurrency?.rounding ?? 0.01);
+  const rowCompany = row.company_amount != null ? companyRound(Number(row.company_amount)) : companyRound(appliedValue(db, doc, row));
+  return Math.abs(companyRound(Number(link.amount)) - rowCompany) <= companyStep + 1e-9;
 }
 
 /**
@@ -312,6 +337,8 @@ function unapplicationError(db, stored, after, before) {
       });
     }
     const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === moveId && x.state === 'posted');
+    const glOnly = !payment && released.filter(({ row }) => row.move_id === moveId).every(({ row }) => hasMatchingPartialLink(db, after, row, { reversed: true }));
+    if (glOnly) continue;
     const prior = (stored.records['account.payment'] ?? []).find((x) => x.id === payment?.id);
     const companyRound = (n) => roundCurrency(n, companyCurrencyRecord(db, after.company_id));
     if (!payment || !prior || !Number.isFinite(change) || companyRound(Number(payment.unapplied) - Number(prior.unapplied)) !== companyRound(change)) {
@@ -339,7 +366,8 @@ export function moveInvariant(db, after, before, stored = null) {
     if (current.unapplied) {
       const { reversed: flag, unapplied, reversal_date: unappliedOn, ...kept } = current;
       const payment = (db.records['account.payment'] ?? []).find((x) => x.move_id === p.move_id && x.state === 'posted');
-      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || !payment
+      const glEntry = hasMatchingPartialLink(db, after, current, { reversed: true });
+      return JSON.stringify(kept) !== JSON.stringify(p) || current.reversal_move_id || (!payment && !glEntry)
         || !unappliedOn || (p.date && unappliedOn < p.date);
     }
     const { reversed: flag, reversal_move_id: reversalId, reversal_date: revDate, ...original } = current;
@@ -371,6 +399,9 @@ export function moveInvariant(db, after, before, stored = null) {
     const used = [...entries.values()].reduce((sum, m) => sum + (m.payments ?? []).filter((p) => !p.reversed && p?.move_id === moveId).reduce((s, p) => s + appliedValue(db, m, p), 0), 0);
     // ponytail: a cent of slack for foreign-currency rounding on partial payments.
     if (used > settlementCapacity(db, entries.get(moveId), after) + companyStep + 1e-9) return 'A payment cannot settle more than its journal entry booked';
+  }
+  if (added.some((p) => p.partial_reconcile_id != null && !hasMatchingPartialLink(db, after, p, { reversed: false }))) {
+    return 'GL reconciliation rows must reference a matching active partial reconciliation';
   }
   if (added.some((p) => p.payment_company_amount != null && Math.abs(Number(p.payment_company_amount) - toCompany(db, after.currency_id, p.amount, p.date, after.company_id)) > companyStep + 1e-9)) return 'Payment company amount does not match the booked conversion';
   for (const [index, p] of added.entries()) {

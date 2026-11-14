@@ -13,6 +13,7 @@ import { stockAccount } from './stock-accounts.js';
 import { models } from '../registry.js';
 import { normalizeDistribution } from '../analytic_distribution.js';
 import { findAnalyticDistribution } from './analytic-distribution-models.js';
+import { buildMatchingNumbers, entryMatchedAmounts, indexGlMatchings, lineKey } from './glMatchIndex.js';
 export { STOCK_CHART_ROLES } from './stock-accounts.js';
 
 /** Whether `account` belongs to the income or expense account type family. */
@@ -768,8 +769,18 @@ function reconcileIndex(db) {
       for (const moveId of new Set([statement.bank_move_id, ...(statement.allocations ?? []).map((a) => a.payment_move_id)].filter(Boolean))) push(settledSuspense, moveId, suspense);
     }
   }
-  const index = { applications, payments, matchedPaymentMoves, paymentLinesById, paymentLinesByMove, settledSuspense };
+  const glMatchings = indexGlMatchings(db);
+  const index = { applications, payments, matchedPaymentMoves, paymentLinesById, paymentLinesByMove, settledSuspense, glMatchings, matchingNumbers: new Map() };
   reconcileIndexes.set(db.records, index);
+  const lineCache = new Map();
+  const isLineReconciled = (moveId, lineIdx) => {
+    if (!lineCache.has(moveId)) {
+      const m = read(db, 'account.move', moveId);
+      lineCache.set(moveId, m ? computeReconciledItems(db, m, index) : []);
+    }
+    return Boolean(lineCache.get(moveId)?.[lineIdx]?.reconciled);
+  };
+  index.matchingNumbers = buildMatchingNumbers(db, index, isLineReconciled);
   return index;
 }
 
@@ -1005,9 +1016,9 @@ export function installmentSettlementState(db, move) {
   };
 }
 
-/** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
-export function reconciledJournalItems(db, move) {
-  const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = reconcileIndex(db);
+/** Compute line reconciliation flags and residuals from settlement index (without attaching group numbers yet). */
+function computeReconciledItems(db, move, index) {
+  const { applications: byMove, payments, matchedPaymentMoves, settledSuspense } = index;
   const applications = byMove.get(move.id) ?? [];
   const payment = payments.get(move.id);
   const posted = move.state === 'posted';
@@ -1016,6 +1027,8 @@ export function reconciledJournalItems(db, move) {
   const rawLines = move.line_ids ?? [];
   // Targeted installment rows settle their specific line; untargeted payments settle earliest due date first.
   const { docResidual, docLineTotal, remainingByIndex, fullyReconciledByIndex } = installmentSettlementState(db, move);
+  const entryMatched = !document && posted ? entryMatchedAmounts(db, move, index) : [];
+  const step = Number(ownCurrency?.rounding ?? 0.01);
   const roundOwn = (v) => cleanSignedZero(ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   /** Scale a line's residuals by the share still open, rounded in each amount's own currency. */
   const scaleResidual = (line, residual, residualCurrency, ratio) => {
@@ -1029,19 +1042,29 @@ export function reconciledJournalItems(db, move) {
     };
   };
   let unappliedLeft = Math.max(0, Number(payment?.unapplied) || 0);
-  return rawLines.map((line, index) => {
+  return rawLines.map((line, indexNumber) => {
     const account = read(db, 'account.account', line.account_id);
+    const matchedInfo = entryMatched[indexNumber];
     let reconciled = false;
     if (posted) {
       if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
-        reconciled = document
-          ? (fullyReconciledByIndex.get(index) ?? (docResidual === 0))
-          : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
+        if (document) {
+          reconciled = fullyReconciledByIndex.get(indexNumber) ?? (docResidual === 0);
+        } else if (payment) {
+          reconciled = applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
             && (invoice.company_id ?? 1) === (move.company_id ?? 1)
             && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
             && (row.reversed || !payment?.unapplied));
+        } else if (matchedInfo?.hasAnyLink) {
+          reconciled = matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step;
+        }
+      } else if (account?.reconcile === true && !document && matchedInfo?.hasAnyLink) {
+        reconciled = matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step;
       }
-      if (payment?.outstanding_account_id === line.account_id) reconciled = matchedPaymentMoves.has(move.id);
+      if (payment?.outstanding_account_id === line.account_id) {
+        reconciled = matchedPaymentMoves.has(move.id)
+          || Boolean(matchedInfo?.hasAnyLink && matchedInfo.absBal > 1e-9 && matchedInfo.matchedTotal >= matchedInfo.absBal - step);
+      }
       if ((settledSuspense.get(move.id) ?? []).includes(line.account_id)) reconciled = true;
     }
     const base = journalItemResidual(db, move, line, { reconciled, ownCurrency });
@@ -1052,17 +1075,29 @@ export function reconciledJournalItems(db, move) {
         // The document cannot price its residual, so its receivable/payable lines cannot either.
         amount_residual = null;
         amount_residual_currency = null;
-      } else if (document && counterpart && remainingByIndex.has(index)) {
+      } else if (document && counterpart && remainingByIndex.has(indexNumber)) {
         const lineDoc = docLineTotal(line);
-        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, lineDoc > 1e-9 ? remainingByIndex.get(index) / lineDoc : 0));
+        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, lineDoc > 1e-9 ? remainingByIndex.get(indexNumber) / lineDoc : 0));
       } else if (posted && !document && payment?.unapplied != null && counterpart && Math.abs(amount_residual) > 1e-9) {
         // The payment's unapplied amount is open once, shared across its counterpart lines in order.
         const share = Math.min(unappliedLeft, Math.abs(amount_residual));
         unappliedLeft -= share;
         ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, share / Math.abs(amount_residual)));
+      } else if (posted && !document && matchedInfo?.hasAnyLink && matchedInfo.absBal > 1e-9) {
+        const remaining = Math.max(0, roundOwn(matchedInfo.absBal - matchedInfo.matchedTotal));
+        ({ amount_residual, amount_residual_currency } = scaleResidual(line, amount_residual, amount_residual_currency, remaining / matchedInfo.absBal));
       }
     }
     return { ...line, reconciled, amount_residual, amount_residual_currency };
+  });
+}
+
+/** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
+export function reconciledJournalItems(db, move) {
+  const index = reconcileIndex(db);
+  return computeReconciledItems(db, move, index).map((item, lineIdx) => {
+    const groupCode = item.reconciled ? (index.matchingNumbers.get(lineKey(move.id, lineIdx)) ?? null) : null;
+    return groupCode ? { ...item, matching_number: groupCode } : item;
   });
 }
 
@@ -1070,7 +1105,7 @@ export function reconciledJournalItems(db, move) {
 export function matchedMoveIds(db, moveId) {
   const matched = new Set([moveId]);
   const queue = [moveId];
-  const { applications } = reconcileIndex(db);
+  const { applications, glMatchings } = reconcileIndex(db);
   const paymentRecords = db.records['account.payment'] ?? [];
   const statements = db.records['account.bank.statement.line'] ?? [];
   const enqueue = (id) => {
@@ -1081,6 +1116,7 @@ export function matchedMoveIds(db, moveId) {
   };
   while (queue.length) {
     const curId = queue.shift();
+    for (const linkedId of glMatchings.byMove.get(curId) ?? []) enqueue(linkedId);
     const cur = read(db, 'account.move', curId);
     for (const row of cur?.payments ?? []) {
       if (row.reversed || row.unapplied) continue;
@@ -1116,7 +1152,7 @@ export function matchedMoveIds(db, moveId) {
 }
 
 /** Identity of an embedded journal line, independent of its position and derived matching or residual state. */
-export function journalItemIdentity({ reconciled: _reconciled, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
+export function journalItemIdentity({ reconciled: _reconciled, matching_number: _matchingNumber, amount_residual: _amountResidual, amount_residual_currency: _amountResidualCurrency, ...line }) {
   return JSON.stringify(line);
 }
 

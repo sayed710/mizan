@@ -30,6 +30,7 @@ const Kitchen = view(() => import('./views/Kitchen.jsx'), 'Kitchen');
 const Knowledge = view(() => import('./views/Knowledge.jsx'), 'Knowledge');
 const PrintDoc = view(() => import('./views/PrintDoc.jsx'), 'PrintDoc');
 const AnalysisPage = view(() => import('./views/Analysis.jsx'), 'AnalysisPage');
+const BankReconcile = view(() => import('./views/BankReconcile.jsx'), 'BankReconcile');
 
 // Routes: #/                          home
 //         #/<app>/<menu>?view=v&rel=   action (kanban | list | graph | pivot | calendar)
@@ -40,7 +41,7 @@ function parseHash() {
   return { app, menu, id, query, params: new URLSearchParams(query) };
 }
 
-const PAGES = { analysis: AnalysisPage, dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet };
+const PAGES = { analysis: AnalysisPage, dashboard: Dashboard, settings: Settings, pos: Pos, discuss: Discuss, report: Reports, barcode: Barcode, shopfloor: ShopFloor, overview: Overview, website: Website, appstore: AppStore, kiosk: Kiosk, surveytake: SurveyTake, surveyresults: SurveyResults, studio: Studio, kitchen: Kitchen, captable: CapTable, knowledge: Knowledge, spreadsheet: Spreadsheet, bankReconcile: BankReconcile };
 
 export function App() {
   const db = useDb();

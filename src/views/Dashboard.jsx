@@ -185,7 +185,10 @@ function JournalCard({ card, companyId }) {
             <RateNote count={card.unratedCount} />
             {isStatement && card.onlineSync && <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} />}
             {isStatement && card.toReconcile > 0 && (
-              <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
+              <>
+                <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
+                <a className="btn sm" href={`#/accounting/reconcile?journal=${card.journal.id}`}>{t('Reconcile')}</a>
+              </>
             )}
           </>
         )}

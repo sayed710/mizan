@@ -17,7 +17,7 @@ const modelFor = (db, line) => suggestRule(db, line);
 
 const inboundTypes = ['out_invoice', 'in_refund'];
 const outboundTypes = ['in_invoice', 'out_refund'];
-const eligibleCounterpart = (account, company) => Boolean(account && account.active !== false && (!account.company_id || account.company_id === company) && !['asset_cash', 'asset_receivable', 'liability_payable'].includes(account.account_type));
+export const eligibleCounterpart = (account, company) => Boolean(account && account.active !== false && (!account.company_id || account.company_id === company) && !['asset_cash', 'asset_receivable', 'liability_payable'].includes(account.account_type));
 
 /** Why this line cannot settle this invoice/bill. */
 export function matchError(db, line, move) {
@@ -186,7 +186,7 @@ function paymentOutstandingItem(db, payment, line, via) {
   return { account: targetAccount, amount: round(incoming ? liquidity[0].debit : liquidity[0].credit), partner_id: payment.partner_id, name: payment.name || line.payment_ref, isDirect: !outstanding, currency_id: liquidity[0].currency_id ?? null };
 }
 
-function matchPayment(db, line) {
+export function matchPayment(db, line) {
   if (line.state !== 'to_check' || line.bank_move_id || (line.allocations ?? []).length) throw new Error('Unreconcile the booked bank transaction before matching a payment');
   const company = line.company_id ?? 1;
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, company));
@@ -304,24 +304,51 @@ function autoReconcile(db, line) {
   return { db: reconcileWith(db, line, exact[0].id) };
 }
 
-function bookToAccount(db, line) {
+/**
+ * Book the remaining open statement amount (or a positive partial override `opts.amount`) to `line.counterpart_account_id`.
+ * Reused by the bank statement form button and the two-pane bank reconciliation Manual Operation tab.
+ */
+export function bookToAccount(db, line, opts = {}) {
   const round = (n) => roundCurrency(n, companyCurrencyRecord(db, line.company_id));
   if (!(Number(line.amount) > 0 || Number(line.amount) < 0)) throw new Error('A bank transaction of 0 cannot be reconciled');
   const via = paymentJournal(db, line.journal_id, line.company_id ?? 1);
   const account = read(db, 'account.account', line.counterpart_account_id);
   if (!eligibleCounterpart(account, line.company_id ?? 1)) throw new Error('Select a valid counterpart account for this company');
-  const value = round(line.open_amount ?? statementCompanyAmount(db, line));
-  if (!(value > 0)) throw new Error('This bank transaction has no open amount');
-  const liquidity = line.bank_move_id ? ensureBankSuspense(db, line.company_id ?? 1, line.journal_id).id : via.accountId;
-  const currency = read(db, 'account.journal', line.journal_id)?.currency_id;
-  const foreign = currency && currency !== companyCurrencyRecord(db, line.company_id)?.id;
-  const foreignValue = line.open_amount != null ? roundCurrency(Math.abs(line.amount) * value / bookedStatementAmount(db, line), read(db, 'res.currency', currency)) : Math.abs(line.amount);
+  const open = round(line.open_amount ?? statementCompanyAmount(db, line));
+  if (!(open > 0)) throw new Error('This bank transaction has no open amount');
+  const requested = opts?.amount != null ? round(Number(opts.amount)) : open;
+  if (!Number.isFinite(requested) || !(requested > 0) || requested > open) throw new Error('Manual operation amount must be positive and within the open statement balance');
+  const remaining = round(open - requested);
+  let current = db;
+  let bankMoveId = line.bank_move_id;
+  if (!bankMoveId && remaining > 0) {
+    const bookedBank = bookBankMovement(current, line, line.company_id ?? 1, { date: line.date ?? today(), openAmount: open });
+    current = bookedBank.db;
+    bankMoveId = bookedBank.bankMoveId;
+  }
+  const liquidity = bankMoveId ? ensureBankSuspense(current, line.company_id ?? 1, line.journal_id).id : via.accountId;
+  const currency = read(current, 'account.journal', line.journal_id)?.currency_id;
+  const foreign = currency && currency !== companyCurrencyRecord(current, line.company_id)?.id;
+  const foreignValue = foreign
+    ? (requested === open && line.open_amount == null
+        ? Math.abs(line.amount)
+        : roundCurrency(Math.abs(line.amount) * requested / bookedStatementAmount(current, line), read(current, 'res.currency', currency)))
+    : Math.abs(requested);
   const fx = (sign) => foreign ? { currency_id: currency, amount_currency: sign * foreignValue } : {};
   const lines = line.amount > 0
-    ? [{ account: liquidity, debit: value, ...fx(1) }, { account: account.id, credit: value, ...fx(-1) }]
-    : [{ account: account.id, debit: value, ...fx(1) }, { account: liquidity, credit: value, ...fx(-1) }];
-  const { db: booked, id } = postEntry(db, { journal: via.code, journal_id: via.id, date: line.date, ref: line.payment_ref, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
-  return { db: write(booked, 'account.bank.statement.line', line.id, { state: 'reconciled', move_id: id, bank_move_id: line.bank_move_id ?? id, open_amount: 0, allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: value }] }) };
+    ? [{ account: liquidity, debit: requested, ...fx(1) }, { account: account.id, credit: requested, ...fx(-1) }]
+    : [{ account: account.id, debit: requested, ...fx(1) }, { account: liquidity, credit: requested, ...fx(-1) }];
+  const entryRef = String(opts?.label ?? line.payment_ref ?? '').trim() || line.payment_ref;
+  const { db: booked, id } = postEntry(current, { journal: via.code, journal_id: via.id, date: line.date, ref: entryRef, company: line.company_id ?? 1, lines: lines.map((l) => ({ ...l, partner_id: line.partner_id })) });
+  return {
+    db: write(booked, 'account.bank.statement.line', line.id, {
+      state: remaining > 0 ? 'to_check' : 'reconciled',
+      move_id: id,
+      bank_move_id: bankMoveId ?? id,
+      open_amount: remaining,
+      allocations: [...(line.allocations ?? []), { payment_move_id: id, amount: requested }],
+    }),
+  };
 }
 
 /** Reject unreconciling when the statement line date, or any bank or counterpart entry, is on or before a lock date. */

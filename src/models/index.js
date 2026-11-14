@@ -95,6 +95,7 @@ import { orderpointModels } from './orderpoint.js';
 import { productConfigModels } from './productconfig.js';
 import { configurableReportModels } from './configurableReports.js';
 import { invoiceReportModels } from './invoiceReport.js';
+import { glReconcileModels } from './glReconcile.js';
 
 // Generic entry menus search like Journal Entries, not like invoices.
 const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys', 'groupByLabels'].filter((k) => k in journalEntriesView).map((k) => [k, journalEntriesView[k]]));
@@ -102,7 +103,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels };
+export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, glReconcileModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -251,7 +252,7 @@ const allApps = [
           { key: 'consolidation-periods', label: 'Consolidation Periods', model: 'consolidation.period' },
         ] },
                 { label: 'Closing', children: [
-          { key: 'reconcile', label: 'Reconcile', model: 'account.bank.statement.line' },
+          { key: 'reconcile', label: 'Reconcile', type: 'bankReconcile' },
           { key: 'tax-returns', label: 'Tax Returns', model: 'account.return', domain: (r, db) => !isAuditReturn(r, db) },
           { key: 'lock-dates', label: 'Lock Dates…', type: 'settings' },
           { key: 'secure-entries', label: 'Secure Entries', model: 'account.secure.entries.wizard' },
@@ -757,7 +758,11 @@ export const leavesOf = (app) => {
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'account.online.link', 'account.online.account', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+  'account.bank.statement.line', 'account.online.link', 'account.online.account', 'account.partial.reconcile', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+/** Protected models without a dedicated menu entry, keyed to their owning apps. */
+const PROTECTED_APPS = {
+  'account.partial.reconcile': ['accounting'],
+};
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
 /** Private employee fields, and the menu models whose users may see them. */
 const PRIVATE_FIELDS = {
@@ -791,7 +796,8 @@ export function menuModelsForApps(appIds) {
 export function writableModelsForApps(appIds) {
   const base = menuModelsForApps(appIds);
   if (base.has('account.online.link')) base.add('account.online.account');
-  return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
+  const owned = (m) => base.has(m) || (PROTECTED_APPS[m]?.some((a) => appIds.includes(a)) ?? false);
+  return new Set([...modelsForApps(appIds)].filter((m) => owned(m) || !PROTECTED.includes(m)));
 }
 
 /** `db` without the private employee fields the apps in `appIds` may not see. */
@@ -812,6 +818,8 @@ export function modelsForApps(appIds) {
   const out = new Set(base);
   // Barcode counts update located stock through the same quantity path as inventory operations.
   if (appIds.includes('barcode')) out.add('stock.quant');
+  // Partial reconciliations have no menu entry; Accounting owns and reads them directly.
+  if (appIds.includes('accounting')) out.add('account.partial.reconcile');
   for (const m of base) {
     for (const f of Object.values(models[m].fields)) {
       if (f.relation) out.add(f.relation);
