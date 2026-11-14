@@ -594,6 +594,10 @@ test('Finding 9: settling, writing off, or unreconciling one installment acts on
   ], { date: '2026-02-10' });
   assert.equal(read(db, 'account.move', inv1.id).amount_residual, 700);
   assert.equal(read(db, 'account.payment', pay1.id).unapplied, 100);
+  assert.deepEqual(
+    reconciledJournalItems(db, read(db, 'account.move', inv1.id)).filter((l) => l.date_maturity).map((l) => l.reconciled),
+    [false, false],
+  );
 
   // 2. Settling or writing off line 1 (700) affects only line 1; line 0 (300) remains open in ledger and agedBalance
   const p2 = create(db, 'res.partner', { name: 'Inst 2 Client' });
@@ -644,17 +648,28 @@ test('Finding 9: settling, writing off, or unreconciling one installment acts on
   assert.equal(read(db3, 'account.move', inv3.id).amount_residual, 300);
   const items3 = reconciledJournalItems(db3, read(db3, 'account.move', inv3.id)).filter((l) => l.date_maturity);
   assert.deepEqual(items3.map((l) => l.amount_residual), [300, 0]);
+  assert.deepEqual(items3.map((l) => l.reconciled), [false, true]);
 
-  // 4. Full-invoice payMove preserves earliest-due order
+  // 4. Full-invoice payMove preserves earliest-due order and keeps bridged installments unreconciled while separate payments close each matching group
   const p4 = create(db3, 'res.partner', { name: 'Full PayMove Client' });
   const inv4 = makePostedInvoice(p4.db, { partnerId: p4.id, invoiceDate: '2026-01-01', dueDate: '2026-03-02', paymentTermId: term.id, amount: 1000 });
   const db4 = payMove(inv4.db, inv4.id, 400, '2026-02-10');
   const items4 = reconciledJournalItems(db4, read(db4, 'account.move', inv4.id)).filter((l) => l.date_maturity);
   assert.deepEqual(items4.map((l) => l.amount_residual), [0, 600]);
+  assert.deepEqual(items4.map((l) => l.reconciled), [false, false]);
   const inv4Move = read(db4, 'account.move', inv4.id);
   const [inv4Line0] = arCounterparts(inv4Move);
   assert.throws(
     () => unreconcileJournalItems(db4, [{ move_id: inv4Move.id, line_identity: journalItemIdentity(inv4Line0) }], { date: '2026-02-12' }),
     /multiple installments/,
   );
+
+  // 5. Two separate untargeted payments (300 exact + 100 partial) reconcile line 0 in full while keeping line 1 open
+  const p5 = create(db4, 'res.partner', { name: 'Split Exact Then Partial Client' });
+  const inv5 = makePostedInvoice(p5.db, { partnerId: p5.id, invoiceDate: '2026-01-01', dueDate: '2026-03-02', paymentTermId: term.id, amount: 1000 });
+  let db5 = payMove(inv5.db, inv5.id, 300, '2026-02-10');
+  db5 = payMove(db5, inv5.id, 100, '2026-02-11');
+  const items5 = reconciledJournalItems(db5, read(db5, 'account.move', inv5.id)).filter((l) => l.date_maturity);
+  assert.deepEqual(items5.map((l) => l.amount_residual), [0, 600]);
+  assert.deepEqual(items5.map((l) => l.reconciled), [true, false]);
 });

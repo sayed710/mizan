@@ -791,44 +791,73 @@ export function journalItemResidual(db, move, line, { reconciled = false, ownCur
 
 /**
  * Distribute targeted (`line_index`-scoped) and untargeted (earliest due date first) settlement amounts
- * across counterpart items, returning remaining balances per index and the indices touched by untargeted payments.
+ * across counterpart items, returning remaining balances per index, untargeted-touched indices, and
+ * bipartite settlement edges between installment indices and source keys.
  */
-export function distributeInstallmentSettlements(items, targetedAdjustments, untargetedTotal, { roundAmount = (v) => round(v) } = {}) {
+export function distributeInstallmentSettlements(items, targetedAdjustments, untargeted, { roundAmount = (v) => round(v) } = {}) {
   const remaining = new Map(items.map((item) => [item.index, item.total]));
-  let extraUntargeted = Number(untargetedTotal) || 0;
-  for (const [index, amount] of targetedAdjustments) {
+  const sourcesByIndex = new Map();
+  const indicesBySource = new Map();
+  const addEdge = (idx, key) => {
+    if (!key) return;
+    if (!sourcesByIndex.has(idx)) sourcesByIndex.set(idx, new Set());
+    sourcesByIndex.get(idx).add(key);
+    if (!indicesBySource.has(key)) indicesBySource.set(key, new Set());
+    indicesBySource.get(key).add(idx);
+  };
+  const untargetedEntries = [];
+  for (const entry of targetedAdjustments) {
+    const [index, amount, key = null] = entry;
     if (!remaining.has(index) || !(amount > 0)) {
-      extraUntargeted = roundAmount(extraUntargeted + Math.max(0, Number(amount) || 0));
+      const overflow = Math.max(0, Number(amount) || 0);
+      if (overflow > 0) untargetedEntries.push({ key, amount: overflow });
       continue;
     }
     const current = remaining.get(index);
     const applied = Math.min(current, Number(amount) || 0);
     remaining.set(index, roundAmount(current - applied));
-    if (amount > applied) extraUntargeted = roundAmount(extraUntargeted + (amount - applied));
+    if (applied > 1e-9) addEdge(index, key);
+    if (amount > applied) untargetedEntries.push({ key, amount: roundAmount(amount - applied) });
+  }
+  if (typeof untargeted === 'number') {
+    if (untargeted > 0) untargetedEntries.push({ key: null, amount: untargeted });
+  } else {
+    for (const entry of untargeted ?? []) {
+      if ((entry?.amount ?? 0) > 0) untargetedEntries.push({ key: entry.key ?? null, amount: entry.amount });
+    }
   }
   const untargetedTouched = new Set();
   const byDueDate = [...items].sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.index - b.index);
-  let left = Math.max(0, roundAmount(extraUntargeted));
-  for (const item of byDueDate) {
-    if (!(left > 1e-9)) break;
-    const current = remaining.get(item.index);
-    if (!(current > 1e-9)) continue;
-    const applied = Math.min(current, left);
-    left = roundAmount(left - applied);
-    remaining.set(item.index, roundAmount(current - applied));
-    if (applied > 1e-9) untargetedTouched.add(item.index);
+  for (const entry of untargetedEntries) {
+    let left = Math.max(0, roundAmount(entry.amount));
+    for (const item of byDueDate) {
+      if (!(left > 1e-9)) break;
+      const current = remaining.get(item.index);
+      if (!(current > 1e-9)) continue;
+      const applied = Math.min(current, left);
+      left = roundAmount(left - applied);
+      remaining.set(item.index, roundAmount(current - applied));
+      if (applied > 1e-9) {
+        untargetedTouched.add(item.index);
+        addEdge(item.index, entry.key);
+      }
+    }
   }
-  return { remaining, untargetedTouched };
+  return { remaining, untargetedTouched, sourcesByIndex, indicesBySource };
 }
 
-/**
- * Compute per-line remaining amounts and which installment indices were touched by untargeted settlements.
- * @param {object} db
- * @param {object} move
- * @returns {{ docResidual: number|null, docCurr: object|null, docLineTotal: (l: object) => number, isCounterpart: (l: object) => boolean, remainingByIndex: Map<number, number>, untargetedTouched: Set<number> }}
- */
-export function installmentSettlementState(db, move) {
-  const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move?.move_type);
+const DOCUMENT_TYPES = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'];
+const localSettlementCache = new WeakMap();
+
+function localInstallmentSettlement(db, move) {
+  let byMove = localSettlementCache.get(db.records);
+  if (!byMove) {
+    byMove = new Map();
+    localSettlementCache.set(db.records, byMove);
+  }
+  const cached = move?.id != null ? byMove.get(move.id) : null;
+  if (cached) return cached;
+  const document = DOCUMENT_TYPES.includes(move?.move_type);
   const ownCurrency = findCompanyCurrencyRecord(db, move?.company_id ?? 1);
   const docCurr = document ? (move.currency_id ? read(db, 'res.currency', move.currency_id) : ownCurrency) : ownCurrency;
   const rawLines = move?.line_ids ?? [];
@@ -840,7 +869,13 @@ export function installmentSettlementState(db, move) {
   };
   const isCounterpart = (l) => ['asset_receivable', 'liability_payable'].includes(read(db, 'account.account', l.account_id)?.account_type);
   if (!document || docResidual == null) {
-    return { docResidual, docCurr, docLineTotal, isCounterpart, remainingByIndex: new Map(), untargetedTouched: new Set() };
+    const empty = {
+      docResidual, docCurr, docLineTotal, isCounterpart,
+      remainingByIndex: new Map(), untargetedTouched: new Set(),
+      sourcesByIndex: new Map(), indicesBySource: new Map(),
+    };
+    if (move?.id != null) byMove.set(move.id, empty);
+    return empty;
   }
   const counterparts = rawLines.map((l, index) => ({
     l,
@@ -852,24 +887,122 @@ export function installmentSettlementState(db, move) {
   const activeRows = (move.payments ?? []).filter((p) => !p.reversed);
   const lineIndexByPayMove = new Map(activeRows.filter((r) => !r.discount && Number.isInteger(r.line_index)).map((r) => [r.move_id, r.line_index]));
   const counterpartIndices = new Set(counterparts.map((c) => c.index));
-  const targeted = new Map();
+  const targetedEntries = [];
+  const untargetedRows = [];
   let targetedTotal = 0;
-  for (const row of activeRows) {
+  activeRows.forEach((row, rowIdx) => {
     const targetIndex = Number.isInteger(row.line_index) ? row.line_index : (row.discount ? lineIndexByPayMove.get(row.payment_move_id) : null);
     const amt = Number(row.amount) || 0;
+    const sourceMoveId = row.discount ? (row.payment_move_id ?? row.move_id) : row.move_id;
+    const key = sourceMoveId != null ? `move:${sourceMoveId}` : `row:${rowIdx}`;
     if (Number.isInteger(targetIndex) && counterpartIndices.has(targetIndex) && amt > 0) {
-      targeted.set(targetIndex, (targeted.get(targetIndex) ?? 0) + amt);
+      targetedEntries.push([targetIndex, amt, key]);
       targetedTotal += amt;
+    } else if (amt > 0) {
+      untargetedRows.push({ key, amount: amt });
+    }
+  });
+  const roundAmount = (v) => cleanSignedZero(docCurr ? roundCurrency(v, docCurr) : round(v));
+  let untargetedBudget = Math.max(0, roundAmount(totalPaid - targetedTotal));
+  const untargetedEntries = [];
+  for (const entry of untargetedRows) {
+    if (!(untargetedBudget > 1e-9)) break;
+    const take = Math.min(entry.amount, untargetedBudget);
+    untargetedBudget = roundAmount(untargetedBudget - take);
+    if (take > 1e-9) untargetedEntries.push({ key: entry.key, amount: take });
+  }
+  if (untargetedBudget > 1e-9) {
+    untargetedEntries.push({ key: 'legacy', amount: untargetedBudget });
+  }
+  const {
+    remaining: remainingByIndex,
+    untargetedTouched,
+    sourcesByIndex,
+    indicesBySource,
+  } = distributeInstallmentSettlements(counterparts, targetedEntries, untargetedEntries, { roundAmount });
+  const result = {
+    docResidual, docCurr, docLineTotal, isCounterpart,
+    remainingByIndex, untargetedTouched, sourcesByIndex, indicesBySource,
+  };
+  if (move?.id != null) byMove.set(move.id, result);
+  return result;
+}
+
+/** True iff `startIndex` and its entire connected reconciliation group (Odoo full_reconcile_id semantics) are settled. */
+function isInstallmentGroupSettled(db, move, startLocal, startIndex) {
+  if ((startLocal.remainingByIndex.get(startIndex) ?? 0) > 1e-9) return false;
+  if (!(startLocal.sourcesByIndex.get(startIndex)?.size)) return startLocal.docResidual === 0;
+  const { applications, payments } = reconcileIndex(db);
+  const visitedInstallments = new Set([`${move.id}:${startIndex}`]);
+  const visitedSources = new Set();
+  const queue = [{ kind: 'installment', move, local: startLocal, index: startIndex }];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (cur.kind === 'installment') {
+      if ((cur.local.remainingByIndex.get(cur.index) ?? 0) > 1e-9) return false;
+      for (const srcKey of cur.local.sourcesByIndex.get(cur.index) ?? []) {
+        if (!visitedSources.has(srcKey)) {
+          visitedSources.add(srcKey);
+          queue.push({ kind: 'source', srcKey });
+        }
+      }
+      continue;
+    }
+    const { srcKey } = cur;
+    if (!srcKey.startsWith('move:')) continue;
+    const srcMoveId = Number(srcKey.slice(5));
+    const srcPay = payments.get(srcMoveId);
+    const srcMove = read(db, 'account.move', srcMoveId);
+    // payMove excess splits out a separate 'Outstanding credit' line, so the matched line itself has no open residual.
+    const hasSplitExcessLine = (srcMove?.line_ids ?? []).some((l) => l.name === 'Outstanding credit');
+    if (srcPay && !hasSplitExcessLine && Number(srcPay.unapplied) > 1e-9) return false;
+    if (DOCUMENT_TYPES.includes(srcMove?.move_type)) {
+      const srcRes = models['account.move'].fields.amount_residual.compute(srcMove, db);
+      if (srcRes == null || srcRes > 1e-9) return false;
+    }
+    for (const { invoice: otherInv, row } of applications.get(srcMoveId) ?? []) {
+      if (row.reversed || row.unapplied || !DOCUMENT_TYPES.includes(otherInv?.move_type)) continue;
+      const otherLocal = localInstallmentSettlement(db, otherInv);
+      const touched = otherLocal.indicesBySource.get(srcKey);
+      if (!touched?.size) {
+        if (otherLocal.docResidual == null || otherLocal.docResidual > 1e-9) return false;
+        continue;
+      }
+      for (const otherIdx of touched) {
+        const key = `${otherInv.id}:${otherIdx}`;
+        if (!visitedInstallments.has(key)) {
+          visitedInstallments.add(key);
+          queue.push({ kind: 'installment', move: otherInv, local: otherLocal, index: otherIdx });
+        }
+      }
     }
   }
-  const roundAmount = (v) => cleanSignedZero(docCurr ? roundCurrency(v, docCurr) : round(v));
-  const { remaining: remainingByIndex, untargetedTouched } = distributeInstallmentSettlements(
-    counterparts,
-    targeted,
-    Math.max(0, totalPaid - targetedTotal),
-    { roundAmount },
-  );
-  return { docResidual, docCurr, docLineTotal, isCounterpart, remainingByIndex, untargetedTouched };
+  return true;
+}
+
+/**
+ * Compute per-line remaining amounts, untargeted-touched indices, and full matching-group reconciliation flags.
+ * @param {object} db
+ * @param {object} move
+ * @returns {{ docResidual: number|null, docCurr: object|null, docLineTotal: (l: object) => number, isCounterpart: (l: object) => boolean, remainingByIndex: Map<number, number>, untargetedTouched: Set<number>, fullyReconciledByIndex: Map<number, boolean> }}
+ */
+export function installmentSettlementState(db, move) {
+  const local = localInstallmentSettlement(db, move);
+  const fullyReconciledByIndex = new Map();
+  if (DOCUMENT_TYPES.includes(move?.move_type) && local.docResidual != null) {
+    for (const idx of local.remainingByIndex.keys()) {
+      fullyReconciledByIndex.set(idx, isInstallmentGroupSettled(db, move, local, idx));
+    }
+  }
+  return {
+    docResidual: local.docResidual,
+    docCurr: local.docCurr,
+    docLineTotal: local.docLineTotal,
+    isCounterpart: local.isCounterpart,
+    remainingByIndex: local.remainingByIndex,
+    untargetedTouched: local.untargetedTouched,
+    fullyReconciledByIndex,
+  };
 }
 
 /** Derive reconciliation and residual amounts from settlement links, never from labels or a second stored flag. */
@@ -878,11 +1011,11 @@ export function reconciledJournalItems(db, move) {
   const applications = byMove.get(move.id) ?? [];
   const payment = payments.get(move.id);
   const posted = move.state === 'posted';
-  const document = ['out_invoice', 'out_refund', 'in_invoice', 'in_refund'].includes(move.move_type);
+  const document = DOCUMENT_TYPES.includes(move.move_type);
   const ownCurrency = findCompanyCurrencyRecord(db, move.company_id ?? 1);
   const rawLines = move.line_ids ?? [];
   // Targeted installment rows settle their specific line; untargeted payments settle earliest due date first.
-  const { docResidual, docLineTotal, remainingByIndex } = installmentSettlementState(db, move);
+  const { docResidual, docLineTotal, remainingByIndex, fullyReconciledByIndex } = installmentSettlementState(db, move);
   const roundOwn = (v) => cleanSignedZero(ownCurrency ? roundCurrency(v, ownCurrency) : round(v));
   /** Scale a line's residuals by the share still open, rounded in each amount's own currency. */
   const scaleResidual = (line, residual, residualCurrency, ratio) => {
@@ -902,7 +1035,7 @@ export function reconciledJournalItems(db, move) {
     if (posted) {
       if (['asset_receivable', 'liability_payable'].includes(account?.account_type)) {
         reconciled = document
-          ? (docResidual === 0 || (remainingByIndex.has(index) && remainingByIndex.get(index) <= 1e-9))
+          ? (fullyReconciledByIndex.get(index) ?? (docResidual === 0))
           : applications.some(({ invoice, row }) => invoice.partner_id === line.partner_id
             && (invoice.company_id ?? 1) === (move.company_id ?? 1)
             && (invoice.line_ids ?? []).some((item) => item.account_id === line.account_id)
