@@ -131,6 +131,36 @@ const batchPaymentCompany = (db, batch) => {
 
 export { bookedStatementAmount, isPaymentMatched, statementCompanyAmount } from './ledger.js';
 
+/** Why this payment cannot be matched to the statement line (or null when eligible). */
+function paymentMatchError(db, line, payment, { journal = null, companyCurrency = null } = {}) {
+  const company = line?.company_id ?? 1;
+  const amount = Number(line?.amount);
+  const incoming = amount > 0;
+  if (!(amount > 0 || amount < 0) || !payment || (payment.payment_type === 'inbound') !== incoming) {
+    return 'Statement amount and direction must match the payment';
+  }
+  if (payment.state !== 'posted' || !payment.move_id) return 'Select a posted payment';
+  if ((payment.company_id ?? 1) !== company) return 'The payment belongs to another company';
+  if (isPaymentMatched(db, payment, line.id)) return 'Payment is already matched';
+  if (journal?.currency_id && (payment.currency_id ?? companyCurrency) !== journal.currency_id) {
+    return 'Payment currency must match the bank journal currency';
+  }
+  return null;
+}
+
+/** Posted, unmatched payments of the statement line's company and direction eligible for matching. */
+export function eligiblePayments(db, line) {
+  if (!line || !(Number(line.amount) > 0 || Number(line.amount) < 0)) return [];
+  const company = line.company_id ?? 1;
+  const journal = line.journal_id ? read(db, 'account.journal', line.journal_id) : null;
+  if (journal && !isLiquidityJournal(journal)) return [];
+  if (journal?.company_id && journal.company_id !== company) return [];
+  const companyCurrency = read(db, 'res.company', company)?.currency_id;
+  return search(db, 'account.payment')
+    .filter((payment) => !paymentMatchError(db, line, payment, { journal, companyCurrency }))
+    .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
+}
+
 function resolveAndValidatePayments(db, line) {
   const company = line.company_id ?? 1;
   let payments = [];
@@ -154,9 +184,8 @@ function resolveAndValidatePayments(db, line) {
   }
   if (new Set(payments.map((payment) => payment.id)).size !== payments.length) throw new Error('A payment can only be selected once');
   for (const payment of payments) {
-    if (payment.state !== 'posted' || !payment.move_id) throw new Error('Select a posted payment');
-    if ((payment.company_id ?? 1) !== company) throw new Error('The payment belongs to another company');
-    if (isPaymentMatched(db, payment, line.id)) throw new Error('Payment is already matched');
+    const err = paymentMatchError(db, line, payment);
+    if (err) throw new Error(err);
   }
   if (new Set(payments.map((payment) => payment.move_id)).size !== payments.length) throw new Error('A payment can only be selected once');
 
@@ -166,7 +195,12 @@ function resolveAndValidatePayments(db, line) {
   if (journal?.company_id && journal.company_id !== company) throw new Error('The bank journal belongs to another company or does not exist');
   // Amounts are compared in company currency; only a foreign-currency bank journal fixes the payment currency.
   const companyCurrency = read(db, 'res.company', company)?.currency_id;
-  if (journal?.currency_id && payments.some((p) => (p.currency_id ?? companyCurrency) !== journal.currency_id)) throw new Error('Payment currency must match the bank journal currency');
+  if (journal?.currency_id) {
+    for (const payment of payments) {
+      const err = paymentMatchError(db, line, payment, { journal, companyCurrency });
+      if (err) throw new Error(err);
+    }
+  }
   return { payments, via, journal };
 }
 

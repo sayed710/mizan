@@ -67,6 +67,8 @@ export const STATEMENT_JOURNAL_TYPES = ['bank', 'credit'];
 export const isLiquidityJournal = (journalOrType) => LIQUIDITY_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
 /** True when a journal (or journal type) supports bank/card statement reconciliation and outstanding payment accounts. */
 export const isStatementJournal = (journalOrType) => STATEMENT_JOURNAL_TYPES.includes(typeof journalOrType === 'string' ? journalOrType : journalOrType?.type);
+/** Owning company ID of a journal; journals without `company_id` belong to company 1. */
+export const journalCompany = (journal) => journal?.company_id ?? 1;
 
 /** Assign a dedicated P{code}/{year}/ payment number or share the journal's entry sequence. */
 export function paymentName(db, journal, date, moveName = null) {

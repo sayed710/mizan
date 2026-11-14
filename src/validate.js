@@ -1,6 +1,7 @@
 // @ts-check
 // Type checks for untrusted record values, so one bad write can't break rendering for every user.
 import { models } from './registry.js';
+import { messageKind } from './models/auditRules.js';
 
 const MAX_TEXT = 20000;
 const MAX_ITEMS = 500;
@@ -119,7 +120,7 @@ export const cleanMessage = (m) => {
     && Object.hasOwn(models[m.model].fields ?? {}, m.field);
   return {
     id: m.id.slice(0, 64), model: m.model, res_id: m.res_id, body: String(m.body ?? '').slice(0, 10000),
-    kind: m.kind === 'note' ? 'note' : 'tracking', author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
+    kind: messageKind(m.kind), author: String(m.author ?? '').slice(0, 100), date: String(m.date ?? '').slice(0, 40),
     ...(m.source_model === 'account.move' && Number.isSafeInteger(m.source_id) && m.source_id > 0 ? { source_model: m.source_model, source_id: m.source_id } : {}),
     ...(validField ? {
       field: m.field,

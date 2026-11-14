@@ -216,7 +216,7 @@ export function createPortal({ sql, getDb, commitDb, sessionUser, allowedFor, ca
         const selected = Number.isSafeInteger(providerId) ? offeredInvoiceProviders(db, r, env).find((p) => p.id === providerId) : null;
         if (!selected) throw new Error('Selected payment provider is not available');
         const checkout = createInvoiceCheckout(db, r.id, selected.id, { returnUrl: back });
-        commitDb(checkout.db, { actor: 'portal' });
+        if (checkout.db !== db) commitDb(checkout.db, { actor: 'portal' });
         let location = checkout.redirectUrl;
         if (location.startsWith('/my/')) {
           const u = new URL(location, 'http://x');

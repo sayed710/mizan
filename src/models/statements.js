@@ -1,6 +1,6 @@
 // Bank statement files (OFX/QFX, CAMT.053) parsed into statement lines; re-importing the same transactions is a no-op.
 import { create, read, search } from '../orm.js';
-import { isLiquidityJournal } from './ledger.js';
+import { isLiquidityJournal, journalCompany } from './ledger.js';
 
 const ofxDate = (v) => (/^\d{8}/.test(v ?? '') ? `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}` : null);
 // OFX 1.x is SGML: tags may be left unclosed, so a value runs to the next "<".
@@ -90,7 +90,7 @@ export function statementImportJournalChoices(db, companyId = null) {
     : [companyId];
   const companyIds = new Set(visibleCompanies.map(Number));
   return search(db, 'account.journal').filter((journal) =>
-    isLiquidityJournal(journal) && companyIds.has(Number(journal.company_id ?? 1))
+    isLiquidityJournal(journal) && companyIds.has(Number(journalCompany(journal)))
   );
 }
 
@@ -119,7 +119,7 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false } 
   const journal = read(db, 'account.journal', defaults.journal_id);
   if (!journal) throw new Error('The bank journal does not exist');
   if (!isLiquidityJournal(journal)) throw new Error('Choose a bank or cash journal');
-  if (defaults.company_id && (journal.company_id ?? 1) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
+  if (defaults.company_id && journalCompany(journal) !== defaults.company_id) throw new Error('The bank journal belongs to another company');
   const company = journal?.company_id ?? defaults.company_id ?? 1;
   const currencyId = journal?.currency_id ?? read(db, 'res.company', company)?.currency_id ?? null;
   const currency = read(db, 'res.currency', currencyId);
@@ -134,7 +134,7 @@ export function importStatementLines(db, lines, defaults = {}, { camt = false } 
     known.add(l.unique_import_id);
     return true;
   });
-  const next = fresh.reduce((acc, { currency: _currency, ...l }) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journal.company_id ?? 1 } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
+  const next = fresh.reduce((acc, { currency: _currency, ...l }) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journalCompany(journal) } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
   return { db: next, count: fresh.length };
 }
 

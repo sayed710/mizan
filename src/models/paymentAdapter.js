@@ -109,9 +109,41 @@ export function createInvoiceCheckout(db, moveId, providerId, { baseUrl = '', re
   const currency = documentCurrency(db, move);
   if (!currency) throw new Error('Configure a currency on the invoice before starting online payment');
 
-  const seq = (db.seq['payment.transaction'] ?? 0) + 1;
+  const expectedAmount = roundCurrency(due, currency);
+  const pending = search(db, 'payment.transaction').filter((t) => t.move_id === move.id && t.state === 'pending');
+  const reusable = pending.find(
+    (t) => t.provider_id === provider.id
+      && t.provider_code === provider.code
+      && t.currency_id === currency.id
+      && roundCurrency(t.amount, currency) === expectedAmount,
+  );
+  let nextDb = db;
+  for (const stale of pending) {
+    if (stale !== reusable) {
+      nextDb = write(nextDb, 'payment.transaction', stale.id, { state: 'cancel' });
+    }
+  }
+  if (reusable) {
+    const redirectUrl = reusable.redirect_url || adapter.createCheckout({
+      db: nextDb,
+      move,
+      provider,
+      transaction: reusable,
+      amount: expectedAmount,
+      currency: currency.name,
+      returnUrl,
+      baseUrl,
+    }).redirectUrl;
+    return {
+      db: nextDb,
+      transaction: read(nextDb, 'payment.transaction', reusable.id),
+      redirectUrl,
+    };
+  }
+
+  const seq = (nextDb.seq['payment.transaction'] ?? 0) + 1;
   const txReference = (typeof reference === 'string' && reference.trim()) ? reference.trim() : `PAY-${move.id}-${seq}`;
-  if (search(db, 'payment.transaction').some((t) => t.reference === txReference)) {
+  if (search(nextDb, 'payment.transaction').some((t) => t.reference === txReference)) {
     throw new Error('Payment transaction reference already exists');
   }
 
@@ -121,14 +153,14 @@ export function createInvoiceCheckout(db, moveId, providerId, { baseUrl = '', re
     move_id: move.id,
     provider_id: provider.id,
     provider_code: provider.code,
-    amount: roundCurrency(due, currency),
+    amount: expectedAmount,
     currency_id: currency.id,
     state: 'pending',
     redirect_url: '',
     company_id: companyId,
   };
   const { redirectUrl, providerReference } = adapter.createCheckout({
-    db,
+    db: nextDb,
     move,
     provider,
     transaction: draftTx,
@@ -138,7 +170,7 @@ export function createInvoiceCheckout(db, moveId, providerId, { baseUrl = '', re
     baseUrl,
   });
 
-  const created = create(db, 'payment.transaction', {
+  const created = create(nextDb, 'payment.transaction', {
     ...draftTx,
     provider_reference: providerReference ?? txReference,
     redirect_url: redirectUrl,

@@ -1909,6 +1909,7 @@ const ar = {
   'Completed payment transaction payment cannot belong to another invoice': 'لا يمكن أن تنتمي دفعة معاملة الدفع المكتملة إلى فاتورة أخرى',
   'Payment is already linked to another payment transaction': 'الدفعة مرتبطة بالفعل بمعاملة دفع أخرى',
   'Completed payment transaction payment must match the transaction currency and amount': 'يجب أن تطابق دفعة معاملة الدفع المكتملة عملة المعاملة ومبلغها',
+  'An active pending payment transaction already exists for this invoice': 'توجد بالفعل معاملة دفع نشطة قيد الانتظار لهذه الفاتورة',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

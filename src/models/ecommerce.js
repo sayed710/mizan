@@ -39,6 +39,11 @@ function paymentTransactionGuard(db, before, rec) {
   } else if (rec.state !== before.state && !(before.state === 'pending' && ['done', 'cancel', 'error'].includes(rec.state))) {
     return 'Invalid payment transaction status transition';
   }
+  if (rec.state === 'pending' && (db.records['payment.transaction'] ?? []).some(
+    (t) => t.id !== rec.id && t.move_id === rec.move_id && t.state === 'pending',
+  )) {
+    return 'An active pending payment transaction already exists for this invoice';
+  }
   if (rec.state !== 'done' && rec.payment_id) {
     return 'Only completed payment transactions can link a payment';
   }

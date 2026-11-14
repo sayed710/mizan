@@ -4,11 +4,12 @@ import { companyViewDb } from '../companyView.js';
 import { read, search } from '../orm.js';
 import { commit, getDb, useDb } from '../store.js';
 import { companyFilter } from '../models/company.js';
-import { isLiquidityJournal, isPaymentMatched } from '../models/ledger.js';
+import { isLiquidityJournal } from '../models/ledger.js';
 import {
   bookToAccount,
   candidates,
   eligibleCounterpart,
+  eligiblePayments,
   matchError,
   matchPayment,
   reconcileWith,
@@ -89,17 +90,10 @@ export function BankReconcile() {
     [db, selectedLine],
   );
 
-  const outstandingPayments = useMemo(() => {
-    if (!selectedLine) return [];
-    const incoming = Number(selectedLine.amount) > 0;
-    return companyFilter(db, search(db, 'account.payment'), 'account.payment')
-      .filter((p) => p.state === 'posted'
-        && (p.company_id ?? 1) === (selectedLine.company_id ?? 1)
-        && (!selectedLine.journal_id || p.journal_id === selectedLine.journal_id)
-        && (p.payment_type === 'inbound') === incoming
-        && !isPaymentMatched(db, p))
-      .sort((a, b) => String(a.date ?? '').localeCompare(String(b.date ?? '')) || a.id - b.id);
-  }, [db, selectedLine]);
+  const outstandingPayments = useMemo(
+    () => (selectedLine ? eligiblePayments(db, selectedLine) : []),
+    [db, selectedLine],
+  );
 
   const counterpartAccounts = useMemo(() => {
     if (!selectedLine) return [];

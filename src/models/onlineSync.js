@@ -2,7 +2,7 @@ import { create, read, unlink, write } from '../orm.js';
 import { companyCurrencyRecord, roundCurrency } from '../money.js';
 import { validDate } from './common.js';
 import { importStatementLines } from './statements.js';
-import { isStatementJournal } from './ledger.js';
+import { isStatementJournal, journalCompany } from './ledger.js';
 
 const LINK_MODEL = 'account.online.link';
 const ACCOUNT_MODEL = 'account.online.account';
@@ -84,11 +84,25 @@ export function onlineAccountForJournal(db, journalId) {
 export function journalStatementBalance(db, journalId) {
   const journal = read(db, 'account.journal', journalId);
   const currency = (journal?.currency_id ? read(db, 'res.currency', journal.currency_id) : null)
-    ?? (journal ? companyCurrencyRecord(db, journal.company_id ?? 1) : null);
+    ?? (journal ? companyCurrencyRecord(db, journalCompany(journal)) : null);
   const total = (db.records?.[LINE_MODEL] ?? [])
     .filter((l) => l.active !== false && l.journal_id === journalId)
     .reduce((sum, l) => sum + (Number(l.amount) || 0), 0);
   return currency ? roundCurrency(total, currency) : total;
+}
+
+/** Validate a statement journal linked to an online account or connection of `companyId`. */
+function linkedJournalError(journal, companyId) {
+  if (!journal) return 'Select an existing journal';
+  if (!isStatementJournal(journal)) return 'Only bank or credit card journals can be linked to an online account';
+  if (journalCompany(journal) !== companyId) return 'The linked journal must belong to the same company as the connection';
+  return null;
+}
+
+/** UI domain filter for linking a statement journal to an online connection or account. */
+function linkedJournalDomain(journal, record, db) {
+  const companyId = record?.company_id ?? db?._company;
+  return isStatementJournal(journal) && (!companyId || journalCompany(journal) === companyId);
 }
 
 /** Validate an `account.online.account` record against its connection, company, journal type, and 1-to-1 uniqueness. */
@@ -102,9 +116,8 @@ export function onlineAccountGuard(db, before, after) {
   if ((link.company_id ?? 1) !== companyId) return 'Online account and connection must belong to the same company';
   if (after.journal_id) {
     const journal = read(db, 'account.journal', after.journal_id);
-    if (!journal) return 'Select an existing journal';
-    if (!isStatementJournal(journal)) return 'Only bank or credit card journals can be linked to an online account';
-    if (journal.company_id && journal.company_id !== companyId) return 'The linked journal must belong to the same company as the connection';
+    const journalErr = linkedJournalError(journal, companyId);
+    if (journalErr) return journalErr;
     const duplicate = (db.records?.[ACCOUNT_MODEL] ?? []).find(
       (a) => a.id !== after.id && a.active !== false && a.journal_id === after.journal_id,
     );
@@ -227,9 +240,8 @@ function linkGuard(db, before, after, _ctx, vals) {
         const dup = otherAccounts.find((a) => a.journal_id === line.journal_id);
         if (dup) return 'This journal is already linked to another online account';
         const journal = read(db, 'account.journal', line.journal_id);
-        if (!journal) return 'Select an existing journal';
-        if (!isStatementJournal(journal)) return 'Only bank or credit card journals can be linked to an online account';
-        if (journal.company_id && journal.company_id !== companyId) return 'The linked journal must belong to the same company as the connection';
+        const journalErr = linkedJournalError(journal, companyId);
+        if (journalErr) return journalErr;
       }
     }
   }
@@ -404,7 +416,7 @@ export const onlineSyncModels = {
             type: 'many2one',
             relation: 'account.journal',
             label: 'Linked Journal',
-            domain: (j, r) => isStatementJournal(j) && (!j.company_id || !r?.company_id || j.company_id === r.company_id),
+            domain: linkedJournalDomain,
           },
         },
         newLine: () => ({ name: '', account_number: '', balance: 0, last_sync_cursor: '', journal_id: null }),
@@ -458,7 +470,7 @@ export const onlineSyncModels = {
         type: 'many2one',
         relation: 'account.journal',
         label: 'Linked Journal',
-        domain: (j, r) => isStatementJournal(j) && (!j.company_id || !r?.company_id || j.company_id === r.company_id),
+        domain: linkedJournalDomain,
       },
     },
     defaults: () => ({ account_number: '', balance: 0, last_sync_cursor: '', journal_id: null }),
