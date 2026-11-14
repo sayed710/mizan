@@ -80,14 +80,11 @@ export function ensureStatementReports(db, companyId = null) {
   const companies = companyId != null
     ? (read(db, 'res.company', companyId) ? [{ id: companyId }] : [])
     : (db?.records?.['res.company'] ?? []);
-  let next = {
-    ...db,
-    seq: { ...(db?.seq ?? {}) },
-    records: { ...(db?.records ?? {}), 'account.report': db?.records?.['account.report'] ?? [] },
-  };
+  let next = db;
   for (const company of companies) {
     for (const spec of STATEMENT_REPORT_SPECS) {
       if (findStatementReport(next, spec.kind, company.id)) continue;
+      if (!next.seq) next = { ...next, seq: {} };
       next = create(next, 'account.report', {
         ...spec,
         company_id: company.id,

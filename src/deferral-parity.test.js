@@ -11,7 +11,7 @@ import { createCompany } from './models/company.js';
 import { postMove } from './models/accounting.js';
 import { accountId, isIncomeOrExpenseAccount, journalItems, profitAndLoss } from './models/ledger.js';
 import { computeBoard, deferralBoard, generateGroupedEntries, postCompanyDeferrals, postDueEntries } from './models/deferred.js';
-import { MIGRATIONS, SCHEMA_VERSION, migrate } from './migrations.js';
+import { SCHEMA_VERSION, migrate } from './migrations.js';
 
 register(new URL('../scripts/jsx-loader.mjs', import.meta.url));
 
@@ -166,7 +166,6 @@ test('res.company splits revenue and expense deferred settings independently and
 
 test('migration 51 splits legacy shared deferred settings per kind and backfills deferred_entry_type structurally', () => {
   assert.equal(SCHEMA_VERSION, 51);
-  assert.equal(MIGRATIONS.some((m) => m.version === 50), false);
 
   const base = seed();
   // Simulate a schema_version 49 database with legacy settings and a pre-51 grouped deferral move.

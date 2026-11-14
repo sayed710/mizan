@@ -1399,7 +1399,6 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
 } });
 
 MIGRATIONS.push({ version: 50, name: 'seed-standard-statement-reports', up: (db) => ensureStatementReports(db) });
-// Version 50 is reserved for another package; split shared deferred config into per-kind fields at 51.
 MIGRATIONS.push({ version: 51, name: 'per-kind-deferred-settings', up: (db) => {
   const journalsById = new Map((db.records['account.journal'] ?? []).map((j) => [j.id, j]));
   const companies = (db.records['res.company'] ?? []).map((c) => {
