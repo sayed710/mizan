@@ -13,12 +13,58 @@ export function invoiceJournalDefaults(db, sourceCompanyId = 1) {
   return { default_sale_journal_id: sales.id, default_purchase_journal_id: purchases.id, default_general_journal_id: general.id };
 }
 
+const BANK_JOURNAL_ACCOUNT_FIELDS = [
+  'default_account_id',
+  'suspense_account_id',
+  'non_deductible_account_id',
+  'profit_account_id',
+  'loss_account_id',
+  'outstanding_receipts_account_id',
+  'outstanding_payments_account_id',
+];
+
+/** Copy or reuse a source account for `companyId` when it is owned by another company. */
+function companyScopedAccountId(db, companyId, accountId) {
+  if (!accountId) return accountId;
+  const orig = read(db, 'account.account', accountId);
+  if (!orig || !orig.company_id || orig.company_id === companyId) return accountId;
+  const existing = (db.records['account.account'] ?? []).find(
+    (a) => a.company_id === companyId && a.code === orig.code && a.active !== false,
+  );
+  if (existing) return existing.id;
+  const { id: _id, ...accVals } = orig;
+  const created = create(db, 'account.account', { ...accVals, company_id: companyId, active: true });
+  return { db: created.db, id: created.id };
+}
+
 /** Give a fixture company its own default payment journal, copied from company 1's default bank journal. */
 export function withDefaultBankJournal(db, companyId) {
   const source = db.records['account.journal'].find((j) => j.company_id === 1 && j.default_for_payments === true);
   if (!source) throw new Error('Configure a default payment journal on company 1 before creating this fixture');
-  const { id: _id, ...vals } = source;
-  return create(db, 'account.journal', { ...vals, code: `BNK${companyId}`, company_id: companyId }).db;
+  let next = db;
+  const { id: _id, secure_chain_heads: _s, last_hash: _h, ...vals } = source;
+  const scoped = {};
+  for (const field of BANK_JOURNAL_ACCOUNT_FIELDS) {
+    const resolved = companyScopedAccountId(next, companyId, vals[field]);
+    if (resolved && typeof resolved === 'object') {
+      next = resolved.db;
+      scoped[field] = resolved.id;
+    } else if (vals[field] !== undefined) {
+      scoped[field] = resolved;
+    }
+  }
+  const bankAcc = vals.bank_account_id ? read(next, 'res.partner.bank', vals.bank_account_id) : null;
+  const companyPartnerId = read(next, 'res.company', companyId)?.partner_id ?? null;
+  const validBank = bankAcc
+    && (!bankAcc.company_id || bankAcc.company_id === companyId)
+    && (!companyPartnerId || bankAcc.partner_id === companyPartnerId);
+  return create(next, 'account.journal', {
+    ...vals,
+    ...scoped,
+    bank_account_id: validBank ? vals.bank_account_id : null,
+    code: `BNK${companyId}`,
+    company_id: companyId,
+  }).db;
 }
 
 /** A fixture company with the explicitly configured sales and purchase journals copied from company 1 and its own bank journal. */

@@ -21,7 +21,7 @@ import { resolveAndValidateRecipientBank } from './partnerbank.js';
 import { exchangeAccount } from './exchange-account.js';
 import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
-import { recipientBankCompanyError } from './company.js';
+import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
@@ -763,7 +763,7 @@ function creditCheck(db, note) {
 }
 
 /** Apply an open credit note (reversed_entry_id-linked or standalone) against an open invoice or bill. */
-export function applyCreditNote(db, noteId, invoiceId, date = null, amount = null) {
+export function applyCreditNote(db, noteId, invoiceId, date = null, amount = null, { lineIndex = null } = {}) {
   const note = read(db, 'account.move', noteId);
   const invoice = read(db, 'account.move', invoiceId);
   const pairError = creditNotePairError(db, note, invoice);
@@ -785,10 +785,10 @@ export function applyCreditNote(db, noteId, invoiceId, date = null, amount = nul
   const notePortion = settlementCompanyAmount(db, note, value);
   const invRelease = releaseCashBasis(db, invoice, value / total(invoice, db), appDate, { final: value >= invResidual });
   const noteRelease = releaseCashBasis(invRelease.db, note, value / total(note, invRelease.db), appDate, { final: value >= noteResidual });
-  const settle = (next, r, other, cashBasisMoveId) => write(next, 'account.move', r.id, {
-    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: cashBasisMoveId }],
+  const settle = (next, r, other, cashBasisMoveId, targetIndex = null) => write(next, 'account.move', r.id, {
+    amount_paid: roundCurrency((Number(r.amount_paid) || 0) + value, documentCurrency(next, r)), payment_date: appDate, payments: [...(r.payments ?? []), { date: appDate, amount: value, move_id: other.id, cash_basis_move_id: cashBasisMoveId, ...(Number.isInteger(targetIndex) ? { line_index: targetIndex } : {}) }],
   });
-  let next = settle(settle(noteRelease.db, invoice, note, invRelease.id), note, invoice, noteRelease.id);
+  let next = settle(settle(noteRelease.db, invoice, note, invRelease.id, lineIndex), note, invoice, noteRelease.id);
   // Each document booked the amount at its own date's rate: the company-currency gap is an exchange difference.
   const sale = !isPurchase(invoice);
   const gap = roundCurrency(invoicePortion - notePortion, companyCurrencyRecord(db, invoice.company_id));
@@ -960,7 +960,7 @@ export function payMove(db, id, amount, date = today(), { paymentId, journalId: 
 }
 
 /** Settle a document with an explicitly chosen company-currency write-off. */
-export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal } = {}) {
+export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { accountId: writeoffAccount, label, journalId: journal, lineIndex = null } = {}) {
   const invoice = read(db, 'account.move', invoiceId);
   if (!invoice || invoice.state !== 'posted' || !isInvoice(invoice) || !Number.isFinite(Number(amount)) || !(amount > 0) || amount > residual(invoice, db)) throw new Error('Write-off exceeds the remaining invoice');
   const docRound = (n) => roundCurrency(n, documentCurrency(db, invoice));
@@ -983,7 +983,7 @@ export function settleWriteoff(db, invoiceId, amount, companyAmount, date, { acc
       ? [{ account: writeoffAccount, debit: companyAmount, partner_id, name: label }, { account: counterpart, credit: open, partner_id }, ...fx]
       : [{ account: counterpart, debit: open, partner_id }, { account: writeoffAccount, credit: companyAmount, partner_id, name: label }, ...fx] });
   const release = releaseCashBasis(booked.db, invoice, amount / total(invoice, db), date, { final: amount >= residual(invoice, db) });
-  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id }];
+  const payments = [...(invoice.payments ?? []), { date, amount, move_id: booked.id, company_amount: open, cash_basis_move_id: release.id, ...(Number.isInteger(lineIndex) ? { line_index: lineIndex } : {}) }];
   return { db: write(release.db, 'account.move', invoiceId, { amount_paid: docRound((Number(invoice.amount_paid) || 0) + amount), payment_date: date, payments }), id: booked.id };
 }
 
@@ -1936,16 +1936,18 @@ export const accountingModels = {
       type: 'general', active: true, sequence: 10,
       refund_sequence: false, payment_sequence: false, restrict_mode_hash_table: false,
     }),
-    createDefaults: (_db, vals = {}) => ({
+    createDefaults: (db, vals = {}) => ({
+      ...(isLiquidityJournal(vals) && vals.company_id === undefined ? { company_id: currentCompany(db) } : {}),
       ...(vals.payment_sequence === undefined ? { payment_sequence: isLiquidityJournal(vals) } : {}),
       ...(vals.refund_sequence === undefined ? derivedRefundSequence(vals) : {}),
       ...(vals.type === 'bank' && vals.bank_statements_source === undefined ? { bank_statements_source: 'undefined' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_type === undefined ? { invoice_reference_type: 'invoice' } : {}),
       ...(vals.type === 'sale' && vals.invoice_reference_model === undefined ? { invoice_reference_model: 'odoo' } : {}),
     }),
-    onchange: (r, key) => {
+    onchange: (r, key, db) => {
       if (key === 'type') {
         return {
+          ...(isLiquidityJournal(r) && !r.company_id ? { company_id: db ? currentCompany(db) : 1 } : {}),
           ...(r.type === 'bank' && !r.bank_statements_source ? { bank_statements_source: 'undefined' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_type ? { invoice_reference_type: 'invoice' } : {}),
           ...(r.type === 'sale' && !r.invoice_reference_model ? { invoice_reference_model: 'odoo' } : {}),

@@ -1303,7 +1303,10 @@ MIGRATIONS.push({ version: 47, name: 'followup-levels-parity', up(db) {
   };
 } });
 
-MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(db) {
+const LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE = 'Upgrade: both legacy and canonical income/expense accounts were set on this category; both values were kept so you can choose which account to retain.';
+
+/** Migrate legacy product.category income/expense fields while preserving differing values with a chatter note. */
+function migrateCategoryAccounts(db) {
   const categories = db.records['product.category'] ?? [];
   if (!categories.length) return db;
   const byId = new Map(categories.map((c) => [c.id, c]));
@@ -1315,24 +1318,40 @@ MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up(d
     }
     return 'standard';
   };
+  const conflictIds = [];
   const nextCategories = categories.map((c) => {
     const {
       property_account_income_id: legacyIncome,
       property_account_expense_id: legacyExpense,
       ...rest
     } = c;
+    const incomeConflict = legacyIncome != null && c.property_account_income_categ_id != null && c.property_account_income_categ_id !== legacyIncome;
+    const expenseConflict = legacyExpense != null && c.property_account_expense_categ_id != null && c.property_account_expense_categ_id !== legacyExpense;
+    if (incomeConflict || expenseConflict) conflictIds.push(c.id);
     return {
       ...rest,
       property_cost_method: c.property_cost_method || inheritedCosting(byId.get(c.parent_id)),
       ...(c.property_account_income_categ_id == null && legacyIncome != null ? { property_account_income_categ_id: legacyIncome } : {}),
       ...(c.property_account_expense_categ_id == null && legacyExpense != null ? { property_account_expense_categ_id: legacyExpense } : {}),
+      ...(incomeConflict ? { property_account_income_id: legacyIncome } : {}),
+      ...(expenseConflict ? { property_account_expense_id: legacyExpense } : {}),
     };
   });
-  return {
+  let next = {
     ...db,
     records: { ...db.records, 'product.category': nextCategories },
   };
-} });
+  if (conflictIds.length) {
+    next = { ...next, messages: next.messages ?? [] };
+    for (const id of conflictIds) {
+      const alreadyNoted = next.messages.some((m) => m.model === 'product.category' && m.res_id === id && m.body === LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE);
+      if (!alreadyNoted) next = postNote(next, 'product.category', id, LEGACY_CATEGORY_ACCOUNT_CONFLICT_NOTE);
+    }
+  }
+  return next;
+}
+
+MIGRATIONS.push({ version: 48, name: 'product-category-canonical-accounts', up: migrateCategoryAccounts });
 
 const JOURNAL_ACCOUNT_FIELDS = [
   'default_account_id',
@@ -1346,18 +1365,24 @@ const JOURNAL_ACCOUNT_FIELDS = [
 
 const UNRESOLVED_JOURNAL_COMPANY_NOTE = 'Upgrade: this journal\'s company could not be proved from its accounts or posted entries; set the company on the journal.';
 
-/** Derive a unique owning company for an unscoped journal from its accounts and posted moves, or null if ambiguous. */
+/** Derive a unique owning company for an unscoped journal from its accounts and posted moves, or null if ambiguous or contradicted. */
 function provableJournalCompany(journal, accountById, postedMoves, companyIds) {
+  const soleCompany = companyIds.size === 1 ? [...companyIds][0] : null;
   const accountCompanies = new Set();
   for (const field of JOURNAL_ACCOUNT_FIELDS) {
     const acc = accountById.get(journal[field]);
     if (acc?.company_id != null) accountCompanies.add(acc.company_id);
   }
   if (accountCompanies.size > 1) return null;
+  const fromAccounts = accountCompanies.size === 1 ? [...accountCompanies][0] : null;
   const hasUnscopedMove = postedMoves.some((m) => m.company_id == null);
   const moveCompanies = new Set(postedMoves.map((m) => m.company_id).filter((id) => id != null));
+  if (soleCompany != null) {
+    if (fromAccounts != null && fromAccounts !== soleCompany) return null;
+    if ([...moveCompanies].some((id) => id !== soleCompany)) return null;
+    return soleCompany;
+  }
   if (postedMoves.length && (hasUnscopedMove || moveCompanies.size !== 1)) return null;
-  const fromAccounts = accountCompanies.size === 1 ? [...accountCompanies][0] : null;
   const fromMoves = postedMoves.length ? [...moveCompanies][0] : null;
   if (fromAccounts != null && fromMoves != null && fromAccounts !== fromMoves) return null;
   const resolved = fromAccounts ?? fromMoves;
@@ -1365,8 +1390,8 @@ function provableJournalCompany(journal, accountById, postedMoves, companyIds) {
   return !companyIds.size || companyIds.has(resolved) ? resolved : null;
 }
 
-/** Bank, cash and credit journals belong to one company; shared document journals stay shared. */
-MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', up(db) {
+/** Resolve provable company ownership for unscoped liquidity journals and post a chatter note on ambiguous ones. */
+function resolveLiquidityJournalsCompany(db) {
   const journals = db.records['account.journal'] ?? [];
   if (!journals.length) return db;
   const accountById = new Map((db.records['account.account'] ?? []).map((a) => [a.id, a]));
@@ -1393,10 +1418,16 @@ MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', u
   let next = changed ? { ...db, records: { ...db.records, 'account.journal': nextJournals } } : db;
   if (unresolvedIds.length) {
     next = { ...next, messages: next.messages ?? [] };
-    for (const id of unresolvedIds) next = postNote(next, 'account.journal', id, UNRESOLVED_JOURNAL_COMPANY_NOTE);
+    for (const id of unresolvedIds) {
+      const alreadyNoted = next.messages.some((m) => m.model === 'account.journal' && m.res_id === id && m.body === UNRESOLVED_JOURNAL_COMPANY_NOTE);
+      if (!alreadyNoted) next = postNote(next, 'account.journal', id, UNRESOLVED_JOURNAL_COMPANY_NOTE);
+    }
   }
   return next;
-} });
+}
+
+/** Bank, cash and credit journals belong to one company; shared document journals stay shared. */
+MIGRATIONS.push({ version: 49, name: 'journal-company-from-accounts-or-moves', up: resolveLiquidityJournalsCompany });
 
 MIGRATIONS.push({ version: 50, name: 'seed-standard-statement-reports', up: (db) => ensureStatementReports(db) });
 MIGRATIONS.push({ version: 51, name: 'per-kind-deferred-settings', up: (db) => {
@@ -1490,6 +1521,23 @@ MIGRATIONS.push({ version: 52, name: 'repair-tax-group-company-splits', up(db) {
     },
     seq: { ...(db.seq ?? {}), 'account.tax.group': nextGroupId },
   };
+/** Single-company journal scoping, conflicting legacy category notes, and in_refund analytic category alignment. */
+MIGRATIONS.push({ version: 53, name: 'qodo-117-upgrade-fixes', up(db) {
+  let next = migrateCategoryAccounts(db);
+  next = resolveLiquidityJournalsCompany(next);
+  const moveTypes = new Map((next.records['account.move'] ?? []).map((m) => [m.id, m.move_type]));
+  const analyticLines = next.records['account.analytic.line'] ?? [];
+  let analyticChanged = false;
+  const nextAnalyticLines = analyticLines.map((line) => {
+    if (line.move_id && line.category === 'invoice' && moveTypes.get(line.move_id) === 'in_refund') {
+      analyticChanged = true;
+      return { ...line, category: 'vendor_bill' };
+    }
+    return line;
+  });
+  return analyticChanged
+    ? { ...next, records: { ...next.records, 'account.analytic.line': nextAnalyticLines } }
+    : next;
 } });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;

@@ -352,7 +352,7 @@ test('account.analytic.account form layout, Archived ribbon, Gross Margin stat b
 });
 
 test('migration 46 backfills analytic plan sequences and Arabic labels resolve cleanly', async () => {
-  assert.equal(SCHEMA_VERSION, 52);
+  assert.equal(SCHEMA_VERSION, 53);
   const legacy = {
     schema_version: 45,
     records: {
@@ -363,7 +363,7 @@ test('migration 46 backfills analytic plan sequences and Arabic labels resolve c
     },
   };
   const migrated = migrate(legacy);
-  assert.equal(migrated.schema_version, 52);
+  assert.equal(migrated.schema_version, 53);
   assert.equal(migrated.records['account.analytic.plan'][0].sequence, 10);
   assert.equal(migrated.records['account.analytic.plan'][0].default_applicability, 'optional');
   assert.equal(migrated.records['account.analytic.plan'][1].sequence, 20);

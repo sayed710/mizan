@@ -3,7 +3,7 @@ import { read, search, write } from '../orm.js';
 import { today } from '../models/common.js';
 import { depreciationReport } from '../models/assets.js';
 import { filterByAnalytic, journalItems } from '../models/ledger.js';
-import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
+import { agedBalance, agedReportDate, analyticActualLines, analyticActuals, analyticReportAmount, followUps, followUpCompanies, followUpLevel, followUpText, formatFollowUpTotals, levelChannel, logManualFollowUp, openManualFollowUp, taxReport, taxesByTax, taxesByGrid } from '../models/finance.js';
 import { reportingBookedAmount } from '../models/money.js';
 import { budgetReport } from '../models/analyticplus.js';
 import { checkInalterability } from '../models/hash_chain.js';
@@ -183,8 +183,8 @@ const Aged = (kind) => function AgedBody({ db, period, companyId }) {
 
 function FollowUpActions({ db, reminder, companyId }) {
   const email = read(db, 'res.partner', reminder.partner_id)?.email?.trim();
-  const channel = followUpLevel(db, reminder)?.channel;
-  const manualChannel = ['phone', 'letter'].includes(channel) ? channel : 'email';
+  const channel = levelChannel(followUpLevel(db, reminder));
+  const manualChannel = ['sms', 'phone', 'letter'].includes(channel) ? channel : 'email';
   const options = { scope: db, reminder, companyId };
   return <>
     {email && <><a className="btn sm" href={`mailto:${email}?subject=${encodeURIComponent(t('Payment reminder'))}&body=${encodeURIComponent(followUpText(db, reminder))}`}

@@ -1703,6 +1703,9 @@ const ar = {
   'Select a valid deferred entry generation method': 'اختر طريقة صحيحة لإنشاء قيود التأجيل',
   'Select a valid deferred amount computation method': 'اختر طريقة صحيحة لاحتساب مبلغ التأجيل',
   'Select a valid deferred periodicity': 'اختر دورية تأجيل صحيحة',
+  'Email Message': 'نص رسالة البريد الإلكتروني',
+  'Optional email reminder message': 'رسالة تذكير اختيارية بالبريد الإلكتروني',
+  'Upgrade: both legacy and canonical income/expense accounts were set on this category; both values were kept so you can choose which account to retain.': 'الترقية: تم تعيين حسابات دخل أو مصروفات قديمة وأساسية معاً لهذه الفئة؛ تم الاحتفاظ بالقيمتين لتتمكن من اختيار الحساب المطلوب الإبقاء عليه.',
 };
 
 /** Translate an English UI string; `{name}` placeholders are filled from `vars`. */

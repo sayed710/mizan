@@ -190,7 +190,8 @@ export function postAnalytic(db, moveId) {
   if (!move) throw new Error('Invoice or bill not found');
   if (move.state !== 'posted') throw new Error('Post the invoice or bill before creating analytic lines');
   const category = analyticMoveCategory(move);
-  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && r.category === category)) return db;
+  const categories = move.move_type === 'in_refund' ? [category, 'invoice'] : [category];
+  if ((db.records['account.analytic.line'] ?? []).some((r) => r.move_id === moveId && categories.includes(r.category))) return db;
   return analyticLinesForMove(db, move).reduce((next, vals) => create(next, 'account.analytic.line', vals).db, db);
 }
 

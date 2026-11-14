@@ -54,6 +54,11 @@ const categoryFields = {
 
 const CATEGORY_ACCOUNT_FIELDS = Object.entries(categoryFields).filter(([, f]) => f.relation === 'account.account');
 
+const LEGACY_CATEGORY_ACCOUNT_FIELDS = [
+  ['property_account_income_id', 'Income Account'],
+  ['property_account_expense_id', 'Expense Account'],
+];
+
 /**
  * Validate `product.category` writes: forbid parent hierarchy cycles and ensure configured
  * accounts belong to the category's company when scoped to one.
@@ -70,6 +75,9 @@ function guardProductCategory(db, before, r) {
     const owner = r.name || 'this category';
     for (const [key, field] of CATEGORY_ACCOUNT_FIELDS) {
       if (r[key] != null && r[key] !== '') configuredAccount(db, r[key], r.company_id, field.label, owner);
+    }
+    for (const [key, label] of LEGACY_CATEGORY_ACCOUNT_FIELDS) {
+      if (r[key] != null && r[key] !== '') configuredAccount(db, r[key], r.company_id, label, owner);
     }
   }
   return null;

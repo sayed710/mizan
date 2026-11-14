@@ -405,7 +405,8 @@ test('PKG-07: journal-item reconcile, unreconcile, and writeoff work on multi-in
     { move_id: invMove.id, line_identity: journalItemIdentity(invAr) },
     { move_id: payMoveRec.id, line_identity: journalItemIdentity(payCounterpart) },
   ], { date: '2026-02-10' });
-  assert.equal(read(db, 'account.move', inv.id).amount_residual, 600);
+  // Only the selected 300 installment line is settled, leaving 700 open and 100 credit unapplied.
+  assert.equal(read(db, 'account.move', inv.id).amount_residual, 700);
 
   // Unreconcile via selecting the invoice's AR item.
   db = unreconcileJournalItems(db, [
