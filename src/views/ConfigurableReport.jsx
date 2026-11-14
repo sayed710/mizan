@@ -25,6 +25,25 @@ function RowCells({ values, variance, showVariance }) {
   );
 }
 
+/** Resolve the company IDs covered by a CompanySelect value. */
+function selectedCompanyIds(companies, selectedCompany) {
+  return selectedCompany === 'all' ? companies.map((c) => c.id) : [Number(selectedCompany)];
+}
+
+/** Filter ledgers (account.journal.group) to those belonging to the given company IDs. */
+function scopedLedgers(db, companyIds) {
+  return search(db, 'account.journal.group')
+    .filter((item) => companyIds.includes(item.company_id ?? 1))
+    .sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
+}
+
+/** Filter journals to the selected company scope and optional active ledger. */
+function scopedJournals(db, companyIds, ledger) {
+  return search(db, 'account.journal').filter(
+    (j) => (!j.company_id || companyIds.includes(j.company_id)) && (!ledger || (ledger.journal_ids ?? []).includes(j.id)),
+  );
+}
+
 /** Render an editable account.report either by record ID or by standard statement kind ('pnl' / 'balance'). */
 export function ConfigurableReportPage({ id, statementKind = null, title = null }) {
   const sourceDb = useDb();
@@ -42,9 +61,7 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
 
   const { companyDb, availableCompanies, companies, selectedCompany } = reportCompanyScope(sourceDb, companyId, { allowAll: true });
   const primaryCompanyId = selectedCompany === 'all' ? currentCompany(companyDb) : Number(selectedCompany);
-  const companyIds = statementKind
-    ? (selectedCompany === 'all' ? companies.map((c) => c.id) : [Number(selectedCompany)])
-    : null;
+  const companyIds = statementKind ? selectedCompanyIds(companies, selectedCompany) : null;
 
   const report = statementKind
     ? (findStatementReport(companyDb, statementKind, primaryCompanyId) ?? findStatementReport(companyDb, statementKind))
@@ -58,14 +75,22 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
     );
   }
 
-  const ledgers = statementKind ? search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10)) : [];
-  const ledger = statementKind ? ledgers.find((item) => item.id === Number(ledgerId)) : null;
-  const availableJournals = statementKind
-    ? (ledger ? search(companyDb, 'account.journal').filter((j) => (ledger.journal_ids ?? []).includes(j.id)) : search(companyDb, 'account.journal'))
-    : [];
-  const targetJournalIds = statementKind && (journalId || ledger)
-    ? (journalId ? [Number(journalId)] : (ledger.journal_ids ?? []))
+  const ledgers = statementKind ? scopedLedgers(companyDb, companyIds) : [];
+  const ledger = statementKind ? (ledgers.find((item) => item.id === Number(ledgerId)) ?? null) : null;
+  const availableJournals = statementKind ? scopedJournals(companyDb, companyIds, ledger) : [];
+  const journal = statementKind ? (availableJournals.find((item) => item.id === Number(journalId)) ?? null) : null;
+  const targetJournalIds = statementKind && (journal || ledger)
+    ? (journal ? [journal.id] : (ledger.journal_ids ?? []))
     : null;
+  const onCompanyChange = (nextCompany) => {
+    setCompanyId(nextCompany);
+    if (!statementKind) return;
+    const nextIds = selectedCompanyIds(companies, nextCompany);
+    const nextLedger = scopedLedgers(companyDb, nextIds).find((item) => item.id === Number(ledgerId)) ?? null;
+    if (!nextLedger && ledgerId) setLedgerId('');
+    const nextJournal = scopedJournals(companyDb, nextIds, nextLedger).find((item) => item.id === Number(journalId)) ?? null;
+    if (!nextJournal && journalId) setJournalId('');
+  };
   const db = targetJournalIds
     ? {
         ...companyDb,
@@ -144,13 +169,13 @@ export function ConfigurableReportPage({ id, statementKind = null, title = null 
             </label>
             <label className="inline-select">
               {t('Journals')}
-              <select aria-label={t('Journals')} value={journalId} onChange={(e) => setJournalId(e.target.value)}>
+              <select aria-label={t('Journals')} value={journal ? String(journal.id) : ''} onChange={(e) => setJournalId(e.target.value)}>
                 <option value="">{t('All Journals')}</option>
                 {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
               </select>
             </label>
             {availableCompanies.length > 1 && (
-              <CompanySelect companies={companies} value={selectedCompany} onChange={setCompanyId} allowAll />
+              <CompanySelect companies={companies} value={selectedCompany} onChange={onCompanyChange} allowAll />
             )}
             {analyticAccounts.length > 0 && (
               <label className="inline-select">

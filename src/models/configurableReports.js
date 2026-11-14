@@ -201,14 +201,15 @@ function resolveReportItems(db, report, period, companies, { analyticAccountIds 
 function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds } = {}) {
   const effective = effectiveReportPeriod(report, period);
   const reportDate = effective.to || today();
+  const includeClosing = !report.exclude_closing;
   let currentYear = 0;
   let priorYears = 0;
   for (const cId of companies) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
     const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate };
     const priorFilter = { ...effective, company_id: cId, from: '', to: addDays(yearStart, -1) };
-    currentYear = round(currentYear + profitAndLoss(db, currentFilter, { includeClosing: true, weight, analyticAccountIds }).net);
-    priorYears = round(priorYears + profitAndLoss(db, priorFilter, { includeClosing: true, weight, analyticAccountIds }).net);
+    currentYear = round(currentYear + profitAndLoss(db, currentFilter, { includeClosing, weight, analyticAccountIds }).net);
+    priorYears = round(priorYears + profitAndLoss(db, priorFilter, { includeClosing, weight, analyticAccountIds }).net);
   }
   return { current_year: currentYear, prior_years: priorYears };
 }

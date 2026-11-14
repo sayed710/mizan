@@ -71,23 +71,22 @@ export function isStandardStatementReport(report) {
   return Boolean(report && STATEMENT_REPORT_SPECS.some((spec) => spec.kind === report.kind));
 }
 
-/** Find a company's configured financial statement report by its explicit kind ('pnl' or 'balance'). */
+/** Find a company's active financial statement report by its explicit kind ('pnl' or 'balance'). */
 export function findStatementReport(db, kind, companyId = null) {
   const target = companyId ?? db?.settings?.current_company_id ?? 1;
-  const reports = (db?.records?.['account.report'] ?? []).filter(
-    (r) => r.kind === kind && (r.company_id ?? 1) === target,
-  );
-  return reports.find((r) => r.active !== false) ?? reports[0] ?? null;
+  return (db?.records?.['account.report'] ?? []).find(
+    (r) => r.kind === kind && (r.company_id ?? 1) === target && r.active !== false,
+  ) ?? null;
 }
 
 /**
  * Return an error message when removing `before` (or updating it to `after`) would leave
- * its `(company_id, kind)` without any resolvable standard financial statement report.
+ * its `(company_id, kind)` without any active standard financial statement report.
  */
 export function statementReportGuard(db, before, after = null) {
-  if (!isStandardStatementReport(before)) return null;
+  if (!isStandardStatementReport(before) || before.active === false) return null;
   const companyId = before.company_id ?? 1;
-  if (after && after.kind === before.kind && (after.company_id ?? 1) === companyId) return null;
+  if (after && after.kind === before.kind && (after.company_id ?? 1) === companyId && after.active !== false) return null;
   const remaining = (db?.records?.['account.report'] ?? []).filter((r) => r.id !== before.id);
   if (findStatementReport({ ...db, records: { ...db?.records, 'account.report': remaining } }, before.kind, companyId)) {
     return null;

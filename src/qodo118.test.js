@@ -271,9 +271,9 @@ test('Finding 3: every company keeps at least one resolvable report per statemen
   assert.throws(() => write(db, 'account.report', pnl2.id, { company_id: 1 }), /at least one report/i);
   assertResolvable(db);
 
-  // Archiving does not break statement lookup because findStatementReport falls back to inactive reports
-  const archivedState = write(db, 'account.report', bs.id, { active: false });
-  assert.equal(findStatementReport(archivedState, 'balance', 1)?.id, bs.id);
+  // Archiving the last active standard report is blocked
+  assert.throws(() => write(db, 'account.report', bs.id, { active: false }), /at least one report/i);
+  assertResolvable(db);
 
   // Verify Arabic translation exists and differs from English
   assert.ok(errMsg);
