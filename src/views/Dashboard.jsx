@@ -1,11 +1,12 @@
 import { search } from '../orm.js';
 import { today } from '../models/index.js';
-import { useDb } from '../store.js';
+import { useDb, commit, getDb } from '../store.js';
 import { t } from '../i18n.js';
 import { money } from '../ui.jsx';
 import { Graph } from './Graph.jsx';
 import { journalCards } from '../models/finance.js';
 import { isLiquidityJournal, isStatementJournal } from '../models/ledger.js';
+import { syncOnlineJournal } from '../models/onlineSync.js';
 import { statementLinesWithoutJournal } from '../models/bank.js';
 import { companyViewDb } from '../companyView.js';
 import { currentCompany } from '../models/company.js';
@@ -40,6 +41,37 @@ function OnboardingStep({ href, icon, label }) {
       <span className="journal-onboarding-icon" aria-hidden="true">{STEP_ICONS[icon]}</span>
       <span>{t(label)}</span>
     </a>
+  );
+}
+
+/** Display sync status (last sync time or error) and the Fetch Transactions trigger for an online-linked journal. */
+function OnlineSyncControls({ sync, journalId, primary = false }) {
+  if (!sync) return null;
+  const fetchTransactions = () => {
+    try {
+      const res = syncOnlineJournal(getDb(), journalId);
+      commit(res.db);
+    } catch (e) {
+      alert(t(e instanceof Error ? e.message : 'Synchronization error'));
+    }
+  };
+  return (
+    <div className="journal-online-sync">
+      {sync.state === 'error' ? (
+        <p className="journal-error" role="alert">{t(sync.errorMessage || 'Synchronization error')}</p>
+      ) : sync.lastRefresh ? (
+        <p className="muted journal-sync-status">{t('Last sync:')} {String(sync.lastRefresh).slice(0, 16).replace('T', ' ')}</p>
+      ) : sync.state === 'disconnected' ? (
+        <p className="muted journal-sync-status">{t('Online synchronization disconnected')}</p>
+      ) : (
+        <p className="muted journal-sync-status">{t('Online synchronization ready')}</p>
+      )}
+      {sync.state !== 'disconnected' && (
+        <button type="button" className={primary ? 'btn primary sm' : 'btn sm'} onClick={fetchTransactions}>
+          {t('Fetch Transactions')}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -112,7 +144,9 @@ function JournalCard({ card, companyId }) {
       <section className="panel journal-card">
         <h2><a href={list}>{card.journal.name}</a></h2>
         {empty ? (
-          isStatement ? (
+          isStatement && card.onlineSync ? (
+            <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} primary />
+          ) : isStatement ? (
             <>
               <p className="journal-empty muted">{t('Import your bank statements to reconcile them.')}</p>
               <label className="btn primary sm">
@@ -138,6 +172,9 @@ function JournalCard({ card, companyId }) {
           <>
             <dl>
               <div><dt>{t('Balance')}</dt><dd>{money(card.balance)}</dd></div>
+              {isStatement && card.onlineSync && card.onlineSync.balance != null && (
+                <div><dt>{t('Online Balance')}</dt><dd>{money(card.onlineSync.balance)}</dd></div>
+              )}
               {isStatement && card.hasOutstandingAccounts && (
                 <div><dt>{card.outstandingCount} {t('Outstanding Payments')}</dt><dd>{money(card.outstandingBalance)}</dd></div>
               )}
@@ -146,6 +183,7 @@ function JournalCard({ card, companyId }) {
               )}
             </dl>
             <RateNote count={card.unratedCount} />
+            {isStatement && card.onlineSync && <OnlineSyncControls sync={card.onlineSync} journalId={card.journal.id} />}
             {isStatement && card.toReconcile > 0 && (
               <a className="btn primary sm" href={list}>{card.toReconcile} {t('To Reconcile')}</a>
             )}

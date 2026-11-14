@@ -110,11 +110,11 @@ export function statementImportDefaults(journal, defaults = {}) {
   };
 }
 
-/** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
-export function importStatement(db, fileName, text, defaults = {}) {
-  const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
-  const lines = camt ? parseCamt(text, { details: true }) : parseOfx(text, { details: true });
-  if (!lines.length) throw new Error('No transactions found in this file');
+/**
+ * Validate the target liquidity journal and create deduplicated `account.bank.statement.line` records.
+ * Deduplicates by `unique_import_id` within `(journal_id, company_id)`; returns `{ db, count }`.
+ */
+export function importStatementLines(db, lines, defaults = {}, { camt = false } = {}) {
   if (!defaults.journal_id) throw new Error('Bank Journal is required');
   const journal = read(db, 'account.journal', defaults.journal_id);
   if (!journal) throw new Error('The bank journal does not exist');
@@ -136,4 +136,12 @@ export function importStatement(db, fileName, text, defaults = {}) {
   });
   const next = fresh.reduce((acc, { currency: _currency, ...l }) => create(acc, 'account.bank.statement.line', { ...defaults, ...l, currency_id: currencyId, ...(journal ? { company_id: journal.company_id ?? 1 } : {}), payment_ref: l.payment_ref || '/', state: 'to_check' }).db, db);
   return { db: next, count: fresh.length };
+}
+
+/** Parse a statement file by its name/content and create the new lines; returns { db, count }. */
+export function importStatement(db, fileName, text, defaults = {}) {
+  const camt = /\.xml$/i.test(fileName) || /<BkToCstmrStmt/.test(text);
+  const lines = camt ? parseCamt(text, { details: true }) : parseOfx(text, { details: true });
+  if (!lines.length) throw new Error('No transactions found in this file');
+  return importStatementLines(db, lines, defaults, { camt });
 }

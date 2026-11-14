@@ -12,6 +12,7 @@ import { companySum, reportingBookedAmount, unratedCount } from './money.js';
 import { companyCurrencyRecord, documentCurrency, formatCurrency, round, roundCurrency } from '../money.js';
 import { paymentCompanyAmount, settlementCompanyAmount, settlementCompanyAllocations, applicationEffectiveDate, applicationActiveAt } from './settlement.js';
 import { exchangeAccount } from './exchange-account.js';
+import { onlineAccountForJournal } from './onlineSync.js';
 
 export { applicationEffectiveDate };
 
@@ -1081,6 +1082,8 @@ export function journalCards(db, at = today()) {
         || companyIds.some((cid) => outstandingIdsFor(cid).length > 0)
       );
       const outstandingBalances = itemBalances(outstandingItems);
+      const onlineAccount = isStatementJournal(j) ? onlineAccountForJournal(db, j.id) : null;
+      const onlineLink = onlineAccount?.link_id ? read(db, 'account.online.link', onlineAccount.link_id) : null;
       const hasPosted = own.some((m) => m.state === 'posted') || defaultItems.length > 0 || outstandingItems.length > 0;
       return {
         journal: j,
@@ -1095,6 +1098,15 @@ export function journalCards(db, at = today()) {
         outstandingBalance: companySum(db, outstandingBalances, 'balance', at),
         miscCount,
         miscBalance,
+        onlineSync: onlineLink ? {
+          linkId: onlineLink.id,
+          accountId: onlineAccount.id,
+          state: onlineLink.state,
+          lastRefresh: onlineLink.last_refresh ?? null,
+          errorMessage: onlineLink.error_message || null,
+          balance: onlineAccount.balance ?? null,
+          cursor: onlineAccount.last_sync_cursor ?? null,
+        } : null,
       };
     }
     return { journal: j, kind: 'general', entries: own.filter((m) => m.state === 'posted').length, draft: own.filter((m) => m.state === 'draft').length };

@@ -150,7 +150,9 @@ export function create(db, model, vals, ctx = undefined) {
     },
     id,
   };
-  return model === 'res.partner' ? { ...res, db: models[model].onWrite?.(res.db, rec, null, vals) ?? res.db } : res;
+  return (models[model].onCreate || model === 'res.partner')
+    ? { ...res, db: (models[model].onCreate ?? models[model].onWrite)?.(res.db, rec, null, vals) ?? res.db }
+    : res;
 }
 
 function trackingMessages(db, model, before, after, vals) {

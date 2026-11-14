@@ -56,6 +56,7 @@ import { mailingModels } from './mailing.js';
 import { apps2Models } from './apps2.js';
 import { apps3Models } from './apps3.js';
 import { bankModels } from './bank.js';
+import { onlineSyncModels } from './onlineSync.js';
 import { pricelistModels } from './pricelist.js';
 import { apps4Models } from './apps4.js';
 import { logisticsModels } from './logistics.js';
@@ -101,7 +102,7 @@ const entriesSearch = Object.fromEntries(['searchFields', 'filters', 'groupBys',
 export { today } from './common.js';
 
 /** Model modules in composition order: a later module's definition of a model replaces (and should extend) an earlier one. */
-export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels };
+export const MODEL_MODULES = { configurableReportModels, crmModels, salesModels, accountingModels, invoiceReportModels, workModels, moreModels, mailModels, payrollModels, extraModels, mailingModels, apps2Models, apps3Models, bankModels, onlineSyncModels, pricelistModels, apps4Models, logisticsModels, routeModels, financeModels, currencyModels, batchModels, termModels, deferredModels, paymentModels, helpdeskModels, timeoffModels, posModels, assetModels, reconcileModels, taxModels, payModels, elearningModels, surveyModels, smsModels, automationModels, socialModels, spreadsheetModels, loanModels, mrpModels, crmTeamModels, projectPlusModels, fsmModels, fleetPlusModels, qualityPlusModels, maintPlusModels, eventsPlusModels, recruitPlusModels, rentalPlusModels, loyaltyModels, approvalsPlusModels, posPlusModels, planningPlusModels, signPlusModels, documentsPlusModels, analyticPlusModels, timesheetPlusModels, appraisalPlusModels, workorderModels, expensePlusModels, purchasePlusModels, subscriptionPlusModels, valuationModels, attendancePlusModels, skillsPlusModels, closingModels, websitePlusModels, repairPlusModels, billControlModels, frontdeskPlusModels, uomModels, knowledgeModels, lunchModels, livechatModels, ecommerceModels, quotePlusModels, blogModels, appointmentModels, whatsappModels, companyModels, warehouseModels, consolidationModels, quantModels, calendarModels, orderpointModels, productConfigModels, taxReturnModels, auditReportModels, partnerBankModels };
 export const models = registerModels(withLocks(withCompany(composeModels(MODEL_MODULES))));
 
 // A button's `when` is its precondition, not just whether it is shown: every caller (a stale form, a double click,
@@ -358,6 +359,7 @@ const allApps = [
           { key: 'analytic', label: 'Analytic Accounts', model: 'account.analytic.account' },
           { key: 'analytic-plans', label: 'Analytic Plans', model: 'account.analytic.plan' },
         ] },
+        { key: 'online-sync', label: 'Online Synchronization', model: 'account.online.link' },
         { key: 'online-payments', label: 'Online Payments', model: 'payment.provider' },
       ] },
     ],
@@ -755,7 +757,7 @@ export const leavesOf = (app) => {
 const SHARED = ['mail.activity', 'discuss.channel', 'res.partner', 'product'];
 /** Accounting, HR and company records: only an app that shows them in its menus may change them. */
 const PROTECTED = ['account.move', 'account.payment', 'account.account', 'account.journal', 'account.tax', 'account.fiscal.position',
-  'account.bank.statement.line', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
+  'account.bank.statement.line', 'account.online.link', 'account.online.account', 'hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run', 'res.company'];
 const HR_OWNERS = ['hr.employee', 'hr.contract', 'hr.payslip', 'hr.payslip.run'];
 /** Private employee fields, and the menu models whose users may see them. */
 const PRIVATE_FIELDS = {
@@ -788,6 +790,7 @@ export function menuModelsForApps(appIds) {
 /** Models a user restricted to `appIds` may write: the readable ones, minus accounting, HR and company records their apps don't show. */
 export function writableModelsForApps(appIds) {
   const base = menuModelsForApps(appIds);
+  if (base.has('account.online.link')) base.add('account.online.account');
   return new Set([...modelsForApps(appIds)].filter((m) => base.has(m) || !PROTECTED.includes(m)));
 }
 

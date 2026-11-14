@@ -1,6 +1,6 @@
 import { create, postNote, read, search, unlink, write } from '../orm.js';
 import { addDays, amounts, companyRoundingMethod, invoiceTaxAmount, monthFilters, nextName, productLines, promptedAmount, sameCommercialPartner, shiftMonth, today, total, validDate } from './common.js';
-import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
+import { ACCOUNT_TYPES, accountBalance, analyticEligibleAccount, badLineSign, historicalOriginAccounts, invoiceCounterpartAccount, invoiceLineAccount, invoiceLines, isBalanced, isIncomeOrExpenseAccount, isLiquidityJournal, isPaymentMatched, isStatementJournal, outstandingAccount, paymentJournal, paymentName, postEntry, postedBillLine, reconciledJournalItems, resolveDocumentJournal } from './ledger.js';
 import { currentActor, employeeFor } from './authority.js';
 import { bookedByBank, creditNotePairError, creditWarning, duplicateBillWarning, accountDeleteGuard, lockedSettlementInvariant, fxProvenanceError, moveDate, moveDeleteGuard, moveGuard, moveInvariant, recordLockDate, taxUnitMemberTypeValidation } from './finance.js';
 import { applyPaymentCredit, reverseEntry, SETTLES } from './pay.js';
@@ -23,6 +23,7 @@ import { ASSET_DEPRECIATION_DEFAULTS, assetAccountGuard } from './assets.js';
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
+import { onlineAccountForJournal } from './onlineSync.js';
 
 export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit };
 
@@ -1824,6 +1825,11 @@ export const accountingModels = {
     label: 'Journals',
     guard: (db, before, after) => {
       const companyId = after.company_id ?? 1;
+      const linkedOnlineAccount = before?.id ? onlineAccountForJournal(db, before.id) : null;
+      if (linkedOnlineAccount) {
+        if (!isStatementJournal(after)) return 'A journal linked to an online account must remain a bank or credit card journal';
+        if (after.company_id && after.company_id !== (linkedOnlineAccount.company_id ?? 1)) return 'Cannot change the company of a journal linked to an online account';
+      }
       const checkAccount = (field, label, allowedTypes = null) => {
         if (!after[field]) return null;
         if (allowedTypes && !allowedTypes.includes(after.type)) {

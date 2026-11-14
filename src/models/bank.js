@@ -541,6 +541,9 @@ function lineGuard(db, before, after) {
   const journal = read(db, 'account.journal', after.journal_id);
   if (!journal || (journal.company_id && journal.company_id !== company)) return 'The bank journal belongs to another company or does not exist';
   if (!isLiquidityJournal(journal)) return 'Bank transactions need a bank or cash journal';
+  if (after.unique_import_id && (db.records['account.bank.statement.line'] ?? []).some((l) => l.id !== after.id && l.active !== false && l.journal_id === after.journal_id && l.unique_import_id === after.unique_import_id)) {
+    return 'A bank transaction with this Import ID already exists on this journal';
+  }
   if (after.payment_id) {
     const payment = read(db, 'account.payment', after.payment_id);
     if (!payment || (payment.company_id ?? 1) !== company) return 'The linked payment belongs to another company or does not exist';
